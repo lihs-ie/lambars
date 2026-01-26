@@ -8,6 +8,7 @@ pub mod applicative;
 pub mod async_pipeline;
 pub mod bifunctor;
 pub mod bulk;
+pub mod consistency;
 pub mod dto;
 pub mod effects;
 pub mod error;
@@ -22,6 +23,11 @@ pub mod transaction;
 pub mod traversable;
 pub mod typeclass;
 pub mod workflow_eff;
+
+// Demo module is conditionally compiled with the `demo` feature flag.
+// This ensures demo endpoints are not included in production builds.
+#[cfg(feature = "demo")]
+pub mod demo;
 
 pub use advanced::{async_pipeline, get_task_history, lazy_compute, transform_task};
 pub use alternative::{
@@ -38,6 +44,10 @@ pub use bifunctor::{
 pub use bulk::{
     BulkConfig, IndexedSaveResult, ItemError, SaveResult, bulk_create_tasks, bulk_update_tasks,
     chunk_tasks_with_indices, merge_chunked_results, save_chunk, save_tasks_bulk_optimized,
+};
+pub use consistency::{
+    ConsistencyError, ConsistencyErrorBuildError, MultipleEventWriteResult, SaveTaskResult,
+    log_consistency_error, save_task_with_event, save_task_with_events, write_events_sequentially,
 };
 pub use dto::{CreateTaskRequest, TaskResponse, UpdateTaskRequest};
 pub use effects::{execute_state_workflow, execute_workflow, update_with_optics};

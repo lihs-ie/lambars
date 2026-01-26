@@ -69,6 +69,9 @@ pub struct TaskResponse {
     pub updated_at: String,
     /// Current version.
     pub version: u64,
+    /// Warnings (e.g., consistency issues) - only included if present.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 impl From<&Task> for TaskResponse {
@@ -84,6 +87,7 @@ impl From<&Task> for TaskResponse {
             created_at: task.created_at.to_string(),
             updated_at: task.updated_at.to_string(),
             version: task.version,
+            warnings: Vec::new(),
         }
     }
 }

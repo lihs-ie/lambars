@@ -50,11 +50,45 @@ use sqlx::PgPool;
 use lambars::effect::AsyncIO;
 
 use crate::domain::{
-    EventId, Project, ProjectId, Task, TaskEvent, TaskEventKind, TaskHistory, TaskId,
+    EventId, Priority, Project, ProjectId, Task, TaskEvent, TaskEventKind, TaskHistory, TaskId,
+    TaskStatus,
 };
 use crate::infrastructure::{
-    EventStore, PaginatedResult, Pagination, ProjectRepository, RepositoryError, TaskRepository,
+    EventStore, PaginatedResult, Pagination, ProjectRepository, RepositoryError, SearchScope,
+    TaskRepository,
 };
+
+// =============================================================================
+// Helper Functions for DB String Conversion
+// =============================================================================
+
+/// Converts `TaskStatus` to its database string representation.
+///
+/// This ensures consistency with serde's `#[serde(rename_all = "snake_case")]`
+/// attribute used in the `TaskStatus` enum, where variants are stored as
+/// lowercase `snake_case` in JSONB (e.g., `in_progress` instead of `In Progress`).
+const fn status_to_database_string(status: TaskStatus) -> &'static str {
+    match status {
+        TaskStatus::Pending => "pending",
+        TaskStatus::InProgress => "in_progress",
+        TaskStatus::Completed => "completed",
+        TaskStatus::Cancelled => "cancelled",
+    }
+}
+
+/// Converts `Priority` to its database string representation.
+///
+/// This ensures consistency with serde's `#[serde(rename_all = "snake_case")]`
+/// attribute used in the `Priority` enum, where variants are stored as
+/// lowercase `snake_case` in JSONB (e.g., `low` instead of `Low`).
+const fn priority_to_database_string(priority: Priority) -> &'static str {
+    match priority {
+        Priority::Low => "low",
+        Priority::Medium => "medium",
+        Priority::High => "high",
+        Priority::Critical => "critical",
+    }
+}
 
 // =============================================================================
 // PostgreSQL Task Repository
@@ -619,6 +653,180 @@ impl TaskRepository for PostgresTaskRepository {
         })
     }
 
+    fn list_filtered(
+        &self,
+        status: Option<TaskStatus>,
+        priority: Option<Priority>,
+        pagination: Pagination,
+    ) -> AsyncIO<Result<PaginatedResult<Task>, RepositoryError>> {
+        let pool = self.pool.clone();
+
+        AsyncIO::new(move || async move {
+            // Build dynamic WHERE clause conditions (pure function logic)
+            let mut conditions = vec!["1=1".to_string()];
+            let mut bind_index = 1;
+
+            if status.is_some() {
+                conditions.push(format!("data->>'status' = ${bind_index}"));
+                bind_index += 1;
+            }
+            if priority.is_some() {
+                conditions.push(format!("data->>'priority' = ${bind_index}"));
+                bind_index += 1;
+            }
+
+            let where_clause = conditions.join(" AND ");
+
+            // Count query
+            let count_sql = format!("SELECT COUNT(*) FROM tasks WHERE {where_clause}");
+            let mut count_query = sqlx::query_as::<_, (i64,)>(&count_sql);
+
+            if let Some(status_value) = status {
+                count_query = count_query.bind(status_to_database_string(status_value));
+            }
+            if let Some(priority_value) = priority {
+                count_query = count_query.bind(priority_to_database_string(priority_value));
+            }
+
+            let count_row = count_query
+                .fetch_one(&pool)
+                .await
+                .map_err(|error| RepositoryError::DatabaseError(error.to_string()))?;
+
+            #[allow(clippy::cast_sign_loss)]
+            let total = count_row.0 as u64;
+
+            if total == 0 {
+                return Ok(PaginatedResult::new(
+                    vec![],
+                    0,
+                    pagination.page,
+                    pagination.page_size,
+                ));
+            }
+
+            // Data query with pagination
+            let data_sql = format!(
+                "SELECT data FROM tasks WHERE {} ORDER BY created_at ASC LIMIT ${} OFFSET ${}",
+                where_clause,
+                bind_index,
+                bind_index + 1
+            );
+
+            #[allow(clippy::cast_possible_wrap)]
+            let offset = pagination.offset() as i64;
+            #[allow(clippy::cast_possible_wrap)]
+            let limit = i64::from(pagination.limit());
+
+            let mut data_query = sqlx::query_as::<_, (serde_json::Value,)>(&data_sql);
+
+            if let Some(status_value) = status {
+                data_query = data_query.bind(status_to_database_string(status_value));
+            }
+            if let Some(priority_value) = priority {
+                data_query = data_query.bind(priority_to_database_string(priority_value));
+            }
+
+            data_query = data_query.bind(limit).bind(offset);
+
+            let rows = data_query
+                .fetch_all(&pool)
+                .await
+                .map_err(|error| RepositoryError::DatabaseError(error.to_string()))?;
+
+            // Transform JSON to Task (pure function with filter_map for robustness)
+            let tasks: Result<Vec<Task>, _> = rows
+                .into_iter()
+                .map(|(data,)| {
+                    serde_json::from_value(data)
+                        .map_err(|error| RepositoryError::SerializationError(error.to_string()))
+                })
+                .collect();
+
+            Ok(PaginatedResult::new(
+                tasks?,
+                total,
+                pagination.page,
+                pagination.page_size,
+            ))
+        })
+    }
+
+    fn search(
+        &self,
+        query: &str,
+        scope: SearchScope,
+        limit: u32,
+        offset: u32,
+    ) -> AsyncIO<Result<Vec<Task>, RepositoryError>> {
+        let pool = self.pool.clone();
+        let search_pattern = format!("%{}%", query.to_lowercase());
+        let search_tag = query.to_lowercase();
+
+        AsyncIO::new(move || async move {
+            #[allow(clippy::cast_possible_wrap)]
+            let limit_i64 = i64::from(limit);
+            #[allow(clippy::cast_possible_wrap)]
+            let offset_i64 = i64::from(offset);
+
+            // Execute search based on scope
+            // - Title: LIKE search with pg_trgm index
+            // - Tags: Containment operator (@>) with GIN index
+            // - All: OR combination with separate parameters for title (LIKE) and tag (exact)
+            let rows: Vec<(serde_json::Value,)> = match scope {
+                SearchScope::Title => {
+                    let sql = "SELECT data FROM tasks \
+                               WHERE LOWER(data->>'title') LIKE $1 \
+                               ORDER BY created_at DESC \
+                               LIMIT $2 OFFSET $3";
+                    sqlx::query_as(sql)
+                        .bind(&search_pattern)
+                        .bind(limit_i64)
+                        .bind(offset_i64)
+                        .fetch_all(&pool)
+                        .await
+                }
+                SearchScope::Tags => {
+                    let sql = "SELECT data FROM tasks \
+                               WHERE data->'tags' @> to_jsonb(ARRAY[$1::text]) \
+                               ORDER BY created_at DESC \
+                               LIMIT $2 OFFSET $3";
+                    sqlx::query_as(sql)
+                        .bind(&search_tag)
+                        .bind(limit_i64)
+                        .bind(offset_i64)
+                        .fetch_all(&pool)
+                        .await
+                }
+                SearchScope::All => {
+                    // Title: LIKE pattern ($1)
+                    // Tag: exact match ($2)
+                    let sql = "SELECT data FROM tasks \
+                               WHERE LOWER(data->>'title') LIKE $1 \
+                                  OR data->'tags' @> to_jsonb(ARRAY[$2::text]) \
+                               ORDER BY created_at DESC \
+                               LIMIT $3 OFFSET $4";
+                    sqlx::query_as(sql)
+                        .bind(&search_pattern)
+                        .bind(&search_tag)
+                        .bind(limit_i64)
+                        .bind(offset_i64)
+                        .fetch_all(&pool)
+                        .await
+                }
+            }
+            .map_err(|error| RepositoryError::DatabaseError(error.to_string()))?;
+
+            // Transform JSON to Task (pure function - filter_map to handle invalid data gracefully)
+            let tasks: Vec<Task> = rows
+                .into_iter()
+                .filter_map(|(data,)| serde_json::from_value(data).ok())
+                .collect();
+
+            Ok(tasks)
+        })
+    }
+
     fn count(&self) -> AsyncIO<Result<u64, RepositoryError>> {
         let pool = self.pool.clone();
 
@@ -1158,6 +1366,7 @@ mod tests {
                 title: "Test Task".to_string(),
                 description: None,
                 priority: Priority::Low,
+                status: TaskStatus::Pending,
             }),
         )
     }
@@ -1172,6 +1381,7 @@ mod tests {
             title: "Test".to_string(),
             description: None,
             priority: Priority::Low,
+            status: TaskStatus::Pending,
         });
         assert_eq!(event_type_from_kind(&kind), "created");
     }

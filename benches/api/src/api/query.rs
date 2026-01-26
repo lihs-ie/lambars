@@ -38,7 +38,7 @@ use super::dto::{PriorityDto, TaskResponse, TaskStatusDto};
 use super::error::ApiErrorResponse;
 use super::handlers::AppState;
 use crate::domain::{Priority, Task, TaskId, TaskStatus};
-use crate::infrastructure::Pagination;
+use crate::infrastructure::{PaginatedResult, Pagination, SearchScope as RepositorySearchScope};
 use lambars::persistent::{PersistentHashSet, PersistentTreeMap, PersistentVector};
 use lambars::typeclass::{Semigroup, Traversable};
 
@@ -66,18 +66,34 @@ const fn default_page() -> u32 {
 }
 
 const fn default_limit() -> u32 {
-    20
+    DEFAULT_PAGE_SIZE
 }
+
+// =============================================================================
+// List Pagination Constants
+// =============================================================================
+
+/// Maximum page size for list operations (prevents full table scans).
+pub const MAX_PAGE_SIZE: u32 = 100;
+
+/// Default page size for list operations.
+pub const DEFAULT_PAGE_SIZE: u32 = 20;
 
 // =============================================================================
 // Search Pagination Constants and Functions
 // =============================================================================
 
-/// Default limit for search results when not specified.
-pub const SEARCH_DEFAULT_LIMIT: u32 = 50;
+/// Maximum limit for search results.
+pub const MAX_SEARCH_LIMIT: u32 = 100;
 
-/// Maximum allowed limit for search results.
-pub const SEARCH_MAX_LIMIT: u32 = 200;
+/// Default limit for search results when not specified.
+pub const DEFAULT_SEARCH_LIMIT: u32 = 20;
+
+/// Legacy constant for backwards compatibility.
+pub const SEARCH_DEFAULT_LIMIT: u32 = DEFAULT_SEARCH_LIMIT;
+
+/// Legacy constant for backwards compatibility.
+pub const SEARCH_MAX_LIMIT: u32 = MAX_SEARCH_LIMIT;
 
 /// Normalizes pagination parameters for search queries (pure function).
 ///
@@ -200,6 +216,20 @@ impl<'de> serde::Deserialize<'de> for SearchScope {
         use std::str::FromStr;
         let value = String::deserialize(deserializer)?;
         Self::from_str(&value).map_err(serde::de::Error::custom)
+    }
+}
+
+impl SearchScope {
+    /// Converts this API `SearchScope` to the repository's `SearchScope`.
+    ///
+    /// This enables using the DB-side search when calling `repository.search()`.
+    #[must_use]
+    pub const fn to_repository_scope(self) -> RepositorySearchScope {
+        match self {
+            Self::Title => RepositorySearchScope::Title,
+            Self::Tags => RepositorySearchScope::Tags,
+            Self::All => RepositorySearchScope::All,
+        }
     }
 }
 
@@ -1594,9 +1624,8 @@ pub enum TaskChange {
 
 /// Lists tasks with pagination and optional filtering.
 ///
-/// This handler demonstrates:
-/// - **Pure filtering**: Using iterator combinators for status/priority filters
-/// - **Pagination**: Skip/take pattern for efficient page extraction
+/// This handler demonstrates DB-side filtering using `list_filtered()` to leverage
+/// database indexes for efficient queries on large datasets.
 ///
 /// # Query Parameters
 ///
@@ -1618,32 +1647,52 @@ pub async fn list_tasks(
     State(state): State<AppState>,
     Query(query): Query<ListTasksQuery>,
 ) -> Result<Json<PaginatedResponse<TaskResponse>>, ApiErrorResponse> {
-    // I/O boundary: Fetch all tasks from repository (use Pagination::all() for full dataset)
-    let all_tasks = state
+    // Normalize pagination parameters (pure function)
+    // Use clamp to ensure page_size is in valid range [1, MAX_PAGE_SIZE]
+    // This prevents panic in Pagination::new when limit=0
+    let page_size = query.limit.clamp(1, MAX_PAGE_SIZE);
+    let page = query.page.saturating_sub(1); // Convert 1-indexed to 0-indexed
+    let pagination = Pagination::new(page, page_size);
+
+    // Convert DTO filters to domain types (pure function)
+    let status_filter = query.status.map(TaskStatus::from);
+    let priority_filter = query.priority.map(Priority::from);
+
+    // I/O boundary: DB-side filtering with indexes
+    let result = state
         .task_repository
-        .list(Pagination::all())
+        .list_filtered(status_filter, priority_filter, pagination)
         .run_async()
         .await
         .map_err(ApiErrorResponse::from)?;
 
-    // Convert to PersistentVector for functional operations
-    let tasks: PersistentVector<Task> = all_tasks.items.into_iter().collect();
-
-    // Pure computation: Filter and paginate
-    let status_filter = query.status.map(TaskStatus::from);
-    let priority_filter = query.priority.map(Priority::from);
-
-    // Phase 1: Validate and filter tasks (propagates nil UUID errors)
-    let filtered = filter_tasks(&tasks, status_filter, priority_filter).map_err(|error| {
-        ApiErrorResponse::internal_error(format!("Data integrity error: {error}"))
-    })?;
-
-    // Phase 2: Paginate filtered tasks
-    let response = paginate_tasks(&filtered, query.page, query.limit).map_err(|error| {
-        ApiErrorResponse::internal_error(format!("Data integrity error: {error}"))
-    })?;
+    // Build response (pure function)
+    let response = build_paginated_response(result);
 
     Ok(Json(response))
+}
+
+/// Converts a [`PaginatedResult`] to a [`PaginatedResponse`] (pure function).
+///
+/// This function transforms the repository result into an API response,
+/// converting each task to a `TaskResponse` DTO.
+fn build_paginated_response(result: PaginatedResult<Task>) -> PaginatedResponse<TaskResponse> {
+    // Compute derived values before consuming items (pure function)
+    let total_pages = result.total_pages();
+    let total = result.total;
+    let page = result.page + 1; // Convert 0-indexed to 1-indexed for API
+    let limit = result.page_size;
+
+    // Transform items (consumes result.items)
+    let data = result.items.into_iter().map(TaskResponse::from).collect();
+
+    PaginatedResponse {
+        data,
+        page,
+        limit,
+        total,
+        total_pages,
+    }
 }
 
 /// Task filter predicate that validates and returns matching tasks.
@@ -1651,6 +1700,7 @@ pub async fn list_tasks(
 /// Returns `Some(task)` if the task matches all filter criteria,
 /// `None` otherwise. This predicate is designed to be used with
 /// `Iterator::filter_map` for filtering.
+#[allow(dead_code)]
 fn task_filter_predicate(
     task: Task,
     status_filter: Option<TaskStatus>,
@@ -1679,6 +1729,7 @@ fn task_filter_predicate(
 /// # Returns
 ///
 /// `Ok(Vec<Task>)` if all tasks are valid, `Err(PaginationValidationError)` if any task has a nil UUID.
+#[allow(dead_code)]
 fn validate_tasks_with_traversable(tasks: &[Task]) -> Result<Vec<Task>, PaginationValidationError> {
     // First, try traverse_option to check if all are valid
     let validated = tasks.to_owned().traverse_option(|task| {
@@ -1729,6 +1780,7 @@ fn validate_tasks_with_traversable(tasks: &[Task]) -> Result<Vec<Task>, Paginati
 /// # Errors
 ///
 /// Returns `Err(PaginationValidationError)` if any task has a nil UUID.
+#[allow(dead_code)]
 fn filter_tasks_with_traversable(
     tasks: &PersistentVector<Task>,
     status_filter: Option<TaskStatus>,
@@ -1752,6 +1804,7 @@ fn filter_tasks_with_traversable(
 /// # Errors
 ///
 /// Returns `Err(PaginationValidationError)` if any task has an invalid (nil) UUID.
+#[allow(dead_code)]
 fn filter_tasks(
     tasks: &PersistentVector<Task>,
     status_filter: Option<TaskStatus>,
@@ -1798,6 +1851,7 @@ impl std::error::Error for PaginationValidationError {}
 ///
 /// Returns `Err` if any task in the page has a nil UUID. This ensures that
 /// `total` and `total_pages` remain consistent with the actual data returned.
+#[allow(dead_code)]
 fn paginate_tasks(
     tasks: &PersistentVector<Task>,
     page: u32,
@@ -1871,18 +1925,14 @@ fn paginate_tasks(
 
 /// Searches tasks by title or tags.
 ///
-/// This handler demonstrates:
-/// - **`ArcSwap`**: Lock-free reads from pre-built search index
-/// - **`Semigroup::combine`**: Combining search results with deduplication
-/// - **Deduplication**: Using `Semigroup::combine` for merging overlapping results
-/// - **Pagination**: Using `normalize_search_pagination` for limit/offset handling
-/// - **Caching**: LRU cache with TTL for repeated queries (REQ-SEARCH-CACHE-001)
+/// This handler demonstrates DB-side search using `repository.search()` to leverage
+/// database indexes (e.g., `pg_trgm` for title, GIN for tags) for efficient searches.
 ///
 /// # Performance
 ///
-/// The search index is pre-built at application startup and updated incrementally
-/// when tasks are created/updated/deleted. This eliminates the need to rebuild
-/// the index on every search request, significantly improving performance.
+/// Search is delegated to the database layer, which uses appropriate indexes
+/// for efficient queries on large datasets. Search results are optionally cached
+/// when using the in-memory backend.
 ///
 /// Search results are cached with:
 /// - **TTL**: 5 seconds
@@ -1893,7 +1943,7 @@ fn paginate_tasks(
 ///
 /// - `q`: Search query (case-insensitive substring match)
 /// - `in`: Search scope - "title", "tags", or "all" (default)
-/// - `limit`: Maximum results to return (default: 50, max: 200)
+/// - `limit`: Maximum results to return (default: 20, max: 100)
 /// - `offset`: Number of results to skip (default: 0)
 ///
 /// # Response
@@ -1902,20 +1952,18 @@ fn paginate_tasks(
 ///
 /// # Errors
 ///
-/// This handler does not return errors directly since the search index
-/// is loaded from memory. Any errors from index loading are handled at startup.
+/// Returns [`ApiErrorResponse`] in the following cases:
+/// - **500 Internal Server Error**: Repository operation failed
 #[allow(clippy::future_not_send)]
 pub async fn search_tasks(
     State(state): State<AppState>,
     Query(query): Query<SearchTasksQuery>,
 ) -> Result<Json<Vec<TaskResponse>>, ApiErrorResponse> {
     // Create cache key from raw query parameters
-    // The key includes normalized query, scope, limit, and offset
     let cache_key = SearchCacheKey::from_raw(&query.q, query.scope, query.limit, query.offset);
 
-    // Check cache first
+    // Check cache first (optional optimization for repeated queries)
     if let Some(cached_result) = state.search_cache.get(&cache_key) {
-        // Cache hit - log metrics
         tracing::debug!(
             cache_hit = true,
             hit_rate = %state.search_cache.stats().hit_rate(),
@@ -1940,33 +1988,27 @@ pub async fn search_tasks(
         "Search cache miss"
     );
 
-    // Perform search
-    // Normalize query for consistent searching
-    let normalized = normalize_query(&query.q);
-    let normalized_query = normalized.key();
+    // Normalize pagination parameters (pure function)
+    let limit = query
+        .limit
+        .unwrap_or(DEFAULT_SEARCH_LIMIT)
+        .min(MAX_SEARCH_LIMIT);
+    let offset = query.offset.unwrap_or(0);
 
-    // Load the pre-built search index from ArcSwap (lock-free read)
-    let index = state.search_index.load();
+    // I/O boundary: DB-side search with indexes
+    let tasks = state
+        .task_repository
+        .search(&query.q, query.scope.to_repository_scope(), limit, offset)
+        .run_async()
+        .await
+        .map_err(ApiErrorResponse::from)?;
 
-    // Pure computation: Search with scope using normalized query
-    let results = search_with_scope_indexed(&index, normalized_query, query.scope);
+    // Store in cache for future requests
+    let search_result = SearchResult::from_tasks(tasks.iter().cloned().collect());
+    state.search_cache.put(cache_key, search_result);
 
-    // Store in cache with the exact cache key (including normalized limit/offset)
-    // Each unique (query, scope, limit, offset) combination creates a separate cache entry
-    // to ensure correct results for each pagination request
-    state.search_cache.put(cache_key, results.clone());
-
-    // Apply pagination using pure function
-    let (limit, offset) = normalize_search_pagination(query.limit, query.offset);
-
-    // Convert to response with pagination applied
-    let response: Vec<TaskResponse> = results
-        .into_tasks()
-        .iter()
-        .skip(offset as usize)
-        .take(limit as usize)
-        .map(TaskResponse::from)
-        .collect();
+    // Convert to response (pure function - map transformation)
+    let response: Vec<TaskResponse> = tasks.into_iter().map(TaskResponse::from).collect();
 
     Ok(Json(response))
 }
@@ -1975,6 +2017,7 @@ pub async fn search_tasks(
 ///
 /// Uses `PersistentTreeMap`-based index for efficient lookup and
 /// `Semigroup::combine` for combining search results from different scopes.
+#[allow(dead_code)]
 fn search_with_scope_indexed(index: &SearchIndex, query: &str, scope: SearchScope) -> SearchResult {
     // Empty query returns all tasks (early return)
     if query.is_empty() {
@@ -3677,43 +3720,56 @@ mod tests {
     // REQ-SEARCH-API-001: Search Pagination Tests
     // =========================================================================
 
-    /// Test: `normalize_search_pagination` defaults limit to 50 when not specified.
+    /// Test: `normalize_search_pagination` defaults limit to `DEFAULT_SEARCH_LIMIT` when not specified.
     #[rstest]
     fn test_normalize_search_pagination_default_limit() {
         let (limit, offset) = normalize_search_pagination(None, None);
-        assert_eq!(limit, 50, "Default limit should be 50");
+        assert_eq!(
+            limit, DEFAULT_SEARCH_LIMIT,
+            "Default limit should be DEFAULT_SEARCH_LIMIT"
+        );
         assert_eq!(offset, 0, "Default offset should be 0");
     }
 
     /// Test: `normalize_search_pagination` defaults offset to 0 when not specified.
     #[rstest]
     fn test_normalize_search_pagination_default_offset() {
-        let (limit, offset) = normalize_search_pagination(Some(100), None);
-        assert_eq!(limit, 100, "Limit should be passed through");
+        let (limit, offset) = normalize_search_pagination(Some(50), None);
+        assert_eq!(limit, 50, "Limit should be passed through");
         assert_eq!(offset, 0, "Default offset should be 0");
     }
 
-    /// Test: `normalize_search_pagination` clamps limit to 200 when exceeds.
+    /// Test: `normalize_search_pagination` clamps limit to `MAX_SEARCH_LIMIT` when exceeds.
     #[rstest]
     fn test_normalize_search_pagination_clamps_limit_to_max() {
         let (limit, offset) = normalize_search_pagination(Some(500), Some(10));
-        assert_eq!(limit, 200, "Limit should be clamped to 200");
+        assert_eq!(
+            limit, MAX_SEARCH_LIMIT,
+            "Limit should be clamped to MAX_SEARCH_LIMIT"
+        );
         assert_eq!(offset, 10, "Offset should be passed through");
     }
 
-    /// Test: `normalize_search_pagination` allows limit at boundary (200).
+    /// Test: `normalize_search_pagination` allows limit at boundary (`MAX_SEARCH_LIMIT`).
     #[rstest]
     fn test_normalize_search_pagination_allows_max_limit() {
-        let (limit, offset) = normalize_search_pagination(Some(200), Some(0));
-        assert_eq!(limit, 200, "Limit at max boundary should be allowed");
+        let (limit, offset) = normalize_search_pagination(Some(MAX_SEARCH_LIMIT), Some(0));
+        assert_eq!(
+            limit, MAX_SEARCH_LIMIT,
+            "Limit at max boundary should be allowed"
+        );
         assert_eq!(offset, 0, "Offset should be 0");
     }
 
-    /// Test: `normalize_search_pagination` allows limit just below max (199).
+    /// Test: `normalize_search_pagination` allows limit just below max.
     #[rstest]
     fn test_normalize_search_pagination_allows_below_max_limit() {
-        let (limit, offset) = normalize_search_pagination(Some(199), Some(5));
-        assert_eq!(limit, 199, "Limit below max should be allowed");
+        let (limit, offset) = normalize_search_pagination(Some(MAX_SEARCH_LIMIT - 1), Some(5));
+        assert_eq!(
+            limit,
+            MAX_SEARCH_LIMIT - 1,
+            "Limit below max should be allowed"
+        );
         assert_eq!(offset, 5, "Offset should be passed through");
     }
 
@@ -3863,27 +3919,33 @@ mod tests {
     // REQ-SEARCH-API-001: Pagination Tests for Handler
     // =========================================================================
 
-    /// Test: Default limit (50) is applied when limit is not specified.
+    /// Test: Default limit is applied when limit is not specified.
     #[rstest]
     fn test_normalize_search_pagination_applies_default_limit() {
         let (limit, offset) = normalize_search_pagination(None, None);
-        assert_eq!(limit, 50, "Default limit should be 50");
+        assert_eq!(
+            limit, DEFAULT_SEARCH_LIMIT,
+            "Default limit should be DEFAULT_SEARCH_LIMIT"
+        );
         assert_eq!(offset, 0, "Default offset should be 0");
     }
 
-    /// Test: Max limit (200) is applied when limit exceeds max.
+    /// Test: Max limit is applied when limit exceeds max.
     #[rstest]
     fn test_normalize_search_pagination_applies_max_limit() {
         let (limit, offset) = normalize_search_pagination(Some(500), None);
-        assert_eq!(limit, 200, "Limit should be clamped to max 200");
+        assert_eq!(
+            limit, MAX_SEARCH_LIMIT,
+            "Limit should be clamped to MAX_SEARCH_LIMIT"
+        );
         assert_eq!(offset, 0, "Offset should be 0");
     }
 
-    /// Test: Exact max limit (200) is allowed.
+    /// Test: Exact max limit is allowed.
     #[rstest]
     fn test_normalize_search_pagination_allows_exact_max_limit() {
-        let (limit, offset) = normalize_search_pagination(Some(200), Some(10));
-        assert_eq!(limit, 200, "Exact max limit should be allowed");
+        let (limit, offset) = normalize_search_pagination(Some(MAX_SEARCH_LIMIT), Some(10));
+        assert_eq!(limit, MAX_SEARCH_LIMIT, "Exact max limit should be allowed");
         assert_eq!(offset, 10, "Offset should be passed through");
     }
 
@@ -4619,25 +4681,30 @@ mod tests {
     fn test_search_cache_key_from_raw_normalizes_pagination() {
         // None values should be normalized to defaults
         let key_with_none = SearchCacheKey::from_raw("test", SearchScope::All, None, None);
-        let key_with_defaults =
-            SearchCacheKey::from_raw("test", SearchScope::All, Some(50), Some(0));
+        let key_with_defaults = SearchCacheKey::from_raw(
+            "test",
+            SearchScope::All,
+            Some(DEFAULT_SEARCH_LIMIT),
+            Some(0),
+        );
 
         assert_eq!(
             key_with_none, key_with_defaults,
             "None pagination should equal default values"
         );
-        assert_eq!(key_with_none.limit(), 50);
+        assert_eq!(key_with_none.limit(), DEFAULT_SEARCH_LIMIT);
         assert_eq!(key_with_none.offset(), 0);
 
         // Limit exceeding max should be clamped
         let key_over_max = SearchCacheKey::from_raw("test", SearchScope::All, Some(300), Some(0));
-        let key_at_max = SearchCacheKey::from_raw("test", SearchScope::All, Some(200), Some(0));
+        let key_at_max =
+            SearchCacheKey::from_raw("test", SearchScope::All, Some(MAX_SEARCH_LIMIT), Some(0));
 
         assert_eq!(
             key_over_max, key_at_max,
-            "Limit over max should be clamped to 200"
+            "Limit over max should be clamped to MAX_SEARCH_LIMIT"
         );
-        assert_eq!(key_over_max.limit(), 200);
+        assert_eq!(key_over_max.limit(), MAX_SEARCH_LIMIT);
     }
 
     /// Test: Cache key equality for equivalent normalized queries.

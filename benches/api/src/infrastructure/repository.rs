@@ -6,7 +6,9 @@
 use lambars::effect::AsyncIO;
 use thiserror::Error;
 
-use crate::domain::{Project, ProjectId, Task, TaskEvent, TaskHistory, TaskId};
+use crate::domain::{
+    Priority, Project, ProjectId, Task, TaskEvent, TaskHistory, TaskId, TaskStatus,
+};
 
 // =============================================================================
 // Repository Error
@@ -34,6 +36,23 @@ pub enum RepositoryError {
     /// Cache operation error.
     #[error("Cache error: {0}")]
     CacheError(String),
+}
+
+// =============================================================================
+// Search Scope
+// =============================================================================
+
+/// Search scope for task search operations.
+///
+/// Defines where to search for the query string in task data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SearchScope {
+    /// Search only in task titles.
+    Title,
+    /// Search only in task tags.
+    Tags,
+    /// Search in both titles and tags.
+    All,
 }
 
 // =============================================================================
@@ -249,6 +268,51 @@ pub trait TaskRepository: Send + Sync {
         &self,
         pagination: Pagination,
     ) -> AsyncIO<Result<PaginatedResult<Task>, RepositoryError>>;
+
+    /// Lists tasks with optional status and priority filtering (DB-side execution).
+    ///
+    /// This method delegates filtering to the database layer, leveraging indexes
+    /// for efficient queries on large datasets. Use this instead of fetching all
+    /// tasks and filtering in memory.
+    ///
+    /// # Arguments
+    ///
+    /// * `status` - Optional filter by task status
+    /// * `priority` - Optional filter by task priority
+    /// * `pagination` - Pagination parameters
+    ///
+    /// # Returns
+    ///
+    /// A paginated result containing tasks matching the filter criteria.
+    fn list_filtered(
+        &self,
+        status: Option<TaskStatus>,
+        priority: Option<Priority>,
+        pagination: Pagination,
+    ) -> AsyncIO<Result<PaginatedResult<Task>, RepositoryError>>;
+
+    /// Searches tasks by query string in specified scope (DB-side execution).
+    ///
+    /// This method delegates search to the database layer, using appropriate
+    /// indexes (e.g., `pg_trgm` for title, GIN for tags) for efficient searches.
+    ///
+    /// # Arguments
+    ///
+    /// * `query` - The search query string
+    /// * `scope` - Where to search (title, tags, or all)
+    /// * `limit` - Maximum number of results to return
+    /// * `offset` - Number of results to skip (for pagination)
+    ///
+    /// # Returns
+    ///
+    /// A vector of tasks matching the search criteria.
+    fn search(
+        &self,
+        query: &str,
+        scope: SearchScope,
+        limit: u32,
+        offset: u32,
+    ) -> AsyncIO<Result<Vec<Task>, RepositoryError>>;
 
     /// Counts all tasks.
     fn count(&self) -> AsyncIO<Result<u64, RepositoryError>>;

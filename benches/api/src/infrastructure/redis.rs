@@ -23,9 +23,9 @@ use redis::AsyncCommands;
 
 use lambars::effect::AsyncIO;
 
-use crate::domain::{Project, ProjectId, Task, TaskId, Timestamp};
+use crate::domain::{Priority, Project, ProjectId, Task, TaskId, TaskStatus, Timestamp};
 use crate::infrastructure::{
-    PaginatedResult, Pagination, ProjectRepository, RepositoryError, TaskRepository,
+    PaginatedResult, Pagination, ProjectRepository, RepositoryError, SearchScope, TaskRepository,
 };
 
 // =============================================================================
@@ -468,6 +468,145 @@ impl TaskRepository for RedisTaskRepository {
                 pagination.page,
                 pagination.page_size,
             ))
+        })
+    }
+
+    #[allow(clippy::future_not_send)]
+    fn list_filtered(
+        &self,
+        status: Option<TaskStatus>,
+        priority: Option<Priority>,
+        pagination: Pagination,
+    ) -> AsyncIO<Result<PaginatedResult<Task>, RepositoryError>> {
+        let pool = self.pool.clone();
+
+        // Redis does not have native filtering on JSONB fields, so we need to
+        // fetch all tasks and filter in memory. This is acceptable for caching
+        // scenarios where the data set is relatively small.
+        AsyncIO::new(move || async move {
+            let mut connection = pool
+                .get()
+                .await
+                .map_err(|error| RepositoryError::CacheError(error.to_string()))?;
+
+            // Get all task IDs from the index
+            let all_task_ids: Vec<String> = connection
+                .zrange(TASK_INDEX_KEY, 0, -1)
+                .await
+                .map_err(|error| RepositoryError::CacheError(error.to_string()))?;
+
+            if all_task_ids.is_empty() {
+                return Ok(PaginatedResult::new(
+                    vec![],
+                    0,
+                    pagination.page,
+                    pagination.page_size,
+                ));
+            }
+
+            // Get all tasks in a single MGET
+            let keys: Vec<String> = all_task_ids
+                .iter()
+                .map(|id| format!("{TASK_KEY_PREFIX}{id}"))
+                .collect();
+
+            let task_jsons: Vec<Option<String>> = connection
+                .mget(&keys)
+                .await
+                .map_err(|error| RepositoryError::CacheError(error.to_string()))?;
+
+            // Deserialize and filter tasks (pure function)
+            let filtered: Vec<Task> = task_jsons
+                .into_iter()
+                .flatten()
+                .filter_map(|json| serde_json::from_str::<Task>(&json).ok())
+                .filter(|task| {
+                    status.is_none_or(|s| task.status == s)
+                        && priority.is_none_or(|p| task.priority == p)
+                })
+                .collect();
+
+            let total = filtered.len() as u64;
+            #[allow(clippy::cast_possible_truncation)]
+            let offset = pagination.offset() as usize;
+            let limit = pagination.limit() as usize;
+
+            // Apply pagination
+            let items: Vec<Task> = filtered.into_iter().skip(offset).take(limit).collect();
+
+            Ok(PaginatedResult::new(
+                items,
+                total,
+                pagination.page,
+                pagination.page_size,
+            ))
+        })
+    }
+
+    #[allow(clippy::future_not_send)]
+    fn search(
+        &self,
+        query: &str,
+        scope: SearchScope,
+        limit: u32,
+        offset: u32,
+    ) -> AsyncIO<Result<Vec<Task>, RepositoryError>> {
+        let pool = self.pool.clone();
+        let query_lower = query.to_lowercase();
+
+        // Redis does not have native text search, so we need to
+        // fetch all tasks and filter in memory.
+        AsyncIO::new(move || async move {
+            let mut connection = pool
+                .get()
+                .await
+                .map_err(|error| RepositoryError::CacheError(error.to_string()))?;
+
+            // Get all task IDs from the index
+            let all_task_ids: Vec<String> = connection
+                .zrange(TASK_INDEX_KEY, 0, -1)
+                .await
+                .map_err(|error| RepositoryError::CacheError(error.to_string()))?;
+
+            if all_task_ids.is_empty() {
+                return Ok(vec![]);
+            }
+
+            // Get all tasks in a single MGET
+            let keys: Vec<String> = all_task_ids
+                .iter()
+                .map(|id| format!("{TASK_KEY_PREFIX}{id}"))
+                .collect();
+
+            let task_jsons: Vec<Option<String>> = connection
+                .mget(&keys)
+                .await
+                .map_err(|error| RepositoryError::CacheError(error.to_string()))?;
+
+            // Deserialize and search tasks (pure function)
+            let matching: Vec<Task> = task_jsons
+                .into_iter()
+                .flatten()
+                .filter_map(|json| serde_json::from_str::<Task>(&json).ok())
+                .filter(|task| match scope {
+                    SearchScope::Title => task.title.to_lowercase().contains(&query_lower),
+                    SearchScope::Tags => task
+                        .tags
+                        .iter()
+                        .any(|tag| tag.as_str().eq_ignore_ascii_case(&query_lower)),
+                    SearchScope::All => {
+                        task.title.to_lowercase().contains(&query_lower)
+                            || task
+                                .tags
+                                .iter()
+                                .any(|tag| tag.as_str().eq_ignore_ascii_case(&query_lower))
+                    }
+                })
+                .skip(offset as usize)
+                .take(limit as usize)
+                .collect();
+
+            Ok(matching)
         })
     }
 

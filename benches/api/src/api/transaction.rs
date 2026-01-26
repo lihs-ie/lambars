@@ -24,6 +24,7 @@ use lambars::optics::{Lens, LensComposeExtension, Optional, Prism};
 use lambars::{lens, prism};
 use uuid::Uuid;
 
+use super::consistency::{save_task_with_event, save_task_with_events};
 use super::dto::{
     TaskResponse, TaskStatusDto, UpdateTaskRequest, validate_description, validate_tags,
     validate_title,
@@ -31,7 +32,11 @@ use super::dto::{
 use super::error::{ApiErrorResponse, ValidationError};
 use super::handlers::AppState;
 use super::query::TaskChange;
-use crate::domain::{SubTask, SubTaskId, Tag, Task, TaskId, TaskStatus, Timestamp};
+use crate::domain::{
+    EventId, Priority, SubTask, SubTaskId, Tag, Task, TaskEvent, TaskId, TaskStatus, Timestamp,
+    create_description_updated_event, create_priority_changed_event, create_status_changed_event,
+    create_tag_added_event, create_title_updated_event,
+};
 
 // =============================================================================
 // Path Extractors
@@ -453,19 +458,34 @@ pub async fn update_task(
     // Get current timestamp (side effect captured at handler level)
     let now = Timestamp::now();
 
-    // Validate and apply updates using Lens (pure function)
-    let updated_task = apply_updates_with_lens(old_task.clone(), &request, now)?;
-
-    // Build response before save (save returns ())
-    let response = TaskResponse::from(&updated_task);
-
-    // Save updated task
-    state
-        .task_repository
-        .save(&updated_task)
+    // Get current event version from EventStore (I/O boundary)
+    let current_event_version = state
+        .event_store
+        .get_current_version(&task_id)
         .run_async()
         .await
         .map_err(ApiErrorResponse::from)?;
+
+    // Validate and apply updates using Lens (pure function)
+    // Clone timestamp since it will be used for events later
+    let updated_task = apply_updates_with_lens(old_task.clone(), &request, now.clone())?;
+
+    // Detect changes (pure function)
+    let changes = detect_task_changes(&old_task, &updated_task);
+
+    // Build events from changes (I/O boundary: generates event IDs)
+    let events = build_events_from_changes(&task_id, &changes, &now, current_event_version);
+
+    // Save task and write events using best-effort consistency
+    let write_result =
+        save_task_with_events(&state, &updated_task, events, current_event_version).await?;
+
+    // Build response with any consistency warnings
+    // Note: logging is done in save_task_with_events, so we only add to response here
+    let mut response = TaskResponse::from(&updated_task);
+    if let Some(warning) = &write_result.warning {
+        response.warnings.push(warning.client_message());
+    }
 
     // Update search index with the task change (lock-free write)
     state.update_search_index(TaskChange::Update {
@@ -474,6 +494,141 @@ pub async fn update_task(
     });
 
     Ok((StatusCode::OK, Json(response)))
+}
+
+/// Describes a detected change in a task (pure value).
+///
+/// This enum represents what changed, without event IDs or timestamps.
+/// Event generation is done at the I/O boundary using this information.
+#[derive(Debug, Clone)]
+enum DetectedChange {
+    /// Title was changed from old to new value.
+    TitleUpdated {
+        old_title: String,
+        new_title: String,
+    },
+    /// Description was changed from old to new value.
+    DescriptionUpdated {
+        old_description: Option<String>,
+        new_description: Option<String>,
+    },
+    /// Priority was changed from old to new value.
+    PriorityChanged {
+        old_priority: Priority,
+        new_priority: Priority,
+    },
+}
+
+/// Detects changes between old and new task states (pure function).
+///
+/// This function compares the two task states and returns a list of
+/// detected changes. It does not generate event IDs or timestamps,
+/// making it referentially transparent.
+///
+/// # Arguments
+///
+/// * `old_task` - The task before updates
+/// * `new_task` - The task after updates
+///
+/// # Returns
+///
+/// A vector of detected changes, possibly empty if no changes were detected.
+fn detect_task_changes(old_task: &Task, new_task: &Task) -> Vec<DetectedChange> {
+    let mut changes = Vec::new();
+
+    // Check title change
+    if old_task.title != new_task.title {
+        changes.push(DetectedChange::TitleUpdated {
+            old_title: old_task.title.clone(),
+            new_title: new_task.title.clone(),
+        });
+    }
+
+    // Check description change
+    if old_task.description != new_task.description {
+        changes.push(DetectedChange::DescriptionUpdated {
+            old_description: old_task.description.clone(),
+            new_description: new_task.description.clone(),
+        });
+    }
+
+    // Check priority change
+    if old_task.priority != new_task.priority {
+        changes.push(DetectedChange::PriorityChanged {
+            old_priority: old_task.priority,
+            new_priority: new_task.priority,
+        });
+    }
+
+    changes
+}
+
+/// Builds events from detected changes (I/O boundary function).
+///
+/// This function generates event IDs and creates `TaskEvent` instances
+/// from the detected changes. Event IDs are generated here because
+/// they are non-deterministic (UUID generation).
+///
+/// # Arguments
+///
+/// * `task_id` - The task ID
+/// * `changes` - Detected changes from `detect_task_changes`
+/// * `timestamp` - Timestamp for all events (generated at I/O boundary)
+/// * `current_version` - Current event version (for version calculation)
+///
+/// # Returns
+///
+/// A vector of events to write.
+fn build_events_from_changes(
+    task_id: &TaskId,
+    changes: &[DetectedChange],
+    timestamp: &Timestamp,
+    current_version: u64,
+) -> Vec<TaskEvent> {
+    changes
+        .iter()
+        .enumerate()
+        .map(|(index, change)| {
+            let version = current_version + 1 + index as u64;
+            let event_id = EventId::generate_v7(); // I/O: generate event ID
+
+            match change {
+                DetectedChange::TitleUpdated {
+                    old_title,
+                    new_title,
+                } => create_title_updated_event(
+                    task_id,
+                    old_title,
+                    new_title,
+                    event_id,
+                    timestamp.clone(),
+                    version,
+                ),
+                DetectedChange::DescriptionUpdated {
+                    old_description,
+                    new_description,
+                } => create_description_updated_event(
+                    task_id,
+                    old_description.as_deref(),
+                    new_description.as_deref(),
+                    event_id,
+                    timestamp.clone(),
+                    version,
+                ),
+                DetectedChange::PriorityChanged {
+                    old_priority,
+                    new_priority,
+                } => create_priority_changed_event(
+                    task_id,
+                    *old_priority,
+                    *new_priority,
+                    event_id,
+                    timestamp.clone(),
+                    version,
+                ),
+            }
+        })
+        .collect()
 }
 
 /// Applies updates to a task using Lens and Optional optics.
@@ -636,19 +791,38 @@ pub async fn update_status(
             Ok((StatusCode::OK, Json(TaskResponse::from(&old_task))))
         }
         Either::Right(StatusTransitionResult::Transition(valid_status)) => {
-            // Apply status update using pure function
-            let updated_task = apply_status_update(old_task.clone(), valid_status, now);
-
-            // Build response before save (save returns ())
-            let response = TaskResponse::from(&updated_task);
-
-            // Save updated task
-            state
-                .task_repository
-                .save(&updated_task)
+            // Get current event version from EventStore (I/O boundary)
+            let current_event_version = state
+                .event_store
+                .get_current_version(&task_id)
                 .run_async()
                 .await
                 .map_err(ApiErrorResponse::from)?;
+
+            // Apply status update using pure function
+            let updated_task = apply_status_update(old_task.clone(), valid_status, now.clone());
+
+            // Create status changed event (pure function)
+            // Version semantics: event.version = current_version + 1
+            let event = create_status_changed_event(
+                &task_id,
+                old_task.status,
+                valid_status,
+                EventId::generate_v7(),    // I/O boundary: generate event ID
+                now,                       // Use same timestamp as task update
+                current_event_version + 1, // This event's version
+            );
+
+            // Save task and write event using best-effort consistency
+            let save_result =
+                save_task_with_event(&state, &updated_task, event, current_event_version).await?;
+
+            // Build response with any consistency warnings
+            // Note: logging is done in save_task_with_event, so we only add to response here
+            let mut response = TaskResponse::from(&updated_task);
+            if let Some(warning) = &save_result.consistency_warning {
+                response.warnings.push(warning.client_message());
+            }
 
             // Update search index with the task change (lock-free write)
             state.update_search_index(TaskChange::Update {
@@ -925,19 +1099,40 @@ pub async fn add_tag(
     // Capture timestamp at handler level for referential transparency
     let now = Timestamp::now();
 
-    // Apply updates using pure function
-    let updated_task = apply_tag_update(old_task.clone(), tag, now);
-
-    // Build response before save (save returns ())
-    let response = TaskResponse::from(&updated_task);
-
-    // Save updated task
-    state
-        .task_repository
-        .save(&updated_task)
+    // Get current event version from EventStore (I/O boundary)
+    let current_event_version = state
+        .event_store
+        .get_current_version(&task_id)
         .run_async()
         .await
         .map_err(ApiErrorResponse::from)?;
+
+    // Clone tag for event creation before it's moved to apply_tag_update
+    let tag_for_event = tag.clone();
+
+    // Apply updates using pure function
+    let updated_task = apply_tag_update(old_task.clone(), tag, now.clone());
+
+    // Create tag added event (pure function)
+    // Version semantics: event.version = current_version + 1
+    let event = create_tag_added_event(
+        &task_id,
+        &tag_for_event,
+        EventId::generate_v7(),    // I/O boundary: generate event ID
+        now,                       // Use same timestamp as task update
+        current_event_version + 1, // This event's version
+    );
+
+    // Save task and write event using best-effort consistency
+    let save_result =
+        save_task_with_event(&state, &updated_task, event, current_event_version).await?;
+
+    // Build response with any consistency warnings
+    // Note: logging is done in save_task_with_event, so we only add to response here
+    let mut response = TaskResponse::from(&updated_task);
+    if let Some(warning) = &save_result.consistency_warning {
+        response.warnings.push(warning.client_message());
+    }
 
     // Update search index with the task change (lock-free write)
     // Tags are indexed, so this update is necessary for search consistency.
@@ -1683,5 +1878,96 @@ mod tests {
 
         // Then: Description should be cleared (None)
         assert_eq!(updated.description, None);
+    }
+
+    // -------------------------------------------------------------------------
+    // Change Detection Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn test_detect_task_changes_no_changes() {
+        let task = Task::new(TaskId::generate(), "Task", Timestamp::now());
+        let changes = detect_task_changes(&task, &task);
+        assert!(changes.is_empty());
+    }
+
+    #[rstest]
+    fn test_detect_task_changes_title_change() {
+        let old_task = Task::new(TaskId::generate(), "Old Title", Timestamp::now());
+        // Create new task with different title by constructing manually
+        let new_task = Task {
+            title: "New Title".to_string(),
+            ..old_task.clone()
+        };
+
+        let changes = detect_task_changes(&old_task, &new_task);
+
+        assert_eq!(changes.len(), 1);
+        assert!(matches!(
+            &changes[0],
+            DetectedChange::TitleUpdated { old_title, new_title }
+            if old_title == "Old Title" && new_title == "New Title"
+        ));
+    }
+
+    #[rstest]
+    fn test_detect_task_changes_description_change() {
+        let old_task = Task::new(TaskId::generate(), "Task", Timestamp::now())
+            .with_description("Old description");
+        let new_task = old_task.clone().with_description("New description");
+
+        let changes = detect_task_changes(&old_task, &new_task);
+
+        assert_eq!(changes.len(), 1);
+        assert!(matches!(
+            &changes[0],
+            DetectedChange::DescriptionUpdated { old_description, new_description }
+            if old_description.as_deref() == Some("Old description")
+                && new_description.as_deref() == Some("New description")
+        ));
+    }
+
+    #[rstest]
+    fn test_detect_task_changes_priority_change() {
+        let old_task =
+            Task::new(TaskId::generate(), "Task", Timestamp::now()).with_priority(Priority::Low);
+        let new_task = old_task.clone().with_priority(Priority::Critical);
+
+        let changes = detect_task_changes(&old_task, &new_task);
+
+        assert_eq!(changes.len(), 1);
+        assert!(matches!(
+            &changes[0],
+            DetectedChange::PriorityChanged { old_priority, new_priority }
+            if *old_priority == Priority::Low && *new_priority == Priority::Critical
+        ));
+    }
+
+    #[rstest]
+    fn test_detect_task_changes_multiple_changes() {
+        let old_task = Task::new(TaskId::generate(), "Old Title", Timestamp::now())
+            .with_description("Old description")
+            .with_priority(Priority::Low);
+        // Create new task with multiple changes
+        let new_task = Task {
+            title: "New Title".to_string(),
+            description: Some("New description".to_string()),
+            priority: Priority::High,
+            ..old_task.clone()
+        };
+
+        let changes = detect_task_changes(&old_task, &new_task);
+
+        assert_eq!(changes.len(), 3);
+        // Verify order: title, description, priority
+        assert!(matches!(&changes[0], DetectedChange::TitleUpdated { .. }));
+        assert!(matches!(
+            &changes[1],
+            DetectedChange::DescriptionUpdated { .. }
+        ));
+        assert!(matches!(
+            &changes[2],
+            DetectedChange::PriorityChanged { .. }
+        ));
     }
 }

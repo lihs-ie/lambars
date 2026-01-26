@@ -1,0 +1,76 @@
+# Issue: ベンチAPIが実運用I/O経路を回避している
+# 実装時に発見された、将来対応が必要な項目
+
+deferred_features:
+  - id: api_benchmark_realism_gap
+    name: "ベンチAPIが実運用I/O経路を回避しており実用性検証にならない"
+    discovered_date: "2026-01-26"
+    priority: high
+    category: refactoring
+    labels:
+      - "api"
+      - "performance"
+      - "refactoring"
+      - "priority: high"
+
+    # 問題の説明
+    problem:
+      summary: "実運用で支配的な I/O 経路を迂回しており、ベンチ結果が現実と乖離する"
+      details: |
+        - `GET /tasks/{id}/history` が EventStore を使わず、`build_mock_history` で履歴を生成している
+          - benches/api/src/api/advanced.rs
+        - `GET /tasks` / `GET /tasks/search` が全件取得→メモリ処理であることを明記しており、
+          DB インデックス・クエリ最適化の影響が反映されない
+          - benches/api/src/api/query.rs
+        - `Alternative` 系は external/secondary を模擬しており、実 I/O の失敗・遅延を再現しない
+          - benches/api/src/api/alternative.rs
+        - 結果として、DB/イベントストア/シリアライズの実コストが測れず、
+          lambars の実用性・回帰検知の判断に使えない
+
+    # 解決策の提案
+    solution:
+      approach: "デモ用途とベンチ用途を分離し、ベンチ側は必ず実リポジトリ/イベントストア経由にする"
+      options:
+        - name: "本番経路を実装し、デモは /demo 系に退避"
+          description: |
+            既存のデモ的エンドポイントは `/demo/*` に移し、
+            ベンチ対象のエンドポイントは EventStore/Repository 経由の実装に置き換える。
+            例: `/tasks/{id}/history` は EventStore の `load_events` を使用。
+          pros:
+            - ベンチ結果が実運用のボトルネックを反映する
+            - 回帰検知の信頼性が高まる
+          cons:
+            - 実装コストが高い
+            - デモ用途の挙動が変わる
+
+        - name: "mode=demo|prod の二重実装"
+          description: |
+            同一エンドポイントに `mode` を追加し、
+            `prod` は実 I/O 経路、`demo` は現在の模擬実装を使用する。
+          pros:
+            - API 変更を最小化できる
+            - デモ用途を温存できる
+          cons:
+            - 実装の二重化で保守コストが増える
+
+      recommended: "本番経路を実装し、デモは /demo 系に退避"
+      estimated_complexity: high
+
+    # 参考情報
+    references:
+      - "benches/api/src/api/advanced.rs"
+      - "benches/api/src/api/query.rs"
+      - "benches/api/src/api/alternative.rs"
+      - "docs/internal/requirements/20260122_2011_api_benchmark_coverage.yaml"
+      - "docs/internal/analysis/20260122_api_benchmark_gaps.yaml"
+
+    # 関連する要件・実装
+    related:
+      requirement_id: "api_benchmark_coverage"
+      plan_id: null
+
+    # GitHub Issue 情報（作成後に追記）
+    github_issue:
+      number: null
+      url: null
+      created: false

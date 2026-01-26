@@ -36,6 +36,7 @@ use std::sync::Arc;
 use axum::{Json, extract::State, http::StatusCode};
 use serde::{Deserialize, Serialize};
 
+use super::consistency::{ConsistencyError, log_consistency_error};
 use super::dto::{
     CreateTaskRequest, PriorityDto, TaskResponse, TaskStatusDto, validate_description,
     validate_tags, validate_title,
@@ -43,7 +44,9 @@ use super::dto::{
 use super::error::ApiErrorResponse;
 use super::handlers::AppState;
 use super::query::TaskChange;
-use crate::domain::{Priority, Tag, Task, TaskId, TaskStatus, Timestamp};
+use crate::domain::{
+    EventId, Priority, Tag, Task, TaskId, TaskStatus, Timestamp, create_task_created_event,
+};
 use crate::infrastructure::TaskRepository;
 use lambars::control::Either;
 use lambars::effect::AsyncIO;
@@ -554,6 +557,28 @@ pub async fn bulk_create_tasks(
     } else {
         save_tasks_bulk(state.task_repository.clone(), tasks_to_save).await
     };
+
+    // Step 5.5: Write events to EventStore for successfully created tasks (I/O boundary)
+    // Best-effort: event write failures are logged but don't affect the response
+    for result in &results {
+        if let Either::Right(save_result) = result {
+            let event = create_task_created_event(
+                &save_result.task,
+                EventId::generate_v7(),
+                now.clone(),
+                1, // Initial event version (expected_version=0 + 1)
+            );
+            // For new tasks, expected_version is 0 (no events exist yet)
+            match state.event_store.append(&event, 0).run_async().await {
+                Ok(()) => {}
+                Err(e) => {
+                    let warning =
+                        ConsistencyError::event_write_failed(&save_result.task.task_id, e);
+                    log_consistency_error(&warning);
+                }
+            }
+        }
+    }
 
     // Step 6: Update search index for successfully created tasks (lock-free writes)
     for result in &results {
@@ -3077,9 +3102,13 @@ mod tests {
         use axum::extract::State;
         use lambars::persistent::PersistentVector;
 
+        use crate::api::handlers::create_stub_external_sources;
         use crate::api::query::{SearchCache, SearchIndex};
+        use crate::infrastructure::RngProvider;
 
         fn create_app_state_with_bulk_config(bulk_config: BulkConfig) -> AppState {
+            let external_sources = create_stub_external_sources();
+
             AppState {
                 task_repository: Arc::new(InMemoryTaskRepository::new()),
                 project_repository: Arc::new(InMemoryProjectRepository::new()),
@@ -3090,6 +3119,9 @@ mod tests {
                     &PersistentVector::new(),
                 ))),
                 search_cache: Arc::new(SearchCache::with_default_config()),
+                secondary_source: external_sources.secondary_source,
+                external_source: external_sources.external_source,
+                rng_provider: Arc::new(RngProvider::new_random()),
             }
         }
 
@@ -3363,8 +3395,8 @@ mod tests {
 
     mod save_chunk_with_fallback_tests {
         use super::*;
-        use crate::domain::{Task, TaskId, Timestamp};
-        use crate::infrastructure::{InMemoryTaskRepository, RepositoryError};
+        use crate::domain::{Priority, Task, TaskId, TaskStatus, Timestamp};
+        use crate::infrastructure::{InMemoryTaskRepository, RepositoryError, SearchScope};
         use lambars::effect::AsyncIO;
 
         fn create_test_task(title: &str) -> Task {
@@ -3420,6 +3452,26 @@ mod tests {
                 self.inner.list(pagination)
             }
 
+            fn list_filtered(
+                &self,
+                status: Option<TaskStatus>,
+                priority: Option<Priority>,
+                pagination: crate::infrastructure::Pagination,
+            ) -> AsyncIO<Result<crate::infrastructure::PaginatedResult<Task>, RepositoryError>>
+            {
+                self.inner.list_filtered(status, priority, pagination)
+            }
+
+            fn search(
+                &self,
+                query: &str,
+                scope: SearchScope,
+                limit: u32,
+                offset: u32,
+            ) -> AsyncIO<Result<Vec<Task>, RepositoryError>> {
+                self.inner.search(query, scope, limit, offset)
+            }
+
             fn count(&self) -> AsyncIO<Result<u64, RepositoryError>> {
                 self.inner.count()
             }
@@ -3467,6 +3519,31 @@ mod tests {
                     0,
                     10,
                 )))
+            }
+
+            fn list_filtered(
+                &self,
+                _status: Option<TaskStatus>,
+                _priority: Option<Priority>,
+                _pagination: crate::infrastructure::Pagination,
+            ) -> AsyncIO<Result<crate::infrastructure::PaginatedResult<Task>, RepositoryError>>
+            {
+                AsyncIO::pure(Ok(crate::infrastructure::PaginatedResult::new(
+                    vec![],
+                    0,
+                    0,
+                    10,
+                )))
+            }
+
+            fn search(
+                &self,
+                _query: &str,
+                _scope: SearchScope,
+                _limit: u32,
+                _offset: u32,
+            ) -> AsyncIO<Result<Vec<Task>, RepositoryError>> {
+                AsyncIO::pure(Ok(vec![]))
             }
 
             fn count(&self) -> AsyncIO<Result<u64, RepositoryError>> {
@@ -3537,6 +3614,26 @@ mod tests {
             ) -> AsyncIO<Result<crate::infrastructure::PaginatedResult<Task>, RepositoryError>>
             {
                 self.inner.list(pagination)
+            }
+
+            fn list_filtered(
+                &self,
+                status: Option<TaskStatus>,
+                priority: Option<Priority>,
+                pagination: crate::infrastructure::Pagination,
+            ) -> AsyncIO<Result<crate::infrastructure::PaginatedResult<Task>, RepositoryError>>
+            {
+                self.inner.list_filtered(status, priority, pagination)
+            }
+
+            fn search(
+                &self,
+                query: &str,
+                scope: SearchScope,
+                limit: u32,
+                offset: u32,
+            ) -> AsyncIO<Result<Vec<Task>, RepositoryError>> {
+                self.inner.search(query, scope, limit, offset)
             }
 
             fn count(&self) -> AsyncIO<Result<u64, RepositoryError>> {
