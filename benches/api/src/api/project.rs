@@ -770,7 +770,6 @@ pub async fn get_project_handler(
 ) -> Result<(HeaderMap, Json<ProjectDetailResponse>), ApiErrorResponse> {
     let project_id = parse_project_id(&project_id)?;
 
-    // Fetch project with cache status
     let cache_result = state
         .project_repository
         .find_by_id_with_status(&project_id)
@@ -778,18 +777,13 @@ pub async fn get_project_handler(
         .await?;
 
     let cache_status = cache_result.cache_status;
-
-    // Record cache metrics (CACHE-REQ-021)
     state.record_cache_status(cache_status);
 
     let project = cache_result
         .value
         .ok_or_else(|| ApiErrorResponse::not_found("Project not found"))?;
 
-    // Use Reader to compose config-dependent response building
     let response = build_detail_response(project).run(state.config.clone());
-
-    // Build cache headers
     let headers = build_cache_headers(cache_status, CacheSource::Redis);
 
     Ok((headers, Json(response)))

@@ -132,24 +132,14 @@ pub struct AppState {
     /// Enables deterministic behavior for testing/benchmarks when seeded.
     pub rng_provider: Arc<RngProvider>,
     /// Cache hit counter (CACHE-REQ-021).
-    ///
-    /// Incremented when a cache hit occurs in `find_by_id_with_status`.
     pub cache_hits: Arc<AtomicU64>,
     /// Cache miss counter (CACHE-REQ-021).
-    ///
-    /// Incremented when a cache miss occurs in `find_by_id_with_status`.
     pub cache_misses: Arc<AtomicU64>,
-    /// Cache error counter (CACHE-REQ-021).
-    ///
-    /// Incremented when a cache error occurs (Redis failure with fail-open).
+    /// Cache error counter (CACHE-REQ-021, fail-open).
     pub cache_errors: Arc<AtomicU64>,
     /// Cache strategy name (CACHE-REQ-021).
-    ///
-    /// The configured cache strategy (e.g., "read-through", "write-through").
     pub cache_strategy: String,
     /// Cache TTL in seconds (CACHE-REQ-021).
-    ///
-    /// The configured time-to-live for cached entries.
     pub cache_ttl_seconds: u64,
 }
 
@@ -367,33 +357,14 @@ impl AppState {
         });
     }
 
-    /// Increments the cache counter based on the given cache status (CACHE-REQ-021).
-    ///
-    /// This method updates the appropriate atomic counter:
-    /// - `Hit` -> increments `cache_hits`
-    /// - `Miss` -> increments `cache_misses`
-    /// - `Error` -> increments `cache_errors`
-    /// - `Bypass` -> no counter increment (cache was not used)
-    ///
-    /// # Thread Safety
-    ///
-    /// Uses `Ordering::Relaxed` for performance, as we only need eventual consistency
-    /// for these metrics (not strict ordering with other operations).
+    /// Increments cache counter based on status (CACHE-REQ-021). Bypass does not increment.
     pub fn record_cache_status(&self, status: CacheStatus) {
         match status {
-            CacheStatus::Hit => {
-                self.cache_hits.fetch_add(1, Ordering::Relaxed);
-            }
-            CacheStatus::Miss => {
-                self.cache_misses.fetch_add(1, Ordering::Relaxed);
-            }
-            CacheStatus::Error => {
-                self.cache_errors.fetch_add(1, Ordering::Relaxed);
-            }
-            CacheStatus::Bypass => {
-                // No counter for bypass (cache was disabled or non-cacheable operation)
-            }
-        }
+            CacheStatus::Hit => self.cache_hits.fetch_add(1, Ordering::Relaxed),
+            CacheStatus::Miss => self.cache_misses.fetch_add(1, Ordering::Relaxed),
+            CacheStatus::Error => self.cache_errors.fetch_add(1, Ordering::Relaxed),
+            CacheStatus::Bypass => 0, // No counter for bypass
+        };
     }
 }
 
@@ -751,33 +722,10 @@ pub async fn get_task(
     Ok((headers, Json(response)))
 }
 
-/// Builds HTTP headers for cache status information.
+/// Builds HTTP headers for cache status (X-Cache, X-Cache-Status, X-Cache-Source).
 ///
-/// This is a pure function that creates a `HeaderMap` with X-Cache headers
-/// based on the cache status and source.
-///
-/// # Headers Added
-///
-/// - `X-Cache`: `HIT` | `MISS` (based on `CacheStatus`)
-/// - `X-Cache-Status`: `hit` | `miss` | `bypass` | `error` (detailed status)
-/// - `X-Cache-Source`: `redis` | `memory` | `none` (cache source type)
-///
-/// # Cache Source Mapping
-///
-/// The `cache_source` argument is used as-is for `Hit`, `Miss`, and `Error` statuses.
-/// For `Bypass` status, the source is overridden to `None` because no cache layer
-/// was consulted when cache is bypassed.
-///
-/// # Arguments
-///
-/// * `cache_status` - The status of the cache operation
-/// * `cache_source` - The source of the cached data (ignored for `Bypass`)
-///
-/// # Returns
-///
-/// A `HeaderMap` containing the cache headers.
+/// For `Bypass` status, source is overridden to `None` because no cache was consulted.
 pub fn build_cache_headers(cache_status: CacheStatus, cache_source: CacheSource) -> HeaderMap {
-    // For Bypass status, override source to None (no cache was consulted)
     let effective_source = match cache_status {
         CacheStatus::Bypass => CacheSource::None,
         CacheStatus::Hit | CacheStatus::Miss | CacheStatus::Error => cache_source,

@@ -1080,7 +1080,9 @@ mod tests {
     #[rstest]
     fn test_repository_config_builder_propagates_cache_strategy_write_through() {
         let cache_config = CacheConfig::new(CacheStrategy::WriteThrough, 60, true, 100);
-        let result = RepositoryConfig::builder().cache_config(cache_config).build();
+        let result = RepositoryConfig::builder()
+            .cache_config(cache_config)
+            .build();
 
         assert!(result.is_ok());
         let config = result.unwrap();
@@ -1090,7 +1092,9 @@ mod tests {
     #[rstest]
     fn test_repository_config_builder_propagates_cache_ttl() {
         let cache_config = CacheConfig::new(CacheStrategy::ReadThrough, 300, true, 100);
-        let result = RepositoryConfig::builder().cache_config(cache_config).build();
+        let result = RepositoryConfig::builder()
+            .cache_config(cache_config)
+            .build();
 
         assert!(result.is_ok());
         let config = result.unwrap();
@@ -1100,7 +1104,9 @@ mod tests {
     #[rstest]
     fn test_repository_config_builder_propagates_cache_enabled_false() {
         let cache_config = CacheConfig::new(CacheStrategy::ReadThrough, 60, false, 100);
-        let result = RepositoryConfig::builder().cache_config(cache_config).build();
+        let result = RepositoryConfig::builder()
+            .cache_config(cache_config)
+            .build();
 
         assert!(result.is_ok());
         let config = result.unwrap();
@@ -1110,7 +1116,9 @@ mod tests {
     #[rstest]
     fn test_repository_config_builder_propagates_all_cache_values() {
         let cache_config = CacheConfig::new(CacheStrategy::WriteBehind, 180, true, 50);
-        let result = RepositoryConfig::builder().cache_config(cache_config).build();
+        let result = RepositoryConfig::builder()
+            .cache_config(cache_config)
+            .build();
 
         assert!(result.is_ok());
         let config = result.unwrap();

@@ -132,59 +132,44 @@ pub struct CacheHeaderExtension {
 }
 
 impl CacheHeaderExtension {
-    /// Creates a new cache header extension.
     #[must_use]
     pub const fn new(status: CacheStatus, source: CacheSource) -> Self {
         Self { status, source }
     }
 
-    /// Creates an extension for a Redis cache hit.
     #[must_use]
     pub const fn redis_hit() -> Self {
         Self::new(CacheStatus::Hit, CacheSource::Redis)
     }
 
-    /// Creates an extension for a Redis cache miss.
     #[must_use]
     pub const fn redis_miss() -> Self {
         Self::new(CacheStatus::Miss, CacheSource::Redis)
     }
 
-    /// Creates an extension for a cache bypass (no cache used).
-    ///
-    /// When cache is bypassed (disabled or non-cacheable operation), the cache
-    /// source is `None` because no cache layer was consulted.
+    /// Bypass: no cache layer was consulted (source is `None`).
     #[must_use]
     pub const fn bypass() -> Self {
         Self::new(CacheStatus::Bypass, CacheSource::None)
     }
 
-    /// Creates an extension for an in-memory cache hit.
     #[must_use]
     pub const fn memory_hit() -> Self {
         Self::new(CacheStatus::Hit, CacheSource::Memory)
     }
 
-    /// Creates an extension for an in-memory cache miss.
     #[must_use]
     pub const fn memory_miss() -> Self {
         Self::new(CacheStatus::Miss, CacheSource::Memory)
     }
 
-    /// Creates an extension for a Redis cache error.
-    ///
-    /// Used when Redis failed but data was fetched from primary storage (fail-open).
+    /// Redis error with fail-open (data fetched from primary storage).
     #[must_use]
     pub const fn redis_error() -> Self {
         Self::new(CacheStatus::Error, CacheSource::Redis)
     }
 
-    /// Returns the X-Cache header value.
-    ///
-    /// - `Hit` -> `"HIT"`
-    /// - `Miss` -> `"MISS"`
-    /// - `Bypass` -> `"MISS"`
-    /// - `Error` -> `"MISS"` (data was fetched from primary, so treat as miss)
+    /// Returns `"HIT"` for cache hit, `"MISS"` for all other statuses.
     #[must_use]
     pub const fn x_cache_value(&self) -> &'static str {
         match self.status {
@@ -193,12 +178,6 @@ impl CacheHeaderExtension {
         }
     }
 
-    /// Returns the X-Cache-Status header value.
-    ///
-    /// - `Hit` -> `"hit"`
-    /// - `Miss` -> `"miss"`
-    /// - `Bypass` -> `"bypass"`
-    /// - `Error` -> `"error"`
     #[must_use]
     pub const fn x_cache_status_value(&self) -> &'static str {
         match self.status {
@@ -209,7 +188,6 @@ impl CacheHeaderExtension {
         }
     }
 
-    /// Returns the X-Cache-Source header value.
     #[must_use]
     pub const fn x_cache_source_value(&self) -> &'static str {
         match self.source {
@@ -353,169 +331,20 @@ mod tests {
     // -------------------------------------------------------------------------
 
     #[rstest]
-    fn test_cache_source_display_redis() {
-        let source = CacheSource::Redis;
-        assert_eq!(source.to_string(), "redis");
-    }
-
-    #[rstest]
-    fn test_cache_source_display_memory() {
-        let source = CacheSource::Memory;
-        assert_eq!(source.to_string(), "memory");
-    }
-
-    #[rstest]
-    fn test_cache_source_display_none() {
-        let source = CacheSource::None;
-        assert_eq!(source.to_string(), "none");
+    #[case(CacheSource::Redis, "redis")]
+    #[case(CacheSource::Memory, "memory")]
+    #[case(CacheSource::None, "none")]
+    fn test_cache_source_display(#[case] source: CacheSource, #[case] expected: &str) {
+        assert_eq!(source.to_string(), expected);
     }
 
     #[rstest]
     fn test_cache_source_default() {
-        let source = CacheSource::default();
-        assert_eq!(source, CacheSource::None);
+        assert_eq!(CacheSource::default(), CacheSource::None);
     }
 
     // -------------------------------------------------------------------------
-    // CacheHeaderExtension Construction Tests
-    // -------------------------------------------------------------------------
-
-    #[rstest]
-    fn test_cache_header_extension_new() {
-        let extension = CacheHeaderExtension::new(CacheStatus::Hit, CacheSource::Redis);
-        assert_eq!(extension.status, CacheStatus::Hit);
-        assert_eq!(extension.source, CacheSource::Redis);
-    }
-
-    #[rstest]
-    fn test_cache_header_extension_redis_hit() {
-        let extension = CacheHeaderExtension::redis_hit();
-        assert_eq!(extension.status, CacheStatus::Hit);
-        assert_eq!(extension.source, CacheSource::Redis);
-    }
-
-    #[rstest]
-    fn test_cache_header_extension_redis_miss() {
-        let extension = CacheHeaderExtension::redis_miss();
-        assert_eq!(extension.status, CacheStatus::Miss);
-        assert_eq!(extension.source, CacheSource::Redis);
-    }
-
-    #[rstest]
-    fn test_cache_header_extension_bypass() {
-        let extension = CacheHeaderExtension::bypass();
-        assert_eq!(extension.status, CacheStatus::Bypass);
-        assert_eq!(extension.source, CacheSource::None);
-    }
-
-    #[rstest]
-    fn test_cache_header_extension_memory_hit() {
-        let extension = CacheHeaderExtension::memory_hit();
-        assert_eq!(extension.status, CacheStatus::Hit);
-        assert_eq!(extension.source, CacheSource::Memory);
-    }
-
-    #[rstest]
-    fn test_cache_header_extension_memory_miss() {
-        let extension = CacheHeaderExtension::memory_miss();
-        assert_eq!(extension.status, CacheStatus::Miss);
-        assert_eq!(extension.source, CacheSource::Memory);
-    }
-
-    #[rstest]
-    fn test_cache_header_extension_redis_error() {
-        let extension = CacheHeaderExtension::redis_error();
-        assert_eq!(extension.status, CacheStatus::Error);
-        assert_eq!(extension.source, CacheSource::Redis);
-    }
-
-    #[rstest]
-    fn test_cache_header_extension_default() {
-        let extension = CacheHeaderExtension::default();
-        assert_eq!(extension.status, CacheStatus::Miss);
-        assert_eq!(extension.source, CacheSource::None);
-    }
-
-    // -------------------------------------------------------------------------
-    // X-Cache Header Value Tests
-    // -------------------------------------------------------------------------
-
-    #[rstest]
-    fn test_x_cache_value_hit() {
-        let extension = CacheHeaderExtension::redis_hit();
-        assert_eq!(extension.x_cache_value(), "HIT");
-    }
-
-    #[rstest]
-    fn test_x_cache_value_miss() {
-        let extension = CacheHeaderExtension::redis_miss();
-        assert_eq!(extension.x_cache_value(), "MISS");
-    }
-
-    #[rstest]
-    fn test_x_cache_value_bypass() {
-        let extension = CacheHeaderExtension::bypass();
-        assert_eq!(extension.x_cache_value(), "MISS");
-    }
-
-    #[rstest]
-    fn test_x_cache_value_error() {
-        let extension = CacheHeaderExtension::redis_error();
-        assert_eq!(extension.x_cache_value(), "MISS");
-    }
-
-    // -------------------------------------------------------------------------
-    // X-Cache-Status Header Value Tests
-    // -------------------------------------------------------------------------
-
-    #[rstest]
-    fn test_x_cache_status_value_hit() {
-        let extension = CacheHeaderExtension::redis_hit();
-        assert_eq!(extension.x_cache_status_value(), "hit");
-    }
-
-    #[rstest]
-    fn test_x_cache_status_value_miss() {
-        let extension = CacheHeaderExtension::redis_miss();
-        assert_eq!(extension.x_cache_status_value(), "miss");
-    }
-
-    #[rstest]
-    fn test_x_cache_status_value_bypass() {
-        let extension = CacheHeaderExtension::bypass();
-        assert_eq!(extension.x_cache_status_value(), "bypass");
-    }
-
-    #[rstest]
-    fn test_x_cache_status_value_error() {
-        let extension = CacheHeaderExtension::redis_error();
-        assert_eq!(extension.x_cache_status_value(), "error");
-    }
-
-    // -------------------------------------------------------------------------
-    // X-Cache-Source Header Value Tests
-    // -------------------------------------------------------------------------
-
-    #[rstest]
-    fn test_x_cache_source_value_redis() {
-        let extension = CacheHeaderExtension::redis_hit();
-        assert_eq!(extension.x_cache_source_value(), "redis");
-    }
-
-    #[rstest]
-    fn test_x_cache_source_value_memory() {
-        let extension = CacheHeaderExtension::memory_hit();
-        assert_eq!(extension.x_cache_source_value(), "memory");
-    }
-
-    #[rstest]
-    fn test_x_cache_source_value_none() {
-        let extension = CacheHeaderExtension::default();
-        assert_eq!(extension.x_cache_source_value(), "none");
-    }
-
-    // -------------------------------------------------------------------------
-    // Combined Header Values Tests
+    // CacheHeaderExtension Tests (combined factory and header value tests)
     // -------------------------------------------------------------------------
 
     #[rstest]
@@ -526,7 +355,7 @@ mod tests {
     #[case(CacheStatus::Hit, CacheSource::Memory, "HIT", "hit", "memory")]
     #[case(CacheStatus::Miss, CacheSource::Memory, "MISS", "miss", "memory")]
     #[case(CacheStatus::Miss, CacheSource::None, "MISS", "miss", "none")]
-    fn test_header_values_combinations(
+    fn test_header_values(
         #[case] status: CacheStatus,
         #[case] source: CacheSource,
         #[case] expected_x_cache: &str,
@@ -537,6 +366,44 @@ mod tests {
         assert_eq!(extension.x_cache_value(), expected_x_cache);
         assert_eq!(extension.x_cache_status_value(), expected_x_cache_status);
         assert_eq!(extension.x_cache_source_value(), expected_x_cache_source);
+    }
+
+    #[rstest]
+    fn test_factory_methods() {
+        // redis_hit
+        let ext = CacheHeaderExtension::redis_hit();
+        assert_eq!(ext.status, CacheStatus::Hit);
+        assert_eq!(ext.source, CacheSource::Redis);
+
+        // redis_miss
+        let ext = CacheHeaderExtension::redis_miss();
+        assert_eq!(ext.status, CacheStatus::Miss);
+        assert_eq!(ext.source, CacheSource::Redis);
+
+        // bypass
+        let ext = CacheHeaderExtension::bypass();
+        assert_eq!(ext.status, CacheStatus::Bypass);
+        assert_eq!(ext.source, CacheSource::None);
+
+        // memory_hit
+        let ext = CacheHeaderExtension::memory_hit();
+        assert_eq!(ext.status, CacheStatus::Hit);
+        assert_eq!(ext.source, CacheSource::Memory);
+
+        // memory_miss
+        let ext = CacheHeaderExtension::memory_miss();
+        assert_eq!(ext.status, CacheStatus::Miss);
+        assert_eq!(ext.source, CacheSource::Memory);
+
+        // redis_error
+        let ext = CacheHeaderExtension::redis_error();
+        assert_eq!(ext.status, CacheStatus::Error);
+        assert_eq!(ext.source, CacheSource::Redis);
+
+        // default
+        let ext = CacheHeaderExtension::default();
+        assert_eq!(ext.status, CacheStatus::Miss);
+        assert_eq!(ext.source, CacheSource::None);
     }
 
     // -------------------------------------------------------------------------

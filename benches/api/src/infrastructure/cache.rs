@@ -236,7 +236,6 @@ pub struct CacheResult<T> {
 }
 
 impl<T> CacheResult<T> {
-    /// Creates a new cache result.
     #[must_use]
     pub const fn new(value: T, cache_status: CacheStatus) -> Self {
         Self {
@@ -245,34 +244,27 @@ impl<T> CacheResult<T> {
         }
     }
 
-    /// Creates a cache hit result.
     #[must_use]
     pub const fn hit(value: T) -> Self {
         Self::new(value, CacheStatus::Hit)
     }
 
-    /// Creates a cache miss result.
     #[must_use]
     pub const fn miss(value: T) -> Self {
         Self::new(value, CacheStatus::Miss)
     }
 
-    /// Creates a cache bypass result.
     #[must_use]
     pub const fn bypass(value: T) -> Self {
         Self::new(value, CacheStatus::Bypass)
     }
 
-    /// Creates a cache error result.
-    ///
-    /// Used when a Redis error occurred but data was fetched from primary storage
-    /// (fail-open behavior).
+    /// Creates a cache error result (fail-open: Redis failed but data fetched from primary).
     #[must_use]
     pub const fn error(value: T) -> Self {
         Self::new(value, CacheStatus::Error)
     }
 
-    /// Maps the value using the given function.
     pub fn map<U, F>(self, function: F) -> CacheResult<U>
     where
         F: FnOnce(T) -> U,
@@ -285,42 +277,27 @@ impl<T> CacheResult<T> {
 }
 
 // =============================================================================
-// Cache Key Generation (Pure Functions)
+// Cache Key Generation
 // =============================================================================
 
-/// Prefix for task cache keys.
 const TASK_CACHE_PREFIX: &str = "cache:task:";
-
-/// Prefix for project cache keys.
 const PROJECT_CACHE_PREFIX: &str = "cache:project:";
 
-/// Generates a versioned cache key for a task.
-///
-/// Format: `cache:task:{task_id}:v{version}`
 #[must_use]
 pub fn task_data_key(task_id: &TaskId, version: u64) -> String {
     format!("{TASK_CACHE_PREFIX}{task_id}:v{version}")
 }
 
-/// Generates a latest version pointer key for a task.
-///
-/// Format: `cache:task:{task_id}:latest`
 #[must_use]
 pub fn task_latest_key(task_id: &TaskId) -> String {
     format!("{TASK_CACHE_PREFIX}{task_id}:latest")
 }
 
-/// Generates a versioned cache key for a project.
-///
-/// Format: `cache:project:{project_id}:v{version}`
 #[must_use]
 pub fn project_data_key(project_id: &ProjectId, version: u64) -> String {
     format!("{PROJECT_CACHE_PREFIX}{project_id}:v{version}")
 }
 
-/// Generates a latest version pointer key for a project.
-///
-/// Format: `cache:project:{project_id}:latest`
 #[must_use]
 pub fn project_latest_key(project_id: &ProjectId) -> String {
     format!("{PROJECT_CACHE_PREFIX}{project_id}:latest")
@@ -355,13 +332,6 @@ pub struct CachedTaskRepository<P: TaskRepository> {
 }
 
 impl<P: TaskRepository + 'static> CachedTaskRepository<P> {
-    /// Creates a new cached task repository.
-    ///
-    /// # Arguments
-    ///
-    /// * `primary` - The primary storage repository to wrap
-    /// * `pool` - Redis connection pool for caching
-    /// * `config` - Cache configuration
     #[must_use]
     pub const fn new(primary: Arc<P>, pool: Pool, config: CacheConfig) -> Self {
         Self {
@@ -371,7 +341,6 @@ impl<P: TaskRepository + 'static> CachedTaskRepository<P> {
         }
     }
 
-    /// Returns the cache configuration.
     #[must_use]
     pub const fn config(&self) -> &CacheConfig {
         &self.config
@@ -1038,10 +1007,8 @@ impl<P: TaskRepository + 'static> TaskRepository for CachedTaskRepository<P> {
         })
     }
 
-    /// Lists tasks with pagination (cache bypassed).
-    ///
-    /// List operations are not cached due to variable results and
-    /// difficult cache invalidation.
+    // List/search/count operations bypass cache (variable results, difficult invalidation)
+
     fn list(
         &self,
         pagination: Pagination,
@@ -1049,9 +1016,6 @@ impl<P: TaskRepository + 'static> TaskRepository for CachedTaskRepository<P> {
         self.primary.list(pagination)
     }
 
-    /// Lists filtered tasks (cache bypassed).
-    ///
-    /// Filtered list operations are not cached due to variable results.
     fn list_filtered(
         &self,
         status: Option<TaskStatus>,
@@ -1061,9 +1025,6 @@ impl<P: TaskRepository + 'static> TaskRepository for CachedTaskRepository<P> {
         self.primary.list_filtered(status, priority, pagination)
     }
 
-    /// Searches tasks (cache bypassed).
-    ///
-    /// Search operations are not cached; they use a separate `SearchCache`.
     fn search(
         &self,
         query: &str,
@@ -1074,9 +1035,6 @@ impl<P: TaskRepository + 'static> TaskRepository for CachedTaskRepository<P> {
         self.primary.search(query, scope, limit, offset)
     }
 
-    /// Counts all tasks (cache bypassed).
-    ///
-    /// Count operations are not cached due to frequent changes.
     fn count(&self) -> AsyncIO<Result<u64, RepositoryError>> {
         self.primary.count()
     }
@@ -1111,13 +1069,6 @@ pub struct CachedProjectRepository<P: ProjectRepository> {
 }
 
 impl<P: ProjectRepository + 'static> CachedProjectRepository<P> {
-    /// Creates a new cached project repository.
-    ///
-    /// # Arguments
-    ///
-    /// * `primary` - The primary storage repository to wrap
-    /// * `pool` - Redis connection pool for caching
-    /// * `config` - Cache configuration
     #[must_use]
     pub const fn new(primary: Arc<P>, pool: Pool, config: CacheConfig) -> Self {
         Self {
@@ -1127,7 +1078,6 @@ impl<P: ProjectRepository + 'static> CachedProjectRepository<P> {
         }
     }
 
-    /// Returns the cache configuration.
     #[must_use]
     pub const fn config(&self) -> &CacheConfig {
         &self.config
@@ -1554,10 +1504,8 @@ impl<P: ProjectRepository + 'static> ProjectRepository for CachedProjectReposito
         })
     }
 
-    /// Lists projects with pagination (cache bypassed).
-    ///
-    /// List operations are not cached due to variable results and
-    /// difficult cache invalidation.
+    // List/count operations bypass cache (variable results, difficult invalidation)
+
     fn list(
         &self,
         pagination: Pagination,
@@ -1565,9 +1513,6 @@ impl<P: ProjectRepository + 'static> ProjectRepository for CachedProjectReposito
         self.primary.list(pagination)
     }
 
-    /// Counts all projects (cache bypassed).
-    ///
-    /// Count operations are not cached due to frequent changes.
     fn count(&self) -> AsyncIO<Result<u64, RepositoryError>> {
         self.primary.count()
     }
@@ -1689,31 +1634,19 @@ mod tests {
     // -------------------------------------------------------------------------
 
     #[rstest]
-    fn test_cache_result_hit() {
-        let result = CacheResult::hit(42);
+    #[case::hit(CacheStatus::Hit)]
+    #[case::miss(CacheStatus::Miss)]
+    #[case::bypass(CacheStatus::Bypass)]
+    #[case::error(CacheStatus::Error)]
+    fn test_cache_result_constructors(#[case] expected_status: CacheStatus) {
+        let result = match expected_status {
+            CacheStatus::Hit => CacheResult::hit(42),
+            CacheStatus::Miss => CacheResult::miss(42),
+            CacheStatus::Bypass => CacheResult::bypass(42),
+            CacheStatus::Error => CacheResult::error(42),
+        };
         assert_eq!(result.value, 42);
-        assert_eq!(result.cache_status, CacheStatus::Hit);
-    }
-
-    #[rstest]
-    fn test_cache_result_miss() {
-        let result = CacheResult::miss("value".to_string());
-        assert_eq!(result.value, "value");
-        assert_eq!(result.cache_status, CacheStatus::Miss);
-    }
-
-    #[rstest]
-    fn test_cache_result_bypass() {
-        let result = CacheResult::bypass(vec![1, 2, 3]);
-        assert_eq!(result.value, vec![1, 2, 3]);
-        assert_eq!(result.cache_status, CacheStatus::Bypass);
-    }
-
-    #[rstest]
-    fn test_cache_result_error() {
-        let result = CacheResult::error("fallback value".to_string());
-        assert_eq!(result.value, "fallback value");
-        assert_eq!(result.cache_status, CacheStatus::Error);
+        assert_eq!(result.cache_status, expected_status);
     }
 
     #[rstest]
