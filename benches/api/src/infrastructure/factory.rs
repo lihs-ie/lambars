@@ -31,13 +31,15 @@ use std::env;
 use std::str::FromStr;
 use std::sync::Arc;
 
+use deadpool_redis::{Config as RedisConfig, Pool as RedisPool, Runtime};
 use sqlx::PgPool;
 use thiserror::Error;
 
 use super::{
-    EventStore, InMemoryEventStore, InMemoryProjectRepository, InMemoryTaskRepository,
-    PostgresEventStore, PostgresProjectRepository, PostgresTaskRepository, ProjectRepository,
-    RedisProjectRepository, RedisTaskRepository, TaskRepository,
+    CacheConfig, CachedProjectRepository, CachedTaskRepository, EventStore, InMemoryEventStore,
+    InMemoryProjectRepository, InMemoryTaskRepository, PostgresEventStore,
+    PostgresProjectRepository, PostgresTaskRepository, ProjectRepository, RedisProjectRepository,
+    RedisTaskRepository, TaskRepository,
 };
 
 // =============================================================================
@@ -104,6 +106,12 @@ impl FromStr for CacheMode {
 ///
 /// This struct holds all configuration needed to create repositories.
 /// Use `RepositoryConfigBuilder` for a fluent API to construct this.
+///
+/// # Cache Configuration (CACHE-REQ-030, CACHE-REQ-031)
+///
+/// The `cache_config` field controls cache behavior when `cache_mode` is `Redis`.
+/// It includes strategy, TTL, and enable/disable settings that can be configured
+/// via environment variables or programmatically.
 #[derive(Debug, Clone, Default)]
 pub struct RepositoryConfig {
     /// Storage mode for persistent data (Tasks, Projects, Events).
@@ -114,6 +122,10 @@ pub struct RepositoryConfig {
     pub database_url: Option<String>,
     /// Redis connection URL (required when `cache_mode` is `Redis`).
     pub redis_url: Option<String>,
+    /// Cache configuration for controlling cache behavior.
+    /// This is used when `cache_mode` is `Redis` to configure
+    /// `CachedTaskRepository` and `CachedProjectRepository`.
+    pub cache_config: CacheConfig,
 }
 
 impl RepositoryConfig {
@@ -124,12 +136,22 @@ impl RepositoryConfig {
 
     /// Creates a configuration from environment variables.
     ///
+    /// # I/O Notice
+    ///
+    /// This function reads environment variables and should be called **only once
+    /// at application startup**. The resulting `RepositoryConfig` is immutable and
+    /// should be shared across the application. This design isolates the side effect
+    /// (environment variable reading) to the application's initialization phase.
+    ///
     /// # Environment Variables
     ///
     /// - `STORAGE_MODE`: `in_memory` (default) | `postgres`
     /// - `CACHE_MODE`: `in_memory` (default) | `redis`
     /// - `DATABASE_URL`: `PostgreSQL` connection URL
     /// - `REDIS_URL`: Redis connection URL
+    /// - `CACHE_STRATEGY`: Cache strategy (`read-through`, `write-through`, `write-behind`)
+    /// - `CACHE_TTL_SECS`: TTL in seconds (default: 60)
+    /// - `CACHE_ENABLED`: Whether caching is enabled (`true`, `false`, `1`, `0`)
     ///
     /// # Errors
     ///
@@ -137,6 +159,12 @@ impl RepositoryConfig {
     /// - `STORAGE_MODE` or `CACHE_MODE` contains an invalid value
     /// - `DATABASE_URL` is missing when `STORAGE_MODE=postgres`
     /// - `REDIS_URL` is missing when `CACHE_MODE=redis`
+    ///
+    /// # Cache Configuration (CACHE-REQ-031)
+    ///
+    /// The cache configuration is loaded from environment variables via
+    /// `CacheConfig::from_env()`. This allows scenarios to control cache
+    /// behavior through environment variables.
     pub fn from_env() -> Result<Self, ConfigurationError> {
         let storage_mode = match env::var("STORAGE_MODE") {
             Ok(value) => value.parse()?,
@@ -168,11 +196,15 @@ impl RepositoryConfig {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
 
+        // Load cache configuration from environment variables (CACHE-REQ-031)
+        let cache_config = CacheConfig::from_env();
+
         let config = Self {
             storage_mode,
             cache_mode,
             database_url,
             redis_url,
+            cache_config,
         };
 
         config.validate()?;
@@ -209,6 +241,7 @@ impl RepositoryConfig {
 ///     .database_url("postgres://localhost/mydb")
 ///     .cache_mode(CacheMode::Redis)
 ///     .redis_url("redis://localhost:6379")
+///     .cache_config(CacheConfig::default())
 ///     .build()?;
 /// ```
 #[derive(Debug, Clone, Default)]
@@ -217,6 +250,7 @@ pub struct RepositoryConfigBuilder {
     cache_mode: CacheMode,
     database_url: Option<String>,
     redis_url: Option<String>,
+    cache_config: CacheConfig,
 }
 
 impl RepositoryConfigBuilder {
@@ -248,6 +282,20 @@ impl RepositoryConfigBuilder {
         self
     }
 
+    /// Sets the cache configuration.
+    ///
+    /// This configuration is used when `cache_mode` is `Redis` to control
+    /// the behavior of `CachedTaskRepository` and `CachedProjectRepository`.
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - Cache configuration including strategy, TTL, and enable/disable
+    #[must_use]
+    pub const fn cache_config(mut self, config: CacheConfig) -> Self {
+        self.cache_config = config;
+        self
+    }
+
     /// Builds the configuration.
     ///
     /// # Errors
@@ -259,6 +307,7 @@ impl RepositoryConfigBuilder {
             cache_mode: self.cache_mode,
             database_url: self.database_url,
             redis_url: self.redis_url,
+            cache_config: self.cache_config,
         };
 
         config.validate()?;
@@ -363,6 +412,12 @@ impl RepositoryFactory {
 
     /// Creates a new repository factory from environment variables.
     ///
+    /// # I/O Notice
+    ///
+    /// This function reads environment variables and should be called **only once
+    /// at application startup**. See [`RepositoryConfig::from_env`] for details
+    /// about the side effects involved.
+    ///
     /// # Errors
     ///
     /// Returns `FactoryError::Configuration` if environment configuration is invalid.
@@ -382,6 +437,22 @@ impl RepositoryFactory {
     /// This method initializes database connections as needed and creates
     /// the appropriate repository implementations.
     ///
+    /// # I/O Notice
+    ///
+    /// This method performs I/O operations (database/Redis connections) and should
+    /// be called **only once at application startup**. The returned `Repositories`
+    /// struct is designed to be shared across the application via `Arc` wrappers.
+    /// This design isolates the side effects to the initialization phase.
+    ///
+    /// # Repository Construction (CACHE-REQ-030)
+    ///
+    /// | `StorageMode` | `CacheMode` | Primary Storage | Cache Layer | `EventStore` |
+    /// |-------------|-----------|--------------|--------------|------------|
+    /// | `InMemory` | `InMemory` | `InMemory` | None | `InMemory` |
+    /// | `Postgres` | `InMemory` | `Postgres` | None | `Postgres` |
+    /// | `InMemory` | `Redis` | `InMemory` | `CachedTaskRepository(Redis)` | `InMemory` |
+    /// | `Postgres` | `Redis` | `Postgres` | `CachedTaskRepository(Redis)` | `Postgres` |
+    ///
     /// # Errors
     ///
     /// Returns `FactoryError` if:
@@ -400,31 +471,56 @@ impl RepositoryFactory {
                 Ok(Self::create_postgres_repositories(pool))
             }
 
-            // In-memory for storage, Redis for cache
-            // This combination uses Redis as the primary repository since it has cache capabilities
+            // In-memory for storage, Redis for cache (CACHE-REQ-030)
+            // InMemory is the primary storage, Redis is the cache layer
             (StorageMode::InMemory, CacheMode::Redis) => {
-                let redis_repositories = self.create_redis_repositories()?;
-                // For this combination, we use Redis for Task and Project,
-                // but keep EventStore in-memory since Redis doesn't implement it
+                let redis_pool = self.create_redis_pool()?;
+
+                // Create in-memory repositories once and reuse them
+                let in_memory_task_repository = Arc::new(InMemoryTaskRepository::new());
+                let in_memory_project_repository = Arc::new(InMemoryProjectRepository::new());
+                let in_memory_event_store = Arc::new(InMemoryEventStore::new());
+
+                // Wrap InMemory repositories with CachedRepository
                 Ok(Repositories {
-                    task_repository: redis_repositories.task_repository,
-                    project_repository: redis_repositories.project_repository,
-                    event_store: Arc::new(InMemoryEventStore::new()),
+                    task_repository: Arc::new(CachedTaskRepository::new(
+                        in_memory_task_repository,
+                        redis_pool.clone(),
+                        self.config.cache_config.clone(),
+                    )),
+                    project_repository: Arc::new(CachedProjectRepository::new(
+                        in_memory_project_repository,
+                        redis_pool,
+                        self.config.cache_config.clone(),
+                    )),
+                    event_store: in_memory_event_store,
                 })
             }
 
-            // PostgreSQL for storage, Redis for cache
-            // This is the full production configuration
+            // PostgreSQL for storage, Redis for cache (CACHE-REQ-030)
+            // Postgres is the primary storage, Redis is the cache layer
             (StorageMode::Postgres, CacheMode::Redis) => {
-                let pool = self.create_postgres_pool().await?;
-                let postgres_repositories = Self::create_postgres_repositories(pool);
-                let redis_repositories = self.create_redis_repositories()?;
+                let pg_pool = self.create_postgres_pool().await?;
+                let redis_pool = self.create_redis_pool()?;
 
-                // Use Redis for Task and Project (with cache), PostgreSQL for EventStore
+                // Create Postgres repositories as primary storage
+                let postgres_task_repository = PostgresTaskRepository::new(pg_pool.clone());
+                let postgres_project_repository = PostgresProjectRepository::new(pg_pool.clone());
+                let postgres_event_store = PostgresEventStore::new(pg_pool);
+
+                // Wrap Postgres repositories with CachedRepository
                 Ok(Repositories {
-                    task_repository: redis_repositories.task_repository,
-                    project_repository: redis_repositories.project_repository,
-                    event_store: postgres_repositories.event_store,
+                    task_repository: Arc::new(CachedTaskRepository::new(
+                        Arc::new(postgres_task_repository),
+                        redis_pool.clone(),
+                        self.config.cache_config.clone(),
+                    )),
+                    project_repository: Arc::new(CachedProjectRepository::new(
+                        Arc::new(postgres_project_repository),
+                        redis_pool,
+                        self.config.cache_config.clone(),
+                    )),
+                    event_store: Arc::new(postgres_event_store),
                 })
             }
         }
@@ -461,7 +557,31 @@ impl RepositoryFactory {
         }
     }
 
+    /// Creates a Redis connection pool for caching (CACHE-REQ-030).
+    ///
+    /// This pool is used by `CachedTaskRepository` and `CachedProjectRepository`
+    /// to cache data in Redis.
+    fn create_redis_pool(&self) -> Result<RedisPool, FactoryError> {
+        let redis_url = self
+            .config
+            .redis_url
+            .as_ref()
+            .ok_or(ConfigurationError::MissingRedisUrl)?;
+
+        let redis_config = RedisConfig::from_url(redis_url);
+        redis_config
+            .create_pool(Some(Runtime::Tokio1))
+            .map_err(|error| FactoryError::RedisConnection(error.to_string()))
+    }
+
     /// Creates Redis-backed repositories.
+    ///
+    /// # Deprecated
+    ///
+    /// This method creates Redis repositories directly without caching.
+    /// For cache-enabled configurations, use `create_redis_pool()` with
+    /// `CachedTaskRepository` and `CachedProjectRepository` instead.
+    #[allow(dead_code)]
     fn create_redis_repositories(&self) -> Result<RedisRepositories, FactoryError> {
         let redis_url = self
             .config
@@ -483,6 +603,13 @@ impl RepositoryFactory {
 }
 
 /// Helper struct for Redis repositories (since Redis doesn't implement `EventStore`).
+///
+/// # Note
+///
+/// This struct is retained for potential future use or backward compatibility,
+/// but is currently not used since `CacheMode::Redis` now uses `CachedRepository`
+/// wrappers instead of direct Redis repositories.
+#[allow(dead_code)]
 struct RedisRepositories {
     task_repository: Arc<dyn TaskRepository>,
     project_repository: Arc<dyn ProjectRepository>,
@@ -495,6 +622,7 @@ struct RedisRepositories {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::infrastructure::CacheStrategy;
     use rstest::rstest;
 
     // -------------------------------------------------------------------------
@@ -593,6 +721,7 @@ mod tests {
             cache_mode: CacheMode::InMemory,
             database_url: None,
             redis_url: None,
+            cache_config: CacheConfig::default(),
         };
         assert!(config.validate().is_ok());
     }
@@ -604,6 +733,7 @@ mod tests {
             cache_mode: CacheMode::InMemory,
             database_url: None,
             redis_url: None,
+            cache_config: CacheConfig::default(),
         };
         let result = config.validate();
         assert!(result.is_err());
@@ -617,6 +747,7 @@ mod tests {
             cache_mode: CacheMode::InMemory,
             database_url: Some("postgres://localhost/test".to_string()),
             redis_url: None,
+            cache_config: CacheConfig::default(),
         };
         assert!(config.validate().is_ok());
     }
@@ -628,6 +759,7 @@ mod tests {
             cache_mode: CacheMode::Redis,
             database_url: None,
             redis_url: None,
+            cache_config: CacheConfig::default(),
         };
         let result = config.validate();
         assert!(result.is_err());
@@ -641,6 +773,7 @@ mod tests {
             cache_mode: CacheMode::Redis,
             database_url: None,
             redis_url: Some("redis://localhost:6379".to_string()),
+            cache_config: CacheConfig::default(),
         };
         assert!(config.validate().is_ok());
     }
@@ -652,6 +785,7 @@ mod tests {
             cache_mode: CacheMode::Redis,
             database_url: Some("postgres://localhost/test".to_string()),
             redis_url: Some("redis://localhost:6379".to_string()),
+            cache_config: CacheConfig::default(),
         };
         assert!(config.validate().is_ok());
     }
@@ -858,6 +992,174 @@ mod tests {
             .database_url("postgres://localhost/test")
             .cache_mode(CacheMode::Redis)
             .redis_url("redis://localhost:6379")
+            .build()
+            .unwrap();
+
+        let factory = RepositoryFactory::new(config);
+        let result = factory.create().await;
+        assert!(result.is_ok());
+    }
+
+    // -------------------------------------------------------------------------
+    // RepositoryConfig CacheConfig Tests (CACHE-REQ-030, CACHE-REQ-031)
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn test_repository_config_default_includes_cache_config() {
+        let config = RepositoryConfig::default();
+        assert_eq!(config.cache_config.strategy, CacheStrategy::ReadThrough);
+        assert_eq!(config.cache_config.ttl_seconds, 60);
+        assert!(config.cache_config.enabled);
+    }
+
+    #[rstest]
+    fn test_repository_config_builder_with_cache_config() {
+        let cache_config = CacheConfig::new(CacheStrategy::WriteThrough, 120, false, 200);
+        let result = RepositoryConfig::builder()
+            .cache_config(cache_config)
+            .build();
+
+        assert!(result.is_ok());
+        let config = result.unwrap();
+        assert_eq!(config.cache_config.strategy, CacheStrategy::WriteThrough);
+        assert_eq!(config.cache_config.ttl_seconds, 120);
+        assert!(!config.cache_config.enabled);
+    }
+
+    #[rstest]
+    fn test_repository_config_builder_full_with_cache_config() {
+        let cache_config = CacheConfig::new(CacheStrategy::WriteBehind, 90, true, 50);
+        let result = RepositoryConfig::builder()
+            .storage_mode(StorageMode::Postgres)
+            .database_url("postgres://localhost/test")
+            .cache_mode(CacheMode::Redis)
+            .redis_url("redis://localhost:6379")
+            .cache_config(cache_config)
+            .build();
+
+        assert!(result.is_ok());
+        let config = result.unwrap();
+        assert_eq!(config.storage_mode, StorageMode::Postgres);
+        assert_eq!(config.cache_mode, CacheMode::Redis);
+        assert_eq!(config.cache_config.strategy, CacheStrategy::WriteBehind);
+        assert_eq!(config.cache_config.ttl_seconds, 90);
+    }
+
+    #[rstest]
+    fn test_repository_config_cache_config_has_default_when_not_specified() {
+        let result = RepositoryConfig::builder()
+            .cache_mode(CacheMode::Redis)
+            .redis_url("redis://localhost:6379")
+            .build();
+
+        assert!(result.is_ok());
+        let config = result.unwrap();
+        // cache_config should use defaults when not explicitly set
+        assert_eq!(config.cache_config.strategy, CacheStrategy::ReadThrough);
+        assert_eq!(config.cache_config.ttl_seconds, 60);
+        assert!(config.cache_config.enabled);
+    }
+
+    // -------------------------------------------------------------------------
+    // RepositoryConfig::from_env() Integration Tests (CACHE-REQ-031)
+    // -------------------------------------------------------------------------
+    //
+    // Note: Direct environment variable tests are not included here because:
+    // 1. Rust 2024 edition requires `unsafe` blocks for `env::set_var`/`env::remove_var`
+    // 2. This project forbids `unsafe` code via `-F unsafe-code`
+    // 3. Parallel test execution makes environment variable tests unreliable
+    //
+    // Instead, `RepositoryConfig::from_env()` behavior is tested through:
+    // - Unit tests for `CacheConfig::from_env()` components (strategy, TTL parsing)
+    // - Integration tests that verify the full configuration chain
+    // - Builder pattern tests that verify cache config propagation
+    //
+    // The following tests verify that `CacheConfig` values are correctly
+    // integrated into `RepositoryConfig` via the builder pattern.
+
+    #[rstest]
+    fn test_repository_config_builder_propagates_cache_strategy_write_through() {
+        let cache_config = CacheConfig::new(CacheStrategy::WriteThrough, 60, true, 100);
+        let result = RepositoryConfig::builder().cache_config(cache_config).build();
+
+        assert!(result.is_ok());
+        let config = result.unwrap();
+        assert_eq!(config.cache_config.strategy, CacheStrategy::WriteThrough);
+    }
+
+    #[rstest]
+    fn test_repository_config_builder_propagates_cache_ttl() {
+        let cache_config = CacheConfig::new(CacheStrategy::ReadThrough, 300, true, 100);
+        let result = RepositoryConfig::builder().cache_config(cache_config).build();
+
+        assert!(result.is_ok());
+        let config = result.unwrap();
+        assert_eq!(config.cache_config.ttl_seconds, 300);
+    }
+
+    #[rstest]
+    fn test_repository_config_builder_propagates_cache_enabled_false() {
+        let cache_config = CacheConfig::new(CacheStrategy::ReadThrough, 60, false, 100);
+        let result = RepositoryConfig::builder().cache_config(cache_config).build();
+
+        assert!(result.is_ok());
+        let config = result.unwrap();
+        assert!(!config.cache_config.enabled);
+    }
+
+    #[rstest]
+    fn test_repository_config_builder_propagates_all_cache_values() {
+        let cache_config = CacheConfig::new(CacheStrategy::WriteBehind, 180, true, 50);
+        let result = RepositoryConfig::builder().cache_config(cache_config).build();
+
+        assert!(result.is_ok());
+        let config = result.unwrap();
+        assert_eq!(config.cache_config.strategy, CacheStrategy::WriteBehind);
+        assert_eq!(config.cache_config.ttl_seconds, 180);
+        assert!(config.cache_config.enabled);
+        assert_eq!(config.cache_config.write_behind_buffer_size, 50);
+    }
+
+    // -------------------------------------------------------------------------
+    // RepositoryFactory CachedRepository Tests (CACHE-REQ-030)
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    #[tokio::test]
+    #[ignore = "Requires Redis instance"]
+    async fn test_repository_factory_creates_cached_repository_for_inmemory_redis() {
+        // (InMemory, Redis) should use CachedTaskRepository with InMemory as primary
+        let cache_config = CacheConfig::new(CacheStrategy::ReadThrough, 60, true, 100);
+        let config = RepositoryConfig::builder()
+            .storage_mode(StorageMode::InMemory)
+            .cache_mode(CacheMode::Redis)
+            .redis_url("redis://localhost:6379")
+            .cache_config(cache_config)
+            .build()
+            .unwrap();
+
+        let factory = RepositoryFactory::new(config);
+        let result = factory.create().await;
+        assert!(result.is_ok());
+
+        // Verify the repositories are functional
+        let repositories = result.unwrap();
+        let count = repositories.task_repository.count().run_async().await;
+        assert!(count.is_ok());
+    }
+
+    #[rstest]
+    #[tokio::test]
+    #[ignore = "Requires PostgreSQL and Redis instances"]
+    async fn test_repository_factory_creates_cached_repository_for_postgres_redis() {
+        // (Postgres, Redis) should use CachedTaskRepository with Postgres as primary
+        let cache_config = CacheConfig::new(CacheStrategy::WriteThrough, 120, true, 100);
+        let config = RepositoryConfig::builder()
+            .storage_mode(StorageMode::Postgres)
+            .database_url("postgres://localhost/test")
+            .cache_mode(CacheMode::Redis)
+            .redis_url("redis://localhost:6379")
+            .cache_config(cache_config)
             .build()
             .unwrap();
 
