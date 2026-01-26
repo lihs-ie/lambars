@@ -3101,6 +3101,7 @@ mod tests {
         use axum::Json;
         use axum::extract::State;
         use lambars::persistent::PersistentVector;
+        use std::sync::atomic::AtomicU64;
 
         use crate::api::handlers::create_stub_external_sources;
         use crate::api::query::{SearchCache, SearchIndex};
@@ -3122,6 +3123,11 @@ mod tests {
                 secondary_source: external_sources.secondary_source,
                 external_source: external_sources.external_source,
                 rng_provider: Arc::new(RngProvider::new_random()),
+                cache_hits: Arc::new(AtomicU64::new(0)),
+                cache_misses: Arc::new(AtomicU64::new(0)),
+                cache_errors: Arc::new(AtomicU64::new(0)),
+                cache_strategy: "read-through".to_string(),
+                cache_ttl_seconds: 60,
             }
         }
 

@@ -208,6 +208,11 @@ pub enum CacheStatus {
     Miss,
     /// Cache was bypassed (disabled or non-cacheable operation).
     Bypass,
+    /// Cache operation failed (Redis error, but data fetched from primary storage).
+    ///
+    /// This status indicates fail-open behavior: the cache layer encountered an error
+    /// but the request was still served from primary storage.
+    Error,
 }
 
 impl std::fmt::Display for CacheStatus {
@@ -216,6 +221,7 @@ impl std::fmt::Display for CacheStatus {
             Self::Hit => write!(formatter, "HIT"),
             Self::Miss => write!(formatter, "MISS"),
             Self::Bypass => write!(formatter, "BYPASS"),
+            Self::Error => write!(formatter, "ERROR"),
         }
     }
 }
@@ -255,6 +261,15 @@ impl<T> CacheResult<T> {
     #[must_use]
     pub const fn bypass(value: T) -> Self {
         Self::new(value, CacheStatus::Bypass)
+    }
+
+    /// Creates a cache error result.
+    ///
+    /// Used when a Redis error occurred but data was fetched from primary storage
+    /// (fail-open behavior).
+    #[must_use]
+    pub const fn error(value: T) -> Self {
+        Self::new(value, CacheStatus::Error)
     }
 
     /// Maps the value using the given function.
@@ -365,12 +380,16 @@ impl<P: TaskRepository + 'static> CachedTaskRepository<P> {
     /// Finds a task by ID with cache status information.
     ///
     /// This method returns a `CacheResult` that includes both the value and
-    /// the cache status (hit/miss/bypass).
+    /// the cache status (hit/miss/bypass/error).
     ///
     /// # Fail-Open Behavior
     ///
     /// On Redis errors, this method falls back to primary storage and returns
-    /// `CacheStatus::Bypass` instead of returning an error.
+    /// `CacheStatus::Error` instead of returning an error. This indicates that
+    /// the data was fetched from primary storage due to a Redis failure.
+    ///
+    /// When cache is disabled (via configuration), returns `CacheStatus::Bypass`
+    /// to indicate that the cache layer was intentionally skipped.
     #[allow(clippy::too_many_lines)]
     pub fn find_by_id_with_status(
         &self,
@@ -399,7 +418,7 @@ impl<P: TaskRepository + 'static> CachedTaskRepository<P> {
                         "Redis connection failed, falling back to primary storage"
                     );
                     let result = primary.find_by_id(&task_id).run_async().await?;
-                    return Ok(CacheResult::bypass(result));
+                    return Ok(CacheResult::error(result));
                 }
             };
 
@@ -414,7 +433,7 @@ impl<P: TaskRepository + 'static> CachedTaskRepository<P> {
                         "Redis GET failed, falling back to primary storage"
                     );
                     let result = primary.find_by_id(&task_id).run_async().await?;
-                    return Ok(CacheResult::bypass(result));
+                    return Ok(CacheResult::error(result));
                 }
             };
 
@@ -430,7 +449,7 @@ impl<P: TaskRepository + 'static> CachedTaskRepository<P> {
                             "Redis GET failed, falling back to primary storage"
                         );
                         let result = primary.find_by_id(&task_id).run_async().await?;
-                        return Ok(CacheResult::bypass(result));
+                        return Ok(CacheResult::error(result));
                     }
                 };
 
@@ -1117,12 +1136,16 @@ impl<P: ProjectRepository + 'static> CachedProjectRepository<P> {
     /// Finds a project by ID with cache status information.
     ///
     /// This method returns a `CacheResult` that includes both the value and
-    /// the cache status (hit/miss/bypass).
+    /// the cache status (hit/miss/bypass/error).
     ///
     /// # Fail-Open Behavior
     ///
     /// On Redis errors, this method falls back to primary storage and returns
-    /// `CacheStatus::Bypass` instead of returning an error.
+    /// `CacheStatus::Error` instead of returning an error. This indicates that
+    /// the data was fetched from primary storage due to a Redis failure.
+    ///
+    /// When cache is disabled (via configuration), returns `CacheStatus::Bypass`
+    /// to indicate that the cache layer was intentionally skipped.
     #[allow(clippy::too_many_lines)]
     pub fn find_by_id_with_status(
         &self,
@@ -1151,7 +1174,7 @@ impl<P: ProjectRepository + 'static> CachedProjectRepository<P> {
                         "Redis connection failed, falling back to primary storage"
                     );
                     let result = primary.find_by_id(&project_id).run_async().await?;
-                    return Ok(CacheResult::bypass(result));
+                    return Ok(CacheResult::error(result));
                 }
             };
 
@@ -1166,7 +1189,7 @@ impl<P: ProjectRepository + 'static> CachedProjectRepository<P> {
                         "Redis GET failed, falling back to primary storage"
                     );
                     let result = primary.find_by_id(&project_id).run_async().await?;
-                    return Ok(CacheResult::bypass(result));
+                    return Ok(CacheResult::error(result));
                 }
             };
 
@@ -1182,7 +1205,7 @@ impl<P: ProjectRepository + 'static> CachedProjectRepository<P> {
                             "Redis GET failed, falling back to primary storage"
                         );
                         let result = primary.find_by_id(&project_id).run_async().await?;
-                        return Ok(CacheResult::bypass(result));
+                        return Ok(CacheResult::error(result));
                     }
                 };
 
@@ -1658,6 +1681,7 @@ mod tests {
         assert_eq!(format!("{}", CacheStatus::Hit), "HIT");
         assert_eq!(format!("{}", CacheStatus::Miss), "MISS");
         assert_eq!(format!("{}", CacheStatus::Bypass), "BYPASS");
+        assert_eq!(format!("{}", CacheStatus::Error), "ERROR");
     }
 
     // -------------------------------------------------------------------------
@@ -1683,6 +1707,13 @@ mod tests {
         let result = CacheResult::bypass(vec![1, 2, 3]);
         assert_eq!(result.value, vec![1, 2, 3]);
         assert_eq!(result.cache_status, CacheStatus::Bypass);
+    }
+
+    #[rstest]
+    fn test_cache_result_error() {
+        let result = CacheResult::error("fallback value".to_string());
+        assert_eq!(result.value, "fallback value");
+        assert_eq!(result.cache_status, CacheStatus::Error);
     }
 
     #[rstest]

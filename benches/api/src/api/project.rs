@@ -17,7 +17,7 @@
 use axum::{
     Json,
     extract::{Path, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
 };
 use lambars::control::Trampoline;
 use lambars::effect::Reader;
@@ -25,9 +25,10 @@ use lambars::typeclass::{Foldable, Monoid, Semigroup};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use super::cache_header::CacheSource;
 use super::dto::{PriorityDto, TaskStatusDto};
 use super::error::ApiErrorResponse;
-use super::handlers::{AppConfig, AppState};
+use super::handlers::{AppConfig, AppState, build_cache_headers};
 use crate::domain::{Priority, Project, ProjectId, TaskStatus, TaskSummary, Timestamp};
 
 // =============================================================================
@@ -766,19 +767,32 @@ pub async fn create_project_handler(
 pub async fn get_project_handler(
     State(state): State<AppState>,
     Path(project_id): Path<String>,
-) -> Result<Json<ProjectDetailResponse>, ApiErrorResponse> {
+) -> Result<(HeaderMap, Json<ProjectDetailResponse>), ApiErrorResponse> {
     let project_id = parse_project_id(&project_id)?;
 
-    let project = state
+    // Fetch project with cache status
+    let cache_result = state
         .project_repository
-        .find_by_id(&project_id)
+        .find_by_id_with_status(&project_id)
         .run_async()
-        .await?
+        .await?;
+
+    let cache_status = cache_result.cache_status;
+
+    // Record cache metrics (CACHE-REQ-021)
+    state.record_cache_status(cache_status);
+
+    let project = cache_result
+        .value
         .ok_or_else(|| ApiErrorResponse::not_found("Project not found"))?;
 
     // Use Reader to compose config-dependent response building
     let response = build_detail_response(project).run(state.config.clone());
-    Ok(Json(response))
+
+    // Build cache headers
+    let headers = build_cache_headers(cache_status, CacheSource::Redis);
+
+    Ok((headers, Json(response)))
 }
 
 // =============================================================================
@@ -1646,6 +1660,7 @@ mod handler_tests {
         use crate::api::bulk::BulkConfig;
         use crate::api::handlers::create_stub_external_sources;
         use crate::infrastructure::RngProvider;
+        use std::sync::atomic::AtomicU64;
 
         let external_sources = create_stub_external_sources();
 
@@ -1662,6 +1677,11 @@ mod handler_tests {
             secondary_source: external_sources.secondary_source,
             external_source: external_sources.external_source,
             rng_provider: Arc::new(RngProvider::new_random()),
+            cache_hits: Arc::new(AtomicU64::new(0)),
+            cache_misses: Arc::new(AtomicU64::new(0)),
+            cache_errors: Arc::new(AtomicU64::new(0)),
+            cache_strategy: "read-through".to_string(),
+            cache_ttl_seconds: 60,
         }
     }
 
@@ -1684,6 +1704,90 @@ mod handler_tests {
 
         (project, summaries)
     }
+
+    // -------------------------------------------------------------------------
+    // GET /projects/{id} Handler Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_get_project_handler_returns_200_with_headers() {
+        let state = create_test_app_state();
+        let (project, _) = create_test_project_with_tasks(&[TaskStatus::Pending]);
+
+        // Save the project
+        state
+            .project_repository
+            .save(&project)
+            .run_async()
+            .await
+            .expect("Failed to save project");
+
+        // Call the handler
+        let result = get_project_handler(
+            axum::extract::State(state),
+            axum::extract::Path(project.project_id.to_string()),
+        )
+        .await;
+
+        assert!(result.is_ok());
+        let (headers, response) = result.unwrap();
+
+        // Verify response data
+        assert_eq!(response.project_id, project.project_id.to_string());
+        assert_eq!(response.name, "Test Project");
+        assert_eq!(response.task_count, 1);
+
+        // Verify cache headers are present with correct values
+        assert!(headers.contains_key("X-Cache"));
+        assert!(headers.contains_key("X-Cache-Status"));
+        assert!(headers.contains_key("X-Cache-Source"));
+
+        // Verify header values (mock returns CacheStatus::Bypass since no Redis layer)
+        assert_eq!(headers.get("X-Cache").unwrap(), "MISS");
+        assert_eq!(headers.get("X-Cache-Status").unwrap(), "bypass");
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_get_project_handler_returns_404_without_headers() {
+        let state = create_test_app_state();
+        let non_existent_id = ProjectId::generate_v7();
+
+        // Call the handler
+        let result = get_project_handler(
+            axum::extract::State(state),
+            axum::extract::Path(non_existent_id.to_string()),
+        )
+        .await;
+
+        // Verify 404 error (no headers for error responses)
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert_eq!(error.status, axum::http::StatusCode::NOT_FOUND);
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_get_project_handler_returns_400_for_invalid_id() {
+        let state = create_test_app_state();
+
+        // Call the handler with invalid UUID
+        let result = get_project_handler(
+            axum::extract::State(state),
+            axum::extract::Path("not-a-valid-uuid".to_string()),
+        )
+        .await;
+
+        // Verify 400 error (no headers for error responses)
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert_eq!(error.status, axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    // -------------------------------------------------------------------------
+    // GET /projects/{id}/progress Handler Tests
+    // -------------------------------------------------------------------------
 
     #[rstest]
     #[tokio::test]

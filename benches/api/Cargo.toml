@@ -17,6 +17,7 @@ lambars-derive = { path = "../../lambars-derive" }
 # Web Framework
 axum = { version = "0.8", features = ["macros"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
+tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["trace", "cors"] }
 
 # Serialization
