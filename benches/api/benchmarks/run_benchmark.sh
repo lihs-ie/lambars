@@ -476,6 +476,54 @@ load_scenario_env_vars() {
     export CACHE_STRATEGY="${cache_strategy}"
 
     # ==========================================================================
+    # Cache Metrics Configuration
+    # ==========================================================================
+    # Export cache_metrics section values as environment variables for
+    # API server and warmup logic.
+
+    # CACHE_METRICS_ENABLED: Whether cache metrics are enabled (1 or 0)
+    local cache_metrics_enabled_raw
+    cache_metrics_enabled_raw=$(yq '.cache_metrics.enabled // false' "${scenario_file}" | tr -d '"')
+    # Normalize to 1/0 for Lua compatibility
+    if [[ "${cache_metrics_enabled_raw}" == "true" ]]; then
+        export CACHE_METRICS_ENABLED="1"
+    else
+        export CACHE_METRICS_ENABLED="0"
+    fi
+
+    # CACHE_WARMUP_REQUESTS: Number of warmup requests to send before measurement
+    local cache_warmup_requests
+    cache_warmup_requests=$(yq '.cache_metrics.warmup_requests // 0' "${scenario_file}")
+    export CACHE_WARMUP_REQUESTS="${cache_warmup_requests}"
+
+    # EXPECTED_CACHE_HIT_RATE: Expected cache hit rate threshold (0.0-1.0)
+    local expected_cache_hit_rate
+    expected_cache_hit_rate=$(yq '.cache_metrics.expected_hit_rate // ""' "${scenario_file}" | tr -d '"')
+    if [[ -n "${expected_cache_hit_rate}" ]]; then
+        export EXPECTED_CACHE_HIT_RATE="${expected_cache_hit_rate}"
+    fi
+
+    # CACHE_METRICS_PER_ENDPOINT: Track cache hit rate per endpoint (1 or 0)
+    local cache_metrics_per_endpoint_raw
+    cache_metrics_per_endpoint_raw=$(yq '.cache_metrics.per_endpoint // false' "${scenario_file}" | tr -d '"')
+    # Normalize to 1/0 for Lua compatibility
+    if [[ "${cache_metrics_per_endpoint_raw}" == "true" ]]; then
+        export CACHE_METRICS_PER_ENDPOINT="1"
+    else
+        export CACHE_METRICS_PER_ENDPOINT="0"
+    fi
+
+    # CACHE_METRICS_TRACK_LATENCY: Track cache latency distribution (1 or 0)
+    local cache_metrics_track_latency_raw
+    cache_metrics_track_latency_raw=$(yq '.cache_metrics.track_latency // false' "${scenario_file}" | tr -d '"')
+    # Normalize to 1/0 for Lua compatibility
+    if [[ "${cache_metrics_track_latency_raw}" == "true" ]]; then
+        export CACHE_METRICS_TRACK_LATENCY="1"
+    else
+        export CACHE_METRICS_TRACK_LATENCY="0"
+    fi
+
+    # ==========================================================================
     # Error Configuration (FAIL_RATE, RETRY)
     # ==========================================================================
 
@@ -563,6 +611,29 @@ load_scenario_env_vars() {
     fi
 
     # ==========================================================================
+    # Environment Section (Cache Configuration)
+    # ==========================================================================
+    # Export environment variables from the 'environment' section in the scenario YAML.
+    # These variables are passed to the API server at startup for cache configuration.
+
+    # CACHE_ENABLED from environment section (default: true)
+    local cache_enabled
+    cache_enabled=$(yq '.environment.CACHE_ENABLED // "true"' "${scenario_file}" | tr -d '"')
+    export CACHE_ENABLED="${cache_enabled}"
+
+    # CACHE_STRATEGY from environment section (takes precedence over metadata.cache_strategy)
+    local env_cache_strategy
+    env_cache_strategy=$(yq '.environment.CACHE_STRATEGY // null' "${scenario_file}" | tr -d '"')
+    if [[ "${env_cache_strategy}" != "null" && -n "${env_cache_strategy}" ]]; then
+        export CACHE_STRATEGY="${env_cache_strategy}"
+    fi
+
+    # CACHE_TTL_SECS from environment section (default: 60)
+    local cache_ttl
+    cache_ttl=$(yq '.environment.CACHE_TTL_SECS // "60"' "${scenario_file}" | tr -d '"')
+    export CACHE_TTL_SECS="${cache_ttl}"
+
+    # ==========================================================================
     # Summary Output
     # ==========================================================================
 
@@ -571,6 +642,7 @@ load_scenario_env_vars() {
     echo "  Data scale: ${DATA_SCALE}, Payload: ${PAYLOAD}"
     echo "  RPS profile: ${RPS_PROFILE}, Hit rate: ${HIT_RATE}%"
     echo "  Cache strategy: ${CACHE_STRATEGY}"
+    echo "  Cache enabled: ${CACHE_ENABLED}, TTL: ${CACHE_TTL_SECS}s"
     echo "  Fail rate: ${FAIL_RATE}, Retry: ${RETRY}"
     [[ -n "${ENDPOINT:-}" ]] && echo "  Endpoint: ${ENDPOINT}"
     [[ -n "${WORKERS:-}" ]] && echo "  Workers: ${WORKERS}"
@@ -813,6 +885,57 @@ else
     echo "  cargo run -p task-management-benchmark-api"
     exit 1
 fi
+
+# =============================================================================
+# Cache Warmup
+# =============================================================================
+#
+# Execute warmup requests to populate the cache before benchmark measurement.
+# This is triggered when cache_state is "warm" and warmup_requests > 0.
+#
+# Warmup Strategy:
+# - Send CACHE_WARMUP_REQUESTS GET requests to /tasks/{id}
+# - Use sequential IDs from 1 to min(warmup_requests, available_tasks)
+# - Silent output (only progress indicator)
+# =============================================================================
+
+run_warmup() {
+    local warmup_requests=${CACHE_WARMUP_REQUESTS:-0}
+    local api_port
+    api_port=$(echo "${API_URL}" | sed 's/.*:\([0-9]*\).*/\1/')
+    api_port=${api_port:-3002}
+
+    if [[ "${warmup_requests}" -gt 0 ]]; then
+        echo ""
+        echo "=============================================="
+        echo "  Cache Warmup"
+        echo "=============================================="
+        echo "Running warmup: ${warmup_requests} requests to populate cache..."
+
+        local progress_interval=$((warmup_requests / 10))
+        [[ "${progress_interval}" -lt 1 ]] && progress_interval=1
+
+        for i in $(seq 1 "${warmup_requests}"); do
+            # Send GET request to /tasks/{id} with sequential IDs
+            # Use modulo to cycle through task IDs if warmup_requests > available tasks
+            local task_id=$((i % 10000 + 1))
+            curl -sf "${API_URL}/tasks/${task_id}" > /dev/null 2>&1 || true
+
+            # Progress indicator
+            if [[ $((i % progress_interval)) -eq 0 ]]; then
+                local percent=$((i * 100 / warmup_requests))
+                echo -n "  Progress: ${percent}% (${i}/${warmup_requests})"
+                echo -e "\r"
+            fi
+        done
+        echo "  Progress: 100% (${warmup_requests}/${warmup_requests})"
+        echo -e "${GREEN}Warmup completed${NC}"
+        echo ""
+    fi
+}
+
+# Run warmup if configured
+run_warmup
 
 # Create results directory
 mkdir -p "${RESULTS_DIR}"

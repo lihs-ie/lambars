@@ -15,6 +15,13 @@ connections: 20
 threads: 4
 warmup_seconds: 10
 
+# Environment variables for cache configuration
+# These are passed to the API server at startup
+environment:
+  CACHE_ENABLED: "true"
+  CACHE_STRATEGY: "read-through"
+  CACHE_TTL_SECS: "60"
+
 cache_metrics:
   enabled: true
   per_endpoint: true
@@ -35,7 +42,7 @@ metadata:
   endpoint: "mixed"
   payload: "medium"
   cache_strategy: "read-through"
-  hit_rate: 90
+  hit_rate: 80
   fail_injection: 0
   retry: false
   profile: false
