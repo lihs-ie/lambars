@@ -3,6 +3,7 @@
 //! This module contains database repositories, cache implementations,
 //! benchmark scenario configuration, and other infrastructure concerns.
 
+pub mod cache;
 pub mod external;
 pub mod factory;
 pub mod fail_injection;
@@ -12,6 +13,10 @@ pub mod redis;
 pub mod repository;
 pub mod scenario;
 
+pub use cache::{
+    CacheConfig, CacheResult, CacheStatus, CacheStrategy, CachedProjectRepository,
+    CachedTaskRepository, project_data_key, project_latest_key, task_data_key, task_latest_key,
+};
 pub use external::{
     ExternalDataSource, ExternalError, ExternalSources, ExternalTaskData, HttpExternalDataSource,
     RedisExternalDataSource, StubExternalDataSource,
