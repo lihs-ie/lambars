@@ -28,14 +28,16 @@ use lambars::persistent::PersistentVector;
 use uuid::Uuid;
 
 use super::bulk::BulkConfig;
+use super::consistency::save_task_with_event;
 use super::dto::{
     CreateTaskRequest, TaskResponse, validate_description, validate_tags, validate_title,
 };
 use super::error::ApiErrorResponse;
 use super::query::{SearchCache, SearchIndex, TaskChange};
-use crate::domain::{Priority, Tag, Task, TaskId, Timestamp};
+use crate::domain::{EventId, Priority, Tag, Task, TaskId, Timestamp, create_task_created_event};
 use crate::infrastructure::{
-    EventStore, Pagination, ProjectRepository, Repositories, TaskRepository,
+    EventStore, ExternalDataSource, ExternalSources, Pagination, ProjectRepository, Repositories,
+    RepositoryError, RngProvider, TaskRepository,
 };
 
 // =============================================================================
@@ -115,6 +117,18 @@ pub struct AppState {
     /// Caches search results to improve performance for repeated queries.
     /// The cache key is `(normalized_query, scope, limit, offset)`.
     pub search_cache: Arc<SearchCache>,
+    /// Secondary data source (Redis) for Alternative patterns.
+    ///
+    /// Used by `aggregate_sources` and `search_fallback` handlers.
+    pub secondary_source: Arc<dyn ExternalDataSource + Send + Sync>,
+    /// External data source (HTTP) for Alternative patterns.
+    ///
+    /// Used by `aggregate_sources` and `search_fallback` handlers.
+    pub external_source: Arc<dyn ExternalDataSource + Send + Sync>,
+    /// RNG provider for fail injection.
+    ///
+    /// Enables deterministic behavior for testing/benchmarks when seeded.
+    pub rng_provider: Arc<RngProvider>,
 }
 
 impl Clone for AppState {
@@ -127,6 +141,9 @@ impl Clone for AppState {
             bulk_config: self.bulk_config,
             search_index: Arc::clone(&self.search_index),
             search_cache: Arc::clone(&self.search_cache),
+            secondary_source: Arc::clone(&self.secondary_source),
+            external_source: Arc::clone(&self.external_source),
+            rng_provider: Arc::clone(&self.rng_provider),
         }
     }
 }
@@ -136,6 +153,8 @@ impl AppState {
     ///
     /// This constructor takes ownership of the `Repositories` struct returned
     /// by `RepositoryFactory::create()`.
+    ///
+    /// Uses stub external sources for backward compatibility.
     ///
     /// # Note
     ///
@@ -152,7 +171,30 @@ impl AppState {
         Self::with_config(repositories, AppConfig::default()).await
     }
 
+    /// Creates a new `AppState` from repositories and external sources.
+    ///
+    /// This constructor is intended for production use where real external
+    /// data sources (Redis, HTTP) are configured.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the task repository fails to list tasks.
+    pub async fn with_external_sources(
+        repositories: Repositories,
+        external_sources: ExternalSources,
+    ) -> Result<Self, crate::infrastructure::RepositoryError> {
+        Self::with_full_config(
+            repositories,
+            AppConfig::default(),
+            BulkConfig::from_env(),
+            external_sources,
+        )
+        .await
+    }
+
     /// Creates a new `AppState` from repositories and custom configuration.
+    ///
+    /// Uses stub external sources for backward compatibility.
     ///
     /// # Errors
     ///
@@ -161,12 +203,36 @@ impl AppState {
         repositories: Repositories,
         config: AppConfig,
     ) -> Result<Self, crate::infrastructure::RepositoryError> {
-        Self::with_full_config(repositories, config, BulkConfig::from_env()).await
+        let external_sources = create_stub_external_sources();
+        Self::with_full_config(
+            repositories,
+            config,
+            BulkConfig::from_env(),
+            external_sources,
+        )
+        .await
     }
 
-    /// Creates a new `AppState` from repositories and both app and bulk configurations.
+    /// Creates a new `AppState` from repositories and all configurations.
     ///
-    /// This method allows explicit injection of `BulkConfig` for testing purposes.
+    /// This method allows explicit injection of `BulkConfig` and `ExternalSources`
+    /// for testing purposes.
+    ///
+    /// # Backfill Processing
+    ///
+    /// On startup, this method performs backfill processing for existing tasks
+    /// that do not have any events in the event store. For each such task, a
+    /// `TaskCreated` event is generated and stored.
+    ///
+    /// Backfill behavior is controlled by the `SKIP_BACKFILL` environment variable:
+    /// - `SKIP_BACKFILL=true` or `SKIP_BACKFILL=1`: Skip backfill (for development/debugging)
+    /// - Otherwise: Perform backfill (default behavior)
+    ///
+    /// # Idempotency
+    ///
+    /// The backfill process is idempotent:
+    /// - Only tasks with `get_current_version() == 0` are backfilled
+    /// - Optimistic locking (`expected_version=0`) prevents duplicate writes on concurrent startup
     ///
     /// # Errors
     ///
@@ -175,7 +241,8 @@ impl AppState {
         repositories: Repositories,
         config: AppConfig,
         bulk_config: BulkConfig,
-    ) -> Result<Self, crate::infrastructure::RepositoryError> {
+        external_sources: ExternalSources,
+    ) -> Result<Self, RepositoryError> {
         // Fetch all tasks to build the initial search index
         let all_tasks = repositories
             .task_repository
@@ -184,8 +251,42 @@ impl AppState {
             .await?;
 
         // Build the search index from all tasks (pure function)
-        let tasks: PersistentVector<Task> = all_tasks.items.into_iter().collect();
+        let tasks: PersistentVector<Task> = all_tasks.items.clone().into_iter().collect();
         let search_index = SearchIndex::build(&tasks);
+
+        // Perform backfill processing (unless SKIP_BACKFILL=true)
+        let skip_backfill = std::env::var("SKIP_BACKFILL")
+            .map(|value| matches!(value.to_lowercase().as_str(), "true" | "1" | "yes"))
+            .unwrap_or(false);
+
+        if skip_backfill {
+            tracing::info!("Skipping backfill (SKIP_BACKFILL=true)");
+        } else {
+            let backfill_result =
+                backfill_existing_tasks(&all_tasks.items, repositories.event_store.as_ref()).await;
+
+            match backfill_result {
+                Ok((backfilled, skipped)) => {
+                    if backfilled > 0 || skipped > 0 {
+                        tracing::info!(
+                            backfilled = backfilled,
+                            skipped = skipped,
+                            "Backfill complete"
+                        );
+                    }
+                }
+                Err(error) => {
+                    tracing::error!(%error, "Backfill failed");
+                    return Err(error);
+                }
+            }
+        }
+
+        // Create RNG provider from environment (I/O boundary)
+        let rng_provider = Arc::new(RngProvider::from_env().unwrap_or_else(|error| {
+            tracing::warn!(%error, "Failed to create RNG provider from env, using random");
+            RngProvider::new_random()
+        }));
 
         Ok(Self {
             task_repository: repositories.task_repository,
@@ -195,6 +296,9 @@ impl AppState {
             bulk_config,
             search_index: Arc::new(ArcSwap::from_pointee(search_index)),
             search_cache: Arc::new(SearchCache::with_default_config()),
+            secondary_source: external_sources.secondary_source,
+            external_source: external_sources.external_source,
+            rng_provider,
         })
     }
 
@@ -227,6 +331,114 @@ impl AppState {
             Arc::new(updated)
         });
     }
+}
+
+// =============================================================================
+// External Sources Helper
+// =============================================================================
+
+use crate::infrastructure::StubExternalDataSource;
+
+/// Creates stub external sources for testing and backward compatibility.
+///
+/// The stub sources return `Ok(None)` for all fetch operations, simulating
+/// external sources that always report "not found".
+#[must_use]
+pub fn create_stub_external_sources() -> ExternalSources {
+    ExternalSources {
+        secondary_source: Arc::new(StubExternalDataSource::not_found("secondary")),
+        external_source: Arc::new(StubExternalDataSource::not_found("external")),
+    }
+}
+
+// =============================================================================
+// Backfill Processing
+// =============================================================================
+
+/// Backfills existing tasks with `TaskCreated` events.
+///
+/// This function is called at startup to ensure all existing tasks have at least
+/// one event in the event store. This is necessary for the event sourcing model
+/// to work correctly.
+///
+/// # Idempotency
+///
+/// The backfill process is idempotent:
+/// - Only tasks with `get_current_version() == 0` are backfilled
+/// - Optimistic locking (`expected_version=0`) prevents duplicate writes on concurrent startup
+///
+/// # Concurrent Startup Handling
+///
+/// When multiple instances start concurrently:
+/// 1. Each instance checks `get_current_version()` - returns 0 for tasks without events
+/// 2. Instance attempts `append(event, expected_version=0)`
+/// 3. First instance succeeds, others get `VersionConflict` error (expected: 0, found: 1)
+/// 4. `VersionConflict` is treated as "already backfilled" and skipped
+///
+/// # Arguments
+///
+/// * `tasks` - Slice of tasks to potentially backfill
+/// * `event_store` - The event store to write events to
+///
+/// # Returns
+///
+/// Returns `Ok((backfilled_count, skipped_count))` on success, or an error if
+/// a non-recoverable error occurs.
+async fn backfill_existing_tasks(
+    tasks: &[Task],
+    event_store: &dyn EventStore,
+) -> Result<(u64, u64), RepositoryError> {
+    let mut backfilled_count = 0u64;
+    let mut skipped_count = 0u64;
+
+    for task in tasks {
+        // Idempotency check: skip tasks that already have events
+        let current_version = event_store
+            .get_current_version(&task.task_id)
+            .run_async()
+            .await?;
+
+        if current_version > 0 {
+            skipped_count += 1;
+            continue;
+        }
+
+        // Create the TaskCreated event (pure function)
+        // Version semantics: event.version = expected_version + 1
+        // For initial creation: expected_version = 0, so event.version = 1
+        let event = create_task_created_event(
+            task,
+            EventId::generate_v7(),  // I/O boundary: generate event ID
+            task.created_at.clone(), // Use task's creation timestamp for event
+            1,                       // First event version (expected_version=0 + 1)
+        );
+
+        // Attempt to append with optimistic locking (expected_version=0)
+        match event_store.append(&event, 0).run_async().await {
+            Ok(()) => {
+                backfilled_count += 1;
+                tracing::debug!(task_id = %task.task_id, "Backfilled task");
+            }
+            Err(RepositoryError::VersionConflict {
+                expected: 0,
+                found: _,
+            }) => {
+                // Only skip VersionConflict when expected_version=0 (concurrent startup case)
+                // Other version conflicts should be propagated as errors
+                tracing::debug!(
+                    task_id = %task.task_id,
+                    "Task already backfilled by another process"
+                );
+                skipped_count += 1;
+            }
+            Err(error) => {
+                // Non-recoverable error (including non-zero VersionConflict)
+                return Err(error);
+            }
+        }
+    }
+
+    Ok((backfilled_count, skipped_count))
 }
 
 // =============================================================================
@@ -271,6 +483,12 @@ impl AppState {
 /// 1. Creating the task synchronously
 /// 2. Converting to `TaskResponse` before the async boundary
 /// 3. Executing the repository save in a separate async block
+///
+/// # Event Sourcing
+///
+/// This handler writes a `TaskCreated` event to the event store alongside
+/// the task persistence. Event write failures are treated as warnings
+/// (best-effort consistency) rather than errors.
 #[allow(clippy::future_not_send)]
 pub async fn create_task(
     State(state): State<AppState>,
@@ -281,23 +499,33 @@ pub async fn create_task(
 
     // Step 2: Create task synchronously (Task is not Send)
     // Generate IDs and timestamp within this block (impure operations)
-    let (task, response) = {
+    let (task, mut response, event) = {
         let ids = generate_task_ids();
         let task = build_task(ids, validated);
         let response = TaskResponse::from(&task);
-        (task, response)
+
+        // Generate event ID and create the task created event (pure function)
+        // Version semantics: event.version = expected_version + 1
+        // For initial creation: expected_version = 0, so event.version = 1
+        let event = create_task_created_event(
+            &task,
+            EventId::generate_v7(), // I/O boundary: generate event ID
+            Timestamp::now(),       // I/O boundary: current timestamp
+            1,                      // First event version (expected_version=0 + 1)
+        );
+
+        (task, response, event)
     };
 
-    // Step 3: Save to repository using AsyncIO
-    // The task reference is consumed here before the await
-    state
-        .task_repository
-        .save(&task)
-        .run_async()
-        .await
-        .map_err(ApiErrorResponse::from)?;
+    // Step 3: Save task and write event using best-effort consistency
+    let save_result = save_task_with_event(&state, &task, event, 0).await?;
 
-    // Step 4: Update search index with the new task (lock-free write)
+    // Step 4: Add consistency warning to response if event write failed
+    if let Some(warning) = &save_result.consistency_warning {
+        response.warnings.push(warning.client_message());
+    }
+
+    // Step 5: Update search index with the new task (lock-free write)
     state.update_search_index(TaskChange::Add(task));
 
     Ok((StatusCode::CREATED, Json(response)))
@@ -589,8 +817,10 @@ mod tests {
 
     use lambars::effect::AsyncIO;
 
+    use crate::domain::{Priority, TaskStatus};
     use crate::infrastructure::{
         InMemoryEventStore, InMemoryProjectRepository, InMemoryTaskRepository, RepositoryError,
+        SearchScope,
     };
 
     // -------------------------------------------------------------------------
@@ -668,6 +898,33 @@ mod tests {
             })
         }
 
+        fn list_filtered(
+            &self,
+            _status: Option<TaskStatus>,
+            _priority: Option<Priority>,
+            pagination: crate::infrastructure::Pagination,
+        ) -> AsyncIO<Result<crate::infrastructure::PaginatedResult<Task>, RepositoryError>>
+        {
+            AsyncIO::new(move || async move {
+                Ok(crate::infrastructure::PaginatedResult::new(
+                    vec![],
+                    0,
+                    pagination.page,
+                    pagination.page_size,
+                ))
+            })
+        }
+
+        fn search(
+            &self,
+            _query: &str,
+            _scope: SearchScope,
+            _limit: u32,
+            _offset: u32,
+        ) -> AsyncIO<Result<Vec<Task>, RepositoryError>> {
+            AsyncIO::new(|| async { Ok(vec![]) })
+        }
+
         fn count(&self) -> AsyncIO<Result<u64, RepositoryError>> {
             AsyncIO::new(|| async { Ok(0) })
         }
@@ -683,8 +940,11 @@ mod tests {
     ) -> AppState {
         use crate::api::bulk::BulkConfig;
         use crate::api::query::{SearchCache, SearchIndex};
+        use crate::infrastructure::RngProvider;
         use arc_swap::ArcSwap;
         use lambars::persistent::PersistentVector;
+
+        let external_sources = super::create_stub_external_sources();
 
         AppState {
             task_repository: Arc::new(task_repository),
@@ -696,6 +956,9 @@ mod tests {
                 &PersistentVector::new(),
             ))),
             search_cache: Arc::new(SearchCache::with_default_config()),
+            secondary_source: external_sources.secondary_source,
+            external_source: external_sources.external_source,
+            rng_provider: Arc::new(RngProvider::new_random()),
         }
     }
 
@@ -703,8 +966,11 @@ mod tests {
     fn create_default_app_state() -> AppState {
         use crate::api::bulk::BulkConfig;
         use crate::api::query::{SearchCache, SearchIndex};
+        use crate::infrastructure::RngProvider;
         use arc_swap::ArcSwap;
         use lambars::persistent::PersistentVector;
+
+        let external_sources = super::create_stub_external_sources();
 
         AppState {
             task_repository: Arc::new(InMemoryTaskRepository::new()),
@@ -716,6 +982,9 @@ mod tests {
                 &PersistentVector::new(),
             ))),
             search_cache: Arc::new(SearchCache::with_default_config()),
+            secondary_source: external_sources.secondary_source,
+            external_source: external_sources.external_source,
+            rng_provider: Arc::new(RngProvider::new_random()),
         }
     }
 
@@ -1013,6 +1282,97 @@ mod tests {
         assert!(result.is_right());
         let returned_task = result.unwrap_right();
         assert_eq!(returned_task.title, "Test Task");
+    }
+
+    // -------------------------------------------------------------------------
+    // Backfill Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_backfill_existing_tasks_backfills_tasks_without_events() {
+        // Arrange
+        let event_store = InMemoryEventStore::new();
+        let task1 = Task::new(TaskId::generate(), "Task 1", Timestamp::now());
+        let task2 = Task::new(TaskId::generate(), "Task 2", Timestamp::now());
+        let tasks = vec![task1.clone(), task2.clone()];
+
+        // Act
+        let result = super::backfill_existing_tasks(&tasks, &event_store).await;
+
+        // Assert
+        assert!(result.is_ok());
+        let (backfilled, skipped) = result.unwrap();
+        assert_eq!(backfilled, 2);
+        assert_eq!(skipped, 0);
+
+        // Verify events were created
+        let version1 = event_store
+            .get_current_version(&task1.task_id)
+            .run_async()
+            .await
+            .unwrap();
+        let version2 = event_store
+            .get_current_version(&task2.task_id)
+            .run_async()
+            .await
+            .unwrap();
+        assert_eq!(version1, 1);
+        assert_eq!(version2, 1);
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_backfill_existing_tasks_skips_tasks_with_events() {
+        // Arrange
+        let event_store = InMemoryEventStore::new();
+        let task1 = Task::new(TaskId::generate(), "Task 1", Timestamp::now());
+        let task2 = Task::new(TaskId::generate(), "Task 2", Timestamp::now());
+
+        // Pre-create an event for task1
+        let event = crate::domain::create_task_created_event(
+            &task1,
+            crate::domain::EventId::generate_v7(),
+            Timestamp::now(),
+            1,
+        );
+        event_store.append(&event, 0).run_async().await.unwrap();
+
+        let tasks = vec![task1.clone(), task2.clone()];
+
+        // Act
+        let result = super::backfill_existing_tasks(&tasks, &event_store).await;
+
+        // Assert
+        assert!(result.is_ok());
+        let (backfilled, skipped) = result.unwrap();
+        assert_eq!(backfilled, 1); // Only task2 was backfilled
+        assert_eq!(skipped, 1); // task1 was skipped
+
+        // Verify task1 still has only 1 event (not duplicated)
+        let version1 = event_store
+            .get_current_version(&task1.task_id)
+            .run_async()
+            .await
+            .unwrap();
+        assert_eq!(version1, 1);
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_backfill_existing_tasks_empty_list() {
+        // Arrange
+        let event_store = InMemoryEventStore::new();
+        let tasks: Vec<Task> = vec![];
+
+        // Act
+        let result = super::backfill_existing_tasks(&tasks, &event_store).await;
+
+        // Assert
+        assert!(result.is_ok());
+        let (backfilled, skipped) = result.unwrap();
+        assert_eq!(backfilled, 0);
+        assert_eq!(skipped, 0);
     }
 
     // -------------------------------------------------------------------------

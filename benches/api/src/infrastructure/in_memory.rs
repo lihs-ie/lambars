@@ -17,9 +17,12 @@ use tokio::sync::RwLock;
 use lambars::effect::AsyncIO;
 use lambars::persistent::PersistentHashMap;
 
-use crate::domain::{Project, ProjectId, Task, TaskEvent, TaskHistory, TaskId};
+use crate::domain::{
+    Priority, Project, ProjectId, Task, TaskEvent, TaskHistory, TaskId, TaskStatus,
+};
 use crate::infrastructure::{
-    EventStore, PaginatedResult, Pagination, ProjectRepository, RepositoryError, TaskRepository,
+    EventStore, PaginatedResult, Pagination, ProjectRepository, RepositoryError, SearchScope,
+    TaskRepository,
 };
 
 // =============================================================================
@@ -264,6 +267,85 @@ impl TaskRepository for InMemoryTaskRepository {
                 pagination.page,
                 pagination.page_size,
             ))
+        })
+    }
+
+    #[allow(clippy::future_not_send)]
+    fn list_filtered(
+        &self,
+        status: Option<TaskStatus>,
+        priority: Option<Priority>,
+        pagination: Pagination,
+    ) -> AsyncIO<Result<PaginatedResult<Task>, RepositoryError>> {
+        let tasks = Arc::clone(&self.tasks);
+        AsyncIO::new(move || async move {
+            let guard = tasks.read().await;
+
+            // Filter tasks based on status and priority (pure function)
+            let filtered: Vec<Task> = guard
+                .iter()
+                .map(|(_, task)| task.clone())
+                .filter(|task| {
+                    status.is_none_or(|s| task.status == s)
+                        && priority.is_none_or(|p| task.priority == p)
+                })
+                .collect();
+            drop(guard);
+
+            let total = filtered.len() as u64;
+            #[allow(clippy::cast_possible_truncation)]
+            let offset = pagination.offset() as usize;
+            let limit = pagination.limit() as usize;
+
+            // Apply pagination
+            let items: Vec<Task> = filtered.into_iter().skip(offset).take(limit).collect();
+
+            Ok(PaginatedResult::new(
+                items,
+                total,
+                pagination.page,
+                pagination.page_size,
+            ))
+        })
+    }
+
+    #[allow(clippy::future_not_send)]
+    fn search(
+        &self,
+        query: &str,
+        scope: SearchScope,
+        limit: u32,
+        offset: u32,
+    ) -> AsyncIO<Result<Vec<Task>, RepositoryError>> {
+        let tasks = Arc::clone(&self.tasks);
+        let query_lower = query.to_lowercase();
+        AsyncIO::new(move || async move {
+            let guard = tasks.read().await;
+
+            // Search tasks based on scope (pure function)
+            let matching: Vec<Task> = guard
+                .iter()
+                .map(|(_, task)| task.clone())
+                .filter(|task| match scope {
+                    SearchScope::Title => task.title.to_lowercase().contains(&query_lower),
+                    SearchScope::Tags => task
+                        .tags
+                        .iter()
+                        .any(|tag| tag.as_str().eq_ignore_ascii_case(&query_lower)),
+                    SearchScope::All => {
+                        task.title.to_lowercase().contains(&query_lower)
+                            || task
+                                .tags
+                                .iter()
+                                .any(|tag| tag.as_str().eq_ignore_ascii_case(&query_lower))
+                    }
+                })
+                .skip(offset as usize)
+                .take(limit as usize)
+                .collect();
+            drop(guard);
+
+            Ok(matching)
         })
     }
 
@@ -557,7 +639,9 @@ impl EventStore for InMemoryEventStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{EventId, Priority, TaskCreated, TaskEventKind, TaskHistoryExt, Timestamp};
+    use crate::domain::{
+        EventId, Priority, TaskCreated, TaskEventKind, TaskHistoryExt, TaskStatus, Timestamp,
+    };
     use rstest::rstest;
 
     // -------------------------------------------------------------------------
@@ -590,6 +674,7 @@ mod tests {
                 title: "Test Task".to_string(),
                 description: None,
                 priority: Priority::Low,
+                status: TaskStatus::Pending,
             }),
         )
     }

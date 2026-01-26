@@ -24,6 +24,8 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+#[cfg(feature = "demo")]
+use task_management_benchmark_api::api::demo::get_task_history_demo;
 use task_management_benchmark_api::api::{
     AppState, add_subtask, add_tag, aggregate_numeric, aggregate_sources, aggregate_tree,
     async_pipeline, batch_process_async, batch_transform_results, batch_update_field,
@@ -41,7 +43,9 @@ use task_management_benchmark_api::api::{
     update_status, update_task, update_with_optics, validate_batch, validate_collect_all,
     workflow_async,
 };
-use task_management_benchmark_api::infrastructure::{RepositoryConfig, RepositoryFactory};
+use task_management_benchmark_api::infrastructure::{
+    ExternalSources, RepositoryConfig, RepositoryFactory,
+};
 
 #[tokio::main]
 #[allow(clippy::too_many_lines)]
@@ -88,17 +92,46 @@ async fn main() {
         }
     };
 
-    // Create application state (async: initializes search index from repository)
-    let application_state = match AppState::from_repositories(repositories).await {
-        Ok(state) => {
-            tracing::info!("Application state initialized with search index");
-            state
+    // Create external sources (Redis, HTTP) from environment
+    let external_sources = match ExternalSources::from_env() {
+        Ok(sources) => {
+            tracing::info!("External sources initialized from environment");
+            sources
         }
         Err(error) => {
-            tracing::error!("Failed to initialize application state: {}", error);
-            std::process::exit(1);
+            // Determine if this is a critical configuration error (parse failure)
+            // or a recoverable error (missing optional config)
+            let is_parse_error = matches!(
+                &error,
+                task_management_benchmark_api::infrastructure::fail_injection::ConfigError::EnvParseError(_)
+                    | task_management_benchmark_api::infrastructure::fail_injection::ConfigError::InvalidRngSeed { .. }
+                    | task_management_benchmark_api::infrastructure::fail_injection::ConfigError::InvalidFailureRate(_)
+                    | task_management_benchmark_api::infrastructure::fail_injection::ConfigError::InvalidTimeoutRate(_)
+                    | task_management_benchmark_api::infrastructure::fail_injection::ConfigError::InvalidDelayRange { .. }
+            );
+
+            if is_parse_error {
+                tracing::error!(%error, "Critical configuration error in external sources");
+                std::process::exit(1);
+            }
+
+            tracing::warn!(%error, "Failed to create external sources, using stubs");
+            ExternalSources::stub()
         }
     };
+
+    // Create application state (async: initializes search index from repository)
+    let application_state =
+        match AppState::with_external_sources(repositories, external_sources).await {
+            Ok(state) => {
+                tracing::info!("Application state initialized with search index");
+                state
+            }
+            Err(error) => {
+                tracing::error!("Failed to initialize application state: {}", error);
+                std::process::exit(1);
+            }
+        };
 
     // Configure CORS
     let cors = CorsLayer::new()
@@ -204,7 +237,27 @@ async fn main() {
         .route("/tasks/concurrent-lazy", post(concurrent_lazy))
         .route("/tasks/deque-operations", post(deque_operations))
         .route("/tasks/aggregate-numeric", get(aggregate_numeric))
-        .route("/tasks/freer-workflow", post(freer_workflow))
+        .route("/tasks/freer-workflow", post(freer_workflow));
+
+    // Demo endpoints: Feature Flag (compile-time) + ENV (runtime) double-gate
+    // Both conditions must be met for demo endpoints to be enabled:
+    // 1. Compiled with `--features demo`
+    // 2. ENABLE_DEMO_ENDPOINTS environment variable is "true", "1", or "yes"
+    #[cfg(feature = "demo")]
+    let application = {
+        let demo_enabled = env::var("ENABLE_DEMO_ENDPOINTS")
+            .map(|value| matches!(value.to_lowercase().as_str(), "true" | "1" | "yes"))
+            .unwrap_or(false);
+
+        if demo_enabled {
+            tracing::info!("Demo endpoints enabled");
+            application.route("/demo/tasks/{id}/history", get(get_task_history_demo))
+        } else {
+            application
+        }
+    };
+
+    let application = application
         .layer(TraceLayer::new_for_http())
         .layer(cors)
         .with_state(application_state);

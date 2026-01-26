@@ -1644,6 +1644,10 @@ mod handler_tests {
 
     fn create_test_app_state() -> AppState {
         use crate::api::bulk::BulkConfig;
+        use crate::api::handlers::create_stub_external_sources;
+        use crate::infrastructure::RngProvider;
+
+        let external_sources = create_stub_external_sources();
 
         AppState {
             task_repository: Arc::new(crate::infrastructure::InMemoryTaskRepository::new()),
@@ -1655,6 +1659,9 @@ mod handler_tests {
                 &PersistentVector::new(),
             ))),
             search_cache: Arc::new(SearchCache::with_default_config()),
+            secondary_source: external_sources.secondary_source,
+            external_source: external_sources.external_source,
+            rng_provider: Arc::new(RngProvider::new_random()),
         }
     }
 
