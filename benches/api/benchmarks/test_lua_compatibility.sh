@@ -150,14 +150,17 @@ test_lua_script() {
     fi
 
     # 2. Lua スクリプトエラーチェック
-    if echo "${wrk2_output}" | grep -iq "error"; then
+    # Lua ランタイムエラーの典型的なパターンを検出
+    # - "attempt to" (attempt to call, attempt to index nil, etc.)
+    # - "unexpected symbol"
+    # - "syntax error"
+    # - ".lua:[0-9]" (ファイル名:行番号 の形式)
+    if echo "${wrk2_output}" | grep -iqE "attempt to|unexpected symbol|syntax error|\.lua:[0-9]+:"; then
+        log_error "  FAILED: Lua script error detected"
+        passed=false
+    elif echo "${wrk2_output}" | grep -iq "error"; then
         # "Socket errors" や "Non-2xx or 3xx responses" は警告扱い
-        if echo "${wrk2_output}" | grep -iq "lua\|script\|syntax"; then
-            log_error "  FAILED: Lua script error detected"
-            passed=false
-        else
-            log_warn "  WARNING: Some errors detected (may be expected)"
-        fi
+        log_warn "  WARNING: Some errors detected (may be expected)"
     fi
 
     # 3. Requests/sec 出力確認
