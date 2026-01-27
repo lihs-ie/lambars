@@ -12,6 +12,7 @@
 //! - `RUST_LOG`: Logging level (e.g., `debug`, `info`, `task_management_benchmark_api=debug`)
 //! - `HOST`: Server host address (default: `0.0.0.0`)
 //! - `PORT`: Server port (default: `3000`)
+//! - `WORKER_THREADS`: Number of tokio worker threads (default: logical CPU count)
 
 use std::env;
 use std::net::SocketAddr;
@@ -47,13 +48,90 @@ use task_management_benchmark_api::infrastructure::{
     ExternalSources, RepositoryConfig, RepositoryFactory,
 };
 
-#[tokio::main]
-#[allow(clippy::too_many_lines)]
-async fn main() {
-    // Load .env file if present (for development)
+/// Result of parsing `WORKER_THREADS` environment variable.
+struct WorkerThreadsResult {
+    threads: Option<usize>,
+    warning_emitted: bool,
+}
+
+fn parse_worker_threads() -> WorkerThreadsResult {
+    let Ok(value) = std::env::var("WORKER_THREADS") else {
+        return WorkerThreadsResult {
+            threads: None,
+            warning_emitted: false,
+        };
+    };
+
+    let trimmed = value.trim();
+
+    if trimmed.is_empty() {
+        return WorkerThreadsResult {
+            threads: None,
+            warning_emitted: false,
+        };
+    }
+
+    match trimmed.parse::<usize>() {
+        Ok(0) => {
+            eprintln!("Warning: WORKER_THREADS=0 is invalid (must be > 0), using default");
+            WorkerThreadsResult {
+                threads: None,
+                warning_emitted: true,
+            }
+        }
+        Ok(n) => {
+            let max_threads = std::thread::available_parallelism()
+                .map(|parallelism| parallelism.get().saturating_mul(4))
+                .unwrap_or(64);
+            if n > max_threads {
+                eprintln!(
+                    "Warning: WORKER_THREADS={n} exceeds recommended limit ({max_threads}), capping to {max_threads}"
+                );
+                WorkerThreadsResult {
+                    threads: Some(max_threads),
+                    warning_emitted: true,
+                }
+            } else {
+                WorkerThreadsResult {
+                    threads: Some(n),
+                    warning_emitted: false,
+                }
+            }
+        }
+        Err(error) => {
+            eprintln!(
+                "Warning: WORKER_THREADS='{trimmed}' is not a valid number ({error}), using default"
+            );
+            WorkerThreadsResult {
+                threads: None,
+                warning_emitted: true,
+            }
+        }
+    }
+}
+
+fn main() {
     dotenvy::dotenv().ok();
 
-    // Initialize tracing
+    let result = parse_worker_threads();
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all();
+
+    if let Some(threads) = result.threads {
+        builder.worker_threads(threads);
+        if !result.warning_emitted {
+            eprintln!("Tokio worker_threads set to: {threads}");
+        }
+    } else if !result.warning_emitted {
+        eprintln!("Tokio worker_threads: using default (logical CPU count)");
+    }
+
+    let runtime = builder.build().expect("Failed to create tokio runtime");
+    runtime.block_on(async_main());
+}
+
+#[allow(clippy::too_many_lines)]
+async fn async_main() {
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
