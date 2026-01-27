@@ -1,0 +1,98 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/lihs-ie/lambars/blob/main/benches/api/benchmarks/schema/meta_extended.schema.json",
+  "title": "Benchmark Meta Extended v1",
+  "description": "meta_extended.json schema v1.0 - Extended metadata for phased benchmark execution",
+  "type": "object",
+  "required": ["version", "rate_control", "integration", "phases"],
+  "properties": {
+    "version": {
+      "type": "string",
+      "const": "1.0",
+      "description": "Schema version"
+    },
+    "rate_control": {
+      "type": "object",
+      "required": ["wrk_version", "rate_control_enabled"],
+      "properties": {
+        "wrk_version": {
+          "type": "string",
+          "description": "Version string of wrk2 load generator"
+        },
+        "rate_control_enabled": {
+          "type": "boolean",
+          "description": "Whether rate control (-R flag) was used"
+        },
+        "target_rps": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "description": "Target RPS configured for the benchmark"
+        },
+        "actual_rps": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "description": "Actual RPS achieved (duration-weighted average across phases)"
+        },
+        "rps_within_tolerance": {
+          "type": ["boolean", "null"],
+          "description": "Whether all phases achieved RPS within tolerance (true/false/null if not checked)"
+        }
+      }
+    },
+    "integration": {
+      "type": "object",
+      "required": ["rps_method", "latency_p99_method", "error_rate_method"],
+      "properties": {
+        "rps_method": {
+          "type": "string",
+          "enum": ["duration_weighted_average"],
+          "description": "Method used to integrate RPS across phases"
+        },
+        "latency_p99_method": {
+          "type": "string",
+          "enum": ["max"],
+          "description": "Method used to integrate P99 latency across phases"
+        },
+        "error_rate_method": {
+          "type": "string",
+          "enum": ["requests_weighted_average"],
+          "description": "Method used to integrate error rate across phases"
+        }
+      }
+    },
+    "phases": {
+      "type": "array",
+      "description": "Array of per-phase results",
+      "items": {
+        "type": "object",
+        "required": ["phase", "target_rps", "actual_rps", "duration_seconds"],
+        "properties": {
+          "phase": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Phase name (e.g., 'ramp_up', 'sustain', 'ramp_down')"
+          },
+          "target_rps": {
+            "type": "number",
+            "minimum": 0,
+            "description": "Target RPS for this phase"
+          },
+          "actual_rps": {
+            "type": "number",
+            "minimum": 0,
+            "description": "Actual RPS achieved in this phase"
+          },
+          "duration_seconds": {
+            "type": "number",
+            "minimum": 0,
+            "description": "Duration of this phase in seconds"
+          },
+          "deviation_percent": {
+            "type": "number",
+            "description": "Deviation from target RPS as percentage ((actual - target) / target * 100)"
+          }
+        }
+      }
+    }
+  }
+}

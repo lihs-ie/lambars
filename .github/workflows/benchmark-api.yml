@@ -52,10 +52,15 @@ jobs:
           # Remove problematic Azure CLI repository that may return 403
           sudo rm -f /etc/apt/sources.list.d/azure-cli.list || true
           sudo apt-get update || true
-          sudo apt-get install -y wrk linux-tools-common linux-tools-generic
+          sudo apt-get install -y build-essential libssl-dev git linux-tools-common linux-tools-generic
           # Install yq (Mike Farah's YAML processor)
           sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
           sudo chmod +x /usr/local/bin/yq
+          # Build wrk2 from source (REQUIRED for rate control)
+          git clone --depth 1 https://github.com/giltene/wrk2.git /tmp/wrk2
+          cd /tmp/wrk2 && make -j$(nproc) && sudo cp wrk /usr/local/bin/wrk2
+          # Verify wrk2 installation
+          wrk2 -v || (echo "ERROR: wrk2 installation failed" && exit 1)
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -135,10 +140,15 @@ jobs:
           # Remove problematic Azure CLI repository that may return 403
           sudo rm -f /etc/apt/sources.list.d/azure-cli.list || true
           sudo apt-get update || true
-          sudo apt-get install -y wrk linux-tools-common linux-tools-generic
+          sudo apt-get install -y build-essential libssl-dev git linux-tools-common linux-tools-generic
           # Install yq (Mike Farah's YAML processor)
           sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
           sudo chmod +x /usr/local/bin/yq
+          # Build wrk2 from source (REQUIRED for rate control)
+          git clone --depth 1 https://github.com/giltene/wrk2.git /tmp/wrk2
+          cd /tmp/wrk2 && make -j$(nproc) && sudo cp wrk /usr/local/bin/wrk2
+          # Verify wrk2 installation
+          wrk2 -v || (echo "ERROR: wrk2 installation failed" && exit 1)
           # Install Python jsonschema for meta.json validation
           pip install jsonschema
 
@@ -147,6 +157,41 @@ jobs:
 
       - name: Checkout PR branch
         uses: actions/checkout@v4
+
+      - name: Run Lua compatibility test
+        working-directory: benches/api/benchmarks
+        run: |
+          chmod +x test_lua_compatibility.sh run_benchmark.sh setup_test_data.sh
+          # Start services for Lua compatibility test
+          cd ../docker && docker compose -f compose.ci.yaml up -d --build --wait
+          cd ../benchmarks
+          # Run Lua compatibility test (port 3002 matches compose.ci.yaml)
+          ./test_lua_compatibility.sh --target http://localhost:3002 --duration 3 --rate 5
+
+      - name: Run RPS smoke tests (constant + step_up)
+        working-directory: benches/api/benchmarks
+        env:
+          STORAGE_MODE: in_memory
+          CACHE_MODE: none
+          DATA_SCALE: small
+          PROFILE: false
+          RPS_TOLERANCE_MODE: strict
+        run: |
+          # Setup minimal data for smoke tests
+          ./setup_test_data.sh --scale small
+
+          # Run constant RPS smoke test
+          echo "=== Running RPS smoke test (constant profile) ==="
+          ./run_benchmark.sh --scenario scenarios/rps_smoke_constant.yaml
+
+          # Run step_up RPS smoke test
+          echo "=== Running RPS smoke test (step_up profile) ==="
+          ./run_benchmark.sh --scenario scenarios/rps_smoke_step_up.yaml
+
+          # Verify RPS results
+          echo ""
+          echo "=== RPS Verification Results ==="
+          find results -name "rps_verification.log" -exec echo "--- {} ---" \; -exec cat {} \;
 
       - name: Run PR benchmark
         working-directory: benches/api/benchmarks
@@ -157,13 +202,7 @@ jobs:
           DATA_SCALE: small
           PROFILE: false
         run: |
-          chmod +x run_benchmark.sh setup_test_data.sh
-          # Start services
-          cd ../docker && docker compose -f compose.ci.yaml up -d --build --wait
-          cd ../benchmarks
-          # Setup data
-          ./setup_test_data.sh --scale small
-          # Run benchmark
+          # Run main benchmark scenario
           ./run_benchmark.sh --scenario scenarios/in_memory_read_heavy_warm.yaml --quick
           # Get results directory (scenario directory level for compare_results.sh)
           SCENARIO_DIR=$(ls -td results/*/in_memory_read_heavy_warm/ 2>/dev/null | head -1)
@@ -175,7 +214,7 @@ jobs:
             cp -r "${SCENARIO_DIR}/." "${PR_RESULTS_DIR}/"
           fi
 
-          # Cleanup
+          # Cleanup Docker services
           cd ../docker && docker compose -f compose.ci.yaml down -v
 
       - name: Validate meta.json schema
@@ -183,6 +222,11 @@ jobs:
         run: |
           chmod +x validate_meta_schema.sh
           ./validate_meta_schema.sh --all results/
+
+      - name: Validate meta_extended.json schema
+        working-directory: benches/api/benchmarks
+        run: |
+          ./validate_meta_schema.sh --all --extended results/
 
       - name: Upload PR artifacts
         uses: actions/upload-artifact@v4
@@ -192,6 +236,9 @@ jobs:
           path: |
             pr_results/
             benches/api/benchmarks/results/
+            benches/api/benchmarks/results/**/rps_verification.log
+            benches/api/benchmarks/results/**/resolved_params.log
+            benches/api/benchmarks/results/lua_compatibility/
           if-no-files-found: warn
           retention-days: 7
 
@@ -490,10 +537,15 @@ jobs:
           # Remove problematic Azure CLI repository that may return 403
           sudo rm -f /etc/apt/sources.list.d/azure-cli.list || true
           sudo apt-get update || true
-          sudo apt-get install -y wrk linux-tools-common linux-tools-generic linux-tools-$(uname -r) || true
+          sudo apt-get install -y build-essential libssl-dev git linux-tools-common linux-tools-generic linux-tools-$(uname -r) || true
           # Install yq (Mike Farah's YAML processor)
           sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
           sudo chmod +x /usr/local/bin/yq
+          # Build wrk2 from source (REQUIRED for rate control)
+          git clone --depth 1 https://github.com/giltene/wrk2.git /tmp/wrk2
+          cd /tmp/wrk2 && make -j$(nproc) && sudo cp wrk /usr/local/bin/wrk2
+          # Verify wrk2 installation
+          wrk2 -v || (echo "ERROR: wrk2 installation failed" && exit 1)
           # Install FlameGraph tools
           git clone --depth 1 https://github.com/brendangregg/FlameGraph /tmp/FlameGraph
           sudo ln -sf /tmp/FlameGraph/stackcollapse-perf.pl /usr/local/bin/
@@ -550,10 +602,15 @@ jobs:
           # Remove problematic Azure CLI repository that may return 403
           sudo rm -f /etc/apt/sources.list.d/azure-cli.list || true
           sudo apt-get update || true
-          sudo apt-get install -y wrk linux-tools-common linux-tools-generic linux-tools-$(uname -r) || true
+          sudo apt-get install -y build-essential libssl-dev git linux-tools-common linux-tools-generic linux-tools-$(uname -r) || true
           # Install yq (Mike Farah's YAML processor)
           sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
           sudo chmod +x /usr/local/bin/yq
+          # Build wrk2 from source (REQUIRED for rate control)
+          git clone --depth 1 https://github.com/giltene/wrk2.git /tmp/wrk2
+          cd /tmp/wrk2 && make -j$(nproc) && sudo cp wrk /usr/local/bin/wrk2
+          # Verify wrk2 installation
+          wrk2 -v || (echo "ERROR: wrk2 installation failed" && exit 1)
           # Install FlameGraph tools
           git clone --depth 1 https://github.com/brendangregg/FlameGraph /tmp/FlameGraph
           sudo ln -sf /tmp/FlameGraph/stackcollapse-perf.pl /usr/local/bin/
@@ -613,7 +670,12 @@ jobs:
           # Remove problematic Azure CLI repository that may return 403
           sudo rm -f /etc/apt/sources.list.d/azure-cli.list || true
           sudo apt-get update || true
-          sudo apt-get install -y wrk linux-tools-common linux-tools-generic linux-tools-$(uname -r) || true
+          sudo apt-get install -y build-essential libssl-dev git linux-tools-common linux-tools-generic linux-tools-$(uname -r) || true
+          # Build wrk2 from source (REQUIRED for rate control)
+          git clone --depth 1 https://github.com/giltene/wrk2.git /tmp/wrk2
+          cd /tmp/wrk2 && make -j$(nproc) && sudo cp wrk /usr/local/bin/wrk2
+          # Verify wrk2 installation
+          wrk2 -v || (echo "ERROR: wrk2 installation failed" && exit 1)
           # Install yq (Mike Farah's YAML processor)
           sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
           sudo chmod +x /usr/local/bin/yq
@@ -696,6 +758,11 @@ jobs:
           chmod +x validate_meta_schema.sh
           ./validate_meta_schema.sh --all results/
 
+      - name: Validate meta_extended.json schema
+        working-directory: benches/api/benchmarks
+        run: |
+          ./validate_meta_schema.sh --all --extended results/
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         if: always()
@@ -703,6 +770,8 @@ jobs:
           name: benchmark-nightly-${{ github.run_id }}
           path: |
             benches/api/benchmarks/results/
+            benches/api/benchmarks/results/**/rps_verification.log
+            benches/api/benchmarks/results/**/resolved_params.log
           # Short retention for immediate access; long-term storage via GitHub Release
           retention-days: 14
 

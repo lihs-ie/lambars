@@ -1,0 +1,58 @@
+# RPS Smoke Test - Constant Profile
+#
+# Verify constant RPS rate control accuracy using /health endpoint.
+# This is a lightweight test that focuses on rate control precision
+# without backend load complexity.
+#
+# Verification criteria:
+#   - Actual RPS should be within 5% of target (100 RPS)
+#   - Test runs for 15 seconds with a minimal 2-second warmup
+#
+# This scenario is used by CI to validate rate control functionality.
+
+name: "rps_smoke_constant"
+description: "Verify constant RPS rate control accuracy"
+
+# Backend configuration (minimal - health endpoint only)
+storage_mode: in_memory
+cache_mode: none
+
+# Workload configuration
+load_pattern: read_heavy
+cache_state: cold
+data_scale: small
+payload_variant: minimal
+rps_profile: constant
+
+# Load generation parameters
+duration_seconds: 15
+connections: 10
+threads: 2
+warmup_seconds: 2
+target_rps: 100
+
+# Target endpoints (health check only for rate control verification)
+endpoints:
+  - "/health"
+
+# RPS verification thresholds
+thresholds:
+  rps_deviation_max_percent: 5
+  max_error_rate: 0.01
+
+# Metadata for result analysis
+metadata:
+  test_type: "rps_smoke"
+  endpoint: "/health"
+  payload: "none"
+  cache_strategy: "none"
+  hit_rate: 0
+  fail_injection: 0
+  retry: false
+  profile: false
+  purpose: "rate_control_verification"
+  tags:
+    - "smoke-test"
+    - "rate-control"
+    - "constant"
+    - "ci"

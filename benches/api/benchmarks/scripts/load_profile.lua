@@ -4,6 +4,17 @@
 -- Provides RPS control and load shaping functions.
 -- Supports profiles: constant, ramp_up_down, burst, step_up
 --
+-- IMPORTANT: Input Validation
+-- This module assumes that all input parameters have been validated by run_benchmark.sh
+-- before being passed to wrk. The following invariants are guaranteed by the caller:
+--   - burst_multiplier > 0
+--   - burst_interval > burst_duration
+--   - duration > 0
+--   - step_count > 0
+--   - All numeric parameters are non-negative integers (where applicable)
+-- Edge cases like duration < burst_interval or ramp_up + ramp_down > duration are handled
+-- in run_benchmark.sh before wrk is invoked (e.g., by running partial phases or scaling).
+--
 -- Usage:
 --   local load_profile = require("load_profile")
 --   load_profile.init({

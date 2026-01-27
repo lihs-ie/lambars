@@ -18,7 +18,7 @@
 #   DATA_SCALE       - 1e2 | 1e4 | 1e6 (maps from small/medium/large) (REQUIRED)
 #   HIT_RATE         - 0-100 (default: 50)
 #   CACHE_STRATEGY   - read-through | write-through | write-behind (default: read-through)
-#   RPS_PROFILE      - steady | ramp | burst
+#   RPS_PROFILE      - constant | ramp_up_down | burst | step_up
 #   THREADS          - wrk threads
 #   CONNECTIONS      - wrk connections
 #   DURATION         - wrk duration
@@ -32,6 +32,9 @@
 #   ENDPOINT         - target endpoint
 #   PAYLOAD          - small | medium | large (default: medium)
 #                      (also accepts minimal | standard | complex | heavy, mapped to small/medium/large)
+#   RPS_TOLERANCE_MODE - strict | warn (default: strict)
+#                        strict: Fail benchmark if actual RPS deviates beyond tolerance
+#                        warn: Log warning but continue execution
 
 set -euo pipefail
 
@@ -166,6 +169,7 @@ resolve_script_from_endpoint() {
         "/tasks/{id}"|"/tasks/*")   echo "tasks_update" ;;
         "/projects/{id}/progress"|"/projects/*/progress")  echo "projects_progress" ;;
         "/tasks")                   echo "recursive" ;;
+        "/health")                  echo "health" ;;
         *)                          echo "" ;;  # Unknown endpoint
     esac
 }
@@ -277,7 +281,7 @@ resolve_scripts_from_scenario() {
 #   cache_mode                        -> CACHE_MODE
 #   data_scale (small/medium/large)   -> DATA_SCALE (1e2/1e4/1e6)
 #   payload_variant or metadata.payload -> PAYLOAD (small/medium/large)
-#   rps_profile (constant/ramp_up_down/burst) -> RPS_PROFILE (steady/ramp/burst)
+#   rps_profile (constant/ramp_up_down/burst/step_up) -> RPS_PROFILE, LOAD_PROFILE
 #   threads                           -> THREADS
 #   connections                       -> CONNECTIONS
 #   duration_seconds                  -> DURATION
@@ -357,16 +361,22 @@ load_scenario_env_vars() {
         export PAYLOAD="${payload}"
     fi
 
-    # RPS profile: constant -> steady, ramp_up_down -> ramp, burst -> burst
+    # RPS profile: Map scenario values to load_profile.lua profile names
+    # Supported profiles: constant, ramp_up_down, burst, step_up
     local rps_profile
     rps_profile=$(yq '.rps_profile // "constant"' "${scenario_file}" | tr -d '"')
     case "${rps_profile}" in
-        "constant")    export RPS_PROFILE="steady" ;;
-        "ramp_up_down") export RPS_PROFILE="ramp" ;;
-        "burst")       export RPS_PROFILE="burst" ;;
-        "step_up")     export RPS_PROFILE="steady" ;;
-        *)             export RPS_PROFILE="steady" ;;
+        "constant")     export RPS_PROFILE="constant" ;;
+        "ramp_up_down") export RPS_PROFILE="ramp_up_down" ;;
+        "burst")        export RPS_PROFILE="burst" ;;
+        "step_up")      export RPS_PROFILE="step_up" ;;
+        *)
+            echo -e "${YELLOW}WARNING: Unknown rps_profile '${rps_profile}', defaulting to constant${NC}"
+            export RPS_PROFILE="constant"
+            ;;
     esac
+    # LOAD_PROFILE is used by Lua scripts (load_profile.lua)
+    export LOAD_PROFILE="${RPS_PROFILE}"
 
     # ==========================================================================
     # Load Generation Parameters
@@ -603,6 +613,47 @@ load_scenario_env_vars() {
         export TARGET_RPS="${target_rps}"
     fi
 
+    # ==========================================================================
+    # Multi-Phase Load Profile Parameters
+    # ==========================================================================
+    # These parameters configure the phased benchmark execution.
+    # See run_phased_benchmark() for how these are used.
+
+    # MIN_RPS: Minimum RPS floor (default: 10)
+    local min_rps_val
+    min_rps_val=$(yq '.min_rps // 10' "${scenario_file}")
+    export MIN_RPS="${min_rps_val}"
+
+    # STEP_COUNT: Number of steps for step_up profile (default: 4)
+    local step_count_val
+    step_count_val=$(yq '.step_count // 4' "${scenario_file}")
+    export STEP_COUNT="${step_count_val}"
+
+    # RAMP_UP_SECONDS: Duration of ramp up phase (default: 10)
+    local ramp_up_val
+    ramp_up_val=$(yq '.ramp_up_seconds // 10' "${scenario_file}")
+    export RAMP_UP_SECONDS="${ramp_up_val}"
+
+    # RAMP_DOWN_SECONDS: Duration of ramp down phase (default: 10)
+    local ramp_down_val
+    ramp_down_val=$(yq '.ramp_down_seconds // 10' "${scenario_file}")
+    export RAMP_DOWN_SECONDS="${ramp_down_val}"
+
+    # BURST_INTERVAL_SECONDS: Interval between bursts (default: 20)
+    local burst_interval_val
+    burst_interval_val=$(yq '.burst_interval_seconds // 20' "${scenario_file}")
+    export BURST_INTERVAL_SECONDS="${burst_interval_val}"
+
+    # BURST_DURATION_SECONDS: Duration of each burst (default: 5)
+    local burst_duration_val
+    burst_duration_val=$(yq '.burst_duration_seconds // 5' "${scenario_file}")
+    export BURST_DURATION_SECONDS="${burst_duration_val}"
+
+    # BURST_MULTIPLIER: RPS multiplier during burst (default: 3)
+    local burst_multiplier_val
+    burst_multiplier_val=$(yq '.burst_multiplier // 3' "${scenario_file}")
+    export BURST_MULTIPLIER="${burst_multiplier_val}"
+
     # Seed for reproducible data generation
     local seed
     seed=$(yq '.seed // null' "${scenario_file}")
@@ -649,6 +700,19 @@ load_scenario_env_vars() {
     [[ -n "${POOL_SIZES:-}" ]] && echo "  Pool sizes: ${POOL_SIZES}"
     [[ -n "${SEED:-}" ]] && echo "  Seed: ${SEED}"
     [[ "${PROFILE_MODE}" == "true" ]] && echo "  Profiling: enabled"
+
+    # Show phase-specific parameters based on RPS profile
+    case "${RPS_PROFILE}" in
+        step_up)
+            echo "  Step-up: ${STEP_COUNT} steps, min_rps=${MIN_RPS}"
+            ;;
+        ramp_up_down)
+            echo "  Ramp: up=${RAMP_UP_SECONDS}s, down=${RAMP_DOWN_SECONDS}s, min_rps=${MIN_RPS}"
+            ;;
+        burst)
+            echo "  Burst: interval=${BURST_INTERVAL_SECONDS}s, duration=${BURST_DURATION_SECONDS}s, multiplier=${BURST_MULTIPLIER}x, min_rps=${MIN_RPS}"
+            ;;
+    esac
 
     # Ensure function returns success (avoid set -e exit on false && conditions)
     return 0
@@ -812,6 +876,111 @@ validate_scenario_parameters() {
     fi
 
     # -------------------------------------------------------------------------
+    # RPS control parameters validation
+    # -------------------------------------------------------------------------
+
+    # target_rps: non-negative integer (default: 0 = no rate limit)
+    if [[ -n "${TARGET_RPS:-}" ]]; then
+        if ! [[ "${TARGET_RPS}" =~ ^[0-9]+$ ]]; then
+            echo -e "${RED}Error: Invalid target_rps '${TARGET_RPS}'. Must be: non-negative integer${NC}"
+            has_errors=true
+        fi
+    fi
+
+    # min_rps: positive integer (default: 10)
+    if [[ -n "${MIN_RPS:-}" ]]; then
+        if ! [[ "${MIN_RPS}" =~ ^[0-9]+$ ]] || [[ "${MIN_RPS}" -lt 1 ]]; then
+            echo -e "${RED}Error: Invalid min_rps '${MIN_RPS}'. Must be: positive integer${NC}"
+            has_errors=true
+        fi
+    fi
+
+    # step_count: positive integer (default: 4)
+    if [[ -n "${STEP_COUNT:-}" ]]; then
+        if ! [[ "${STEP_COUNT}" =~ ^[0-9]+$ ]] || [[ "${STEP_COUNT}" -lt 1 ]]; then
+            echo -e "${RED}Error: Invalid step_count '${STEP_COUNT}'. Must be: positive integer${NC}"
+            has_errors=true
+        fi
+    fi
+
+    # ramp_up_seconds: non-negative integer (default: 10)
+    if [[ -n "${RAMP_UP_SECONDS:-}" ]]; then
+        if ! [[ "${RAMP_UP_SECONDS}" =~ ^[0-9]+$ ]]; then
+            echo -e "${RED}Error: Invalid ramp_up_seconds '${RAMP_UP_SECONDS}'. Must be: non-negative integer${NC}"
+            has_errors=true
+        fi
+    fi
+
+    # ramp_down_seconds: non-negative integer (default: 10)
+    if [[ -n "${RAMP_DOWN_SECONDS:-}" ]]; then
+        if ! [[ "${RAMP_DOWN_SECONDS}" =~ ^[0-9]+$ ]]; then
+            echo -e "${RED}Error: Invalid ramp_down_seconds '${RAMP_DOWN_SECONDS}'. Must be: non-negative integer${NC}"
+            has_errors=true
+        fi
+    fi
+
+    # burst_interval_seconds: positive integer (default: 20)
+    if [[ -n "${BURST_INTERVAL_SECONDS:-}" ]]; then
+        if ! [[ "${BURST_INTERVAL_SECONDS}" =~ ^[0-9]+$ ]] || [[ "${BURST_INTERVAL_SECONDS}" -lt 1 ]]; then
+            echo -e "${RED}Error: Invalid burst_interval_seconds '${BURST_INTERVAL_SECONDS}'. Must be: positive integer${NC}"
+            has_errors=true
+        fi
+    fi
+
+    # burst_duration_seconds: positive integer (default: 5)
+    if [[ -n "${BURST_DURATION_SECONDS:-}" ]]; then
+        if ! [[ "${BURST_DURATION_SECONDS}" =~ ^[0-9]+$ ]] || [[ "${BURST_DURATION_SECONDS}" -lt 1 ]]; then
+            echo -e "${RED}Error: Invalid burst_duration_seconds '${BURST_DURATION_SECONDS}'. Must be: positive integer${NC}"
+            has_errors=true
+        fi
+    fi
+
+    # burst_multiplier: positive number > 0 (default: 3)
+    if [[ -n "${BURST_MULTIPLIER:-}" ]]; then
+        if ! [[ "${BURST_MULTIPLIER}" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+            echo -e "${RED}Error: Invalid burst_multiplier '${BURST_MULTIPLIER}'. Must be: positive number${NC}"
+            has_errors=true
+        else
+            # Check if burst_multiplier > 0
+            local is_positive
+            is_positive=$(echo "${BURST_MULTIPLIER}" | awk '{ print ($1 > 0) ? "yes" : "no" }')
+            if [[ "${is_positive}" != "yes" ]]; then
+                echo -e "${RED}Error: burst_multiplier must be > 0 (got: ${BURST_MULTIPLIER})${NC}"
+                has_errors=true
+            fi
+        fi
+    fi
+
+    # -------------------------------------------------------------------------
+    # Profile-specific boundary condition checks
+    # -------------------------------------------------------------------------
+
+    # step_count vs duration: each step must be at least 1 second
+    if [[ -n "${STEP_COUNT:-}" && -n "${DURATION_SECONDS:-}" ]]; then
+        if [[ "${STEP_COUNT}" -gt "${DURATION_SECONDS}" ]]; then
+            echo -e "${RED}Error: step_count (${STEP_COUNT}) > duration_seconds (${DURATION_SECONDS}). Each step must be at least 1s.${NC}"
+            has_errors=true
+        fi
+    fi
+
+    # ramp_up + ramp_down vs duration: total ramp time should not exceed duration
+    # Note: This is a warning, not an error, as the code will auto-scale
+    if [[ -n "${RAMP_UP_SECONDS:-}" && -n "${RAMP_DOWN_SECONDS:-}" && -n "${DURATION_SECONDS:-}" ]]; then
+        local total_ramp=$((RAMP_UP_SECONDS + RAMP_DOWN_SECONDS))
+        if [[ "${total_ramp}" -gt "${DURATION_SECONDS}" ]]; then
+            echo -e "${YELLOW}Warning: ramp_up + ramp_down (${total_ramp}s) > duration (${DURATION_SECONDS}s). Will be auto-scaled.${NC}"
+        fi
+    fi
+
+    # burst_interval > burst_duration: normal phase must have positive duration
+    if [[ -n "${BURST_INTERVAL_SECONDS:-}" && -n "${BURST_DURATION_SECONDS:-}" ]]; then
+        if [[ "${BURST_INTERVAL_SECONDS}" -le "${BURST_DURATION_SECONDS}" ]]; then
+            echo -e "${RED}Error: burst_interval (${BURST_INTERVAL_SECONDS}s) must be > burst_duration (${BURST_DURATION_SECONDS}s)${NC}"
+            has_errors=true
+        fi
+    fi
+
+    # -------------------------------------------------------------------------
     # Calculate POOL_SIZES if not set
     # -------------------------------------------------------------------------
     if [[ -z "${POOL_SIZES:-}" ]]; then
@@ -862,14 +1031,33 @@ echo "  Results:     ${RESULTS_DIR}"
 [[ "${PROFILE_MODE}" == "true" ]] && echo "  Profiling:   enabled"
 echo ""
 
-# Check if wrk is installed
-if ! command -v wrk &> /dev/null; then
-    echo -e "${RED}Error: wrk is not installed${NC}"
-    echo "Install with:"
-    echo "  macOS:  brew install wrk"
-    echo "  Ubuntu: apt-get install wrk"
-    exit 1
-fi
+# =============================================================================
+# wrk/wrk2 Detection and Configuration
+# =============================================================================
+#
+# wrk2 is required for open-loop rate control (-R option).
+# This ensures accurate latency measurement under target RPS.
+#
+# If wrk2 is not installed, the script will exit with instructions.
+# =============================================================================
+
+WRK_COMMAND=""
+
+require_wrk2() {
+    if ! command -v wrk2 &> /dev/null; then
+        echo -e "${RED}ERROR: wrk2 is required for rate control but not found.${NC}"
+        echo -e "${RED}Run: ./setup_wrk2.sh${NC}"
+        echo ""
+        echo "wrk2 provides open-loop rate control with the -R option,"
+        echo "which is essential for accurate latency measurement under load."
+        exit 1
+    fi
+    WRK_COMMAND="wrk2"
+    echo -e "${GREEN}Using wrk2 for open-loop rate control${NC}"
+}
+
+# Require wrk2 for all benchmarks
+require_wrk2
 
 # Health check
 echo -n "Checking API health... "
@@ -1137,10 +1325,43 @@ generate_meta_json() {
     wrk_output_filename=$(basename "${result_file}")
 
     # v3: Parse duration to seconds (remove 's' suffix)
+    # Use MERGED_DURATION if available (from phased execution)
     local duration_seconds
-    duration_seconds=$(echo "${DURATION}" | sed 's/s$//')
-    if [[ -z "${duration_seconds}" || ! "${duration_seconds}" =~ ^[0-9]+$ ]]; then
-        duration_seconds=30
+    if [[ -n "${MERGED_DURATION:-}" ]]; then
+        duration_seconds="${MERGED_DURATION}"
+    else
+        duration_seconds=$(echo "${DURATION}" | sed 's/s$//')
+        if [[ -z "${duration_seconds}" || ! "${duration_seconds}" =~ ^[0-9]+$ ]]; then
+            duration_seconds=30
+        fi
+    fi
+
+    # Override metrics with merged values if available (from phased execution)
+    if [[ -n "${MERGED_RPS:-}" ]]; then
+        rps="${MERGED_RPS}"
+    fi
+    if [[ -n "${MERGED_REQUESTS:-}" ]]; then
+        total_requests="${MERGED_REQUESTS}"
+    fi
+    if [[ -n "${MERGED_P99:-}" ]]; then
+        # MERGED_P99 is already in milliseconds, format for JSON
+        p99_json=$(format_latency_json "${MERGED_P99}")
+    fi
+    if [[ -n "${MERGED_ERROR_RATE:-}" ]]; then
+        error_rate="${MERGED_ERROR_RATE}"
+    fi
+
+    # Prepare phased execution metadata
+    local phased_execution_json="null"
+    if [[ -n "${MERGED_PHASE_COUNT:-}" && "${MERGED_PHASE_COUNT}" -gt 1 ]]; then
+        phased_execution_json=$(cat << PHASES_EOF
+{
+      "enabled": true,
+      "phase_count": ${MERGED_PHASE_COUNT},
+      "profile": "${RPS_PROFILE:-constant}"
+    }
+PHASES_EOF
+)
     fi
 
     # Generate meta.json with schema v3.0
@@ -1217,11 +1438,160 @@ generate_meta_json() {
     "os": "${os_name}",
     "cpu_cores": ${cpu_cores},
     "memory_gb": ${memory_gb}
-  }
+  },
+  "phased_execution": ${phased_execution_json}
 }
 EOF
 
     echo -e "${GREEN}meta.json generated (v3.0)${NC}"
+}
+
+# =============================================================================
+# Generate meta_extended.json (Phase Details)
+# =============================================================================
+#
+# Generates meta_extended.json containing:
+# - Rate control information (wrk2 version, target/actual RPS)
+# - Integration method documentation
+# - Per-phase detailed results
+#
+# This file is generated only when phased execution is used (MERGED_PHASE_COUNT > 1).
+# The meta.json schema remains unchanged for backward compatibility.
+# =============================================================================
+
+generate_meta_extended() {
+    local results_dir="$1"
+    local meta_extended_file="${results_dir}/meta_extended.json"
+
+    # Only generate if phased execution was used
+    if [[ -z "${MERGED_PHASE_COUNT:-}" || "${MERGED_PHASE_COUNT}" -le 1 ]]; then
+        return 0
+    fi
+
+    # Check if jq is available (required for meta_extended.json generation)
+    if ! command -v jq &>/dev/null; then
+        echo -e "${YELLOW}WARNING: jq is not installed. Skipping meta_extended.json generation.${NC}"
+        return 0
+    fi
+
+    # Get wrk2 version
+    local wrk_version
+    wrk_version=$("${WRK_COMMAND:-wrk2}" -v 2>&1 | head -1 || echo "unknown")
+
+    # Collect max target_rps from phases to determine rate_control_enabled
+    # This handles cases where TARGET_RPS is not set but phases have non-zero target_rps
+    # Note: target_rps is validated as non-negative integer by validate_scenario_parameters,
+    # so integer-only comparison is safe here
+    local max_phase_target_rps=0
+    local phase_dirs_check
+    phase_dirs_check=$(find "${results_dir}" -maxdepth 1 -type d -name "phase_*" 2>/dev/null | head -1)
+    if [[ -n "${phase_dirs_check}" ]]; then
+        for phase_dir in $(find "${results_dir}" -maxdepth 1 -type d -name "phase_*" 2>/dev/null); do
+            if [[ -f "${phase_dir}/phase_result.json" ]]; then
+                local phase_target
+                phase_target=$(jq -r '.target_rps // 0' "${phase_dir}/phase_result.json" 2>/dev/null || echo "0")
+                if [[ "${phase_target}" =~ ^[0-9]+$ ]] && [[ "${phase_target}" -gt "${max_phase_target_rps}" ]]; then
+                    max_phase_target_rps="${phase_target}"
+                fi
+            fi
+        done
+    fi
+
+    # Rate control status: enabled if TARGET_RPS is set OR any phase has non-zero target_rps
+    local rate_control_enabled="false"
+    local effective_target_rps="${TARGET_RPS:-0}"
+    if [[ -n "${TARGET_RPS:-}" && "${TARGET_RPS}" != "0" ]]; then
+        rate_control_enabled="true"
+    elif [[ "${max_phase_target_rps}" -gt 0 ]]; then
+        rate_control_enabled="true"
+        effective_target_rps="${max_phase_target_rps}"
+    fi
+
+    # Check if RPS is within tolerance (from rps_verification.log)
+    local rps_within_tolerance="null"
+    if [[ -f "${results_dir}/rps_verification.log" ]]; then
+        # Check if any FAIL entries exist
+        if grep -q "| FAIL" "${results_dir}/rps_verification.log" 2>/dev/null; then
+            rps_within_tolerance="false"
+        else
+            rps_within_tolerance="true"
+        fi
+    fi
+
+    # Collect phase information
+    local phases_json="[]"
+    local phase_dirs
+    phase_dirs=$(find "${results_dir}" -maxdepth 1 -type d -name "phase_*" 2>/dev/null | sort)
+
+    for phase_dir in ${phase_dirs}; do
+        if [[ -d "${phase_dir}" && -f "${phase_dir}/phase_result.json" ]]; then
+            local phase_json target_rps actual_rps duration_seconds
+
+            # Read phase result
+            target_rps=$(jq -r '.target_rps // 0' "${phase_dir}/phase_result.json" 2>/dev/null || echo "0")
+            actual_rps=$(jq -r '.actual_rps // 0' "${phase_dir}/phase_result.json" 2>/dev/null || echo "0")
+            duration_seconds=$(jq -r '.duration_seconds // 0' "${phase_dir}/phase_result.json" 2>/dev/null || echo "0")
+
+            # Calculate deviation percent
+            local deviation_percent="0"
+            if [[ "${target_rps}" != "0" ]]; then
+                deviation_percent=$(awk -v t="${target_rps}" -v a="${actual_rps}" \
+                    'BEGIN { printf "%.2f", ((a - t) / t) * 100 }')
+            fi
+
+            # Build phase JSON with deviation_percent
+            phase_json=$(jq -c --argjson dev "${deviation_percent}" \
+                '. + {deviation_percent: $dev}' "${phase_dir}/phase_result.json" 2>/dev/null)
+
+            # Append to phases array
+            if [[ -n "${phase_json}" && "${phase_json}" != "null" ]]; then
+                phases_json=$(echo "${phases_json}" | jq -c --argjson p "${phase_json}" '. + [$p]')
+            fi
+        fi
+    done
+
+    # Prepare target_rps for JSON (use effective_target_rps if non-zero, else null)
+    local target_rps_json="null"
+    if [[ "${effective_target_rps}" -gt 0 ]]; then
+        target_rps_json="${effective_target_rps}"
+    fi
+
+    # Prepare actual_rps for JSON
+    local actual_rps_json="null"
+    if [[ -n "${MERGED_RPS:-}" ]]; then
+        actual_rps_json="${MERGED_RPS}"
+    fi
+
+    # Generate meta_extended.json
+    jq -n \
+        --arg version "1.0" \
+        --arg wrk_version "${wrk_version}" \
+        --argjson rate_control_enabled "${rate_control_enabled}" \
+        --argjson target_rps "${target_rps_json}" \
+        --argjson actual_rps "${actual_rps_json}" \
+        --argjson rps_within_tolerance "${rps_within_tolerance}" \
+        --arg rps_method "duration_weighted_average" \
+        --arg latency_p99_method "max" \
+        --arg error_rate_method "requests_weighted_average" \
+        --argjson phases "${phases_json}" \
+        '{
+            version: $version,
+            rate_control: {
+                wrk_version: $wrk_version,
+                rate_control_enabled: $rate_control_enabled,
+                target_rps: $target_rps,
+                actual_rps: $actual_rps,
+                rps_within_tolerance: $rps_within_tolerance
+            },
+            integration: {
+                rps_method: $rps_method,
+                latency_p99_method: $latency_p99_method,
+                error_rate_method: $error_rate_method
+            },
+            phases: $phases
+        }' > "${meta_extended_file}"
+
+    echo -e "${GREEN}meta_extended.json generated (v1.0)${NC}"
 }
 
 # =============================================================================
@@ -1423,7 +1793,692 @@ generate_flamegraph() {
     fi
 }
 
+# =============================================================================
+# Log Resolved Parameters
+# =============================================================================
+#
+# Outputs the resolved parameters from scenario YAML to a log file for debugging.
+# This helps verify that scenario configuration is correctly applied.
+# =============================================================================
+
+log_resolved_params() {
+    local script_name="$1"
+    local rate_option="$2"
+    local log_file="${RESULTS_DIR}/resolved_params.log"
+    local timestamp
+    timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+    cat > "${log_file}" << EOF
+# Resolved Parameters from Scenario YAML
+# Generated at: ${timestamp}
+
+## Source
+scenario_file: ${SCENARIO_FILE}
+
+## Resolved Values
+TARGET_RPS=${TARGET_RPS:-null}
+RPS_PROFILE=${RPS_PROFILE:-constant}
+LOAD_PROFILE=${LOAD_PROFILE:-constant}
+DURATION=${DURATION}
+THREADS=${THREADS}
+CONNECTIONS=${CONNECTIONS}
+
+## Cache Configuration
+CACHE_MODE=${CACHE_MODE:-none}
+CACHE_ENABLED=${CACHE_ENABLED:-true}
+CACHE_STRATEGY=${CACHE_STRATEGY:-read-through}
+CACHE_TTL_SECS=${CACHE_TTL_SECS:-60}
+HIT_RATE=${HIT_RATE:-50}
+
+## Storage Configuration
+STORAGE_MODE=${STORAGE_MODE:-in_memory}
+DATA_SCALE=${DATA_SCALE:-1e4}
+
+## Concurrency
+WORKERS=${WORKERS:-4}
+DATABASE_POOL_SIZE=${DATABASE_POOL_SIZE:-16}
+REDIS_POOL_SIZE=${REDIS_POOL_SIZE:-8}
+POOL_SIZES=${POOL_SIZES:-24}
+
+## Error Configuration
+FAIL_RATE=${FAIL_RATE:-0}
+RETRY=${RETRY:-false}
+
+## Multi-Phase Load Profile Parameters
+MIN_RPS=${MIN_RPS:-10}
+STEP_COUNT=${STEP_COUNT:-4}
+RAMP_UP_SECONDS=${RAMP_UP_SECONDS:-10}
+RAMP_DOWN_SECONDS=${RAMP_DOWN_SECONDS:-10}
+BURST_INTERVAL_SECONDS=${BURST_INTERVAL_SECONDS:-20}
+BURST_DURATION_SECONDS=${BURST_DURATION_SECONDS:-5}
+BURST_MULTIPLIER=${BURST_MULTIPLIER:-3}
+
+## wrk2 Execution Command
+${WRK_COMMAND} -t${THREADS} -c${CONNECTIONS} -d${DURATION} ${rate_option} --latency --script=scripts/${script_name}.lua ${API_URL}
+EOF
+
+    echo "  Resolved parameters logged to: ${log_file}"
+}
+
+# =============================================================================
+# Phased Benchmark Execution
+# =============================================================================
+#
+# Implements multi-phase benchmark execution for load profiles:
+# - constant: Single phase at TARGET_RPS for DURATION_SECONDS
+# - step_up: N steps with progressively increasing RPS
+# - ramp_up_down: Ramp up -> Sustain -> Ramp down phases
+# - burst: Alternating burst/normal cycles
+#
+# Each phase runs wrk2 separately, results are merged for meta.json generation.
+# =============================================================================
+
+# Verify that actual RPS is within acceptable tolerance of target RPS
+# @param $1 target_rps - Target RPS configured for this phase
+# @param $2 actual_rps - Actual RPS achieved
+# @param $3 phase_name - Name of the phase (for logging)
+# @return 0 if within tolerance or SKIP, 1 if FAIL in strict mode
+verify_rps_accuracy() {
+    local target_rps="$1"
+    local actual_rps="$2"
+    local phase_name="${3:-main}"
+    local tolerance_percent="5"
+    local tolerance_absolute="5"  # 絶対誤差 ±5 RPS（target < 10 用）
+    local tolerance_mode="${RPS_TOLERANCE_MODE:-strict}"
+
+    # Validate RESULTS_DIR is set and non-empty
+    if [[ -z "${RESULTS_DIR:-}" ]]; then
+        echo -e "${RED}ERROR: RESULTS_DIR is not set. Cannot write RPS verification log.${NC}"
+        return 1
+    fi
+
+    local log_file="${RESULTS_DIR}/rps_verification.log"
+
+    # Validate tolerance_mode: only "strict" or "warn" are valid, default to "strict" for unknown values
+    if [[ "${tolerance_mode}" != "strict" && "${tolerance_mode}" != "warn" ]]; then
+        echo -e "${YELLOW}WARNING: Unknown RPS_TOLERANCE_MODE '${tolerance_mode}', defaulting to 'strict'${NC}"
+        tolerance_mode="strict"
+    fi
+
+    # Validate actual_rps is a valid number (integer or decimal)
+    # actual_rps is extracted from wrk2 output and may be empty or non-numeric on parse failure
+    if [[ -z "${actual_rps}" ]] || ! echo "${actual_rps}" | grep -qE '^[0-9]+(\.[0-9]+)?$'; then
+        echo -e "${YELLOW}WARNING: Invalid actual_rps '${actual_rps}', treating as 0${NC}"
+        actual_rps="0"
+    fi
+
+    # Ensure RESULTS_DIR exists before creating log file
+    mkdir -p "${RESULTS_DIR}"
+
+    if [[ ! -f "${log_file}" ]]; then
+        echo "# RPS Verification Log" > "${log_file}"
+        echo "# Tolerance: ±${tolerance_percent}% (relative) or ±${tolerance_absolute} RPS (absolute for target<10)" >> "${log_file}"
+        echo "# Mode: ${tolerance_mode}" >> "${log_file}"
+        echo "" >> "${log_file}"
+    fi
+
+    local timestamp
+    timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+    # Step 1: target_rps == 0 or empty → SKIP（乖離率計算対象外）
+    # Note: target_rps is validated as non-negative integer by validate_scenario_parameters
+    if [[ -z "${target_rps}" || "${target_rps}" == "0" ]]; then
+        echo "${timestamp} | ${phase_name} | target=0 | actual=${actual_rps} | SKIP (no target_rps)" | tee -a "${log_file}"
+        return 0
+    fi
+
+    # Step 2: target_rps < 10 → 絶対誤差 ±5 RPS
+    # Note: target_rps is validated as non-negative integer by validate_scenario_parameters
+    # so -lt comparison is safe here
+    if [[ "${target_rps}" -lt 10 ]]; then
+        echo -e "${YELLOW}WARNING: target_rps (${target_rps}) < 10, using absolute tolerance ±${tolerance_absolute} RPS${NC}"
+        local abs_diff
+        abs_diff=$(awk -v t="${target_rps}" -v a="${actual_rps}" 'BEGIN { diff = a - t; print (diff < 0 ? -diff : diff) }')
+        local result_line="${timestamp} | ${phase_name} | target=${target_rps} | actual=${actual_rps} | abs_diff=${abs_diff}"
+
+        if (( $(echo "${abs_diff} <= ${tolerance_absolute}" | bc -l) )); then
+            echo "${result_line} | PASS (absolute ±${tolerance_absolute})" | tee -a "${log_file}"
+            return 0
+        else
+            echo "${result_line} | FAIL (exceeds ±${tolerance_absolute} RPS)" | tee -a "${log_file}"
+            if [[ "${tolerance_mode}" == "strict" ]]; then
+                echo -e "${RED}ERROR: RPS verification failed. Set RPS_TOLERANCE_MODE=warn to continue.${NC}"
+                return 1
+            else
+                echo -e "${YELLOW}WARNING: RPS verification failed but continuing (tolerance_mode=warn)${NC}"
+                return 0
+            fi
+        fi
+    fi
+
+    # Step 3: target_rps >= 10 → 相対誤差 ±5%
+    # Calculate deviation with fixed precision (%.6f) for reliable bc comparison
+    local abs_deviation
+    abs_deviation=$(awk -v t="${target_rps}" -v a="${actual_rps}" \
+        'BEGIN { diff = ((a - t) / t) * 100; printf "%.6f", (diff < 0 ? -diff : diff) }')
+    local deviation_display
+    deviation_display=$(awk -v t="${target_rps}" -v a="${actual_rps}" \
+        'BEGIN { printf "%.2f", ((a - t) / t) * 100 }')
+
+    local result_line="${timestamp} | ${phase_name} | target=${target_rps} | actual=${actual_rps} | deviation=${deviation_display}%"
+
+    if (( $(echo "${abs_deviation} <= ${tolerance_percent}" | bc -l) )); then
+        echo "${result_line} | PASS" | tee -a "${log_file}"
+        return 0
+    else
+        echo "${result_line} | FAIL (exceeds ±${tolerance_percent}%)" | tee -a "${log_file}"
+        if [[ "${tolerance_mode}" == "strict" ]]; then
+            echo -e "${RED}ERROR: RPS verification failed. Set RPS_TOLERANCE_MODE=warn to continue.${NC}"
+            return 1
+        else
+            echo -e "${YELLOW}WARNING: RPS verification failed but continuing (tolerance_mode=warn)${NC}"
+            return 0
+        fi
+    fi
+}
+
+# Run a single phase of the benchmark
+# @param $1 script_name - Lua script name (without .lua extension)
+# @param $2 phase_dir - Directory to store phase results
+# @param $3 target_rps - Target RPS for this phase
+# @param $4 duration - Duration in seconds for this phase
+# @param $5 phase_name - Human-readable phase name for logging
+run_single_phase() {
+    local script_name="$1"
+    local phase_dir="$2"
+    local target_rps="$3"
+    local duration="$4"
+    local phase_name="$5"
+
+    mkdir -p "${phase_dir}"
+    local result_file="${phase_dir}/wrk.txt"
+    local phase_log="${phase_dir}/phase.log"
+
+    echo "[${phase_name}] Starting: target_rps=${target_rps}, duration=${duration}s" | tee "${phase_log}"
+
+    local rate_option=""
+    if [[ "${target_rps}" -gt 0 ]]; then
+        rate_option="-R${target_rps}"
+    fi
+
+    # Set LUA_RESULTS_DIR for Lua scripts to output lua_metrics.json
+    export LUA_RESULTS_DIR="${phase_dir}"
+
+    cd "${SCRIPT_DIR}"
+    ${WRK_COMMAND} -t"${THREADS}" -c"${CONNECTIONS}" -d"${duration}s" \
+        ${rate_option} \
+        --latency \
+        --script="scripts/${script_name}.lua" \
+        "${API_URL}" 2>&1 | tee "${result_file}"
+
+    local actual_rps
+    actual_rps=$(grep "Requests/sec:" "${result_file}" 2>/dev/null | awk '{print $2}' || echo "0")
+
+    # Validate actual_rps is a valid number for JSON output
+    if [[ -z "${actual_rps}" ]] || ! echo "${actual_rps}" | grep -qE '^[0-9]+(\.[0-9]+)?$'; then
+        echo -e "${YELLOW}WARNING: Invalid actual_rps '${actual_rps}' from wrk2 output, treating as 0${NC}"
+        actual_rps="0"
+    fi
+
+    echo "[${phase_name}] Completed: actual_rps=${actual_rps}" | tee -a "${phase_log}"
+
+    # Save phase result as JSON for merge_phase_results
+    cat > "${phase_dir}/phase_result.json" << EOF
+{
+  "phase": "${phase_name}",
+  "target_rps": ${target_rps},
+  "actual_rps": ${actual_rps},
+  "duration_seconds": ${duration}
+}
+EOF
+
+    # Verify RPS accuracy
+    if ! verify_rps_accuracy "${target_rps}" "${actual_rps}" "${phase_name}"; then
+        echo -e "${RED}Phase ${phase_name} failed RPS verification${NC}"
+        # In strict mode, propagate failure
+        return 1
+    fi
+}
+
+# Merge results from all phases into a unified wrk.txt for meta.json generation
+# @param $1 results_base_dir - Base directory containing phase_* subdirectories
+merge_phase_results() {
+    local results_base_dir="$1"
+    local merged_wrk="${results_base_dir}/wrk.txt"
+
+    # Collect all phase directories
+    local phase_dirs
+    phase_dirs=$(find "${results_base_dir}" -maxdepth 1 -type d -name "phase_*" | sort)
+
+    if [[ -z "${phase_dirs}" ]]; then
+        echo -e "${YELLOW}WARNING: No phase directories found to merge${NC}"
+        return 1
+    fi
+
+    local phase_count=0
+    local total_requests=0
+    local weighted_rps_sum=0
+    local total_duration=0
+    local max_p99=0
+    local total_http_errors=0
+    local total_socket_errors=0
+
+    # Initialize latency tracking arrays
+    declare -a avg_latencies=()
+    declare -a p50_latencies=()
+    declare -a p95_latencies=()
+    declare -a p99_latencies=()
+
+    for phase_dir in ${phase_dirs}; do
+        if [[ -d "${phase_dir}" ]]; then
+            local wrk_file="${phase_dir}/wrk.txt"
+            local phase_json="${phase_dir}/phase_result.json"
+
+            if [[ -f "${wrk_file}" && -f "${phase_json}" ]]; then
+                phase_count=$((phase_count + 1))
+
+                # Extract metrics from wrk output
+                local requests
+                requests=$(grep -m1 "requests in" "${wrk_file}" 2>/dev/null | awk '{print $1}' || echo "0")
+                [[ ! "${requests}" =~ ^[0-9]+$ ]] && requests=0
+
+                local rps duration
+                rps=$(jq -r '.actual_rps // 0' "${phase_json}" 2>/dev/null || echo "0")
+                duration=$(jq -r '.duration_seconds // 0' "${phase_json}" 2>/dev/null || echo "0")
+
+                # Socket errors (tracked separately, NOT included in error_rate)
+                local socket_errors=0
+                if grep -q "Socket errors:" "${wrk_file}" 2>/dev/null; then
+                    local connect_err read_err write_err timeout_err
+                    connect_err=$(grep "Socket errors:" "${wrk_file}" | sed 's/.*connect \([0-9]*\).*/\1/' 2>/dev/null || echo "0")
+                    read_err=$(grep "Socket errors:" "${wrk_file}" | sed 's/.*read \([0-9]*\).*/\1/' 2>/dev/null || echo "0")
+                    write_err=$(grep "Socket errors:" "${wrk_file}" | sed 's/.*write \([0-9]*\).*/\1/' 2>/dev/null || echo "0")
+                    timeout_err=$(grep "Socket errors:" "${wrk_file}" | sed 's/.*timeout \([0-9]*\).*/\1/' 2>/dev/null || echo "0")
+                    socket_errors=$((connect_err + read_err + write_err + timeout_err))
+                fi
+                total_socket_errors=$((total_socket_errors + socket_errors))
+
+                # HTTP errors (used for error_rate calculation)
+                local http_errors=0
+                if grep -q "Non-2xx or 3xx responses:" "${wrk_file}" 2>/dev/null; then
+                    http_errors=$(grep -m1 "Non-2xx or 3xx responses:" "${wrk_file}" | awk '{print $NF}' 2>/dev/null || echo "0")
+                    [[ ! "${http_errors}" =~ ^[0-9]+$ ]] && http_errors=0
+                fi
+                total_http_errors=$((total_http_errors + http_errors))
+
+                total_requests=$((total_requests + requests))
+                weighted_rps_sum=$(echo "${weighted_rps_sum} + (${rps} * ${duration})" | bc 2>/dev/null || echo "${weighted_rps_sum}")
+                total_duration=$((total_duration + duration))
+
+                # Extract p99 latency and track maximum
+                local p99_raw
+                p99_raw=$(grep -E "^[[:space:]]+99%" "${wrk_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
+                if [[ -n "${p99_raw}" ]]; then
+                    local p99_ms
+                    p99_ms=$(parse_latency_to_ms "${p99_raw}")
+                    if [[ -n "${p99_ms}" ]]; then
+                        local compare_result
+                        compare_result=$(echo "${p99_ms} > ${max_p99}" | bc -l 2>/dev/null || echo "0")
+                        if [[ "${compare_result}" == "1" ]]; then
+                            max_p99="${p99_ms}"
+                        fi
+                    fi
+                fi
+
+                # Collect latencies for potential averaging
+                local avg_lat p50_lat p95_lat p99_lat
+                avg_lat=$(grep "Latency" "${wrk_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
+                p50_lat=$(grep -E "^[[:space:]]+50%" "${wrk_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
+                p95_lat=$(grep -E "^[[:space:]]+95%" "${wrk_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
+                p99_lat=$(grep -E "^[[:space:]]+99%" "${wrk_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
+
+                [[ -n "${avg_lat}" ]] && avg_latencies+=("${avg_lat}")
+                [[ -n "${p50_lat}" ]] && p50_latencies+=("${p50_lat}")
+                [[ -n "${p95_lat}" ]] && p95_latencies+=("${p95_lat}")
+                [[ -n "${p99_lat}" ]] && p99_latencies+=("${p99_lat}")
+            fi
+        fi
+    done
+
+    if [[ "${total_duration}" -eq 0 ]]; then
+        echo -e "${YELLOW}WARNING: Total duration is 0, cannot calculate averages${NC}"
+        total_duration=1
+    fi
+
+    # Calculate weighted average RPS
+    local avg_rps
+    avg_rps=$(echo "scale=2; ${weighted_rps_sum} / ${total_duration}" | bc 2>/dev/null || echo "0")
+
+    # Calculate error rate using HTTP errors only (not socket errors)
+    # This is consistent with meta.json which uses HTTP 4xx/5xx for error_rate
+    local error_rate="0"
+    if [[ "${total_requests}" -gt 0 ]]; then
+        error_rate=$(echo "scale=6; ${total_http_errors} / ${total_requests}" | bc 2>/dev/null || echo "0")
+    fi
+
+    # Use the last phase's latency values for the merged output (representative of peak load)
+    # Exception: p99 uses max_p99 (worst case across all phases) for conservative reporting
+    local last_avg="" last_p50="" last_p95="" last_p99=""
+    if [[ ${#avg_latencies[@]} -gt 0 ]]; then
+        last_avg="${avg_latencies[-1]}"
+    fi
+    if [[ ${#p50_latencies[@]} -gt 0 ]]; then
+        last_p50="${p50_latencies[-1]}"
+    fi
+    if [[ ${#p95_latencies[@]} -gt 0 ]]; then
+        last_p95="${p95_latencies[-1]}"
+    fi
+    if [[ ${#p99_latencies[@]} -gt 0 ]]; then
+        last_p99="${p99_latencies[-1]}"
+    fi
+
+    # Format max_p99 for display (convert from ms number to human-readable string)
+    local max_p99_display="N/A"
+    if [[ -n "${max_p99}" ]]; then
+        local max_p99_compare
+        max_p99_compare=$(echo "${max_p99} > 0" | bc -l 2>/dev/null || echo "0")
+        if [[ "${max_p99_compare}" == "1" ]]; then
+            # Format: if >= 1000ms show as Xs, if >= 1ms show as Xms, else show as Xus
+            if awk -v val="${max_p99}" 'BEGIN { exit (val >= 1000) ? 0 : 1 }'; then
+                max_p99_display=$(awk -v val="${max_p99}" 'BEGIN { printf "%.2fs", val / 1000 }')
+            elif awk -v val="${max_p99}" 'BEGIN { exit (val >= 1) ? 0 : 1 }'; then
+                max_p99_display=$(awk -v val="${max_p99}" 'BEGIN { printf "%.2fms", val }')
+            else
+                max_p99_display=$(awk -v val="${max_p99}" 'BEGIN { printf "%.2fus", val * 1000 }')
+            fi
+        fi
+    fi
+
+    # Generate merged wrk.txt in wrk-compatible format
+    cat > "${merged_wrk}" << EOF
+Running ${total_duration}s test @ ${API_URL}
+  ${THREADS} threads and ${CONNECTIONS} connections
+
+=== Merged Results (${RPS_PROFILE} profile, ${phase_count} phases) ===
+
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   ${last_avg:-N/A}
+
+  Latency Distribution
+     50%    ${last_p50:-N/A}
+     75%    N/A
+     90%    N/A
+     95%    ${last_p95:-N/A}
+     99%    ${max_p99_display}
+     99.9%  N/A
+  Max P99 (across phases): ${max_p99_display}
+  ${total_requests} requests in ${total_duration}s
+Requests/sec: ${avg_rps}
+Transfer/sec: N/A (merged result)
+
+--- Phase Details ---
+EOF
+
+    # Append phase summaries
+    for phase_dir in ${phase_dirs}; do
+        if [[ -d "${phase_dir}" && -f "${phase_dir}/phase_result.json" ]]; then
+            local phase_name target actual dur
+            phase_name=$(jq -r '.phase // "unknown"' "${phase_dir}/phase_result.json" 2>/dev/null)
+            target=$(jq -r '.target_rps // 0' "${phase_dir}/phase_result.json" 2>/dev/null)
+            actual=$(jq -r '.actual_rps // 0' "${phase_dir}/phase_result.json" 2>/dev/null)
+            dur=$(jq -r '.duration_seconds // 0' "${phase_dir}/phase_result.json" 2>/dev/null)
+            echo "  ${phase_name}: target=${target} RPS, actual=${actual} RPS, duration=${dur}s" >> "${merged_wrk}"
+        fi
+    done
+
+    # Export merged values as environment variables for meta.json generation
+    export MERGED_RPS="${avg_rps}"
+    export MERGED_REQUESTS="${total_requests}"
+    export MERGED_DURATION="${total_duration}"
+    export MERGED_P99="${max_p99}"
+    export MERGED_ERROR_RATE="${error_rate}"
+    export MERGED_PHASE_COUNT="${phase_count}"
+
+    echo -e "${GREEN}Merged ${phase_count} phase results${NC}"
+}
+
+# Run phased benchmark based on RPS_PROFILE
+# @param $1 script_name - Lua script name
+# @param $2 results_base_dir - Base directory for results
+run_phased_benchmark() {
+    local script_name="$1"
+    local results_base_dir="$2"
+    local profile="${RPS_PROFILE:-constant}"
+
+    echo ""
+    echo "Running phased benchmark: profile=${profile}"
+    echo ""
+
+    # Extract DURATION_SECONDS from DURATION (remove 's' suffix)
+    local duration_seconds
+    duration_seconds=$(echo "${DURATION}" | sed 's/s$//')
+    if [[ -z "${duration_seconds}" || ! "${duration_seconds}" =~ ^[0-9]+$ ]]; then
+        duration_seconds=30
+    fi
+
+    case "${profile}" in
+        constant)
+            # Single phase at constant RPS
+            run_single_phase "${script_name}" "${results_base_dir}/phase_main" \
+                "${TARGET_RPS:-0}" "${duration_seconds}" "main"
+            merge_phase_results "${results_base_dir}"
+            ;;
+
+        step_up)
+            # Gradual steps up to TARGET_RPS
+            local step_count="${STEP_COUNT:-4}"
+            local base_step_duration=$((duration_seconds / step_count))
+            local min_rps="${MIN_RPS:-10}"
+            local target_rps="${TARGET_RPS:-100}"
+            local rps_range=$((target_rps - min_rps))
+
+            # Calculate remainder to distribute to final step
+            local total_allocated_duration=0
+
+            echo "Step-up configuration: ${step_count} steps"
+            echo "  RPS range: ${min_rps} -> ${target_rps}"
+
+            for i in $(seq 1 "${step_count}"); do
+                local step_rps step_duration
+                # Final step guarantees TARGET_RPS (avoid rounding issues)
+                if [[ "${i}" -eq "${step_count}" ]]; then
+                    step_rps="${target_rps}"
+                    # Final step uses remaining time to avoid truncation
+                    step_duration=$((duration_seconds - total_allocated_duration))
+                else
+                    # step_rps = min_rps + (rps_range / step_count) * i
+                    step_rps=$((min_rps + (rps_range * i) / step_count))
+                    step_duration="${base_step_duration}"
+                fi
+                total_allocated_duration=$((total_allocated_duration + step_duration))
+
+                echo ""
+                echo "--- Step ${i}/${step_count}: ${step_rps} RPS, ${step_duration}s ---"
+                run_single_phase "${script_name}" "${results_base_dir}/phase_step_${i}" \
+                    "${step_rps}" "${step_duration}" "step_${i}"
+            done
+
+            merge_phase_results "${results_base_dir}"
+            ;;
+
+        ramp_up_down)
+            # Linear ramp up, sustain at peak, linear ramp down
+            local ramp_up="${RAMP_UP_SECONDS:-10}"
+            local ramp_down="${RAMP_DOWN_SECONDS:-10}"
+            local total_ramp=$((ramp_up + ramp_down))
+            local min_rps="${MIN_RPS:-10}"
+            local target_rps="${TARGET_RPS:-100}"
+
+            # Boundary condition: ramp_up + ramp_down > duration
+            # Scale down proportionally to fit within duration
+            if [[ "${total_ramp}" -gt "${duration_seconds}" ]]; then
+                echo -e "${YELLOW}WARNING: ramp_up + ramp_down (${total_ramp}s) > duration (${duration_seconds}s). Scaling down.${NC}"
+                # Proportionally scale ramp_up and ramp_down to fit within duration
+                local original_ramp_up="${ramp_up}"
+                local original_ramp_down="${ramp_down}"
+                ramp_up=$((duration_seconds * original_ramp_up / total_ramp))
+                ramp_down=$((duration_seconds - ramp_up))
+                echo "  Adjusted: ramp_up=${ramp_up}s, ramp_down=${ramp_down}s"
+            fi
+
+            local sustain_duration=$((duration_seconds - ramp_up - ramp_down))
+
+            echo "Ramp-up-down configuration:"
+            echo "  Ramp up: ${ramp_up}s (${min_rps} -> ${target_rps} RPS)"
+            echo "  Sustain: ${sustain_duration}s at ${target_rps} RPS"
+            echo "  Ramp down: ${ramp_down}s (${target_rps} -> ${min_rps} RPS)"
+
+            # Boundary condition: sustain duration is negative or zero
+            if [[ "${sustain_duration}" -le 0 ]]; then
+                echo -e "${YELLOW}WARNING: sustain duration is ${sustain_duration}s, skipping sustain phase${NC}"
+                sustain_duration=0
+            fi
+
+            # Phase 1: Ramp up (skip if duration is 0)
+            # Note: wrk2 uses constant rate, so we target the peak RPS at end of ramp
+            if [[ "${ramp_up}" -gt 0 ]]; then
+                echo ""
+                echo "--- Ramp Up Phase (${ramp_up}s) ---"
+                run_single_phase "${script_name}" "${results_base_dir}/phase_ramp_up" \
+                    "${target_rps}" "${ramp_up}" "ramp_up"
+            else
+                echo ""
+                echo "--- Ramp Up Phase: skipped (0s) ---"
+            fi
+
+            # Phase 2: Sustain (skip if duration <= 0)
+            if [[ "${sustain_duration}" -gt 0 ]]; then
+                echo ""
+                echo "--- Sustain Phase (${sustain_duration}s) ---"
+                run_single_phase "${script_name}" "${results_base_dir}/phase_sustain" \
+                    "${target_rps}" "${sustain_duration}" "sustain"
+            else
+                echo ""
+                echo "--- Sustain Phase: skipped (0s) ---"
+            fi
+
+            # Phase 3: Ramp down (skip if duration is 0)
+            if [[ "${ramp_down}" -gt 0 ]]; then
+                echo ""
+                echo "--- Ramp Down Phase (${ramp_down}s) ---"
+                run_single_phase "${script_name}" "${results_base_dir}/phase_ramp_down" \
+                    "${min_rps}" "${ramp_down}" "ramp_down"
+            else
+                echo ""
+                echo "--- Ramp Down Phase: skipped (0s) ---"
+            fi
+
+            merge_phase_results "${results_base_dir}"
+            ;;
+
+        burst)
+            # Periodic bursts (spikes)
+            local burst_interval="${BURST_INTERVAL_SECONDS:-20}"
+            local burst_duration="${BURST_DURATION_SECONDS:-5}"
+            local burst_multiplier="${BURST_MULTIPLIER:-3}"
+            local min_rps="${MIN_RPS:-10}"
+            local target_rps="${TARGET_RPS:-100}"
+
+            # Validate burst_multiplier > 0
+            local is_positive
+            is_positive=$(echo "${burst_multiplier}" | awk '{ print ($1 > 0) ? "yes" : "no" }')
+            if [[ "${is_positive}" != "yes" ]]; then
+                echo -e "${RED}ERROR: burst_multiplier must be > 0 (got: ${burst_multiplier})${NC}"
+                return 1
+            fi
+
+            # Calculate base RPS (normal phase): target_rps / burst_multiplier
+            # Use bc for floating point division
+            local base_rps
+            base_rps=$(echo "scale=0; ${target_rps} / ${burst_multiplier}" | bc 2>/dev/null || echo "$((target_rps / burst_multiplier))")
+            # Ensure base_rps >= min_rps
+            if [[ "${base_rps}" -lt "${min_rps}" ]]; then
+                base_rps="${min_rps}"
+            fi
+
+            local normal_duration=$((burst_interval - burst_duration))
+
+            echo "Burst configuration:"
+            echo "  Burst: ${target_rps} RPS for ${burst_duration}s"
+            echo "  Normal: ${base_rps} RPS for ${normal_duration}s"
+            echo "  Cycle interval: ${burst_interval}s"
+
+            # Boundary condition: normal period is negative
+            if [[ "${normal_duration}" -le 0 ]]; then
+                echo -e "${RED}ERROR: burst_interval (${burst_interval}s) must be > burst_duration (${burst_duration}s)${NC}"
+                return 1
+            fi
+
+            local cycle_count=$((duration_seconds / burst_interval))
+
+            # Boundary condition: duration < burst_interval
+            # Run single cycle within duration (burst + optional normal)
+            if [[ "${cycle_count}" -eq 0 ]]; then
+                echo -e "${YELLOW}WARNING: duration (${duration_seconds}s) < burst_interval (${burst_interval}s). Running single cycle within duration.${NC}"
+                # Fit burst and normal phases within duration
+                local actual_burst_duration=$((duration_seconds < burst_duration ? duration_seconds : burst_duration))
+                local actual_normal_duration=$((duration_seconds - actual_burst_duration))
+
+                echo "  Actual burst: ${actual_burst_duration}s"
+                echo "  Actual normal: ${actual_normal_duration}s"
+
+                run_single_phase "${script_name}" "${results_base_dir}/phase_cycle_1_burst" \
+                    "${target_rps}" "${actual_burst_duration}" "cycle_1_burst"
+
+                if [[ "${actual_normal_duration}" -gt 0 ]]; then
+                    run_single_phase "${script_name}" "${results_base_dir}/phase_cycle_1_normal" \
+                        "${base_rps}" "${actual_normal_duration}" "cycle_1_normal"
+                fi
+                merge_phase_results "${results_base_dir}"
+                return  # 早期リターン
+            fi
+
+            # Calculate remaining time after full cycles for final cycle adjustment
+            local total_cycle_duration=$((cycle_count * burst_interval))
+            local remaining_time=$((duration_seconds - total_cycle_duration))
+
+            # Ensure remaining_time is not negative (should not happen with integer division, but guard anyway)
+            if [[ "${remaining_time}" -lt 0 ]]; then
+                remaining_time=0
+            fi
+
+            echo "  Total cycles: ${cycle_count}"
+            if [[ "${remaining_time}" -gt 0 ]]; then
+                echo "  Remaining time (added to final normal phase): ${remaining_time}s"
+            fi
+
+            for i in $(seq 1 "${cycle_count}"); do
+                echo ""
+                echo "--- Cycle ${i}/${cycle_count}: Burst Phase ---"
+                run_single_phase "${script_name}" "${results_base_dir}/phase_cycle_${i}_burst" \
+                    "${target_rps}" "${burst_duration}" "cycle_${i}_burst"
+
+                # Final cycle uses remaining time if any
+                local current_normal_duration="${normal_duration}"
+                if [[ "${i}" -eq "${cycle_count}" && "${remaining_time}" -gt 0 ]]; then
+                    current_normal_duration=$((normal_duration + remaining_time))
+                fi
+
+                echo ""
+                echo "--- Cycle ${i}/${cycle_count}: Normal Phase (${current_normal_duration}s) ---"
+                run_single_phase "${script_name}" "${results_base_dir}/phase_cycle_${i}_normal" \
+                    "${base_rps}" "${current_normal_duration}" "cycle_${i}_normal"
+            done
+
+            merge_phase_results "${results_base_dir}"
+            ;;
+
+        *)
+            echo -e "${YELLOW}WARNING: Unknown rps_profile '${profile}', defaulting to constant${NC}"
+            run_single_phase "${script_name}" "${results_base_dir}/phase_main" \
+                "${TARGET_RPS:-0}" "${duration_seconds}" "main"
+            merge_phase_results "${results_base_dir}"
+            ;;
+    esac
+}
+
 # Run benchmarks
+# Uses phased execution for all RPS profiles (constant, step_up, ramp_up_down, burst)
 run_benchmark() {
     local script_name="$1"
     local script_path="${SCRIPT_DIR}/scripts/${script_name}.lua"
@@ -1447,40 +2502,42 @@ run_benchmark() {
         mkdir -p "${script_results_dir}"
     fi
 
-    local result_file="${script_results_dir}/wrk.txt"
-
-    # Set LUA_RESULTS_DIR for Lua scripts to output lua_metrics.json
-    export LUA_RESULTS_DIR="${script_results_dir}"
-
     # Switch RESULTS_DIR to script-specific directory for profiling, flamegraph, and meta.json
     local orig_results_dir="${RESULTS_DIR}"
     RESULTS_DIR="${script_results_dir}"
 
+    # Build rate option for wrk2 (-R flag) for logging
+    local rate_option=""
+    if [[ -n "${TARGET_RPS:-}" && "${TARGET_RPS}" != "0" ]]; then
+        rate_option="-R${TARGET_RPS}"
+    fi
+
+    # Log resolved parameters for debugging
+    log_resolved_params "${script_name}" "${rate_option}"
+
     # Start profiling if enabled (now writes to script_results_dir)
     start_profiling
 
-    # Run wrk and capture output (with --latency for percentile stats)
-    cd "${SCRIPT_DIR}"
-    if wrk -t"${THREADS}" -c"${CONNECTIONS}" -d"${DURATION}" \
-        --latency \
-        --script="scripts/${script_name}.lua" \
-        "${API_URL}" 2>&1 | tee "${result_file}"; then
-
+    # Run phased benchmark (handles all profiles: constant, step_up, ramp_up_down, burst)
+    if run_phased_benchmark "${script_name}" "${script_results_dir}"; then
         # Stop profiling
         stop_profiling
 
         # Generate flamegraph if profiling was enabled
         generate_flamegraph
 
-        # Extract key metrics for summary
-        local reqs_sec=$(grep "Requests/sec:" "${result_file}" | awk '{print $2}')
-        local avg_latency=$(grep "Latency" "${result_file}" | head -1 | awk '{print $2}')
+        # Extract key metrics from merged wrk.txt for summary
+        local result_file="${script_results_dir}/wrk.txt"
+        local reqs_sec avg_latency p50 p75 p90 p99
+
+        reqs_sec=$(grep "Requests/sec:" "${result_file}" 2>/dev/null | awk '{print $2}')
+        avg_latency=$(grep "Latency" "${result_file}" 2>/dev/null | head -1 | awk '{print $2}')
 
         # Extract latency percentiles (P50, P75, P90, P99)
-        local p50=$(grep "50%" "${result_file}" | awk '{print $2}')
-        local p75=$(grep "75%" "${result_file}" | awk '{print $2}')
-        local p90=$(grep "90%" "${result_file}" | awk '{print $2}')
-        local p99=$(grep "99%" "${result_file}" | awk '{print $2}')
+        p50=$(grep -E "^[[:space:]]+50%" "${result_file}" 2>/dev/null | awk '{print $2}')
+        p75=$(grep -E "^[[:space:]]+75%" "${result_file}" 2>/dev/null | awk '{print $2}')
+        p90=$(grep -E "^[[:space:]]+90%" "${result_file}" 2>/dev/null | awk '{print $2}')
+        p99=$(grep -E "^[[:space:]]+99%" "${result_file}" 2>/dev/null | awk '{print $2}')
 
         echo "" >> "${SUMMARY_FILE}"
         echo "${script_name}:" >> "${SUMMARY_FILE}"
@@ -1491,8 +2548,16 @@ run_benchmark() {
         echo "  P90: ${p90:-N/A}" >> "${SUMMARY_FILE}"
         echo "  P99: ${p99:-N/A}" >> "${SUMMARY_FILE}"
 
+        # Add phase count if multi-phase execution
+        if [[ -n "${MERGED_PHASE_COUNT:-}" && "${MERGED_PHASE_COUNT}" -gt 1 ]]; then
+            echo "  Phases: ${MERGED_PHASE_COUNT}" >> "${SUMMARY_FILE}"
+        fi
+
         # Generate meta.json in script-specific directory
         generate_meta_json "${result_file}" "${script_name}"
+
+        # Generate meta_extended.json for phased execution details
+        generate_meta_extended "${RESULTS_DIR}"
 
         # Restore RESULTS_DIR
         RESULTS_DIR="${orig_results_dir}"
