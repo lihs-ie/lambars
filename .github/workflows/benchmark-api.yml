@@ -60,7 +60,7 @@ jobs:
           git clone --depth 1 https://github.com/giltene/wrk2.git /tmp/wrk2
           cd /tmp/wrk2 && make -j$(nproc) && sudo cp wrk /usr/local/bin/wrk2
           # Verify wrk2 installation
-          wrk2 -v || (echo "ERROR: wrk2 installation failed" && exit 1)
+          command -v wrk2 && wrk2 -v 2>&1 | head -1 || (echo "ERROR: wrk2 installation failed" && exit 1)
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -148,7 +148,7 @@ jobs:
           git clone --depth 1 https://github.com/giltene/wrk2.git /tmp/wrk2
           cd /tmp/wrk2 && make -j$(nproc) && sudo cp wrk /usr/local/bin/wrk2
           # Verify wrk2 installation
-          wrk2 -v || (echo "ERROR: wrk2 installation failed" && exit 1)
+          command -v wrk2 && wrk2 -v 2>&1 | head -1 || (echo "ERROR: wrk2 installation failed" && exit 1)
           # Install Python jsonschema for meta.json validation
           pip install jsonschema
 
@@ -545,7 +545,7 @@ jobs:
           git clone --depth 1 https://github.com/giltene/wrk2.git /tmp/wrk2
           cd /tmp/wrk2 && make -j$(nproc) && sudo cp wrk /usr/local/bin/wrk2
           # Verify wrk2 installation
-          wrk2 -v || (echo "ERROR: wrk2 installation failed" && exit 1)
+          command -v wrk2 && wrk2 -v 2>&1 | head -1 || (echo "ERROR: wrk2 installation failed" && exit 1)
           # Install FlameGraph tools
           git clone --depth 1 https://github.com/brendangregg/FlameGraph /tmp/FlameGraph
           sudo ln -sf /tmp/FlameGraph/stackcollapse-perf.pl /usr/local/bin/
@@ -610,7 +610,7 @@ jobs:
           git clone --depth 1 https://github.com/giltene/wrk2.git /tmp/wrk2
           cd /tmp/wrk2 && make -j$(nproc) && sudo cp wrk /usr/local/bin/wrk2
           # Verify wrk2 installation
-          wrk2 -v || (echo "ERROR: wrk2 installation failed" && exit 1)
+          command -v wrk2 && wrk2 -v 2>&1 | head -1 || (echo "ERROR: wrk2 installation failed" && exit 1)
           # Install FlameGraph tools
           git clone --depth 1 https://github.com/brendangregg/FlameGraph /tmp/FlameGraph
           sudo ln -sf /tmp/FlameGraph/stackcollapse-perf.pl /usr/local/bin/
@@ -675,7 +675,7 @@ jobs:
           git clone --depth 1 https://github.com/giltene/wrk2.git /tmp/wrk2
           cd /tmp/wrk2 && make -j$(nproc) && sudo cp wrk /usr/local/bin/wrk2
           # Verify wrk2 installation
-          wrk2 -v || (echo "ERROR: wrk2 installation failed" && exit 1)
+          command -v wrk2 && wrk2 -v 2>&1 | head -1 || (echo "ERROR: wrk2 installation failed" && exit 1)
           # Install yq (Mike Farah's YAML processor)
           sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
           sudo chmod +x /usr/local/bin/yq
