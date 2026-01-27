@@ -130,9 +130,9 @@ struct BenchEnv {
     cache_strategy: String,
     hit_rate: u8,
     fail_rate: f64,
-    workers: u32,
-    database_pool_size: u32,
-    redis_pool_size: u32,
+    worker_threads: Option<u32>,
+    database_pool_size: Option<u32>,
+    redis_pool_size: Option<u32>,
     data_scale: String,
     payload_variant: String,
     seed: Option<u64>,
@@ -141,7 +141,6 @@ struct BenchEnv {
 }
 
 impl BenchEnv {
-    /// Create environment from scenario config and CLI overrides
     fn from_args_and_scenario(
         args: &BenchApiArgs,
         scenario: &ScenarioConfig,
@@ -214,21 +213,22 @@ impl BenchEnv {
         });
         let fail_rate = fail_rate.unwrap_or(0.0);
 
-        // Workers: from concurrency.workers, worker_config.worker_threads, or default
-        let workers = env::var("WORKERS")
+        // Worker threads: from environment, concurrency.workers, or worker_config.worker_threads
+        // None means use library default (don't set environment variable)
+        let worker_threads = env::var("WORKER_THREADS")
             .ok()
             .and_then(|v| v.parse().ok())
-            .or_else(|| env_vars.get("WORKERS").and_then(|v| v.parse().ok()))
+            .or_else(|| env_vars.get("WORKER_THREADS").and_then(|v| v.parse().ok()))
             .or_else(|| scenario.concurrency.as_ref().and_then(|c| c.workers))
             .or_else(|| {
                 scenario
                     .worker_config
                     .as_ref()
                     .and_then(|w| w.worker_threads)
-            })
-            .unwrap_or(4);
+            });
 
-        // Pool sizes: from concurrency or pool_sizes
+        // Pool sizes: from environment, concurrency, or pool_sizes
+        // None means use library default (don't set environment variable)
         let database_pool_size = env::var("DATABASE_POOL_SIZE")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -248,8 +248,7 @@ impl BenchEnv {
                     .pool_sizes
                     .as_ref()
                     .and_then(|p| p.database_pool_size)
-            })
-            .unwrap_or(16);
+            });
 
         let redis_pool_size = env::var("REDIS_POOL_SIZE")
             .ok()
@@ -261,8 +260,7 @@ impl BenchEnv {
                     .as_ref()
                     .and_then(|c| c.redis_pool_size)
             })
-            .or_else(|| scenario.pool_sizes.as_ref().and_then(|p| p.redis_pool_size))
-            .unwrap_or(8);
+            .or_else(|| scenario.pool_sizes.as_ref().and_then(|p| p.redis_pool_size));
 
         let data_scale = args
             .data_scale
@@ -298,7 +296,7 @@ impl BenchEnv {
             cache_strategy,
             hit_rate,
             fail_rate,
-            workers,
+            worker_threads,
             database_pool_size,
             redis_pool_size,
             data_scale,
@@ -309,27 +307,30 @@ impl BenchEnv {
         })
     }
 
-    /// Set environment variables for child processes
-    ///
     /// # Safety
-    /// This function uses `env::set_var` which is unsafe in Rust 2024 edition.
-    /// It should only be called from a single-threaded context before spawning
-    /// child processes. The xtask runner is single-threaded, so this is safe.
+    /// Uses `env::set_var` (unsafe in Rust 2024). Must be called from single-threaded
+    /// context before spawning child processes. xtask runner is single-threaded.
     fn set_env_vars(&self) {
-        // SAFETY: xtask is single-threaded and we set these before spawning
-        // any child processes. The environment is inherited by child processes.
+        // SAFETY: xtask is single-threaded, environment is inherited by child processes
         unsafe {
             env::set_var("STORAGE_MODE", &self.storage_mode);
             env::set_var("CACHE_MODE", &self.cache_mode);
             env::set_var("CACHE_STRATEGY", &self.cache_strategy);
             env::set_var("HIT_RATE", self.hit_rate.to_string());
             env::set_var("FAIL_RATE", self.fail_rate.to_string());
-            env::set_var("WORKERS", self.workers.to_string());
-            env::set_var("DATABASE_POOL_SIZE", self.database_pool_size.to_string());
-            env::set_var("REDIS_POOL_SIZE", self.redis_pool_size.to_string());
             env::set_var("DATA_SCALE", &self.data_scale);
             env::set_var("PAYLOAD_VARIANT", &self.payload_variant);
             env::set_var("API_URL", &self.api_url);
+
+            if let Some(threads) = self.worker_threads {
+                env::set_var("WORKER_THREADS", threads.to_string());
+            }
+            if let Some(size) = self.database_pool_size {
+                env::set_var("DATABASE_POOL_SIZE", size.to_string());
+            }
+            if let Some(size) = self.redis_pool_size {
+                env::set_var("REDIS_POOL_SIZE", size.to_string());
+            }
 
             if let Some(seed) = self.seed {
                 env::set_var("SEED", seed.to_string());
@@ -342,7 +343,6 @@ impl BenchEnv {
     }
 }
 
-/// Load environment variables from a file
 fn load_env_file(path: &Path) -> Result<HashMap<String, String>> {
     if !path.exists() {
         return Ok(HashMap::new());
@@ -365,7 +365,6 @@ fn load_env_file(path: &Path) -> Result<HashMap<String, String>> {
     Ok(vars)
 }
 
-/// Get the project root directory
 fn project_root() -> Result<PathBuf> {
     let manifest_dir = env::var("CARGO_MANIFEST_DIR")
         .map(PathBuf::from)
@@ -381,7 +380,6 @@ fn project_root() -> Result<PathBuf> {
     Ok(root)
 }
 
-/// Check if API is healthy
 fn check_api_health(api_url: &str, max_retries: u32) -> Result<bool> {
     for attempt in 1..=max_retries {
         let health_url = format!("{}/health", api_url);
@@ -407,29 +405,99 @@ fn check_api_health(api_url: &str, max_retries: u32) -> Result<bool> {
     Ok(false)
 }
 
-/// Start API using docker compose
-fn start_api(root: &Path) -> Result<()> {
+/// Ensures API containers are stopped on drop (RAII cleanup guard)
+///
+/// # Behavior
+///
+/// This guard provides automatic cleanup of API containers when dropped.
+/// The `should_stop` flag controls whether cleanup occurs:
+///
+/// - **Normal exit path**: If `keep_api_running` is set, call `keep_running()` to prevent cleanup
+/// - **Abnormal exit path**: The guard will always stop the API on drop if `should_stop` is true,
+///   ensuring containers don't leak even when errors occur. This is intentional behavior.
+///
+/// This means `keep_api_running` only affects successful completion - if an error occurs,
+/// the API will be stopped regardless of the flag value.
+struct ApiGuard<'a> {
+    root: &'a Path,
+    should_stop: bool,
+}
+
+impl<'a> ApiGuard<'a> {
+    fn new(root: &'a Path) -> Self {
+        Self {
+            root,
+            should_stop: false,
+        }
+    }
+
+    fn mark_started(&mut self) {
+        self.should_stop = true;
+    }
+    fn keep_running(&mut self) {
+        self.should_stop = false;
+    }
+    fn will_stop(&self) -> bool {
+        self.should_stop
+    }
+}
+
+impl Drop for ApiGuard<'_> {
+    fn drop(&mut self) {
+        if self.should_stop {
+            eprintln!("Stopping API (cleanup from guard)...");
+            if let Err(error) = stop_api(self.root) {
+                eprintln!("Warning: Failed to stop API in cleanup: {}", error);
+            }
+        }
+    }
+}
+
+fn start_api(root: &Path, environment: &BenchEnv) -> Result<()> {
     let compose_file = root.join("benches/api/docker/compose.ci.yaml");
 
     if !compose_file.exists() {
         bail!("Docker compose file not found: {}", compose_file.display());
     }
 
+    // If API is already running, stop it first to ensure new environment is applied (ENV-REQ-010)
+    if check_api_health(&environment.api_url, 1)? {
+        eprintln!("API is already running, restarting to apply new environment...");
+        stop_api(root)?;
+    }
+
     eprintln!("Starting API with docker compose...");
 
-    let status = Command::new("docker")
+    let mut command = Command::new("docker");
+    command
         .args([
             "compose",
             "-f",
-            compose_file.to_str().unwrap(),
+            &compose_file.to_string_lossy(),
             "up",
             "-d",
             "--build",
             "--wait",
         ])
-        .current_dir(root)
-        .status()
-        .context("Failed to start docker compose")?;
+        .current_dir(root);
+
+    if let Some(threads) = environment.worker_threads {
+        command.env("WORKER_THREADS", threads.to_string());
+    }
+    if let Some(size) = environment.database_pool_size {
+        command.env("DATABASE_POOL_SIZE", size.to_string());
+    }
+    if let Some(size) = environment.redis_pool_size {
+        command.env("REDIS_POOL_SIZE", size.to_string());
+    }
+
+    command
+        .env("STORAGE_MODE", &environment.storage_mode)
+        .env("CACHE_MODE", &environment.cache_mode)
+        .env("CACHE_STRATEGY", &environment.cache_strategy)
+        .env("ENABLE_DEBUG_ENDPOINTS", "true"); // Enable /debug/config for benchmarks
+
+    let status = command.status().context("Failed to start docker compose")?;
 
     if !status.success() {
         // Clean up any partially started containers before returning error
@@ -440,7 +508,6 @@ fn start_api(root: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Stop API using docker compose
 fn stop_api(root: &Path) -> Result<()> {
     let compose_file = root.join("benches/api/docker/compose.ci.yaml");
 
@@ -450,21 +517,28 @@ fn stop_api(root: &Path) -> Result<()> {
 
     eprintln!("Stopping API...");
 
-    let _ = Command::new("docker")
+    let status = Command::new("docker")
         .args([
             "compose",
             "-f",
-            compose_file.to_str().unwrap(),
+            &compose_file.to_string_lossy(),
             "down",
             "-v",
         ])
         .current_dir(root)
-        .status();
+        .status()
+        .context("Failed to execute docker compose down")?;
+
+    if !status.success() {
+        bail!(
+            "Failed to stop API via docker compose (exit code: {:?})",
+            status.code()
+        );
+    }
 
     Ok(())
 }
 
-/// Run setup_test_data.sh
 fn setup_test_data(root: &Path, bench_env: &BenchEnv) -> Result<()> {
     let setup_script = root.join("benches/api/benchmarks/setup_test_data.sh");
 
@@ -498,7 +572,6 @@ fn setup_test_data(root: &Path, bench_env: &BenchEnv) -> Result<()> {
     Ok(())
 }
 
-/// Run the benchmark using run_benchmark.sh
 fn run_benchmark(root: &Path, scenario: &Path, quick: bool) -> Result<PathBuf> {
     let benchmark_script = root.join("benches/api/benchmarks/run_benchmark.sh");
 
@@ -557,7 +630,6 @@ fn run_benchmark(root: &Path, scenario: &Path, quick: bool) -> Result<PathBuf> {
     bail!("Could not determine results directory");
 }
 
-/// Main entry point for bench-api command
 pub fn run(args: BenchApiArgs) -> Result<()> {
     let root = project_root()?;
 
@@ -612,9 +684,21 @@ pub fn run(args: BenchApiArgs) -> Result<()> {
     eprintln!("  Fail Rate:      {}", bench_env.fail_rate);
     eprintln!("  Data Scale:     {}", bench_env.data_scale);
     eprintln!("  Payload:        {}", bench_env.payload_variant);
-    eprintln!("  Workers:        {}", bench_env.workers);
-    eprintln!("  DB Pool Size:   {}", bench_env.database_pool_size);
-    eprintln!("  Redis Pool:     {}", bench_env.redis_pool_size);
+    if let Some(threads) = bench_env.worker_threads {
+        eprintln!("  Worker Threads: {}", threads);
+    } else {
+        eprintln!("  Worker Threads: (default)");
+    }
+    if let Some(size) = bench_env.database_pool_size {
+        eprintln!("  DB Pool Size:   {}", size);
+    } else {
+        eprintln!("  DB Pool Size:   (default)");
+    }
+    if let Some(size) = bench_env.redis_pool_size {
+        eprintln!("  Redis Pool:     {}", size);
+    } else {
+        eprintln!("  Redis Pool:     (default)");
+    }
     if let Some(seed) = bench_env.seed {
         eprintln!("  Seed:           {}", seed);
     }
@@ -622,57 +706,36 @@ pub fn run(args: BenchApiArgs) -> Result<()> {
     eprintln!("  Quick Mode:     {}", args.quick);
     eprintln!();
 
-    // Track whether we started the API (for cleanup on error)
-    let mut api_started = false;
+    let mut api_guard = ApiGuard::new(&root);
 
-    // Step 1: Start API (if not skipped)
     if !args.skip_api_start {
-        // First check if API is already running
-        if !args.skip_health_check && check_api_health(&bench_env.api_url, 1)? {
-            eprintln!("API already running at {}", bench_env.api_url);
-        } else {
-            start_api(&root)?;
-            api_started = true;
-        }
+        // Always call start_api to ensure environment variables are applied (ENV-REQ-010)
+        // start_api handles the case where API is already running by restarting it
+        start_api(&root, &bench_env)?;
+        api_guard.mark_started();
     }
 
-    // Helper closure for cleanup on error
-    let cleanup_on_error = |root: &Path, should_stop: bool| {
-        if should_stop {
-            let _ = stop_api(root);
-        }
-    };
-
-    // Step 2: Health check (if not skipped)
     if !args.skip_health_check {
         eprintln!("Checking API health...");
         if !check_api_health(&bench_env.api_url, 3)? {
-            cleanup_on_error(&root, api_started && !args.keep_api_running);
+            // On error, let the guard stop the API (don't call keep_running)
             bail!("API health check failed after 3 retries");
         }
         eprintln!("API is healthy");
     }
 
-    // Step 3: Setup test data (if not skipped)
-    if !args.skip_setup
-        && let Err(e) = setup_test_data(&root, &bench_env)
-    {
-        cleanup_on_error(&root, api_started && !args.keep_api_running);
-        return Err(e);
+    if !args.skip_setup {
+        setup_test_data(&root, &bench_env)?;
     }
 
-    // Step 4: Run benchmark
-    let results_dir = match run_benchmark(&root, &scenario_path, args.quick) {
-        Ok(dir) => dir,
-        Err(e) => {
-            cleanup_on_error(&root, api_started && !args.keep_api_running);
-            return Err(e);
-        }
-    };
+    let results_dir = run_benchmark(&root, &scenario_path, args.quick)?;
 
-    // Step 5: Stop API (if not keeping running)
-    if !args.keep_api_running && api_started {
+    if !args.keep_api_running && api_guard.will_stop() {
+        eprintln!("Stopping API...");
         stop_api(&root)?;
+        api_guard.keep_running(); // Prevent double-stop from guard
+    } else if args.keep_api_running {
+        api_guard.keep_running();
     }
 
     eprintln!();
