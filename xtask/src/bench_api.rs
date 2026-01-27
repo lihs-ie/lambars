@@ -80,6 +80,10 @@ pub struct BenchApiArgs {
     /// Load environment from file (default: .env.sample)
     #[arg(long, default_value = "benches/api/benchmarks/.env.sample")]
     pub env_file: PathBuf,
+
+    /// Dry-run mode: show commands without executing
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 /// Scenario configuration from YAML
@@ -340,6 +344,28 @@ impl BenchEnv {
                 env::set_var("PROFILE", "true");
             }
         }
+    }
+
+    /// Generate a string of environment variables for Docker compose command display
+    fn to_docker_env_string(&self) -> String {
+        let mut parts = Vec::new();
+
+        if let Some(threads) = self.worker_threads {
+            parts.push(format!("WORKER_THREADS={}", threads));
+        }
+        if let Some(size) = self.database_pool_size {
+            parts.push(format!("DATABASE_POOL_SIZE={}", size));
+        }
+        if let Some(size) = self.redis_pool_size {
+            parts.push(format!("REDIS_POOL_SIZE={}", size));
+        }
+
+        parts.push(format!("STORAGE_MODE={}", self.storage_mode));
+        parts.push(format!("CACHE_MODE={}", self.cache_mode));
+        parts.push(format!("CACHE_STRATEGY={}", self.cache_strategy));
+        parts.push("ENABLE_DEBUG_ENDPOINTS=true".to_string());
+
+        parts.join(" ")
     }
 }
 
@@ -630,6 +656,126 @@ fn run_benchmark(root: &Path, scenario: &Path, quick: bool) -> Result<PathBuf> {
     bail!("Could not determine results directory");
 }
 
+fn print_dry_run_output(
+    bench_env: &BenchEnv,
+    scenario_path: &Path,
+    root: &Path,
+    args: &BenchApiArgs,
+) {
+    eprintln!("=== DRY RUN MODE ===");
+    eprintln!();
+
+    // Environment variables to be applied
+    eprintln!("Environment variables to be applied:");
+    if let Some(threads) = bench_env.worker_threads {
+        eprintln!("  WORKER_THREADS={}", threads);
+    }
+    if let Some(size) = bench_env.database_pool_size {
+        eprintln!("  DATABASE_POOL_SIZE={}", size);
+    }
+    if let Some(size) = bench_env.redis_pool_size {
+        eprintln!("  REDIS_POOL_SIZE={}", size);
+    }
+    eprintln!("  STORAGE_MODE={}", bench_env.storage_mode);
+    eprintln!("  CACHE_MODE={}", bench_env.cache_mode);
+    eprintln!("  CACHE_STRATEGY={}", bench_env.cache_strategy);
+    eprintln!("  HIT_RATE={}", bench_env.hit_rate);
+    eprintln!("  FAIL_RATE={}", bench_env.fail_rate);
+    eprintln!("  DATA_SCALE={}", bench_env.data_scale);
+    eprintln!("  PAYLOAD_VARIANT={}", bench_env.payload_variant);
+    eprintln!("  API_URL={}", bench_env.api_url);
+    if let Some(seed) = bench_env.seed {
+        eprintln!("  SEED={}", seed);
+    }
+    if bench_env.profile {
+        eprintln!("  PROFILE=true");
+    }
+    eprintln!();
+
+    // Execution steps based on args
+    eprintln!("Execution steps (not executed):");
+    let mut step = 1;
+
+    if !args.skip_api_start {
+        let compose_file = root.join("benches/api/docker/compose.ci.yaml");
+        let docker_env_string = bench_env.to_docker_env_string();
+        eprintln!("  {}. Start API:", step);
+        eprintln!("     {} \\", docker_env_string);
+        eprintln!(
+            "       docker compose -f {} up -d --build --wait",
+            compose_file.display()
+        );
+        step += 1;
+    } else {
+        eprintln!("  [SKIP] Start API (--skip-api-start)");
+    }
+
+    if !args.skip_health_check {
+        eprintln!(
+            "  {}. Health check: curl -sf {}/health",
+            step, bench_env.api_url
+        );
+        step += 1;
+    } else {
+        eprintln!("  [SKIP] Health check (--skip-health-check)");
+    }
+
+    if !args.skip_setup {
+        let setup_script = root.join("benches/api/benchmarks/setup_test_data.sh");
+        let meta_output = root.join("benches/api/benchmarks/setup_meta.json");
+        let seed_arg = bench_env
+            .seed
+            .map(|s| format!(" --seed {}", s))
+            .unwrap_or_default();
+        eprintln!(
+            "  {}. Setup test data: {} --scale {} --payload {}{} --meta-output {}",
+            step,
+            setup_script.display(),
+            bench_env.data_scale,
+            bench_env.payload_variant,
+            seed_arg,
+            meta_output.display()
+        );
+        step += 1;
+    } else {
+        eprintln!("  [SKIP] Setup test data (--skip-setup)");
+    }
+
+    let benchmark_script = root.join("benches/api/benchmarks/run_benchmark.sh");
+    if args.quick {
+        eprintln!(
+            "  {}. Run benchmark: {} --scenario {} --quick",
+            step,
+            benchmark_script.display(),
+            scenario_path.display()
+        );
+    } else {
+        eprintln!(
+            "  {}. Run benchmark: {} --scenario {}",
+            step,
+            benchmark_script.display(),
+            scenario_path.display()
+        );
+    }
+    step += 1;
+
+    if !args.keep_api_running && !args.skip_api_start {
+        let compose_file = root.join("benches/api/docker/compose.ci.yaml");
+        eprintln!(
+            "  {}. Stop API: docker compose -f {} down -v",
+            step,
+            compose_file.display()
+        );
+    } else if args.skip_api_start {
+        eprintln!("  [SKIP] Stop API (API was not started)");
+    } else if args.keep_api_running {
+        eprintln!("  [SKIP] Stop API (--keep-api-running)");
+    }
+    eprintln!();
+
+    eprintln!("=== END DRY RUN ===");
+}
+
 pub fn run(args: BenchApiArgs) -> Result<()> {
     let root = project_root()?;
 
@@ -668,9 +814,6 @@ pub fn run(args: BenchApiArgs) -> Result<()> {
     // Create environment configuration
     let bench_env = BenchEnv::from_args_and_scenario(&args, &scenario, &root)?;
 
-    // Set environment variables
-    bench_env.set_env_vars();
-
     eprintln!("==============================================");
     eprintln!("  API Benchmark Runner (xtask)");
     eprintln!("==============================================");
@@ -704,7 +847,17 @@ pub fn run(args: BenchApiArgs) -> Result<()> {
     }
     eprintln!("  Profile:        {}", bench_env.profile);
     eprintln!("  Quick Mode:     {}", args.quick);
+    eprintln!("  Dry Run:        {}", args.dry_run);
     eprintln!();
+
+    // Dry-run mode: show commands without executing (no side effects)
+    if args.dry_run {
+        print_dry_run_output(&bench_env, &scenario_path, &root, &args);
+        return Ok(());
+    }
+
+    // Set environment variables (only when actually executing)
+    bench_env.set_env_vars();
 
     let mut api_guard = ApiGuard::new(&root);
 
