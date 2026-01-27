@@ -44,8 +44,8 @@ thresholds:
 metadata:
   test_type: "rps_smoke"
   endpoint: "/health"
-  payload: "none"
-  cache_strategy: "none"
+  payload: "minimal"
+  cache_strategy: "read-through"
   hit_rate: 0
   fail_injection: 0
   retry: false
