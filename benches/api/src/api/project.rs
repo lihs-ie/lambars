@@ -1652,7 +1652,7 @@ mod handler_tests {
 
     fn create_test_app_state() -> AppState {
         use crate::api::bulk::BulkConfig;
-        use crate::api::handlers::create_stub_external_sources;
+        use crate::api::handlers::{AppliedConfig, create_stub_external_sources};
         use crate::infrastructure::RngProvider;
         use std::sync::atomic::AtomicU64;
 
@@ -1676,6 +1676,7 @@ mod handler_tests {
             cache_errors: Arc::new(AtomicU64::new(0)),
             cache_strategy: "read-through".to_string(),
             cache_ttl_seconds: 60,
+            applied_config: AppliedConfig::default(),
         }
     }
 

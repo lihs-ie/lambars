@@ -25,7 +25,7 @@ use std::sync::atomic::AtomicU64;
 use arc_swap::ArcSwap;
 
 use task_management_benchmark_api::api::{
-    AppConfig, AppState, bulk::BulkConfig, handlers::create_stub_external_sources,
+    AppConfig, AppState, AppliedConfig, bulk::BulkConfig, handlers::create_stub_external_sources,
     query::SearchCache, query::SearchIndex,
 };
 use task_management_benchmark_api::domain::{
@@ -67,6 +67,7 @@ pub fn create_test_app_state() -> AppState {
         cache_errors: Arc::new(AtomicU64::new(0)),
         cache_strategy: "read-through".to_string(),
         cache_ttl_seconds: 60,
+        applied_config: AppliedConfig::default(),
     }
 }
 
@@ -116,6 +117,7 @@ pub fn create_test_app_state_with_fail_injection(
         cache_errors: Arc::new(AtomicU64::new(0)),
         cache_strategy: "read-through".to_string(),
         cache_ttl_seconds: 60,
+        applied_config: AppliedConfig::default(),
     }
 }
 
