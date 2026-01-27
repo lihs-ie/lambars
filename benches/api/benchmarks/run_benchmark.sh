@@ -1,17 +1,39 @@
 #!/bin/bash
 # benches/api/benchmarks/run_benchmark.sh
 #
-# Run wrk benchmarks for API endpoints
+# Run wrk/wrk2 benchmarks for API endpoints
 #
+# =============================================================================
+# RESPONSIBILITY SEPARATION
+# =============================================================================
+#
+# This script is responsible ONLY for:
+#   - Executing wrk/wrk2 load generation
+#   - Collecting benchmark results
+#   - Generating meta.json with execution metadata
+#
+# API startup and environment variable injection are delegated to:
+#   - xtask (cargo xtask bench-api): Parses scenario YAML, generates env vars,
+#     starts/stops API server, and invokes this script
+#   - Manual startup: User starts API with appropriate env vars before running
+#
+# Environment variables are expected to be:
+#   - Inherited from xtask (when using cargo xtask bench-api)
+#   - Set by the user (when running this script directly)
+#
+# =============================================================================
 # Usage:
 #   ./run_benchmark.sh --scenario <yaml>                # Run with scenario configuration (REQUIRED)
 #   ./run_benchmark.sh --scenario <yaml> --quick        # Quick test (5s duration)
 #   ./run_benchmark.sh --scenario <yaml> --profile      # Run with perf profiling
 #   ./run_benchmark.sh --scenario <yaml> --quick --profile  # Combined options
 #
+# Recommended usage (via xtask for full environment integration):
+#   cargo xtask bench-api --scenario <yaml>
+#
 # IMPORTANT: --scenario is REQUIRED. Use one of the scenarios in benches/api/benchmarks/scenarios/
 #
-# Environment Variables (set via scenario YAML or directly):
+# Environment Variables (set via xtask, scenario YAML parsing, or directly):
 #   API_URL          - API server URL (default: http://localhost:3002)
 #   STORAGE_MODE     - in_memory | postgres (REQUIRED)
 #   CACHE_MODE       - in_memory | redis | none (REQUIRED)
@@ -25,7 +47,7 @@
 #   POOL_SIZES       - DB+Redis pool size (combined)
 #   DATABASE_POOL_SIZE - Database pool size (default: 16)
 #   REDIS_POOL_SIZE  - Redis pool size (default: 8)
-#   WORKERS          - worker threads (default: 4)
+#   WORKER_THREADS   - tokio worker threads (default: 4)
 #   FAIL_RATE        - 0.0-1.0 (default: 0)
 #   RETRY            - true | false (default: false)
 #   PROFILE          - true | false (default: false)
@@ -285,7 +307,7 @@ resolve_scripts_from_scenario() {
 #   threads                           -> THREADS
 #   connections                       -> CONNECTIONS
 #   duration_seconds                  -> DURATION
-#   concurrency.worker_threads        -> WORKERS
+#   concurrency.worker_threads        -> WORKER_THREADS
 #   concurrency.database_pool_size + redis_pool_size -> POOL_SIZES
 #   cache_metrics.expected_hit_rate or metadata.hit_rate -> HIT_RATE (0/50/90)
 #   metadata.cache_strategy           -> CACHE_STRATEGY
@@ -323,25 +345,28 @@ load_scenario_env_vars() {
     SCENARIO_NAME=$(yq '.name // "benchmark"' "${scenario_file}" | tr -d '"')
     export SCENARIO_NAME
 
-    # Storage mode
+    # Storage mode (preserve existing environment variable if set)
     local storage_mode
     storage_mode=$(yq '.storage_mode // "in_memory"' "${scenario_file}" | tr -d '"')
-    export STORAGE_MODE="${storage_mode}"
+    export STORAGE_MODE="${STORAGE_MODE:-${storage_mode}}"
 
-    # Cache mode
+    # Cache mode (preserve existing environment variable if set)
     local cache_mode
     cache_mode=$(yq '.cache_mode // "in_memory"' "${scenario_file}" | tr -d '"')
-    export CACHE_MODE="${cache_mode}"
+    export CACHE_MODE="${CACHE_MODE:-${cache_mode}}"
 
     # Data scale: small -> 1e2, medium -> 1e4, large -> 1e6
-    local data_scale
-    data_scale=$(yq '.data_scale // "medium"' "${scenario_file}" | tr -d '"')
-    case "${data_scale}" in
-        "small")  export DATA_SCALE="1e2" ;;
-        "medium") export DATA_SCALE="1e4" ;;
-        "large")  export DATA_SCALE="1e6" ;;
-        *)        export DATA_SCALE="1e4" ;;
-    esac
+    # Preserve existing environment variable if set
+    if [[ -z "${DATA_SCALE:-}" ]]; then
+        local data_scale
+        data_scale=$(yq '.data_scale // "medium"' "${scenario_file}" | tr -d '"')
+        case "${data_scale}" in
+            "small")  export DATA_SCALE="1e2" ;;
+            "medium") export DATA_SCALE="1e4" ;;
+            "large")  export DATA_SCALE="1e6" ;;
+            *)        export DATA_SCALE="1e4" ;;
+        esac
+    fi
 
     # Payload: prefer metadata.payload, fallback to payload_variant mapping
     local payload
@@ -407,22 +432,26 @@ load_scenario_env_vars() {
     fi
 
     # ==========================================================================
-    # Concurrency Settings (WORKERS, POOL_SIZES)
+    # Concurrency Settings (WORKER_THREADS, POOL_SIZES)
     # ==========================================================================
-    # Priority: .concurrency.* > .worker_config.* > .pool_sizes.*
+    # Priority: Environment > .concurrency.* > .worker_config.* > .pool_sizes.*
+    # Existing environment variables are preserved (not overwritten by scenario)
 
     # Workers: prefer concurrency.worker_threads, fallback to worker_config.worker_threads
-    local worker_threads
-    worker_threads=$(yq '.concurrency.worker_threads // null' "${scenario_file}")
-    if [[ "${worker_threads}" == "null" ]]; then
-        worker_threads=$(yq '.worker_config.worker_threads // null' "${scenario_file}")
-    fi
-    if [[ "${worker_threads}" != "null" ]]; then
-        export WORKERS="${worker_threads}"
-        export WORKER_THREADS="${worker_threads}"
+    # Only set if WORKER_THREADS is not already set
+    if [[ -z "${WORKER_THREADS:-}" ]]; then
+        local worker_threads
+        worker_threads=$(yq '.concurrency.worker_threads // null' "${scenario_file}")
+        if [[ "${worker_threads}" == "null" ]]; then
+            worker_threads=$(yq '.worker_config.worker_threads // null' "${scenario_file}")
+        fi
+        if [[ "${worker_threads}" != "null" ]]; then
+            export WORKER_THREADS="${worker_threads}"
+        fi
     fi
 
     # Pool sizes: prefer concurrency.*, fallback to pool_sizes.*
+    # Only set if not already set from environment
     local database_pool_size redis_pool_size
 
     # Try concurrency.* first
@@ -437,15 +466,15 @@ load_scenario_env_vars() {
         redis_pool_size=$(yq '.pool_sizes.redis_pool_size // 0' "${scenario_file}")
     fi
 
-    # Set environment variables if values are present
+    # Set environment variables if values are present, preserving existing values
     if [[ "${database_pool_size}" != "null" && "${database_pool_size}" != "0" ]] || \
        [[ "${redis_pool_size}" != "null" && "${redis_pool_size}" != "0" ]]; then
         database_pool_size=${database_pool_size:-0}
         redis_pool_size=${redis_pool_size:-0}
         local pool_sizes=$((database_pool_size + redis_pool_size))
-        export POOL_SIZES="${pool_sizes}"
-        export DATABASE_POOL_SIZE="${database_pool_size}"
-        export REDIS_POOL_SIZE="${redis_pool_size}"
+        export POOL_SIZES="${POOL_SIZES:-${pool_sizes}}"
+        export DATABASE_POOL_SIZE="${DATABASE_POOL_SIZE:-${database_pool_size}}"
+        export REDIS_POOL_SIZE="${REDIS_POOL_SIZE:-${redis_pool_size}}"
     fi
 
     local max_connections
@@ -480,10 +509,10 @@ load_scenario_env_vars() {
         export HIT_RATE="${hit_rate}"
     fi
 
-    # Cache strategy
+    # Cache strategy (preserve existing environment variable if set)
     local cache_strategy
     cache_strategy=$(yq '.metadata.cache_strategy // "read-through"' "${scenario_file}" | tr -d '"')
-    export CACHE_STRATEGY="${cache_strategy}"
+    export CACHE_STRATEGY="${CACHE_STRATEGY:-${cache_strategy}}"
 
     # ==========================================================================
     # Cache Metrics Configuration
@@ -696,7 +725,7 @@ load_scenario_env_vars() {
     echo "  Cache enabled: ${CACHE_ENABLED}, TTL: ${CACHE_TTL_SECS}s"
     echo "  Fail rate: ${FAIL_RATE}, Retry: ${RETRY}"
     [[ -n "${ENDPOINT:-}" ]] && echo "  Endpoint: ${ENDPOINT}"
-    [[ -n "${WORKERS:-}" ]] && echo "  Workers: ${WORKERS}"
+    [[ -n "${WORKER_THREADS:-}" ]] && echo "  Worker threads: ${WORKER_THREADS}"
     [[ -n "${POOL_SIZES:-}" ]] && echo "  Pool sizes: ${POOL_SIZES}"
     [[ -n "${SEED:-}" ]] && echo "  Seed: ${SEED}"
     [[ "${PROFILE_MODE}" == "true" ]] && echo "  Profiling: enabled"
@@ -733,7 +762,7 @@ load_scenario_env_vars() {
 #   - hit_rate: 0-100 (default: 50)
 #   - database_pool_size: positive integer (default: 16)
 #   - redis_pool_size: positive integer (default: 8)
-#   - workers: positive integer (default: 4)
+#   - worker_threads: positive integer (default: 4)
 #   - fail_rate: 0.0-1.0 (default: 0)
 #   - profile: true | false (default: false)
 #   - payload_variant: minimal | standard | complex | heavy (default: standard)
@@ -804,11 +833,11 @@ validate_scenario_parameters() {
         has_errors=true
     fi
 
-    # workers: positive integer (default: 4)
-    if [[ -z "${WORKERS:-}" ]]; then
-        export WORKERS="4"
-    elif ! [[ "${WORKERS}" =~ ^[0-9]+$ ]] || [[ "${WORKERS}" -lt 1 ]]; then
-        echo -e "${RED}Error: Invalid workers '${WORKERS}'. Must be: positive integer${NC}"
+    # worker_threads: positive integer (default: 4)
+    if [[ -z "${WORKER_THREADS:-}" ]]; then
+        export WORKER_THREADS="4"
+    elif ! [[ "${WORKER_THREADS}" =~ ^[0-9]+$ ]] || [[ "${WORKER_THREADS}" -lt 1 ]]; then
+        echo -e "${RED}Error: Invalid worker_threads '${WORKER_THREADS}'. Must be: positive integer${NC}"
         has_errors=true
     fi
 
@@ -1065,12 +1094,30 @@ if curl -sf "${API_URL}/health" > /dev/null 2>&1; then
     echo -e "${GREEN}OK${NC}"
 else
     echo -e "${RED}FAILED${NC}"
-    echo "API is not responding at ${API_URL}/health"
     echo ""
-    echo "Start the API server with:"
+    echo "Error: API health check failed at ${API_URL}/health"
+    echo ""
+    echo "The API server must be started before running this script."
+    echo ""
+    echo "Recommended (via xtask with full environment integration):"
+    echo "  cargo xtask bench-api --scenario ${SCENARIO_FILE:-<yaml>}"
+    echo ""
+    echo "Alternative (manual startup):"
     echo "  cd benches/api/docker && docker compose up -d"
     echo "  # or"
     echo "  cargo run -p task-management-benchmark-api"
+    echo ""
+    echo "IMPORTANT: When starting the API manually, you must pass scenario-derived"
+    echo "environment variables (WORKER_THREADS, DATABASE_POOL_SIZE, REDIS_POOL_SIZE,"
+    echo "STORAGE_MODE, CACHE_MODE, CACHE_STRATEGY, etc.) to the API server."
+    echo "Otherwise, the benchmark results may not reflect the intended configuration."
+    echo ""
+    echo "Example with environment variables:"
+    echo "  WORKER_THREADS=4 DATABASE_POOL_SIZE=16 REDIS_POOL_SIZE=8 \\"
+    echo "    cargo run -p task-management-benchmark-api"
+    echo ""
+    echo "Note: When using xtask, the API is started automatically with"
+    echo "      environment variables from the scenario YAML applied."
     exit 1
 fi
 
@@ -1386,7 +1433,7 @@ PHASES_EOF
     "threads": ${THREADS},
     "connections": ${CONNECTIONS},
     "duration_seconds": ${duration_seconds},
-    "workers": ${WORKERS:-null},
+    "worker_threads": ${WORKER_THREADS:-null},
     "pool_sizes": ${POOL_SIZES:-null},
     "database_pool_size": ${DATABASE_POOL_SIZE:-null},
     "redis_pool_size": ${REDIS_POOL_SIZE:-null},
@@ -1835,7 +1882,7 @@ STORAGE_MODE=${STORAGE_MODE:-in_memory}
 DATA_SCALE=${DATA_SCALE:-1e4}
 
 ## Concurrency
-WORKERS=${WORKERS:-4}
+WORKER_THREADS=${WORKER_THREADS:-4}
 DATABASE_POOL_SIZE=${DATABASE_POOL_SIZE:-16}
 REDIS_POOL_SIZE=${REDIS_POOL_SIZE:-8}
 POOL_SIZES=${POOL_SIZES:-24}

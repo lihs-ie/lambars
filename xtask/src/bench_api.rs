@@ -113,7 +113,7 @@ struct PoolSizes {
 
 #[derive(Debug, Deserialize)]
 struct ConcurrencyConfig {
-    workers: Option<u32>,
+    worker_threads: Option<u32>,
     database_pool_size: Option<u32>,
     redis_pool_size: Option<u32>,
 }
@@ -213,13 +213,13 @@ impl BenchEnv {
         });
         let fail_rate = fail_rate.unwrap_or(0.0);
 
-        // Worker threads: from environment, concurrency.workers, or worker_config.worker_threads
+        // Worker threads: from environment, concurrency.worker_threads, or worker_config.worker_threads
         // None means use library default (don't set environment variable)
         let worker_threads = env::var("WORKER_THREADS")
             .ok()
             .and_then(|v| v.parse().ok())
             .or_else(|| env_vars.get("WORKER_THREADS").and_then(|v| v.parse().ok()))
-            .or_else(|| scenario.concurrency.as_ref().and_then(|c| c.workers))
+            .or_else(|| scenario.concurrency.as_ref().and_then(|c| c.worker_threads))
             .or_else(|| {
                 scenario
                     .worker_config
