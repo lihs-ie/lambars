@@ -356,18 +356,32 @@ load_scenario_env_vars() {
     export CACHE_MODE="${CACHE_MODE:-${cache_mode}}"
 
     # Data scale: small -> 1e2, medium -> 1e4, large -> 1e6
-    # Preserve existing environment variable if set
-    if [[ -z "${DATA_SCALE:-}" ]]; then
-        local data_scale
-        data_scale=$(yq '.data_scale // "medium"' "${scenario_file}" | tr -d '"')
-        case "${data_scale}" in
-            "small")  export DATA_SCALE="1e2" ;;
-            "medium") export DATA_SCALE="1e4" ;;
-            "large")  export DATA_SCALE="1e6" ;;
-            *)        export DATA_SCALE="1e4" ;;
-        esac
+    # Use environment variable if set, otherwise read from YAML
+    local data_scale_raw
+    local data_scale_source="yaml"
+
+    if [[ -n "${DATA_SCALE:-}" ]]; then
+        data_scale_raw="${DATA_SCALE}"
+        data_scale_source="env"
+    else
+        data_scale_raw=$(yq '.data_scale // "medium"' "${scenario_file}" | tr -d '"')
     fi
 
+    # Map human-readable format to numeric format
+    case "${data_scale_raw}" in
+        "small"|"1e2")  export DATA_SCALE="1e2" ;;
+        "medium"|"1e4") export DATA_SCALE="1e4" ;;
+        "large"|"1e6")  export DATA_SCALE="1e6" ;;
+        *)
+            if [[ "${data_scale_source}" == "env" ]]; then
+                echo -e "${RED}Error: Invalid DATA_SCALE '${data_scale_raw}' from environment. Must be: small|medium|large|1e2|1e4|1e6${NC}" >&2
+                return 1
+            else
+                echo -e "${YELLOW}Warning: Unknown data_scale '${data_scale_raw}' in scenario, defaulting to medium (1e4)${NC}" >&2
+                export DATA_SCALE="1e4"
+            fi
+            ;;
+    esac
     # Payload: prefer metadata.payload, fallback to payload_variant mapping
     local payload
     payload=$(yq '.metadata.payload // null' "${scenario_file}" | tr -d '"')
