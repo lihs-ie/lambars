@@ -33,7 +33,9 @@ use std::sync::Arc;
 
 use deadpool_redis::{Config as RedisConfig, Pool as RedisPool, Runtime};
 use sqlx::PgPool;
+use sqlx::postgres::PgPoolOptions;
 use thiserror::Error;
+use tracing::warn;
 
 use super::{
     CacheConfig, CachedProjectRepository, CachedTaskRepository, EventStore, InMemoryEventStore,
@@ -112,6 +114,11 @@ impl FromStr for CacheMode {
 /// The `cache_config` field controls cache behavior when `cache_mode` is `Redis`.
 /// It includes strategy, TTL, and enable/disable settings that can be configured
 /// via environment variables or programmatically.
+///
+/// # Pool Size Configuration (ENV-REQ-021)
+///
+/// The `database_pool_size` and `redis_pool_size` fields control connection pool sizes.
+/// When `None`, each library's default value is used.
 #[derive(Debug, Clone, Default)]
 pub struct RepositoryConfig {
     /// Storage mode for persistent data (Tasks, Projects, Events).
@@ -126,6 +133,74 @@ pub struct RepositoryConfig {
     /// This is used when `cache_mode` is `Redis` to configure
     /// `CachedTaskRepository` and `CachedProjectRepository`.
     pub cache_config: CacheConfig,
+    /// `PostgreSQL` connection pool size.
+    /// When `None`, sqlx's default value is used.
+    pub database_pool_size: Option<u32>,
+    /// Redis connection pool size.
+    /// When `None`, deadpool-redis's default value is used.
+    pub redis_pool_size: Option<u32>,
+}
+
+/// Parses a pool size value from a string.
+///
+/// This is a pure function that handles the parsing logic without side effects.
+/// It is separated from environment variable reading for testability.
+///
+/// # Returns
+///
+/// - `Some(n)` if the value is a valid positive integer (`n > 0`)
+/// - `None` if the value is empty, whitespace-only, zero, or unparseable
+///
+/// # Examples
+///
+/// ```ignore
+/// assert_eq!(parse_pool_size("10"), Some(10));
+/// assert_eq!(parse_pool_size("0"), None);
+/// assert_eq!(parse_pool_size(""), None);
+/// assert_eq!(parse_pool_size("  "), None);
+/// assert_eq!(parse_pool_size("abc"), None);
+/// ```
+fn parse_pool_size(value: &str) -> Option<u32> {
+    value.trim().parse::<u32>().ok().filter(|&n| n > 0)
+}
+
+/// Parses an optional u32 value from an environment variable.
+///
+/// Returns `None` if the variable is unset, empty, whitespace-only, zero, or unparseable.
+/// Logs a warning if the value is present but invalid (non-UTF-8, zero, or unparseable).
+///
+/// # Arguments
+///
+/// * `variable_name` - The name of the environment variable to read
+///
+/// # I/O Notice
+///
+/// This function reads from environment variables and logs warnings.
+/// It should only be called during application initialization.
+fn parse_optional_u32(variable_name: &str) -> Option<u32> {
+    match env::var(variable_name) {
+        Ok(value) => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            parse_pool_size(trimmed).or_else(|| {
+                warn!(
+                    "Invalid {} value '{}', using default (library default will be applied)",
+                    variable_name, value
+                );
+                None
+            })
+        }
+        Err(env::VarError::NotPresent) => None,
+        Err(env::VarError::NotUnicode(_)) => {
+            warn!(
+                "{} contains non-UTF-8 value, using default (library default will be applied)",
+                variable_name
+            );
+            None
+        }
+    }
 }
 
 impl RepositoryConfig {
@@ -152,6 +227,8 @@ impl RepositoryConfig {
     /// - `CACHE_STRATEGY`: Cache strategy (`read-through`, `write-through`, `write-behind`)
     /// - `CACHE_TTL_SECS`: TTL in seconds (default: 60)
     /// - `CACHE_ENABLED`: Whether caching is enabled (`true`, `false`, `1`, `0`)
+    /// - `DATABASE_POOL_SIZE`: `PostgreSQL` connection pool size (optional)
+    /// - `REDIS_POOL_SIZE`: Redis connection pool size (optional)
     ///
     /// # Errors
     ///
@@ -165,6 +242,11 @@ impl RepositoryConfig {
     /// The cache configuration is loaded from environment variables via
     /// `CacheConfig::from_env()`. This allows scenarios to control cache
     /// behavior through environment variables.
+    ///
+    /// # Pool Size Configuration (ENV-REQ-021)
+    ///
+    /// Pool sizes are loaded from environment variables. When not set or empty,
+    /// `None` is used which causes each library to use its default value.
     pub fn from_env() -> Result<Self, ConfigurationError> {
         let storage_mode = match env::var("STORAGE_MODE") {
             Ok(value) => value.parse()?,
@@ -199,12 +281,18 @@ impl RepositoryConfig {
         // Load cache configuration from environment variables (CACHE-REQ-031)
         let cache_config = CacheConfig::from_env();
 
+        // Load pool size configuration from environment variables (ENV-REQ-021)
+        let database_pool_size = parse_optional_u32("DATABASE_POOL_SIZE");
+        let redis_pool_size = parse_optional_u32("REDIS_POOL_SIZE");
+
         let config = Self {
             storage_mode,
             cache_mode,
             database_url,
             redis_url,
             cache_config,
+            database_pool_size,
+            redis_pool_size,
         };
 
         config.validate()?;
@@ -239,8 +327,10 @@ impl RepositoryConfig {
 /// let config = RepositoryConfig::builder()
 ///     .storage_mode(StorageMode::Postgres)
 ///     .database_url("postgres://localhost/mydb")
+///     .database_pool_size(10)
 ///     .cache_mode(CacheMode::Redis)
 ///     .redis_url("redis://localhost:6379")
+///     .redis_pool_size(5)
 ///     .cache_config(CacheConfig::default())
 ///     .build()?;
 /// ```
@@ -251,6 +341,8 @@ pub struct RepositoryConfigBuilder {
     database_url: Option<String>,
     redis_url: Option<String>,
     cache_config: CacheConfig,
+    database_pool_size: Option<u32>,
+    redis_pool_size: Option<u32>,
 }
 
 impl RepositoryConfigBuilder {
@@ -296,7 +388,26 @@ impl RepositoryConfigBuilder {
         self
     }
 
+    /// Sets the `PostgreSQL` connection pool size.
+    /// When not set, sqlx's default pool size is used.
+    #[must_use]
+    pub const fn database_pool_size(mut self, size: u32) -> Self {
+        self.database_pool_size = Some(size);
+        self
+    }
+
+    /// Sets the Redis connection pool size.
+    /// When not set, deadpool-redis's default pool size is used.
+    #[must_use]
+    pub const fn redis_pool_size(mut self, size: u32) -> Self {
+        self.redis_pool_size = Some(size);
+        self
+    }
+
     /// Builds the configuration.
+    ///
+    /// Pool sizes of `0` are treated as `None` (use library defaults),
+    /// consistent with environment variable parsing behavior.
     ///
     /// # Errors
     ///
@@ -308,6 +419,8 @@ impl RepositoryConfigBuilder {
             database_url: self.database_url,
             redis_url: self.redis_url,
             cache_config: self.cache_config,
+            database_pool_size: self.database_pool_size.filter(|&size| size > 0),
+            redis_pool_size: self.redis_pool_size.filter(|&size| size > 0),
         };
 
         config.validate()?;
@@ -543,7 +656,13 @@ impl RepositoryFactory {
             .as_ref()
             .ok_or(ConfigurationError::MissingDatabaseUrl)?;
 
-        PgPool::connect(database_url)
+        let mut pool_options = PgPoolOptions::new();
+        if let Some(size) = self.config.database_pool_size {
+            pool_options = pool_options.max_connections(size);
+        }
+
+        pool_options
+            .connect(database_url)
             .await
             .map_err(|error| FactoryError::DatabaseConnection(error.to_string()))
     }
@@ -557,10 +676,7 @@ impl RepositoryFactory {
         }
     }
 
-    /// Creates a Redis connection pool for caching (CACHE-REQ-030).
-    ///
-    /// This pool is used by `CachedTaskRepository` and `CachedProjectRepository`
-    /// to cache data in Redis.
+    /// Creates a Redis connection pool for caching.
     fn create_redis_pool(&self) -> Result<RedisPool, FactoryError> {
         let redis_url = self
             .config
@@ -568,7 +684,11 @@ impl RepositoryFactory {
             .as_ref()
             .ok_or(ConfigurationError::MissingRedisUrl)?;
 
-        let redis_config = RedisConfig::from_url(redis_url);
+        let mut redis_config = RedisConfig::from_url(redis_url);
+        if let Some(size) = self.config.redis_pool_size {
+            redis_config.pool = Some(deadpool_redis::PoolConfig::new(size as usize));
+        }
+
         redis_config
             .create_pool(Some(Runtime::Tokio1))
             .map_err(|error| FactoryError::RedisConnection(error.to_string()))
@@ -722,6 +842,8 @@ mod tests {
             database_url: None,
             redis_url: None,
             cache_config: CacheConfig::default(),
+            database_pool_size: None,
+            redis_pool_size: None,
         };
         assert!(config.validate().is_ok());
     }
@@ -734,6 +856,8 @@ mod tests {
             database_url: None,
             redis_url: None,
             cache_config: CacheConfig::default(),
+            database_pool_size: None,
+            redis_pool_size: None,
         };
         let result = config.validate();
         assert!(result.is_err());
@@ -748,6 +872,8 @@ mod tests {
             database_url: Some("postgres://localhost/test".to_string()),
             redis_url: None,
             cache_config: CacheConfig::default(),
+            database_pool_size: None,
+            redis_pool_size: None,
         };
         assert!(config.validate().is_ok());
     }
@@ -760,6 +886,8 @@ mod tests {
             database_url: None,
             redis_url: None,
             cache_config: CacheConfig::default(),
+            database_pool_size: None,
+            redis_pool_size: None,
         };
         let result = config.validate();
         assert!(result.is_err());
@@ -774,6 +902,8 @@ mod tests {
             database_url: None,
             redis_url: Some("redis://localhost:6379".to_string()),
             cache_config: CacheConfig::default(),
+            database_pool_size: None,
+            redis_pool_size: None,
         };
         assert!(config.validate().is_ok());
     }
@@ -786,6 +916,8 @@ mod tests {
             database_url: Some("postgres://localhost/test".to_string()),
             redis_url: Some("redis://localhost:6379".to_string()),
             cache_config: CacheConfig::default(),
+            database_pool_size: None,
+            redis_pool_size: None,
         };
         assert!(config.validate().is_ok());
     }
@@ -1054,7 +1186,6 @@ mod tests {
 
         assert!(result.is_ok());
         let config = result.unwrap();
-        // cache_config should use defaults when not explicitly set
         assert_eq!(config.cache_config.strategy, CacheStrategy::ReadThrough);
         assert_eq!(config.cache_config.ttl_seconds, 60);
         assert!(config.cache_config.enabled);
@@ -1063,19 +1194,8 @@ mod tests {
     // -------------------------------------------------------------------------
     // RepositoryConfig::from_env() Integration Tests (CACHE-REQ-031)
     // -------------------------------------------------------------------------
-    //
-    // Note: Direct environment variable tests are not included here because:
-    // 1. Rust 2024 edition requires `unsafe` blocks for `env::set_var`/`env::remove_var`
-    // 2. This project forbids `unsafe` code via `-F unsafe-code`
-    // 3. Parallel test execution makes environment variable tests unreliable
-    //
-    // Instead, `RepositoryConfig::from_env()` behavior is tested through:
-    // - Unit tests for `CacheConfig::from_env()` components (strategy, TTL parsing)
-    // - Integration tests that verify the full configuration chain
-    // - Builder pattern tests that verify cache config propagation
-    //
-    // The following tests verify that `CacheConfig` values are correctly
-    // integrated into `RepositoryConfig` via the builder pattern.
+    // Direct env var tests skipped: Rust 2024 requires unsafe for set_var,
+    // and this project forbids unsafe code. Tested via builder pattern instead.
 
     #[rstest]
     fn test_repository_config_builder_propagates_cache_strategy_write_through() {
@@ -1170,6 +1290,271 @@ mod tests {
             .cache_config(cache_config)
             .build()
             .unwrap();
+
+        let factory = RepositoryFactory::new(config);
+        let result = factory.create().await;
+        assert!(result.is_ok());
+    }
+
+    // -------------------------------------------------------------------------
+    // Pool Size Configuration Tests (ENV-REQ-021)
+    // -------------------------------------------------------------------------
+    // Direct env var tests skipped: Rust 2024 requires unsafe for set_var.
+    // Pool size behavior tested via builder pattern instead.
+
+    #[rstest]
+    fn test_repository_config_default_pool_sizes_are_none() {
+        let config = RepositoryConfig::default();
+        assert!(config.database_pool_size.is_none());
+        assert!(config.redis_pool_size.is_none());
+    }
+
+    #[rstest]
+    fn test_repository_config_builder_without_pool_sizes() {
+        let result = RepositoryConfig::builder().build();
+
+        assert!(result.is_ok());
+        let config = result.unwrap();
+        assert!(config.database_pool_size.is_none());
+        assert!(config.redis_pool_size.is_none());
+    }
+
+    #[rstest]
+    fn test_repository_config_builder_with_database_pool_size() {
+        let result = RepositoryConfig::builder().database_pool_size(10).build();
+
+        assert!(result.is_ok());
+        let config = result.unwrap();
+        assert_eq!(config.database_pool_size, Some(10));
+        assert!(config.redis_pool_size.is_none());
+    }
+
+    #[rstest]
+    fn test_repository_config_builder_with_redis_pool_size() {
+        let result = RepositoryConfig::builder().redis_pool_size(5).build();
+
+        assert!(result.is_ok());
+        let config = result.unwrap();
+        assert!(config.database_pool_size.is_none());
+        assert_eq!(config.redis_pool_size, Some(5));
+    }
+
+    #[rstest]
+    fn test_repository_config_builder_with_both_pool_sizes() {
+        let result = RepositoryConfig::builder()
+            .database_pool_size(20)
+            .redis_pool_size(15)
+            .build();
+
+        assert!(result.is_ok());
+        let config = result.unwrap();
+        assert_eq!(config.database_pool_size, Some(20));
+        assert_eq!(config.redis_pool_size, Some(15));
+    }
+
+    #[rstest]
+    fn test_repository_config_builder_full_with_pool_sizes() {
+        let cache_config = CacheConfig::new(CacheStrategy::ReadThrough, 60, true, 100);
+        let result = RepositoryConfig::builder()
+            .storage_mode(StorageMode::Postgres)
+            .database_url("postgres://localhost/test")
+            .database_pool_size(25)
+            .cache_mode(CacheMode::Redis)
+            .redis_url("redis://localhost:6379")
+            .redis_pool_size(10)
+            .cache_config(cache_config)
+            .build();
+
+        assert!(result.is_ok());
+        let config = result.unwrap();
+        assert_eq!(config.storage_mode, StorageMode::Postgres);
+        assert_eq!(config.cache_mode, CacheMode::Redis);
+        assert_eq!(config.database_pool_size, Some(25));
+        assert_eq!(config.redis_pool_size, Some(10));
+    }
+
+    #[rstest]
+    fn test_repository_config_builder_pool_size_zero_is_filtered_to_none() {
+        // Zero pool sizes are filtered to None in build(),
+        // consistent with from_env() behavior.
+        let result = RepositoryConfig::builder()
+            .database_pool_size(0)
+            .redis_pool_size(0)
+            .build();
+
+        assert!(result.is_ok());
+        let config = result.unwrap();
+        assert_eq!(config.database_pool_size, None);
+        assert_eq!(config.redis_pool_size, None);
+    }
+
+    #[rstest]
+    fn test_repository_config_builder_large_pool_sizes() {
+        let result = RepositoryConfig::builder()
+            .database_pool_size(1000)
+            .redis_pool_size(500)
+            .build();
+
+        assert!(result.is_ok());
+        let config = result.unwrap();
+        assert_eq!(config.database_pool_size, Some(1000));
+        assert_eq!(config.redis_pool_size, Some(500));
+    }
+
+    // -------------------------------------------------------------------------
+    // parse_pool_size Pure Function Tests (ENV-REQ-021)
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    #[case("10", Some(10))]
+    #[case("1", Some(1))]
+    #[case("100", Some(100))]
+    #[case("999999", Some(999_999))]
+    fn test_parse_pool_size_valid_positive_values(
+        #[case] input: &str,
+        #[case] expected: Option<u32>,
+    ) {
+        assert_eq!(super::parse_pool_size(input), expected);
+    }
+
+    #[rstest]
+    #[case("0")]
+    fn test_parse_pool_size_zero_returns_none(#[case] input: &str) {
+        assert_eq!(super::parse_pool_size(input), None);
+    }
+
+    #[rstest]
+    #[case("")]
+    fn test_parse_pool_size_empty_string_returns_none(#[case] input: &str) {
+        assert_eq!(super::parse_pool_size(input), None);
+    }
+
+    #[rstest]
+    #[case(" ")]
+    #[case("  ")]
+    #[case("\t")]
+    #[case("\n")]
+    #[case("   \t\n   ")]
+    fn test_parse_pool_size_whitespace_only_returns_none(#[case] input: &str) {
+        assert_eq!(super::parse_pool_size(input), None);
+    }
+
+    #[rstest]
+    #[case("abc")]
+    #[case("12abc")]
+    #[case("abc12")]
+    #[case("-1")]
+    #[case("-10")]
+    #[case("1.5")]
+    #[case("10.0")]
+    #[case("0x10")]
+    #[case("")]
+    fn test_parse_pool_size_invalid_values_return_none(#[case] input: &str) {
+        assert_eq!(super::parse_pool_size(input), None);
+    }
+
+    #[rstest]
+    #[case(" 10 ", Some(10))]
+    #[case("  5  ", Some(5))]
+    #[case("\t20\t", Some(20))]
+    #[case("\n15\n", Some(15))]
+    fn test_parse_pool_size_trims_whitespace(#[case] input: &str, #[case] expected: Option<u32>) {
+        assert_eq!(super::parse_pool_size(input), expected);
+    }
+
+    #[rstest]
+    #[case(" 0 ")]
+    fn test_parse_pool_size_trimmed_zero_returns_none(#[case] input: &str) {
+        assert_eq!(super::parse_pool_size(input), None);
+    }
+
+    // -------------------------------------------------------------------------
+    // parse_optional_u32 Behavior Tests (ENV-REQ-021)
+    // -------------------------------------------------------------------------
+    // Tested indirectly via builder pattern since parse_optional_u32 reads from env.
+
+    #[rstest]
+    fn test_repository_config_builder_preserves_none_when_not_set() {
+        let result = RepositoryConfig::builder()
+            .storage_mode(StorageMode::InMemory)
+            .cache_mode(CacheMode::InMemory)
+            .build();
+
+        assert!(result.is_ok());
+        let config = result.unwrap();
+        assert!(config.database_pool_size.is_none());
+        assert!(config.redis_pool_size.is_none());
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_repository_factory_creates_in_memory_without_pool_sizes() {
+        let config = RepositoryConfig::builder()
+            .storage_mode(StorageMode::InMemory)
+            .cache_mode(CacheMode::InMemory)
+            .build()
+            .unwrap();
+
+        assert!(config.database_pool_size.is_none());
+        assert!(config.redis_pool_size.is_none());
+
+        let factory = RepositoryFactory::new(config);
+        let result = factory.create().await;
+        assert!(result.is_ok());
+    }
+
+    #[rstest]
+    #[tokio::test]
+    #[ignore = "Requires PostgreSQL instance"]
+    async fn test_repository_factory_creates_postgres_with_custom_pool_size() {
+        let config = RepositoryConfig::builder()
+            .storage_mode(StorageMode::Postgres)
+            .database_url("postgres://localhost/test")
+            .database_pool_size(5)
+            .build()
+            .unwrap();
+
+        assert_eq!(config.database_pool_size, Some(5));
+
+        let factory = RepositoryFactory::new(config);
+        let result = factory.create().await;
+        assert!(result.is_ok());
+    }
+
+    #[rstest]
+    #[tokio::test]
+    #[ignore = "Requires Redis instance"]
+    async fn test_repository_factory_creates_redis_with_custom_pool_size() {
+        let config = RepositoryConfig::builder()
+            .cache_mode(CacheMode::Redis)
+            .redis_url("redis://localhost:6379")
+            .redis_pool_size(3)
+            .build()
+            .unwrap();
+
+        assert_eq!(config.redis_pool_size, Some(3));
+
+        let factory = RepositoryFactory::new(config);
+        let result = factory.create().await;
+        assert!(result.is_ok());
+    }
+
+    #[rstest]
+    #[tokio::test]
+    #[ignore = "Requires PostgreSQL and Redis instances"]
+    async fn test_repository_factory_creates_full_production_with_custom_pool_sizes() {
+        let config = RepositoryConfig::builder()
+            .storage_mode(StorageMode::Postgres)
+            .database_url("postgres://localhost/test")
+            .database_pool_size(20)
+            .cache_mode(CacheMode::Redis)
+            .redis_url("redis://localhost:6379")
+            .redis_pool_size(10)
+            .build()
+            .unwrap();
+
+        assert_eq!(config.database_pool_size, Some(20));
+        assert_eq!(config.redis_pool_size, Some(10));
 
         let factory = RepositoryFactory::new(config);
         let result = factory.create().await;
