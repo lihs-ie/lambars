@@ -1,26 +1,26 @@
 #!/usr/bin/env bash
 # =============================================================================
-# test_lua_compatibility.sh - Lua スクリプト wrk2 互換性テスト
+# test_lua_compatibility.sh - Lua script wrk2 compatibility test
 # =============================================================================
-# 全ての Lua スクリプトが wrk2 で正常に動作することを確認します。
+# Verify that all Lua scripts work correctly with wrk2.
 #
-# テスト内容:
-#   1. 各 Lua スクリプトを wrk2 で 5 秒間実行
-#   2. エラーなく完了することを確認
-#   3. Requests/sec 出力があることを確認
+# Test contents:
+#   1. Run each Lua script with wrk2 for 5 seconds
+#   2. Verify completion without errors
+#   3. Verify Requests/sec output is present
 #
-# 前提条件:
-#   - wrk2 がインストールされていること
-#   - テスト対象の API サーバーが起動していること (デフォルト: localhost:8080)
+# Prerequisites:
+#   - wrk2 must be installed
+#   - Target API server must be running (default: localhost:8080)
 #
-# 使用方法:
+# Usage:
 #   ./test_lua_compatibility.sh [--target URL] [--duration SECONDS]
 #
-# オプション:
-#   --target URL       テスト対象の URL (デフォルト: http://localhost:8080)
-#   --duration SECONDS 各スクリプトの実行時間 (デフォルト: 5)
-#   --skip-server      サーバー起動チェックをスキップ
-#   --verbose          詳細出力
+# Options:
+#   --target URL       Target URL (default: http://localhost:8080)
+#   --duration SECONDS Duration per script (default: 5)
+#   --skip-server      Skip server availability check
+#   --verbose          Verbose output
 # =============================================================================
 
 set -euo pipefail
@@ -29,12 +29,12 @@ readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly SCRIPTS_DIR="${SCRIPT_DIR}/scripts"
 readonly RESULTS_DIR="${SCRIPT_DIR}/results/lua_compatibility"
 
-# デフォルト設定
+# Default settings
 DEFAULT_TARGET="http://localhost:8080"
 DEFAULT_DURATION=5
 DEFAULT_RATE=10
 
-# カラー出力
+# Color output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -58,7 +58,7 @@ log_test() {
 }
 
 # =============================================================================
-# wrk2 がインストールされているか確認
+# Check if wrk2 is installed
 # =============================================================================
 check_wrk2() {
     if ! command -v wrk2 &>/dev/null; then
@@ -71,7 +71,7 @@ check_wrk2() {
 }
 
 # =============================================================================
-# サーバーが起動しているか確認
+# Check if server is running
 # =============================================================================
 check_server() {
     local target="$1"
@@ -84,7 +84,7 @@ check_server() {
 
     log_info "Checking if server is available at ${target}..."
 
-    # ヘルスチェックエンドポイントを試行
+    # Try health check endpoints
     local health_endpoints=("/health" "/api/health" "/" "/ping")
 
     for endpoint in "${health_endpoints[@]}"; do
@@ -102,7 +102,7 @@ check_server() {
 }
 
 # =============================================================================
-# Lua スクリプトをテスト
+# Test Lua script
 # =============================================================================
 test_lua_script() {
     local script_path="$1"
@@ -117,59 +117,59 @@ test_lua_script() {
 
     log_test "Testing: ${script_name}"
 
-    # wrk2 実行
-    # -t1: 1 スレッド
-    # -c1: 1 コネクション
-    # -d: 実行時間
-    # -R: リクエストレート (requests/sec)
-    # -s: Lua スクリプト
-    # 注: Lua スクリプトの require() が正しく解決されるよう、scripts ディレクトリで実行
+    # Run wrk2
+    # -t1: 1 thread
+    # -c1: 1 connection
+    # -d: duration
+    # -R: request rate (requests/sec)
+    # -s: Lua script
+    # Note: Run from scripts directory so that Lua require() resolves correctly
     local wrk2_output
     local exit_code=0
 
     wrk2_output=$(cd "${SCRIPTS_DIR}" && wrk2 -t1 -c1 -d"${duration}s" -R"${rate}" -s "${script_path}" "${target}" 2>&1) || exit_code=$?
 
-    # 結果をファイルに保存
+    # Save results to file
     echo "=== ${script_name} ===" >> "${output_file}"
     echo "${wrk2_output}" >> "${output_file}"
     echo "" >> "${output_file}"
 
-    # 詳細出力
+    # Verbose output
     if [[ "${verbose}" == "true" ]]; then
         echo "${wrk2_output}"
         echo ""
     fi
 
-    # 結果判定
+    # Result validation
     local passed=true
 
-    # 1. エラーチェック (非ゼロ終了コード)
+    # 1. Error check (non-zero exit code)
     if [[ ${exit_code} -ne 0 ]]; then
         log_error "  FAILED: wrk2 exited with code ${exit_code}"
         passed=false
     fi
 
-    # 2. Lua スクリプトエラーチェック
-    # Lua ランタイムエラーの典型的なパターンを検出
+    # 2. Lua script error check
+    # Detect typical Lua runtime error patterns:
     # - "attempt to" (attempt to call, attempt to index nil, etc.)
     # - "unexpected symbol"
     # - "syntax error"
-    # - ".lua:[0-9]" (ファイル名:行番号 の形式)
+    # - ".lua:[0-9]" (filename:line_number format)
     if echo "${wrk2_output}" | grep -iqE "attempt to|unexpected symbol|syntax error|\.lua:[0-9]+:"; then
         log_error "  FAILED: Lua script error detected"
         passed=false
     elif echo "${wrk2_output}" | grep -iq "error"; then
-        # "Socket errors" や "Non-2xx or 3xx responses" は警告扱い
+        # "Socket errors" and "Non-2xx or 3xx responses" are treated as warnings
         log_warn "  WARNING: Some errors detected (may be expected)"
     fi
 
-    # 3. Requests/sec 出力確認
+    # 3. Requests/sec output check
     if ! echo "${wrk2_output}" | grep -q "Requests/sec"; then
         log_error "  FAILED: No 'Requests/sec' in output"
         passed=false
     fi
 
-    # 4. 完了メッセージ確認
+    # 4. Completion message check
     if ! echo "${wrk2_output}" | grep -q "requests in"; then
         log_error "  FAILED: Benchmark did not complete normally"
         passed=false
@@ -186,7 +186,7 @@ test_lua_script() {
 }
 
 # =============================================================================
-# メイン処理
+# Main function
 # =============================================================================
 main() {
     local target="${DEFAULT_TARGET}"
@@ -195,7 +195,7 @@ main() {
     local skip_server=false
     local verbose=false
 
-    # 引数解析
+    # Parse arguments
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --target)
@@ -241,17 +241,17 @@ main() {
     log_info "Duration: ${duration}s per script"
     log_info "Rate: ${rate} req/sec"
 
-    # 前提条件チェック
+    # Prerequisites check
     check_wrk2
     check_server "${target}" "${skip_server}"
 
-    # 結果ディレクトリ作成
+    # Create results directory
     mkdir -p "${RESULTS_DIR}"
     local timestamp
     timestamp=$(date +%Y%m%d_%H%M%S)
     local output_file="${RESULTS_DIR}/compatibility_test_${timestamp}.txt"
 
-    # ヘッダー情報を記録
+    # Record header information
     {
         echo "=== Lua Script wrk2 Compatibility Test ==="
         echo "Date: $(date)"
@@ -262,7 +262,7 @@ main() {
         echo ""
     } > "${output_file}"
 
-    # Lua スクリプト一覧を取得 (macOS/Linux 互換)
+    # Get Lua script list (macOS/Linux compatible)
     local scripts=()
     while IFS= read -r script; do
         scripts+=("${script}")
@@ -276,7 +276,7 @@ main() {
     log_info "Found ${total} Lua scripts to test"
     echo ""
 
-    # 各スクリプトをテスト
+    # Test each script
     for script in "${scripts[@]}"; do
         if test_lua_script "${script}" "${target}" "${duration}" "${rate}" "${verbose}" "${output_file}"; then
             passed=$((passed + 1))
@@ -286,7 +286,7 @@ main() {
         fi
     done
 
-    # サマリー
+    # Summary
     echo ""
     log_info "=== Test Summary ==="
     log_info "Total:  ${total}"
@@ -304,7 +304,7 @@ main() {
 
     log_info "Results saved to: ${output_file}"
 
-    # 失敗があれば非ゼロで終了
+    # Exit with non-zero if any failures
     if [[ ${failed} -gt 0 ]]; then
         exit 1
     fi
