@@ -362,7 +362,14 @@ jobs:
           # Remove problematic Azure CLI repository that may return 403
           sudo rm -f /etc/apt/sources.list.d/azure-cli.list || true
           sudo apt-get update || true
-          sudo apt-get install -y wrk yq linux-tools-common linux-tools-generic linux-tools-$(uname -r) gawk || true
+          sudo apt-get install -y build-essential libssl-dev git yq linux-tools-common linux-tools-generic linux-tools-$(uname -r) gawk || true
+          # Build wrk2 from source (REQUIRED for rate control)
+          git clone --depth 1 https://github.com/giltene/wrk2.git /tmp/wrk2
+          cd /tmp/wrk2 && make -j$(nproc) && sudo cp wrk /usr/local/bin/wrk2
+          # Create wrk symlink for backward compatibility
+          sudo ln -sf /usr/local/bin/wrk2 /usr/local/bin/wrk
+          # Verify wrk2 installation
+          command -v wrk2 && wrk2 -v 2>&1 | head -1 || (echo "ERROR: wrk2 installation failed" && exit 1)
           # Allow perf for non-root users
           echo '1' | sudo tee /proc/sys/kernel/perf_event_paranoid
           echo '0' | sudo tee /proc/sys/kernel/kptr_restrict
