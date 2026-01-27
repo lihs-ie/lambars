@@ -276,9 +276,9 @@ main() {
     # 各スクリプトをテスト
     for script in "${scripts[@]}"; do
         if test_lua_script "${script}" "${target}" "${duration}" "${rate}" "${verbose}" "${output_file}"; then
-            ((passed++))
+            passed=$((passed + 1))
         else
-            ((failed++))
+            failed=$((failed + 1))
             failed_scripts+=("$(basename "${script}")")
         fi
     done
