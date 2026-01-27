@@ -1990,16 +1990,21 @@ run_single_phase() {
     local duration="$4"
     local phase_name="$5"
 
+    # Default RPS if not specified (wrk2 requires -R option)
+    local DEFAULT_RPS=100
+    if [[ -z "${target_rps}" || "${target_rps}" == "0" ]]; then
+        echo -e "${YELLOW}WARNING: target_rps is 0 or not specified. Using default: ${DEFAULT_RPS} RPS${NC}"
+        target_rps="${DEFAULT_RPS}"
+    fi
+
     mkdir -p "${phase_dir}"
     local result_file="${phase_dir}/wrk.txt"
     local phase_log="${phase_dir}/phase.log"
 
     echo "[${phase_name}] Starting: target_rps=${target_rps}, duration=${duration}s" | tee "${phase_log}"
 
-    local rate_option=""
-    if [[ "${target_rps}" -gt 0 ]]; then
-        rate_option="-R${target_rps}"
-    fi
+    # wrk2 always requires -R option
+    local rate_option="-R${target_rps}"
 
     # Set LUA_RESULTS_DIR for Lua scripts to output lua_metrics.json
     export LUA_RESULTS_DIR="${phase_dir}"
