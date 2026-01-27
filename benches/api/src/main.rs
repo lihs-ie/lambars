@@ -13,12 +13,16 @@
 //! - `HOST`: Server host address (default: `0.0.0.0`)
 //! - `PORT`: Server port (default: `3000`)
 //! - `WORKER_THREADS`: Number of tokio worker threads (default: logical CPU count)
+//! - `ENABLE_DEBUG_ENDPOINTS`: Enable debug endpoints like `/debug/config` (default: `false`)
 
 use std::env;
 use std::net::SocketAddr;
 
+use axum::Json;
 use axum::Router;
+use axum::extract::State;
 use axum::routing::{get, patch, post, put};
+use serde::Serialize;
 use tokio::net::TcpListener;
 use tokio::signal;
 use tower_http::cors::{Any, CorsLayer};
@@ -28,25 +32,58 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 #[cfg(feature = "demo")]
 use task_management_benchmark_api::api::demo::get_task_history_demo;
 use task_management_benchmark_api::api::{
-    AppState, add_subtask, add_tag, aggregate_numeric, aggregate_sources, aggregate_tree,
-    async_pipeline, batch_process_async, batch_transform_results, batch_update_field,
-    build_from_parts, bulk_create_tasks, bulk_update_tasks, collect_optional, compute_parallel,
-    concurrent_lazy, conditional_pipeline, convert_error_domain, count_by_priority,
-    create_project_handler, create_task, create_task_eff, dashboard, delete_task, deque_operations,
-    enrich_batch, enrich_error, execute_sequential, execute_state_workflow, execute_workflow,
-    fetch_batch, filter_conditional, first_available, flatten_demo, flatten_subtasks,
-    freer_workflow, functor_mut_demo, get_project_handler, get_project_progress_handler,
-    get_project_stats_handler, get_task, get_task_history, health_check, identity_demo,
-    lazy_compute, list_tasks, monad_error_demo, monad_transformers, nested_access, partial_apply,
-    process_with_error_transform, projects_leaderboard, resolve_config, resolve_dependencies,
-    search_fallback, search_tasks, tasks_by_deadline, tasks_timeline, transform_async,
-    transform_pair, transform_task, update_filtered, update_metadata_key, update_optional,
-    update_status, update_task, update_with_optics, validate_batch, validate_collect_all,
-    workflow_async,
+    AppState, AppliedConfig, add_subtask, add_tag, aggregate_numeric, aggregate_sources,
+    aggregate_tree, async_pipeline, batch_process_async, batch_transform_results,
+    batch_update_field, build_from_parts, bulk_create_tasks, bulk_update_tasks, collect_optional,
+    compute_parallel, concurrent_lazy, conditional_pipeline, convert_error_domain,
+    count_by_priority, create_project_handler, create_task, create_task_eff, dashboard,
+    delete_task, deque_operations, enrich_batch, enrich_error, execute_sequential,
+    execute_state_workflow, execute_workflow, fetch_batch, filter_conditional, first_available,
+    flatten_demo, flatten_subtasks, freer_workflow, functor_mut_demo, get_project_handler,
+    get_project_progress_handler, get_project_stats_handler, get_task, get_task_history,
+    health_check, identity_demo, lazy_compute, list_tasks, monad_error_demo, monad_transformers,
+    nested_access, partial_apply, process_with_error_transform, projects_leaderboard,
+    resolve_config, resolve_dependencies, search_fallback, search_tasks, tasks_by_deadline,
+    tasks_timeline, transform_async, transform_pair, transform_task, update_filtered,
+    update_metadata_key, update_optional, update_status, update_task, update_with_optics,
+    validate_batch, validate_collect_all, workflow_async,
 };
 use task_management_benchmark_api::infrastructure::{
     ExternalSources, RepositoryConfig, RepositoryFactory,
 };
+
+/// Debug configuration response for `/debug/config` endpoint.
+///
+/// Exposes current runtime configuration for benchmark verification.
+/// Sensitive values (`DATABASE_URL`, `REDIS_URL`) are excluded.
+#[derive(Debug, Serialize)]
+struct DebugConfig {
+    worker_threads: Option<usize>,
+    database_pool_size: Option<u32>,
+    redis_pool_size: Option<u32>,
+    storage_mode: String,
+    cache_mode: String,
+}
+
+fn is_env_flag_enabled(key: &str) -> bool {
+    env::var(key)
+        .map(|value| matches!(value.trim().to_lowercase().as_str(), "true" | "1" | "yes"))
+        .unwrap_or(false)
+}
+
+/// Debug config endpoint handler (ENV-REQ-030).
+///
+/// Returns the *actual* applied configuration values, not raw environment variables.
+/// This ensures values reflect caps, defaults, and validation applied at startup.
+async fn debug_config_handler(State(state): State<AppState>) -> Json<DebugConfig> {
+    Json(DebugConfig {
+        worker_threads: state.applied_config.worker_threads,
+        database_pool_size: state.applied_config.database_pool_size,
+        redis_pool_size: state.applied_config.redis_pool_size,
+        storage_mode: state.applied_config.storage_mode,
+        cache_mode: state.applied_config.cache_mode,
+    })
+}
 
 /// Result of parsing `WORKER_THREADS` environment variable.
 struct WorkerThreadsResult {
@@ -117,6 +154,9 @@ fn main() {
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.enable_all();
 
+    // Store the actual applied worker threads value (after caps/defaults)
+    let applied_worker_threads = result.threads;
+
     if let Some(threads) = result.threads {
         builder.worker_threads(threads);
         if !result.warning_emitted {
@@ -127,11 +167,11 @@ fn main() {
     }
 
     let runtime = builder.build().expect("Failed to create tokio runtime");
-    runtime.block_on(async_main());
+    runtime.block_on(async_main(applied_worker_threads));
 }
 
 #[allow(clippy::too_many_lines)]
-async fn async_main() {
+async fn async_main(applied_worker_threads: Option<usize>) {
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -156,6 +196,29 @@ async fn async_main() {
         cache_mode = ?config.cache_mode,
         "Repository configuration loaded"
     );
+
+    // Build AppliedConfig from actual runtime values (ENV-REQ-030)
+    // This captures the *applied* values after validation/caps/defaults,
+    // not raw environment variables.
+    //
+    // For worker_threads: when None (default), tokio uses available_parallelism(),
+    // falling back to 1 on error. We resolve it here to report the actual value.
+    let effective_worker_threads = applied_worker_threads.or_else(|| {
+        Some(
+            std::thread::available_parallelism()
+                .map(std::num::NonZero::get)
+                .unwrap_or(1),
+        )
+    });
+
+    let applied_config = AppliedConfig {
+        worker_threads: effective_worker_threads,
+        database_pool_size: config.database_pool_size,
+        redis_pool_size: config.redis_pool_size,
+        // Use Display format (in_memory, postgres, redis) not Debug (InMemory, Postgres, Redis)
+        storage_mode: config.storage_mode.to_string(),
+        cache_mode: config.cache_mode.to_string(),
+    };
 
     // Create repository factory and initialize repositories
     let factory = RepositoryFactory::new(config);
@@ -200,7 +263,8 @@ async fn async_main() {
 
     // Create application state (async: initializes search index from repository)
     let application_state =
-        match AppState::with_external_sources(repositories, external_sources).await {
+        match AppState::with_external_sources(repositories, external_sources, applied_config).await
+        {
             Ok(state) => {
                 tracing::info!("Application state initialized with search index");
                 state
@@ -317,22 +381,19 @@ async fn async_main() {
         .route("/tasks/aggregate-numeric", get(aggregate_numeric))
         .route("/tasks/freer-workflow", post(freer_workflow));
 
-    // Demo endpoints: Feature Flag (compile-time) + ENV (runtime) double-gate
-    // Both conditions must be met for demo endpoints to be enabled:
-    // 1. Compiled with `--features demo`
-    // 2. ENABLE_DEMO_ENDPOINTS environment variable is "true", "1", or "yes"
     #[cfg(feature = "demo")]
-    let application = {
-        let demo_enabled = env::var("ENABLE_DEMO_ENDPOINTS")
-            .map(|value| matches!(value.to_lowercase().as_str(), "true" | "1" | "yes"))
-            .unwrap_or(false);
+    let application = if is_env_flag_enabled("ENABLE_DEMO_ENDPOINTS") {
+        tracing::info!("Demo endpoints enabled");
+        application.route("/demo/tasks/{id}/history", get(get_task_history_demo))
+    } else {
+        application
+    };
 
-        if demo_enabled {
-            tracing::info!("Demo endpoints enabled");
-            application.route("/demo/tasks/{id}/history", get(get_task_history_demo))
-        } else {
-            application
-        }
+    let application = if is_env_flag_enabled("ENABLE_DEBUG_ENDPOINTS") {
+        tracing::info!("Debug endpoints enabled");
+        application.route("/debug/config", get(debug_config_handler))
+    } else {
+        application
     };
 
     let application = application

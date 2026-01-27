@@ -3103,7 +3103,7 @@ mod tests {
         use lambars::persistent::PersistentVector;
         use std::sync::atomic::AtomicU64;
 
-        use crate::api::handlers::create_stub_external_sources;
+        use crate::api::handlers::{AppliedConfig, create_stub_external_sources};
         use crate::api::query::{SearchCache, SearchIndex};
         use crate::infrastructure::RngProvider;
 
@@ -3128,6 +3128,7 @@ mod tests {
                 cache_errors: Arc::new(AtomicU64::new(0)),
                 cache_strategy: "read-through".to_string(),
                 cache_ttl_seconds: 60,
+                applied_config: AppliedConfig::default(),
             }
         }
 

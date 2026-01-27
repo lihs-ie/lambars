@@ -63,6 +63,48 @@ pub struct AppConfig {
     pub default_page_size: u32,
 }
 
+/// Applied configuration values at runtime (ENV-REQ-030).
+///
+/// This struct stores the *actual* values applied at startup, not raw environment
+/// variable strings. This ensures `/debug/config` returns accurate values that
+/// reflect caps, defaults, and validation.
+///
+/// # Fields
+///
+/// - `worker_threads`: The actual worker thread count used by Tokio runtime
+///   (after validation, caps, and defaults applied)
+/// - `database_pool_size`: The actual database pool size (`None` means library default)
+/// - `redis_pool_size`: The actual Redis pool size (`None` means library default)
+/// - `storage_mode`: Storage backend mode (`in_memory` or `postgres`)
+/// - `cache_mode`: Cache backend mode (`in_memory` or `redis`)
+#[derive(Clone, Debug)]
+pub struct AppliedConfig {
+    /// Actual Tokio worker threads count (after caps/defaults).
+    pub worker_threads: Option<usize>,
+    /// Actual database pool size (`None` = library default).
+    pub database_pool_size: Option<u32>,
+    /// Actual Redis pool size (`None` = library default).
+    pub redis_pool_size: Option<u32>,
+    /// Storage mode as env-compatible string (`in_memory`, `postgres`).
+    pub storage_mode: String,
+    /// Cache mode as env-compatible string (`in_memory`, `redis`).
+    pub cache_mode: String,
+}
+
+impl Default for AppliedConfig {
+    fn default() -> Self {
+        Self {
+            worker_threads: std::thread::available_parallelism()
+                .map(std::num::NonZero::get)
+                .ok(),
+            database_pool_size: None,
+            redis_pool_size: None,
+            storage_mode: "in_memory".to_string(),
+            cache_mode: "in_memory".to_string(),
+        }
+    }
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -141,6 +183,10 @@ pub struct AppState {
     pub cache_strategy: String,
     /// Cache TTL in seconds (CACHE-REQ-021).
     pub cache_ttl_seconds: u64,
+    /// Applied configuration values (ENV-REQ-030).
+    ///
+    /// Stores actual runtime configuration for `/debug/config` endpoint.
+    pub applied_config: AppliedConfig,
 }
 
 impl Clone for AppState {
@@ -161,6 +207,7 @@ impl Clone for AppState {
             cache_errors: Arc::clone(&self.cache_errors),
             cache_strategy: self.cache_strategy.clone(),
             cache_ttl_seconds: self.cache_ttl_seconds,
+            applied_config: self.applied_config.clone(),
         }
     }
 }
@@ -171,7 +218,7 @@ impl AppState {
     /// This constructor takes ownership of the `Repositories` struct returned
     /// by `RepositoryFactory::create()`.
     ///
-    /// Uses stub external sources for backward compatibility.
+    /// Uses stub external sources and default `AppliedConfig` for backward compatibility.
     ///
     /// # Note
     ///
@@ -193,18 +240,26 @@ impl AppState {
     /// This constructor is intended for production use where real external
     /// data sources (Redis, HTTP) are configured.
     ///
+    /// # Arguments
+    ///
+    /// * `repositories` - Initialized repositories from `RepositoryFactory`
+    /// * `external_sources` - External data sources (Redis, HTTP)
+    /// * `applied_config` - Applied configuration values for `/debug/config` endpoint
+    ///
     /// # Errors
     ///
     /// Returns an error if the task repository fails to list tasks.
     pub async fn with_external_sources(
         repositories: Repositories,
         external_sources: ExternalSources,
+        applied_config: AppliedConfig,
     ) -> Result<Self, crate::infrastructure::RepositoryError> {
         Self::with_full_config(
             repositories,
             AppConfig::default(),
             BulkConfig::from_env(),
             external_sources,
+            applied_config,
         )
         .await
     }
@@ -212,6 +267,7 @@ impl AppState {
     /// Creates a new `AppState` from repositories and custom configuration.
     ///
     /// Uses stub external sources for backward compatibility.
+    /// Uses default `AppliedConfig` (for tests that don't care about applied config).
     ///
     /// # Errors
     ///
@@ -226,6 +282,7 @@ impl AppState {
             config,
             BulkConfig::from_env(),
             external_sources,
+            AppliedConfig::default(),
         )
         .await
     }
@@ -259,6 +316,7 @@ impl AppState {
         config: AppConfig,
         bulk_config: BulkConfig,
         external_sources: ExternalSources,
+        applied_config: AppliedConfig,
     ) -> Result<Self, RepositoryError> {
         // Fetch all tasks to build the initial search index
         let all_tasks = repositories
@@ -324,6 +382,7 @@ impl AppState {
             cache_errors: Arc::new(AtomicU64::new(0)),
             cache_strategy: cache_config.strategy.to_string(),
             cache_ttl_seconds: cache_config.ttl_seconds,
+            applied_config,
         })
     }
 
@@ -1038,6 +1097,7 @@ mod tests {
             cache_errors: Arc::new(AtomicU64::new(0)),
             cache_strategy: "read-through".to_string(),
             cache_ttl_seconds: 60,
+            applied_config: AppliedConfig::default(),
         }
     }
 
@@ -1070,6 +1130,7 @@ mod tests {
             cache_errors: Arc::new(AtomicU64::new(0)),
             cache_strategy: "read-through".to_string(),
             cache_ttl_seconds: 60,
+            applied_config: AppliedConfig::default(),
         }
     }
 

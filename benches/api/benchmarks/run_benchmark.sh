@@ -1411,6 +1411,87 @@ PHASES_EOF
 )
     fi
 
+    # ==========================================================================
+    # Fetch applied_env from /debug/config endpoint (ENV-REQ-030)
+    # ==========================================================================
+    # The /debug/config endpoint is only available when ENABLE_DEBUG_ENDPOINTS=true.
+    # If available, we compare scenario_requested values with actual applied values
+    # to detect any configuration mismatches.
+    #
+    # Security: The /debug/config endpoint does not expose sensitive values
+    # (DATABASE_URL, REDIS_URL, etc.)
+    # ==========================================================================
+    # env_mismatch is "null" when /debug/config is unavailable (unknown state),
+    # "true" when mismatch detected, "false" when comparison succeeded with no mismatch.
+    local scenario_requested_json applied_env_json env_mismatch="null"
+    local applied_worker_threads="null" applied_database_pool_size="null" applied_redis_pool_size="null"
+    local applied_storage_mode="null" applied_cache_mode="null"
+
+    # Build scenario_requested from current environment variables
+    scenario_requested_json=$(cat << SCENARIO_EOF
+{
+      "worker_threads": ${WORKER_THREADS:-null},
+      "database_pool_size": ${DATABASE_POOL_SIZE:-null},
+      "redis_pool_size": ${REDIS_POOL_SIZE:-null}
+    }
+SCENARIO_EOF
+)
+
+    # Try to fetch /debug/config from the API
+    local debug_config_response
+    if debug_config_response=$(curl -s -f "${API_URL}/debug/config" 2>/dev/null); then
+        # Parse the response if jq is available
+        if command -v jq &>/dev/null && echo "${debug_config_response}" | jq -e . &>/dev/null; then
+            applied_worker_threads=$(echo "${debug_config_response}" | jq -r '.worker_threads // null')
+            applied_database_pool_size=$(echo "${debug_config_response}" | jq -r '.database_pool_size // null')
+            applied_redis_pool_size=$(echo "${debug_config_response}" | jq -r '.redis_pool_size // null')
+            applied_storage_mode=$(echo "${debug_config_response}" | jq -r '.storage_mode // null')
+            applied_cache_mode=$(echo "${debug_config_response}" | jq -r '.cache_mode // null')
+
+            # Build applied_env JSON
+            applied_env_json=$(cat << APPLIED_EOF
+{
+      "worker_threads": ${applied_worker_threads},
+      "database_pool_size": ${applied_database_pool_size},
+      "redis_pool_size": ${applied_redis_pool_size},
+      "storage_mode": "${applied_storage_mode}",
+      "cache_mode": "${applied_cache_mode}"
+    }
+APPLIED_EOF
+)
+
+            # Detect mismatch between scenario_requested and applied_env
+            # Compare only the fields that are in both (worker_threads, database_pool_size, redis_pool_size)
+            local req_wt="${WORKER_THREADS:-null}"
+            local req_dbp="${DATABASE_POOL_SIZE:-null}"
+            local req_rp="${REDIS_POOL_SIZE:-null}"
+
+            # Normalize "null" string to actual null for comparison
+            [[ "${applied_worker_threads}" == "null" ]] && applied_worker_threads="null"
+            [[ "${applied_database_pool_size}" == "null" ]] && applied_database_pool_size="null"
+            [[ "${applied_redis_pool_size}" == "null" ]] && applied_redis_pool_size="null"
+
+            # Successfully fetched /debug/config, so we can determine mismatch status.
+            # Default to false (no mismatch), then check for mismatches.
+            env_mismatch="false"
+
+            # Check for mismatches (only when both values are non-null)
+            if [[ "${req_wt}" != "null" && "${applied_worker_threads}" != "null" && "${req_wt}" != "${applied_worker_threads}" ]]; then
+                env_mismatch="true"
+            elif [[ "${req_dbp}" != "null" && "${applied_database_pool_size}" != "null" && "${req_dbp}" != "${applied_database_pool_size}" ]]; then
+                env_mismatch="true"
+            elif [[ "${req_rp}" != "null" && "${applied_redis_pool_size}" != "null" && "${req_rp}" != "${applied_redis_pool_size}" ]]; then
+                env_mismatch="true"
+            fi
+        else
+            # jq not available or invalid JSON, set applied_env to null
+            applied_env_json="null"
+        fi
+    else
+        # /debug/config not available (ENABLE_DEBUG_ENDPOINTS=false or API down)
+        applied_env_json="null"
+    fi
+
     # Generate meta.json with schema v3.0
     cat > "${meta_file}" << EOF
 {
@@ -1486,7 +1567,10 @@ PHASES_EOF
     "cpu_cores": ${cpu_cores},
     "memory_gb": ${memory_gb}
   },
-  "phased_execution": ${phased_execution_json}
+  "phased_execution": ${phased_execution_json},
+  "scenario_requested": ${scenario_requested_json},
+  "applied_env": ${applied_env_json},
+  "env_mismatch": ${env_mismatch}
 }
 EOF
 
