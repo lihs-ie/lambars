@@ -1,0 +1,70 @@
+# Issue: RPS/負荷形状が実測に反映されない
+# 実装時に発見された、将来対応が必要な項目
+
+deferred_features:
+  - id: api_load_profile_not_enforced
+    name: "RPS/負荷形状が実測に反映されず再現性が低い"
+    discovered_date: "2026-01-26"
+    priority: high
+    category: bug
+    labels:
+      - "api"
+      - "performance"
+      - "bug"
+      - "priority: high"
+
+    # 問題の説明
+    problem:
+      summary: "シナリオの target_rps / rps_profile が実際の負荷制御に使われていない"
+      details: |
+        - `run_benchmark.sh` は `wrk` を使用しているが `--rate` を指定していない
+          - benches/api/benchmarks/run_benchmark.sh
+        - `load_profile.lua` も「真のレート制御は `--rate` が必要」と明記している
+          - benches/api/benchmarks/scripts/load_profile.lua
+        - `target_rps` / `rps_profile` が実際の送信レートに反映されず、
+          レイテンシ依存のクローズドループ負荷になっている
+        - その結果、シナリオ間・コミット間の比較が不正確になる
+
+    # 解決策の提案
+    solution:
+      approach: "オープンループ負荷（レート制御）で target_rps を厳密に再現する"
+      options:
+        - name: "wrk2 への移行 + フェーズ分割"
+          description: |
+            wrk2 の `-R` で一定レートを保証し、
+            ramp/burst はフェーズを分割して連続実行し結果を統合する。
+          pros:
+            - 既存 Lua スクリプトを流用できる
+            - 変更範囲が限定的
+          cons:
+            - フェーズ統合ロジックが必要
+
+        - name: "k6 への移行"
+          description: |
+            k6 の stage 機能で ramp/burst を正確に再現し、
+            target_rps を open-loop で制御する。
+          pros:
+            - 負荷形状の表現力が高い
+            - 将来的な拡張が容易
+          cons:
+            - 既存 Lua スクリプトの移植が必要
+
+      recommended: "wrk2 への移行 + フェーズ分割"
+      estimated_complexity: medium
+
+    # 参考情報
+    references:
+      - "benches/api/benchmarks/run_benchmark.sh"
+      - "benches/api/benchmarks/scripts/load_profile.lua"
+      - "benches/api/benchmarks/scenarios/step_up_stress_test.yaml"
+
+    # 関連する要件・実装
+    related:
+      requirement_id: "api_benchmark_coverage"
+      plan_id: null
+
+    # GitHub Issue 情報（作成後に追記）
+    github_issue:
+      number: null
+      url: null
+      created: false

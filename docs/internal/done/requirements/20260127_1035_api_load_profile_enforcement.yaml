@@ -1,0 +1,119 @@
+# API ベンチ負荷プロファイル強制 要件定義
+#
+# 概要:
+#   シナリオの target_rps / rps_profile を実測に反映し、
+#   再現性のある負荷制御（open-loop）を実現する。
+#
+# 設計方針:
+#   1. レート制御を実際の送信に適用し、クローズドループ負荷から脱却する。
+#   2. シナリオの rps_profile を厳密に再現できる実行モデルを採用する。
+#   3. 既存の Lua スクリプトと結果メタデータを最大限活用する。
+#
+# 参照:
+#   - docs/internal/issues/20260126_1040_api_load_profile_not_enforced.yaml
+#   - benches/api/benchmarks/run_benchmark.sh
+#   - benches/api/benchmarks/scripts/load_profile.lua
+#   - benches/api/benchmarks/scenarios/step_up_stress_test.yaml
+
+version: "1.0.0"
+name: "api_load_profile_enforcement"
+description: |
+  wrk による負荷生成が `--rate` を使っておらず、target_rps / rps_profile が
+  実際の送信レートに反映されていない問題を解決する。
+  調査と解決策の導出は以下の手順で行う。
+  1. run_benchmark.sh の wrk 実行から `--rate` が欠落していることを確認する。
+  2. load_profile.lua が「真のレート制御は `--rate` が必要」と記載していることを確認する。
+  3. シナリオ YAML の target_rps / rps_profile が実測レートに反映されないことを検証する。
+  4. open-loop なレート制御を提供できる実行方法（wrk2 または k6）を比較する。
+  5. 既存結果メタデータとの互換性を保った実装方針を確定する。
+
+# 背景・動機
+background:
+  problem: |
+    シナリオの target_rps / rps_profile が負荷送信に反映されず、
+    レイテンシ依存のクローズドループ負荷になっている。
+    そのためシナリオ間・コミット間の比較が不正確になる。
+  motivation: |
+    lambars の性能評価は再現性の高い open-loop 負荷が前提であり、
+    レート制御の実装が不可欠である。
+  prior_art:
+    - name: "wrk2"
+      description: "固定レート（-R）で open-loop 負荷を実現する"
+    - name: "k6"
+      description: "stages による負荷形状の高精度再現"
+
+# 要件一覧
+requirements:
+  # ======================================================================
+  # 1. 現状調査・検証
+  # ======================================================================
+  - id: RPS-REQ-001
+    name: "レート制御欠落の確認"
+    description: |
+      run_benchmark.sh が wrk 実行時に `--rate` または相当の
+      レート制御オプションを使っていないことを確認し、
+      クローズドループ負荷になっている点を明文化する。
+
+  - id: RPS-REQ-002
+    name: "シナリオ反映不備の検証"
+    description: |
+      シナリオの target_rps / rps_profile が実測 RPS に反映されないことを
+      再現可能な形で検証し、差分の根拠を残す。
+
+  # ======================================================================
+  # 2. 実行基盤の置換
+  # ======================================================================
+  - id: RPS-REQ-010
+    name: "wrk2 のレート制御導入"
+    description: |
+      wrk2 を使用し、`-R` により open-loop の固定レート制御を行う。
+      target_rps を wrk2 の `-R` にマッピングし、レート制御が有効であること。
+
+  - id: RPS-REQ-011
+    name: "負荷プロファイルのフェーズ分割"
+    description: |
+      rps_profile が ramp/burst/step_up の場合、
+      1 シナリオを複数フェーズに分割し、
+      フェーズごとの結果を統合して meta.json を生成する。
+
+  - id: RPS-REQ-012
+    name: "既存 Lua スクリプトの再利用"
+    description: |
+      既存の Lua スクリプト（request/response/metrics）の互換性を維持し、
+      移植コストを最小化する。
+
+  # ======================================================================
+  # 3. 計測と検証
+  # ======================================================================
+  - id: RPS-REQ-020
+    name: "実測 RPS の検証"
+    description: |
+      target_rps と実測 RPS の乖離を定量的に検証し、
+      許容範囲（例: ±5%）を満たすことを確認する。
+
+  - id: RPS-REQ-021
+    name: "メタデータ互換性"
+    description: |
+      meta.json のスキーマを維持し、
+      wrk2 導入後も既存の比較ツールが動作すること。
+
+# 非機能要件
+non_functional_requirements:
+  performance:
+    - "target_rps に対する実測 RPS が ±5% 以内である"
+    - "ramp/burst プロファイルでフェーズ毎の RPS がシナリオ定義に一致する"
+  compatibility:
+    - "Lua スクリプト互換を維持し、シナリオ YAML の形式を変更しない"
+  testing:
+    - "RPS 検証用のスモークシナリオを追加する"
+    - "meta.json の形式検証を継続する"
+
+# 将来の拡張
+future_extensions:
+  - id: RPS-FUT-001
+    name: "k6 への移行"
+    description: |
+      stage ベースで精密な負荷形状を表現し、
+      wrk2 では難しい複合パターンを実現する。
+    rationale: |
+      既存 Lua 資産を活かすため、当面は wrk2 を優先する。
