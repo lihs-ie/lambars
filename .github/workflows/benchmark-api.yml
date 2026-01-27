@@ -59,6 +59,8 @@ jobs:
           # Build wrk2 from source (REQUIRED for rate control)
           git clone --depth 1 https://github.com/giltene/wrk2.git /tmp/wrk2
           cd /tmp/wrk2 && make -j$(nproc) && sudo cp wrk /usr/local/bin/wrk2
+          # Create wrk symlink for backward compatibility with main branch
+          sudo ln -sf /usr/local/bin/wrk2 /usr/local/bin/wrk
           # Verify wrk2 installation
           command -v wrk2 && wrk2 -v 2>&1 | head -1 || (echo "ERROR: wrk2 installation failed" && exit 1)
 
@@ -147,6 +149,8 @@ jobs:
           # Build wrk2 from source (REQUIRED for rate control)
           git clone --depth 1 https://github.com/giltene/wrk2.git /tmp/wrk2
           cd /tmp/wrk2 && make -j$(nproc) && sudo cp wrk /usr/local/bin/wrk2
+          # Create wrk symlink for backward compatibility with main branch
+          sudo ln -sf /usr/local/bin/wrk2 /usr/local/bin/wrk
           # Verify wrk2 installation
           command -v wrk2 && wrk2 -v 2>&1 | head -1 || (echo "ERROR: wrk2 installation failed" && exit 1)
           # Install Python jsonschema for meta.json validation
@@ -544,6 +548,8 @@ jobs:
           # Build wrk2 from source (REQUIRED for rate control)
           git clone --depth 1 https://github.com/giltene/wrk2.git /tmp/wrk2
           cd /tmp/wrk2 && make -j$(nproc) && sudo cp wrk /usr/local/bin/wrk2
+          # Create wrk symlink for backward compatibility
+          sudo ln -sf /usr/local/bin/wrk2 /usr/local/bin/wrk
           # Verify wrk2 installation
           command -v wrk2 && wrk2 -v 2>&1 | head -1 || (echo "ERROR: wrk2 installation failed" && exit 1)
           # Install FlameGraph tools
@@ -609,6 +615,8 @@ jobs:
           # Build wrk2 from source (REQUIRED for rate control)
           git clone --depth 1 https://github.com/giltene/wrk2.git /tmp/wrk2
           cd /tmp/wrk2 && make -j$(nproc) && sudo cp wrk /usr/local/bin/wrk2
+          # Create wrk symlink for backward compatibility
+          sudo ln -sf /usr/local/bin/wrk2 /usr/local/bin/wrk
           # Verify wrk2 installation
           command -v wrk2 && wrk2 -v 2>&1 | head -1 || (echo "ERROR: wrk2 installation failed" && exit 1)
           # Install FlameGraph tools
@@ -674,6 +682,8 @@ jobs:
           # Build wrk2 from source (REQUIRED for rate control)
           git clone --depth 1 https://github.com/giltene/wrk2.git /tmp/wrk2
           cd /tmp/wrk2 && make -j$(nproc) && sudo cp wrk /usr/local/bin/wrk2
+          # Create wrk symlink for backward compatibility
+          sudo ln -sf /usr/local/bin/wrk2 /usr/local/bin/wrk
           # Verify wrk2 installation
           command -v wrk2 && wrk2 -v 2>&1 | head -1 || (echo "ERROR: wrk2 installation failed" && exit 1)
           # Install yq (Mike Farah's YAML processor)
