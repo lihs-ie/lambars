@@ -18,6 +18,7 @@
 //! threads: 2
 //! ```
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use std::str::FromStr;
@@ -520,6 +521,22 @@ pub struct BenchmarkScenario {
     /// Error handling and timeout configuration.
     #[serde(default)]
     pub error_config: ErrorConfig,
+
+    /// Custom environment variables passed to the API server.
+    ///
+    /// These variables are exported before starting the API server,
+    /// allowing scenario-specific configuration like cache settings.
+    ///
+    /// # Example
+    ///
+    /// ```yaml
+    /// environment:
+    ///   CACHE_ENABLED: "true"
+    ///   CACHE_STRATEGY: "read-through"
+    ///   CACHE_TTL_SECS: "60"
+    /// ```
+    #[serde(default)]
+    pub environment: HashMap<String, String>,
 }
 
 const fn default_duration_seconds() -> u64 {
@@ -567,6 +584,7 @@ impl Default for BenchmarkScenario {
             data_scale_config: None,
             cache_metrics: CacheMetricsConfig::default(),
             error_config: ErrorConfig::default(),
+            environment: HashMap::new(),
         }
     }
 }
@@ -900,6 +918,89 @@ impl BenchmarkScenario {
         }
 
         env_vars
+    }
+
+    /// Generates cache-related environment variables from the scenario.
+    ///
+    /// This method consolidates environment variables from multiple sources:
+    /// 1. The `environment` section (direct key-value pairs)
+    /// 2. The `cache_metrics` section (converted to environment variables)
+    ///
+    /// # Returns
+    ///
+    /// A `HashMap` containing all cache-related environment variables.
+    /// Keys from the `environment` section take precedence over generated values.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use task_management_benchmark_api::infrastructure::{
+    ///     BenchmarkScenario, StorageMode, CacheMode, LoadPattern, CacheState,
+    ///     DataScale, PayloadVariant, RpsProfile, CacheMetricsConfig,
+    /// };
+    /// use std::collections::HashMap;
+    ///
+    /// let mut env = HashMap::new();
+    /// env.insert("CACHE_ENABLED".to_string(), "true".to_string());
+    /// env.insert("CACHE_STRATEGY".to_string(), "read-through".to_string());
+    /// env.insert("CACHE_TTL_SECS".to_string(), "60".to_string());
+    ///
+    /// let scenario = BenchmarkScenario::builder("cache_test")
+    ///     .description("Cache test scenario")
+    ///     .storage_mode(StorageMode::Postgres)
+    ///     .cache_mode(CacheMode::Redis)
+    ///     .load_pattern(LoadPattern::ReadHeavy)
+    ///     .cache_state(CacheState::Warm)
+    ///     .data_scale(DataScale::Medium)
+    ///     .payload_variant(PayloadVariant::Standard)
+    ///     .rps_profile(RpsProfile::Constant)
+    ///     .cache_metrics(CacheMetricsConfig::warm_cache(1000))
+    ///     .environment(env)
+    ///     .build();
+    ///
+    /// let cache_env = scenario.get_cache_environment();
+    ///
+    /// assert_eq!(cache_env.get("CACHE_ENABLED"), Some(&"true".to_string()));
+    /// assert_eq!(cache_env.get("CACHE_STRATEGY"), Some(&"read-through".to_string()));
+    /// assert_eq!(cache_env.get("CACHE_WARMUP_REQUESTS"), Some(&"1000".to_string()));
+    /// ```
+    #[must_use]
+    pub fn get_cache_environment(&self) -> HashMap<String, String> {
+        let mut env = HashMap::new();
+
+        // Generate variables from cache_metrics configuration
+        if self.cache_metrics.enabled {
+            env.insert("CACHE_METRICS_ENABLED".to_string(), "1".to_string());
+            env.insert(
+                "CACHE_WARMUP_REQUESTS".to_string(),
+                self.cache_metrics.warmup_requests.to_string(),
+            );
+            if let Some(rate) = self.cache_metrics.expected_hit_rate {
+                env.insert("EXPECTED_CACHE_HIT_RATE".to_string(), rate.to_string());
+            }
+            // per_endpoint and track_latency flags
+            env.insert(
+                "CACHE_METRICS_PER_ENDPOINT".to_string(),
+                if self.cache_metrics.per_endpoint {
+                    "1".to_string()
+                } else {
+                    "0".to_string()
+                },
+            );
+            env.insert(
+                "CACHE_METRICS_TRACK_LATENCY".to_string(),
+                if self.cache_metrics.track_latency {
+                    "1".to_string()
+                } else {
+                    "0".to_string()
+                },
+            );
+        }
+
+        // Apply environment section (takes precedence)
+        env.extend(self.environment.clone());
+
+        env
     }
 }
 
@@ -1721,6 +1822,16 @@ impl BenchmarkScenarioBuilder {
         self
     }
 
+    /// Sets the custom environment variables.
+    ///
+    /// These variables are exported before starting the API server,
+    /// allowing scenario-specific configuration like cache settings.
+    #[must_use]
+    pub fn environment(mut self, environment: HashMap<String, String>) -> Self {
+        self.scenario.environment = environment;
+        self
+    }
+
     /// Builds the scenario.
     #[must_use]
     pub fn build(self) -> BenchmarkScenario {
@@ -1847,6 +1958,7 @@ impl ScenarioMatrix {
                                         data_scale_config: None,
                                         cache_metrics: CacheMetricsConfig::default(),
                                         error_config: ErrorConfig::default(),
+                                        environment: HashMap::new(),
                                     });
                                 }
                             }
@@ -2091,6 +2203,10 @@ pub struct PartialScenario {
     /// Performance thresholds override.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thresholds: Option<Thresholds>,
+
+    /// Custom environment variables override.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub environment: Option<HashMap<String, String>>,
 }
 
 impl PartialScenario {
@@ -2158,6 +2274,10 @@ impl PartialScenario {
                 .clone()
                 .or_else(|| self.concurrency.clone()),
             thresholds: other.thresholds.clone().or_else(|| self.thresholds.clone()),
+            environment: other
+                .environment
+                .clone()
+                .or_else(|| self.environment.clone()),
         }
     }
 
@@ -2255,6 +2375,9 @@ impl PartialScenario {
         if let Some(ref value) = self.thresholds {
             scenario.thresholds = Some(value.clone());
         }
+        if let Some(ref value) = self.environment {
+            scenario.environment.clone_from(value);
+        }
     }
 }
 
@@ -2312,6 +2435,11 @@ impl From<&BenchmarkScenario> for PartialScenario {
             error_config: Some(scenario.error_config.clone()),
             concurrency: scenario.concurrency.clone(),
             thresholds: scenario.thresholds.clone(),
+            environment: if scenario.environment.is_empty() {
+                None
+            } else {
+                Some(scenario.environment.clone())
+            },
         }
     }
 }
@@ -5088,6 +5216,171 @@ rps_profile: constant
         assert!(scenario.cache_metrics.track_latency);
         assert_eq!(scenario.cache_metrics.warmup_requests, 0);
         assert_eq!(scenario.cache_metrics.expected_hit_rate, Some(0.0));
+    }
+
+    // -------------------------------------------------------------------------
+    // Environment and get_cache_environment() Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn test_scenario_with_environment() {
+        let yaml = r#"
+name: "env_test"
+description: "Test scenario with environment"
+storage_mode: postgres
+cache_mode: redis
+load_pattern: read_heavy
+cache_state: warm
+data_scale: medium
+payload_variant: standard
+rps_profile: constant
+
+environment:
+  CACHE_ENABLED: "true"
+  CACHE_STRATEGY: "read-through"
+  CACHE_TTL_SECS: "60"
+"#;
+
+        let scenario = BenchmarkScenario::from_yaml(yaml).unwrap();
+
+        assert_eq!(scenario.environment.len(), 3);
+        assert_eq!(
+            scenario.environment.get("CACHE_ENABLED"),
+            Some(&"true".to_string())
+        );
+        assert_eq!(
+            scenario.environment.get("CACHE_STRATEGY"),
+            Some(&"read-through".to_string())
+        );
+        assert_eq!(
+            scenario.environment.get("CACHE_TTL_SECS"),
+            Some(&"60".to_string())
+        );
+    }
+
+    #[rstest]
+    fn test_scenario_without_environment() {
+        let yaml = r#"
+name: "no_env_test"
+description: "Test scenario without environment"
+storage_mode: in_memory
+cache_mode: in_memory
+load_pattern: read_heavy
+cache_state: warm
+data_scale: medium
+payload_variant: standard
+rps_profile: constant
+"#;
+
+        let scenario = BenchmarkScenario::from_yaml(yaml).unwrap();
+
+        assert!(scenario.environment.is_empty());
+    }
+
+    #[rstest]
+    fn test_get_cache_environment_with_env_and_cache_metrics() {
+        let mut env = HashMap::new();
+        env.insert("CACHE_ENABLED".to_string(), "true".to_string());
+        env.insert("CACHE_STRATEGY".to_string(), "read-through".to_string());
+        env.insert("CACHE_TTL_SECS".to_string(), "60".to_string());
+
+        let scenario = BenchmarkScenario::builder("cache_env_test")
+            .description("Test get_cache_environment")
+            .storage_mode(StorageMode::Postgres)
+            .cache_mode(CacheMode::Redis)
+            .load_pattern(LoadPattern::ReadHeavy)
+            .cache_state(CacheState::Warm)
+            .data_scale(DataScale::Medium)
+            .payload_variant(PayloadVariant::Standard)
+            .rps_profile(RpsProfile::Constant)
+            .cache_metrics(CacheMetricsConfig::warm_cache(1000))
+            .environment(env)
+            .build();
+
+        let cache_env = scenario.get_cache_environment();
+
+        // Environment section values
+        assert_eq!(cache_env.get("CACHE_ENABLED"), Some(&"true".to_string()));
+        assert_eq!(
+            cache_env.get("CACHE_STRATEGY"),
+            Some(&"read-through".to_string())
+        );
+        assert_eq!(cache_env.get("CACHE_TTL_SECS"), Some(&"60".to_string()));
+
+        // cache_metrics values
+        assert_eq!(
+            cache_env.get("CACHE_METRICS_ENABLED"),
+            Some(&"1".to_string())
+        );
+        assert_eq!(
+            cache_env.get("CACHE_WARMUP_REQUESTS"),
+            Some(&"1000".to_string())
+        );
+        assert_eq!(
+            cache_env.get("EXPECTED_CACHE_HIT_RATE"),
+            Some(&"0.8".to_string())
+        );
+        // per_endpoint and track_latency are set to true by warm_cache()
+        assert_eq!(
+            cache_env.get("CACHE_METRICS_PER_ENDPOINT"),
+            Some(&"1".to_string())
+        );
+        assert_eq!(
+            cache_env.get("CACHE_METRICS_TRACK_LATENCY"),
+            Some(&"1".to_string())
+        );
+    }
+
+    #[rstest]
+    fn test_get_cache_environment_env_takes_precedence() {
+        let mut env = HashMap::new();
+        // Environment section overrides cache_metrics generated values
+        env.insert("CACHE_WARMUP_REQUESTS".to_string(), "2000".to_string());
+
+        let scenario = BenchmarkScenario::builder("env_precedence_test")
+            .description("Test environment takes precedence")
+            .storage_mode(StorageMode::Postgres)
+            .cache_mode(CacheMode::Redis)
+            .load_pattern(LoadPattern::ReadHeavy)
+            .cache_state(CacheState::Warm)
+            .data_scale(DataScale::Medium)
+            .payload_variant(PayloadVariant::Standard)
+            .rps_profile(RpsProfile::Constant)
+            .cache_metrics(CacheMetricsConfig::warm_cache(1000)) // warmup_requests = 1000
+            .environment(env)
+            .build();
+
+        let cache_env = scenario.get_cache_environment();
+
+        // Environment section value (2000) takes precedence over cache_metrics (1000)
+        assert_eq!(
+            cache_env.get("CACHE_WARMUP_REQUESTS"),
+            Some(&"2000".to_string())
+        );
+    }
+
+    #[rstest]
+    fn test_builder_with_environment() {
+        let mut env = HashMap::new();
+        env.insert("CUSTOM_VAR".to_string(), "custom_value".to_string());
+
+        let scenario = BenchmarkScenario::builder("builder_env_test")
+            .description("Test builder with environment")
+            .storage_mode(StorageMode::InMemory)
+            .cache_mode(CacheMode::InMemory)
+            .load_pattern(LoadPattern::ReadHeavy)
+            .cache_state(CacheState::Warm)
+            .data_scale(DataScale::Medium)
+            .payload_variant(PayloadVariant::Standard)
+            .rps_profile(RpsProfile::Constant)
+            .environment(env)
+            .build();
+
+        assert_eq!(scenario.environment.len(), 1);
+        assert_eq!(
+            scenario.environment.get("CUSTOM_VAR"),
+            Some(&"custom_value".to_string())
+        );
     }
 
     // -------------------------------------------------------------------------

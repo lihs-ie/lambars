@@ -20,6 +20,7 @@
 #![allow(dead_code)]
 
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
 use arc_swap::ArcSwap;
 
@@ -61,6 +62,11 @@ pub fn create_test_app_state() -> AppState {
         secondary_source: external_sources.secondary_source,
         external_source: external_sources.external_source,
         rng_provider: Arc::new(RngProvider::new_random()),
+        cache_hits: Arc::new(AtomicU64::new(0)),
+        cache_misses: Arc::new(AtomicU64::new(0)),
+        cache_errors: Arc::new(AtomicU64::new(0)),
+        cache_strategy: "read-through".to_string(),
+        cache_ttl_seconds: 60,
     }
 }
 
@@ -105,6 +111,11 @@ pub fn create_test_app_state_with_fail_injection(
         secondary_source,
         external_source,
         rng_provider: Arc::new(RngProvider::new_random()),
+        cache_hits: Arc::new(AtomicU64::new(0)),
+        cache_misses: Arc::new(AtomicU64::new(0)),
+        cache_errors: Arc::new(AtomicU64::new(0)),
+        cache_strategy: "read-through".to_string(),
+        cache_ttl_seconds: 60,
     }
 }
 

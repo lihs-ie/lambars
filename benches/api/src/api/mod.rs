@@ -8,6 +8,7 @@ pub mod applicative;
 pub mod async_pipeline;
 pub mod bifunctor;
 pub mod bulk;
+pub mod cache_header;
 pub mod consistency;
 pub mod dto;
 pub mod effects;
@@ -53,7 +54,8 @@ pub use dto::{CreateTaskRequest, TaskResponse, UpdateTaskRequest};
 pub use effects::{execute_state_workflow, execute_workflow, update_with_optics};
 pub use error::{ApiError, ApiErrorResponse, FieldError, ValidationError};
 pub use handlers::{
-    AppConfig, AppState, HealthResponse, create_task, delete_task, get_task, health_check,
+    AppConfig, AppState, HealthResponse, build_cache_headers, create_task, delete_task, get_task,
+    health_check,
 };
 pub use misc::{
     aggregate_numeric, concurrent_lazy, deque_operations, freer_workflow, partial_apply,
@@ -76,3 +78,6 @@ pub use typeclass::{
     flatten_demo, functor_mut_demo, identity_demo, monad_error_demo, monad_transformers,
 };
 pub use workflow_eff::create_task_eff;
+
+// Cache header middleware exports
+pub use cache_header::{CacheHeaderExtension, CacheHeaderLayer, CacheSource};

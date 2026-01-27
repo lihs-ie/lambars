@@ -18,6 +18,8 @@ services:
       POSTGRES_USER: benchmark
       POSTGRES_PASSWORD: benchmark
       POSTGRES_DB: benchmark
+    volumes:
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U benchmark -d benchmark"]
       interval: 2s

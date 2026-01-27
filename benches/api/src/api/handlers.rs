@@ -16,18 +16,20 @@
 //! 3. Converting `Task` to `TaskResponse` (which is `Send`) before returning
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use arc_swap::ArcSwap;
 use axum::{
     Json,
     extract::{Path, State},
-    http::StatusCode,
+    http::{HeaderMap, HeaderValue, StatusCode},
 };
 use lambars::control::Either;
 use lambars::persistent::PersistentVector;
 use uuid::Uuid;
 
 use super::bulk::BulkConfig;
+use super::cache_header::{CacheHeaderExtension, CacheSource};
 use super::consistency::save_task_with_event;
 use super::dto::{
     CreateTaskRequest, TaskResponse, validate_description, validate_tags, validate_title,
@@ -36,8 +38,8 @@ use super::error::ApiErrorResponse;
 use super::query::{SearchCache, SearchIndex, TaskChange};
 use crate::domain::{EventId, Priority, Tag, Task, TaskId, Timestamp, create_task_created_event};
 use crate::infrastructure::{
-    EventStore, ExternalDataSource, ExternalSources, Pagination, ProjectRepository, Repositories,
-    RepositoryError, RngProvider, TaskRepository,
+    CacheStatus, EventStore, ExternalDataSource, ExternalSources, Pagination, ProjectRepository,
+    Repositories, RepositoryError, RngProvider, TaskRepository,
 };
 
 // =============================================================================
@@ -129,6 +131,16 @@ pub struct AppState {
     ///
     /// Enables deterministic behavior for testing/benchmarks when seeded.
     pub rng_provider: Arc<RngProvider>,
+    /// Cache hit counter (CACHE-REQ-021).
+    pub cache_hits: Arc<AtomicU64>,
+    /// Cache miss counter (CACHE-REQ-021).
+    pub cache_misses: Arc<AtomicU64>,
+    /// Cache error counter (CACHE-REQ-021, fail-open).
+    pub cache_errors: Arc<AtomicU64>,
+    /// Cache strategy name (CACHE-REQ-021).
+    pub cache_strategy: String,
+    /// Cache TTL in seconds (CACHE-REQ-021).
+    pub cache_ttl_seconds: u64,
 }
 
 impl Clone for AppState {
@@ -144,6 +156,11 @@ impl Clone for AppState {
             secondary_source: Arc::clone(&self.secondary_source),
             external_source: Arc::clone(&self.external_source),
             rng_provider: Arc::clone(&self.rng_provider),
+            cache_hits: Arc::clone(&self.cache_hits),
+            cache_misses: Arc::clone(&self.cache_misses),
+            cache_errors: Arc::clone(&self.cache_errors),
+            cache_strategy: self.cache_strategy.clone(),
+            cache_ttl_seconds: self.cache_ttl_seconds,
         }
     }
 }
@@ -288,6 +305,9 @@ impl AppState {
             RngProvider::new_random()
         }));
 
+        // Load cache configuration for metadata (CACHE-REQ-021)
+        let cache_config = crate::infrastructure::CacheConfig::from_env();
+
         Ok(Self {
             task_repository: repositories.task_repository,
             project_repository: repositories.project_repository,
@@ -299,6 +319,11 @@ impl AppState {
             secondary_source: external_sources.secondary_source,
             external_source: external_sources.external_source,
             rng_provider,
+            cache_hits: Arc::new(AtomicU64::new(0)),
+            cache_misses: Arc::new(AtomicU64::new(0)),
+            cache_errors: Arc::new(AtomicU64::new(0)),
+            cache_strategy: cache_config.strategy.to_string(),
+            cache_ttl_seconds: cache_config.ttl_seconds,
         })
     }
 
@@ -330,6 +355,16 @@ impl AppState {
             let updated = current.apply_change(change.clone());
             Arc::new(updated)
         });
+    }
+
+    /// Increments cache counter based on status (CACHE-REQ-021). Bypass does not increment.
+    pub fn record_cache_status(&self, status: CacheStatus) {
+        match status {
+            CacheStatus::Hit => self.cache_hits.fetch_add(1, Ordering::Relaxed),
+            CacheStatus::Miss => self.cache_misses.fetch_add(1, Ordering::Relaxed),
+            CacheStatus::Error => self.cache_errors.fetch_add(1, Ordering::Relaxed),
+            CacheStatus::Bypass => 0, // No counter for bypass
+        };
     }
 }
 
@@ -650,31 +685,69 @@ fn build_task(ids: TaskIds, validated: ValidatedCreateTask) -> Task {
 pub async fn get_task(
     State(state): State<AppState>,
     Path(task_id): Path<Uuid>,
-) -> Result<Json<TaskResponse>, ApiErrorResponse> {
+) -> Result<(HeaderMap, Json<TaskResponse>), ApiErrorResponse> {
     // Step 1: Convert Uuid to TaskId (pure)
     let task_id = TaskId::from_uuid(task_id);
 
-    // Step 2: Fetch task from repository using AsyncIO
-    let maybe_task = state
+    // Step 2: Fetch task from repository with cache status using AsyncIO
+    let cache_result = state
         .task_repository
-        .find_by_id(&task_id)
+        .find_by_id_with_status(&task_id)
         .run_async()
         .await
         .map_err(ApiErrorResponse::from)?;
 
-    // Step 3: Lift Option<Task> to Either<ApiErrorResponse, Task>
+    // Step 3: Extract cache status and value, record metrics
+    let cache_status = cache_result.cache_status;
+    let maybe_task = cache_result.value;
+
+    // Record cache metrics (CACHE-REQ-021)
+    state.record_cache_status(cache_status);
+
+    // Step 4: Lift Option<Task> to Either<ApiErrorResponse, Task>
     // This demonstrates functional error handling using Either
     let task_result: Either<ApiErrorResponse, Task> = lift_option_to_either(maybe_task, || {
         ApiErrorResponse::not_found(format!("Task not found: {task_id}"))
     });
 
-    // Step 4: Convert Either to Result and map to response
+    // Step 5: Convert Either to Result and map to response
     // Task is not Send, so we convert to TaskResponse (which is Send) immediately
     let result: Result<Task, ApiErrorResponse> = task_result.into();
     let task = result?;
     let response = TaskResponse::from(&task);
 
-    Ok(Json(response))
+    // Step 6: Build cache headers (pure transformation)
+    let headers = build_cache_headers(cache_status, CacheSource::Redis);
+
+    Ok((headers, Json(response)))
+}
+
+/// Builds HTTP headers for cache status (X-Cache, X-Cache-Status, X-Cache-Source).
+///
+/// For `Bypass` status, source is overridden to `None` because no cache was consulted.
+pub fn build_cache_headers(cache_status: CacheStatus, cache_source: CacheSource) -> HeaderMap {
+    let effective_source = match cache_status {
+        CacheStatus::Bypass => CacheSource::None,
+        CacheStatus::Hit | CacheStatus::Miss | CacheStatus::Error => cache_source,
+    };
+
+    let extension = CacheHeaderExtension::new(cache_status, effective_source);
+    let mut headers = HeaderMap::new();
+
+    headers.insert(
+        "X-Cache",
+        HeaderValue::from_static(extension.x_cache_value()),
+    );
+    headers.insert(
+        "X-Cache-Status",
+        HeaderValue::from_static(extension.x_cache_status_value()),
+    );
+    headers.insert(
+        "X-Cache-Source",
+        HeaderValue::from_static(extension.x_cache_source_value()),
+    );
+
+    headers
 }
 
 /// Lifts an `Option<T>` to `Either<L, T>`.
@@ -943,6 +1016,7 @@ mod tests {
         use crate::infrastructure::RngProvider;
         use arc_swap::ArcSwap;
         use lambars::persistent::PersistentVector;
+        use std::sync::atomic::AtomicU64;
 
         let external_sources = super::create_stub_external_sources();
 
@@ -959,6 +1033,11 @@ mod tests {
             secondary_source: external_sources.secondary_source,
             external_source: external_sources.external_source,
             rng_provider: Arc::new(RngProvider::new_random()),
+            cache_hits: Arc::new(AtomicU64::new(0)),
+            cache_misses: Arc::new(AtomicU64::new(0)),
+            cache_errors: Arc::new(AtomicU64::new(0)),
+            cache_strategy: "read-through".to_string(),
+            cache_ttl_seconds: 60,
         }
     }
 
@@ -969,6 +1048,7 @@ mod tests {
         use crate::infrastructure::RngProvider;
         use arc_swap::ArcSwap;
         use lambars::persistent::PersistentVector;
+        use std::sync::atomic::AtomicU64;
 
         let external_sources = super::create_stub_external_sources();
 
@@ -985,6 +1065,11 @@ mod tests {
             secondary_source: external_sources.secondary_source,
             external_source: external_sources.external_source,
             rng_provider: Arc::new(RngProvider::new_random()),
+            cache_hits: Arc::new(AtomicU64::new(0)),
+            cache_misses: Arc::new(AtomicU64::new(0)),
+            cache_errors: Arc::new(AtomicU64::new(0)),
+            cache_strategy: "read-through".to_string(),
+            cache_ttl_seconds: 60,
         }
     }
 
@@ -1007,10 +1092,19 @@ mod tests {
 
         // Assert
         assert!(result.is_ok());
-        let Json(response) = result.unwrap();
+        let (headers, Json(response)) = result.unwrap();
         assert_eq!(response.title, "Test Task");
         assert_eq!(response.description, Some("Test description".to_string()));
         assert_eq!(response.priority, super::super::dto::PriorityDto::High);
+
+        // Verify cache headers are present with correct values
+        assert!(headers.contains_key("X-Cache"));
+        assert!(headers.contains_key("X-Cache-Status"));
+        assert!(headers.contains_key("X-Cache-Source"));
+
+        // Verify header values (mock returns CacheStatus::Bypass since no Redis layer)
+        assert_eq!(headers.get("X-Cache").unwrap(), "MISS");
+        assert_eq!(headers.get("X-Cache-Status").unwrap(), "bypass");
     }
 
     #[rstest]
@@ -1068,7 +1162,7 @@ mod tests {
 
         // Assert
         assert!(result.is_ok());
-        let Json(response) = result.unwrap();
+        let (_headers, Json(response)) = result.unwrap();
         assert_eq!(response.id, task_id.to_string());
         assert_eq!(response.title, "Complete Task");
         assert_eq!(
@@ -1103,7 +1197,7 @@ mod tests {
 
         // Assert
         assert!(result.is_ok());
-        let Json(response) = result.unwrap();
+        let (_headers, Json(response)) = result.unwrap();
         assert_eq!(response.title, "Integration Test Task");
     }
 
@@ -1282,6 +1376,108 @@ mod tests {
         assert!(result.is_right());
         let returned_task = result.unwrap_right();
         assert_eq!(returned_task.title, "Test Task");
+    }
+
+    // -------------------------------------------------------------------------
+    // record_cache_status Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn test_record_cache_status_hit() {
+        let state = create_default_app_state();
+
+        state.record_cache_status(CacheStatus::Hit);
+        state.record_cache_status(CacheStatus::Hit);
+
+        assert_eq!(
+            state.cache_hits.load(std::sync::atomic::Ordering::Relaxed),
+            2
+        );
+        assert_eq!(
+            state
+                .cache_misses
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        assert_eq!(
+            state
+                .cache_errors
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+    }
+
+    #[rstest]
+    fn test_record_cache_status_miss() {
+        let state = create_default_app_state();
+
+        state.record_cache_status(CacheStatus::Miss);
+
+        assert_eq!(
+            state.cache_hits.load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        assert_eq!(
+            state
+                .cache_misses
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            state
+                .cache_errors
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+    }
+
+    #[rstest]
+    fn test_record_cache_status_error() {
+        let state = create_default_app_state();
+
+        state.record_cache_status(CacheStatus::Error);
+
+        assert_eq!(
+            state.cache_hits.load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        assert_eq!(
+            state
+                .cache_misses
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        assert_eq!(
+            state
+                .cache_errors
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+    }
+
+    #[rstest]
+    fn test_record_cache_status_bypass_does_not_increment() {
+        let state = create_default_app_state();
+
+        state.record_cache_status(CacheStatus::Bypass);
+
+        // Bypass should not increment any counter
+        assert_eq!(
+            state.cache_hits.load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        assert_eq!(
+            state
+                .cache_misses
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        assert_eq!(
+            state
+                .cache_errors
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
     }
 
     // -------------------------------------------------------------------------

@@ -9,6 +9,7 @@ use thiserror::Error;
 use crate::domain::{
     Priority, Project, ProjectId, Task, TaskEvent, TaskHistory, TaskId, TaskStatus,
 };
+use crate::infrastructure::cache::CacheResult;
 
 // =============================================================================
 // Repository Error
@@ -316,6 +317,33 @@ pub trait TaskRepository: Send + Sync {
 
     /// Counts all tasks.
     fn count(&self) -> AsyncIO<Result<u64, RepositoryError>>;
+
+    /// Finds a task by its ID with cache status information.
+    ///
+    /// This method returns a `CacheResult` that includes both the value and
+    /// the cache status (hit/miss/bypass). Use this method when you need to
+    /// know if the result came from cache.
+    ///
+    /// # Default Implementation
+    ///
+    /// The default implementation calls `find_by_id` and wraps the result
+    /// with `CacheStatus::Bypass`, indicating that no caching was used.
+    /// `CachedTaskRepository` overrides this to provide actual cache status.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(CacheResult::hit(Some(task)))` - Cache hit with task
+    /// - `Ok(CacheResult::miss(Some(task)))` - Cache miss, fetched from storage
+    /// - `Ok(CacheResult::bypass(Some(task)))` - Cache bypassed (default)
+    /// - `Ok(CacheResult::*(None))` - Task not found
+    /// - `Err(RepositoryError)` - Operation failed
+    fn find_by_id_with_status(
+        &self,
+        id: &TaskId,
+    ) -> AsyncIO<Result<CacheResult<Option<Task>>, RepositoryError>> {
+        self.find_by_id(id)
+            .fmap(|result| result.map(CacheResult::bypass))
+    }
 }
 
 // =============================================================================
@@ -343,6 +371,25 @@ pub trait ProjectRepository: Send + Sync {
 
     /// Counts all projects.
     fn count(&self) -> AsyncIO<Result<u64, RepositoryError>>;
+
+    /// Finds a project by its ID with cache status information.
+    ///
+    /// This method returns a `CacheResult` that includes both the value and
+    /// the cache status (hit/miss/bypass). Use this method when you need to
+    /// know if the result came from cache.
+    ///
+    /// # Default Implementation
+    ///
+    /// The default implementation calls `find_by_id` and wraps the result
+    /// with `CacheStatus::Bypass`, indicating that no caching was used.
+    /// `CachedProjectRepository` overrides this to provide actual cache status.
+    fn find_by_id_with_status(
+        &self,
+        id: &ProjectId,
+    ) -> AsyncIO<Result<CacheResult<Option<Project>>, RepositoryError>> {
+        self.find_by_id(id)
+            .fmap(|result| result.map(CacheResult::bypass))
+    }
 }
 
 // =============================================================================
