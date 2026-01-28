@@ -1215,13 +1215,17 @@ pub fn index_ngrams_streaming(
 /// Alias for [`index_ngrams_streaming`] used when building removal deltas.
 pub use index_ngrams_streaming as remove_ngrams_streaming;
 
-/// Metrics for key pool memory efficiency.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+/// Metrics for key pool memory efficiency and merge operations.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct SearchIndexKeyMetrics {
     pub key_generated_total: usize,
     pub key_unique_total: usize,
     pub pool_hit_rate: f64,
     pub build_delta_elapsed_ms: u128,
+    #[serde(default)]
+    pub merge_calls_total: usize,
+    #[serde(default)]
+    pub merge_elapsed_ms: u128,
 }
 
 #[deprecated(since = "0.1.0", note = "Use SearchIndexKeyMetrics instead")]
@@ -1377,6 +1381,8 @@ impl SearchIndexDelta {
             key_unique_total: pool.unique_count(),
             pool_hit_rate: pool.hit_rate(),
             build_delta_elapsed_ms: elapsed_ms,
+            merge_calls_total: 0,
+            merge_elapsed_ms: 0,
         }
     }
 
@@ -3692,6 +3698,39 @@ impl SearchIndex {
         self.apply_delta(&delta, changes)
     }
 
+    /// Applies multiple task changes in a single batch operation with metrics collection.
+    ///
+    /// Returns the updated index and combined metrics for delta building and merge operations.
+    ///
+    /// # Panics
+    ///
+    /// Panics on forbidden patterns: Remove followed by Add/Update for the same `TaskId`.
+    #[must_use]
+    pub fn apply_changes_with_metrics(
+        &self,
+        changes: &[TaskChange],
+    ) -> (Self, SearchIndexKeyMetrics) {
+        if changes.is_empty() {
+            return (self.clone(), SearchIndexKeyMetrics::default());
+        }
+
+        let (mut delta, mut metrics) = SearchIndexDelta::from_changes_with_metrics(
+            changes,
+            &self.config,
+            &self.tasks_by_id,
+        );
+        // Sort and deduplicate posting lists to satisfy merge preconditions
+        delta.prepare_posting_lists();
+
+        let (result, merge_calls_total, merge_elapsed_ms) =
+            self.apply_delta_with_metrics(&delta, changes);
+
+        metrics.merge_calls_total = merge_calls_total;
+        metrics.merge_elapsed_ms = merge_elapsed_ms;
+
+        (result, metrics)
+    }
+
     /// Applies a pre-computed `SearchIndexDelta` to this index.
     #[must_use]
     pub fn apply_delta(&self, delta: &SearchIndexDelta, changes: &[TaskChange]) -> Self {
@@ -3740,6 +3779,19 @@ impl SearchIndex {
             ),
             config: self.config.clone(),
         }
+    }
+
+    /// Applies a pre-computed `SearchIndexDelta` to this index with merge metrics collection.
+    #[must_use]
+    pub fn apply_delta_with_metrics(
+        &self,
+        delta: &SearchIndexDelta,
+        changes: &[TaskChange],
+    ) -> (Self, usize, u128) {
+        const MERGE_CALLS_TOTAL: usize = 9;
+        let start = std::time::Instant::now();
+        let result = self.apply_delta(delta, changes);
+        (result, MERGE_CALLS_TOTAL, start.elapsed().as_millis())
     }
 
     fn update_tasks_by_id(&self, changes: &[TaskChange]) -> PersistentTreeMap<TaskId, Task> {
@@ -13606,6 +13658,8 @@ mod search_index_ngram_metrics_tests {
             key_unique_total: 500,
             pool_hit_rate: 0.5,
             build_delta_elapsed_ms: 42,
+            merge_calls_total: 9,
+            merge_elapsed_ms: 15,
         };
 
         let json = serde_json::to_string(&metrics).expect("serialize should succeed");
@@ -13616,6 +13670,8 @@ mod search_index_ngram_metrics_tests {
         assert_eq!(deserialized.key_unique_total, 500);
         assert!((deserialized.pool_hit_rate - 0.5).abs() < f64::EPSILON);
         assert_eq!(deserialized.build_delta_elapsed_ms, 42);
+        assert_eq!(deserialized.merge_calls_total, 9);
+        assert_eq!(deserialized.merge_elapsed_ms, 15);
     }
 
     #[rstest]
@@ -13625,6 +13681,8 @@ mod search_index_ngram_metrics_tests {
             key_unique_total: 50,
             pool_hit_rate: 0.75,
             build_delta_elapsed_ms: 10,
+            merge_calls_total: 9,
+            merge_elapsed_ms: 5,
         };
 
         let json = serde_json::to_string(&metrics).expect("serialize should succeed");
@@ -13633,6 +13691,8 @@ mod search_index_ngram_metrics_tests {
         assert!(json.contains("\"key_unique_total\":50"));
         assert!(json.contains("\"pool_hit_rate\":0.75"));
         assert!(json.contains("\"build_delta_elapsed_ms\":10"));
+        assert!(json.contains("\"merge_calls_total\":9"));
+        assert!(json.contains("\"merge_elapsed_ms\":5"));
     }
 
     #[rstest]
@@ -13782,6 +13842,138 @@ mod search_index_ngram_metrics_tests {
         assert_eq!(metrics.key_unique_total, 0);
         assert!((metrics.pool_hit_rate - 0.0).abs() < f64::EPSILON);
         assert_eq!(metrics.build_delta_elapsed_ms, 5);
+        assert_eq!(metrics.merge_calls_total, 0);
+        assert_eq!(metrics.merge_elapsed_ms, 0);
+    }
+
+    #[rstest]
+    fn deserialize_legacy_format_without_merge_fields() {
+        // Test backward compatibility: old JSON without merge fields should deserialize with defaults
+        let json = r#"{
+            "key_generated_total": 200,
+            "key_unique_total": 80,
+            "pool_hit_rate": 0.6,
+            "build_delta_elapsed_ms": 25
+        }"#;
+
+        let metrics: SearchIndexKeyMetrics =
+            serde_json::from_str(json).expect("deserialize should succeed");
+
+        assert_eq!(metrics.key_generated_total, 200);
+        assert_eq!(metrics.key_unique_total, 80);
+        assert!((metrics.pool_hit_rate - 0.6).abs() < f64::EPSILON);
+        assert_eq!(metrics.build_delta_elapsed_ms, 25);
+        // New fields should default to 0
+        assert_eq!(metrics.merge_calls_total, 0);
+        assert_eq!(metrics.merge_elapsed_ms, 0);
+    }
+
+    #[rstest]
+    fn deserialize_full_format_with_merge_fields() {
+        let json = r#"{
+            "key_generated_total": 300,
+            "key_unique_total": 150,
+            "pool_hit_rate": 0.5,
+            "build_delta_elapsed_ms": 30,
+            "merge_calls_total": 18,
+            "merge_elapsed_ms": 100
+        }"#;
+
+        let metrics: SearchIndexKeyMetrics =
+            serde_json::from_str(json).expect("deserialize should succeed");
+
+        assert_eq!(metrics.key_generated_total, 300);
+        assert_eq!(metrics.key_unique_total, 150);
+        assert!((metrics.pool_hit_rate - 0.5).abs() < f64::EPSILON);
+        assert_eq!(metrics.build_delta_elapsed_ms, 30);
+        assert_eq!(metrics.merge_calls_total, 18);
+        assert_eq!(metrics.merge_elapsed_ms, 100);
+    }
+
+    #[rstest]
+    fn apply_delta_with_metrics_returns_correct_merge_count() {
+        use crate::domain::{Tag, Timestamp};
+        use lambars::persistent::PersistentVector;
+
+        let config = SearchIndexConfig::default();
+        let empty_tasks: PersistentVector<Task> = PersistentVector::new();
+        let index = SearchIndex::build_with_config(&empty_tasks, config.clone());
+        let timestamp = Timestamp::now();
+        let task = Task::new(TaskId::generate(), "Test Task", timestamp)
+            .with_tags(PersistentHashSet::new().insert(Tag::new("tag1")));
+        let changes = vec![TaskChange::Add(task)];
+
+        let mut delta = SearchIndexDelta::from_changes(&changes, &index.config, &index.tasks_by_id);
+        delta.prepare_posting_lists();
+
+        let (_new_index, merge_calls_total, _merge_elapsed_ms) =
+            index.apply_delta_with_metrics(&delta, &changes);
+
+        assert_eq!(merge_calls_total, 9);
+    }
+
+    #[rstest]
+    fn apply_changes_with_metrics_returns_combined_metrics() {
+        use crate::domain::{Tag, Timestamp};
+        use lambars::persistent::PersistentVector;
+
+        let config = SearchIndexConfig::default();
+        let empty_tasks: PersistentVector<Task> = PersistentVector::new();
+        let index = SearchIndex::build_with_config(&empty_tasks, config.clone());
+        let timestamp = Timestamp::now();
+        let task = Task::new(TaskId::generate(), "Hello World Task", timestamp)
+            .with_tags(PersistentHashSet::new().insert(Tag::new("rust")));
+        let changes = vec![TaskChange::Add(task)];
+
+        let (_new_index, metrics) = index.apply_changes_with_metrics(&changes);
+
+        assert!(metrics.key_generated_total > 0);
+        assert!(metrics.key_unique_total > 0);
+        assert!((0.0..=1.0).contains(&metrics.pool_hit_rate));
+        assert_eq!(metrics.merge_calls_total, 9);
+    }
+
+    #[rstest]
+    fn apply_changes_with_metrics_empty_changes_returns_zero_metrics() {
+        use lambars::persistent::PersistentVector;
+
+        let config = SearchIndexConfig::default();
+        let empty_tasks: PersistentVector<Task> = PersistentVector::new();
+        let index = SearchIndex::build_with_config(&empty_tasks, config.clone());
+        let changes: Vec<TaskChange> = vec![];
+
+        let (new_index, metrics) = index.apply_changes_with_metrics(&changes);
+
+        assert_eq!(new_index.tasks_by_id.len(), 0);
+        assert_eq!(metrics.key_generated_total, 0);
+        assert_eq!(metrics.key_unique_total, 0);
+        assert!((metrics.pool_hit_rate - 0.0).abs() < f64::EPSILON);
+        assert_eq!(metrics.build_delta_elapsed_ms, 0);
+        assert_eq!(metrics.merge_calls_total, 0);
+        assert_eq!(metrics.merge_elapsed_ms, 0);
+    }
+
+    #[rstest]
+    fn apply_changes_with_metrics_multiple_changes() {
+        use crate::domain::{Tag, Timestamp};
+        use lambars::persistent::PersistentVector;
+
+        let config = SearchIndexConfig::default();
+        let empty_tasks: PersistentVector<Task> = PersistentVector::new();
+        let index = SearchIndex::build_with_config(&empty_tasks, config.clone());
+        let timestamp = Timestamp::now();
+
+        let task1 = Task::new(TaskId::generate(), "First Task", timestamp.clone())
+            .with_tags(PersistentHashSet::new().insert(Tag::new("tag1")));
+        let task2 = Task::new(TaskId::generate(), "Second Task", timestamp)
+            .with_tags(PersistentHashSet::new().insert(Tag::new("tag2")));
+        let changes = vec![TaskChange::Add(task1), TaskChange::Add(task2)];
+
+        let (new_index, metrics) = index.apply_changes_with_metrics(&changes);
+
+        assert_eq!(new_index.tasks_by_id.len(), 2);
+        assert!(metrics.key_generated_total > 0);
+        assert_eq!(metrics.merge_calls_total, 9);
     }
 }
 
