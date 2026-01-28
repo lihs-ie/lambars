@@ -3843,9 +3843,7 @@ impl SearchIndex {
             })
     }
 
-    /// Uses `(existing ∪ add) - remove` order to correctly handle Add->Remove within the same batch.
-    ///
-    /// Key clone is O(1) via `NgramKey` (Arc<str>), avoiding `String::clone()` allocations.
+    /// Computes `(existing ∪ add) - remove` for a `PrefixIndex`.
     fn merge_index_delta(
         index: &PrefixIndex,
         add: &MutableInternedIndex,
@@ -3855,21 +3853,22 @@ impl SearchIndex {
 
         all_keys.into_iter().fold(index.clone(), |acc, key| {
             let key_str = key.as_str();
-            let merged = Self::compute_merged_posting_list(
-                acc.get(key_str).map(|v| v.iter().cloned().collect()),
-                add.get(key),
-                remove.get(key),
+            let existing_iter = acc.get(key_str).into_iter().flat_map(|v| v.iter());
+            let merged = Self::compute_merged_posting_list_iter(
+                existing_iter,
+                add.get(key).map_or(&[], Vec::as_slice),
+                remove.get(key).map_or(&[], Vec::as_slice),
             );
 
             if merged.is_empty() {
                 acc.remove(key_str)
             } else {
-                // O(1) clone via Arc<str> - no String allocation
                 acc.insert(key.clone(), merged.into_iter().collect())
             }
         })
     }
 
+    /// Computes `(existing ∪ add) - remove` for a `NgramIndex`.
     fn merge_ngram_delta(
         index: &NgramIndex,
         add: &MutableInternedNgramIndex,
@@ -3880,10 +3879,11 @@ impl SearchIndex {
 
         for key in all_keys {
             let key_str = key.as_str();
-            let merged = Self::compute_merged_posting_list(
-                result.get(key_str).map(|v| v.iter().cloned().collect()),
-                add.get(key),
-                remove.get(key),
+            let existing_iter = result.get(key_str).into_iter().flat_map(|v| v.iter());
+            let merged = Self::compute_merged_posting_list_iter(
+                existing_iter,
+                add.get(key).map_or(&[], Vec::as_slice),
+                remove.get(key).map_or(&[], Vec::as_slice),
             );
 
             if merged.is_empty() {
@@ -3897,6 +3897,7 @@ impl SearchIndex {
     }
 
     /// Computes `(existing ∪ add) - remove` with deduplication.
+    #[cfg(test)]
     fn compute_merged_posting_list(
         existing: Option<Vec<TaskId>>,
         to_add: Option<&Vec<TaskId>>,
@@ -3999,46 +4000,55 @@ impl SearchIndex {
         result
     }
 
-    // -------------------------------------------------------------------------
-    // Test-only accessors for internal index verification
-    // -------------------------------------------------------------------------
+    /// Computes `(existing ∪ add) - remove` with sorted, deduplicated output.
+    fn compute_merged_posting_list_iter<'a>(
+        existing: impl Iterator<Item = &'a TaskId>,
+        add: &'a [TaskId],
+        remove: &'a [TaskId],
+    ) -> Vec<TaskId> {
+        let remove_set: std::collections::HashSet<_> = remove.iter().collect();
 
-    /// Returns a reference to the title word index (test-only).
+        let mut merged: Vec<TaskId> = existing
+            .chain(add.iter())
+            .filter(|id| !remove_set.contains(id))
+            .cloned()
+            .collect();
+
+        merged.sort();
+        merged.dedup();
+        merged
+    }
+
     #[cfg(test)]
     #[must_use]
     pub const fn title_word_index_for_test(&self) -> &PrefixIndex {
         &self.title_word_index
     }
 
-    /// Returns a reference to the title full index (test-only).
     #[cfg(test)]
     #[must_use]
     pub const fn title_full_index_for_test(&self) -> &PrefixIndex {
         &self.title_full_index
     }
 
-    /// Returns a reference to the title full all-suffix index (test-only).
     #[cfg(test)]
     #[must_use]
     pub const fn title_full_all_suffix_index_for_test(&self) -> &PrefixIndex {
         &self.title_full_all_suffix_index
     }
 
-    /// Returns a reference to the title word all-suffix index (test-only).
     #[cfg(test)]
     #[must_use]
     pub const fn title_word_all_suffix_index_for_test(&self) -> &PrefixIndex {
         &self.title_word_all_suffix_index
     }
 
-    /// Returns a reference to the tag index (test-only).
     #[cfg(test)]
     #[must_use]
     pub const fn tag_index_for_test(&self) -> &PrefixIndex {
         &self.tag_index
     }
 
-    /// Returns a reference to the tag all-suffix index (test-only).
     #[cfg(test)]
     #[must_use]
     pub const fn tag_all_suffix_index_for_test(&self) -> &PrefixIndex {
@@ -4053,6 +4063,16 @@ impl SearchIndex {
         remove: &[TaskId],
     ) -> Vec<TaskId> {
         Self::compute_merged_posting_list_sorted(existing, add, remove)
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub fn compute_merged_posting_list_iter_for_test(
+        existing: &[TaskId],
+        add: &[TaskId],
+        remove: &[TaskId],
+    ) -> Vec<TaskId> {
+        Self::compute_merged_posting_list_iter(existing.iter(), add, remove)
     }
 }
 
@@ -14182,5 +14202,121 @@ mod compute_merged_posting_list_sorted_tests {
 
         // Assert
         assert_eq!(result, task_ids(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]));
+    }
+}
+
+#[cfg(test)]
+mod compute_merged_posting_list_iter_tests {
+    use super::*;
+    use rstest::rstest;
+    use uuid::Uuid;
+
+    fn task_ids(values: &[u128]) -> Vec<TaskId> {
+        values
+            .iter()
+            .map(|&v| TaskId::from_uuid(Uuid::from_u128(v)))
+            .collect()
+    }
+
+    fn merge(existing: &[u128], add: &[u128], remove: &[u128]) -> Vec<TaskId> {
+        SearchIndex::compute_merged_posting_list_iter_for_test(
+            &task_ids(existing),
+            &task_ids(add),
+            &task_ids(remove),
+        )
+    }
+
+    #[rstest]
+    fn empty_inputs_returns_empty() {
+        assert!(merge(&[], &[], &[]).is_empty());
+    }
+
+    #[rstest]
+    fn existing_only_preserved() {
+        assert_eq!(merge(&[1, 2, 3], &[], &[]), task_ids(&[1, 2, 3]));
+    }
+
+    #[rstest]
+    fn add_only_preserved() {
+        assert_eq!(merge(&[], &[4, 5, 6], &[]), task_ids(&[4, 5, 6]));
+    }
+
+    #[rstest]
+    fn remove_without_source_returns_empty() {
+        assert!(merge(&[], &[], &[1, 2, 3]).is_empty());
+    }
+
+    #[rstest]
+    fn union_minus_remove() {
+        // (1,2,3) ∪ (4,5,6) - (2,5) = (1,3,4,6)
+        assert_eq!(merge(&[1, 2, 3], &[4, 5, 6], &[2, 5]), task_ids(&[1, 3, 4, 6]));
+    }
+
+    #[rstest]
+    fn merge_without_remove_produces_sorted_union() {
+        assert_eq!(merge(&[1, 3, 5], &[2, 4, 6], &[]), task_ids(&[1, 2, 3, 4, 5, 6]));
+    }
+
+    #[rstest]
+    fn remove_from_existing() {
+        assert_eq!(merge(&[1, 2, 3, 4, 5], &[], &[2, 4]), task_ids(&[1, 3, 5]));
+    }
+
+    #[rstest]
+    fn remove_from_add() {
+        assert_eq!(merge(&[], &[1, 2, 3, 4, 5], &[2, 4]), task_ids(&[1, 3, 5]));
+    }
+
+    #[rstest]
+    fn remove_from_both() {
+        assert_eq!(merge(&[1, 2, 3], &[4, 5, 6], &[1, 2, 4, 5]), task_ids(&[3, 6]));
+    }
+
+    #[rstest]
+    fn remove_all_returns_empty() {
+        assert!(merge(&[1, 2, 3], &[4, 5], &[1, 2, 3, 4, 5]).is_empty());
+    }
+
+    #[rstest]
+    fn remove_more_than_exists_returns_empty() {
+        assert!(merge(&[1, 2, 3], &[4, 5], &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]).is_empty());
+    }
+
+    #[rstest]
+    fn single_elements() {
+        assert_eq!(merge(&[1], &[2], &[1]), task_ids(&[2]));
+    }
+
+    #[rstest]
+    fn large_gap_in_ids() {
+        assert_eq!(merge(&[1, 1_000_000], &[500_000], &[]), task_ids(&[1, 500_000, 1_000_000]));
+    }
+
+    #[rstest]
+    fn interleaved_merge() {
+        assert_eq!(
+            merge(&[1, 3, 5, 7, 9], &[2, 4, 6, 8, 10], &[]),
+            task_ids(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+        );
+    }
+
+    #[rstest]
+    #[case::existing_only(&[1, 2, 3], &[], &[])]
+    #[case::add_only(&[], &[4, 5, 6], &[])]
+    #[case::remove_only(&[], &[], &[1, 2, 3])]
+    #[case::all_inputs(&[1, 2, 3], &[4, 5, 6], &[2, 5])]
+    #[case::overlapping(&[1, 2, 3, 4, 5], &[3, 4, 5, 6, 7], &[4, 5])]
+    fn iter_matches_sorted(
+        #[case] existing: &[u128],
+        #[case] add: &[u128],
+        #[case] remove: &[u128],
+    ) {
+        let iter_result = merge(existing, add, remove);
+        let sorted_result = SearchIndex::compute_merged_posting_list_sorted_for_test(
+            &task_ids(existing),
+            &task_ids(add),
+            &task_ids(remove),
+        );
+        assert_eq!(iter_result, sorted_result);
     }
 }
