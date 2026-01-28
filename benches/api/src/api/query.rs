@@ -1058,6 +1058,200 @@ pub struct SearchIndexDelta {
     pub tag_ngram_remove: MutableNgramIndex,
 }
 
+// REQ-SEARCH-NGRAM-PERF-001 Part 2
+/// Cached normalization result for a task. Tags are sorted for stable ordering.
+struct NormalizedTaskData {
+    title_key: String,
+    title_words: Vec<String>,
+    tags: Vec<String>,
+}
+
+// REQ-SEARCH-NGRAM-PERF-001 Part 2
+impl SearchIndexDelta {
+    /// Constructs a delta from task changes. Each task is normalized only once.
+    ///
+    /// # Panics
+    ///
+    /// Panics on forbidden patterns: Remove followed by Add/Update for the same `TaskId`.
+    #[must_use]
+    pub fn from_changes(
+        changes: &[TaskChange],
+        config: &SearchIndexConfig,
+        tasks_by_id: &PersistentTreeMap<TaskId, Task>,
+    ) -> Self {
+        let mut delta = Self::default();
+        let mut pending_tasks: std::collections::HashMap<TaskId, (Task, NormalizedTaskData)> =
+            std::collections::HashMap::new();
+        let mut removed_task_ids: std::collections::HashSet<TaskId> =
+            std::collections::HashSet::new();
+
+        for change in changes {
+            match change {
+                TaskChange::Add(task) => {
+                    assert!(
+                        !removed_task_ids.contains(&task.task_id),
+                        "Invalid change sequence: Remove followed by Add for same TaskId {:?}. \
+                         This pattern is not supported. Use Update instead.",
+                        task.task_id
+                    );
+                    let normalized = Self::normalize_task_once(task);
+                    delta.collect_add(&normalized, &task.task_id, config);
+                    pending_tasks.insert(task.task_id.clone(), (task.clone(), normalized));
+                }
+                TaskChange::Update { old, new } => {
+                    assert!(
+                        !removed_task_ids.contains(&new.task_id),
+                        "Invalid change sequence: Remove followed by Update for same TaskId {:?}. \
+                         This pattern is not supported.",
+                        new.task_id
+                    );
+                    let old_normalized = Self::normalize_task_once(old);
+                    let new_normalized = Self::normalize_task_once(new);
+                    delta.collect_remove(&old_normalized, &old.task_id, config);
+                    delta.collect_add(&new_normalized, &new.task_id, config);
+                    pending_tasks.insert(new.task_id.clone(), (new.clone(), new_normalized));
+                }
+                TaskChange::Remove(task_id) => {
+                    if let Some((_, normalized)) = pending_tasks.get(task_id) {
+                        delta.collect_remove(normalized, task_id, config);
+                        pending_tasks.remove(task_id);
+                    } else if let Some(task) = tasks_by_id.get(task_id) {
+                        let normalized = Self::normalize_task_once(task);
+                        delta.collect_remove(&normalized, task_id, config);
+                    }
+                    removed_task_ids.insert(task_id.clone());
+                }
+            }
+        }
+
+        delta
+    }
+
+    fn normalize_task_once(task: &Task) -> NormalizedTaskData {
+        let title = normalize_query(&task.title);
+
+        // Sort tags by as_str() (already lowercase via Tag::new), then apply normalize_query.
+        // This matches existing build_with_config/add_task behavior.
+        let mut sorted_tags: Vec<_> = task.tags.iter().collect();
+        sorted_tags.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        let tags: Vec<String> = sorted_tags
+            .into_iter()
+            .map(|tag| normalize_query(tag.as_str()).key)
+            .collect();
+
+        NormalizedTaskData {
+            title_key: title.key,
+            title_words: title.tokens,
+            tags,
+        }
+    }
+
+    fn collect_add(
+        &mut self,
+        data: &NormalizedTaskData,
+        task_id: &TaskId,
+        config: &SearchIndexConfig,
+    ) {
+        let (word_limit, tag_limit) = Self::compute_token_limits(data, config);
+
+        self.title_full_add
+            .entry(data.title_key.clone())
+            .or_default()
+            .push(task_id.clone());
+
+        for word in data.title_words.iter().take(word_limit) {
+            self.title_word_add
+                .entry(word.clone())
+                .or_default()
+                .push(task_id.clone());
+            if config.infix_mode == InfixMode::Ngram {
+                index_ngrams_batch(&mut self.title_word_ngram_add, word, task_id, config);
+            }
+        }
+
+        for tag in data.tags.iter().take(tag_limit) {
+            self.tag_add
+                .entry(tag.clone())
+                .or_default()
+                .push(task_id.clone());
+            if config.infix_mode == InfixMode::Ngram {
+                index_ngrams_batch(&mut self.tag_ngram_add, tag, task_id, config);
+            }
+        }
+
+        if config.infix_mode == InfixMode::Ngram {
+            index_ngrams_batch(
+                &mut self.title_full_ngram_add,
+                &data.title_key,
+                task_id,
+                config,
+            );
+        }
+    }
+
+    fn collect_remove(
+        &mut self,
+        data: &NormalizedTaskData,
+        task_id: &TaskId,
+        config: &SearchIndexConfig,
+    ) {
+        let (word_limit, tag_limit) = Self::compute_token_limits(data, config);
+
+        self.title_full_remove
+            .entry(data.title_key.clone())
+            .or_default()
+            .push(task_id.clone());
+
+        for word in data.title_words.iter().take(word_limit) {
+            self.title_word_remove
+                .entry(word.clone())
+                .or_default()
+                .push(task_id.clone());
+            if config.infix_mode == InfixMode::Ngram {
+                index_ngrams_batch(&mut self.title_word_ngram_remove, word, task_id, config);
+            }
+        }
+
+        for tag in data.tags.iter().take(tag_limit) {
+            self.tag_remove
+                .entry(tag.clone())
+                .or_default()
+                .push(task_id.clone());
+            if config.infix_mode == InfixMode::Ngram {
+                index_ngrams_batch(&mut self.tag_ngram_remove, tag, task_id, config);
+            }
+        }
+
+        if config.infix_mode == InfixMode::Ngram {
+            index_ngrams_batch(
+                &mut self.title_full_ngram_remove,
+                &data.title_key,
+                task_id,
+                config,
+            );
+        }
+    }
+
+    /// Tags take priority over words when total exceeds `max_tokens_per_task`.
+    fn compute_token_limits(
+        data: &NormalizedTaskData,
+        config: &SearchIndexConfig,
+    ) -> (usize, usize) {
+        let (words_len, tags_len) = (data.title_words.len(), data.tags.len());
+        let total = words_len + tags_len;
+
+        if total <= config.max_tokens_per_task {
+            (words_len, tags_len)
+        } else {
+            let word_limit = config
+                .max_tokens_per_task
+                .saturating_sub(tags_len.min(config.max_tokens_per_task));
+            let tag_limit = config.max_tokens_per_task.saturating_sub(word_limit);
+            (word_limit, tag_limit)
+        }
+    }
+}
+
 // -----------------------------------------------------------------------------
 // N-gram Generation (REQ-SEARCH-NGRAM-002 Part 1)
 // -----------------------------------------------------------------------------
@@ -9878,7 +10072,14 @@ mod performance_tests {
 #[cfg(test)]
 mod search_index_delta_tests {
     use super::*;
+    use crate::domain::{Tag, Timestamp};
     use rstest::rstest;
+
+    fn create_task_with_title_and_tags(title: &str, tags: Vec<&str>) -> Task {
+        let base = Task::new(TaskId::generate(), title, Timestamp::now());
+        tags.into_iter()
+            .fold(base, |task, tag| task.add_tag(Tag::new(tag)))
+    }
 
     #[rstest]
     fn default_creates_empty_delta() {
@@ -9950,5 +10151,276 @@ mod search_index_delta_tests {
         assert!(debug_str.contains("SearchIndexDelta"));
         assert!(debug_str.contains("title_full_add"));
         assert!(debug_str.contains("tag_ngram_remove"));
+    }
+
+    // =========================================================================
+    // from_changes Tests (REQ-SEARCH-NGRAM-PERF-001 Part 2)
+    // =========================================================================
+
+    fn task_id_from_u128(value: u128) -> TaskId {
+        TaskId::from_uuid(uuid::Uuid::from_u128(value))
+    }
+
+    fn create_task_with_title_and_id(title: &str, task_id: TaskId) -> Task {
+        Task::new(task_id, title, crate::domain::Timestamp::now())
+    }
+
+    /// Tests that a single Add change correctly populates add fields.
+    #[rstest]
+    fn delta_from_single_add_change() {
+        let task = create_task_with_title_and_id("Test Task", task_id_from_u128(1));
+        let changes = vec![TaskChange::Add(task)];
+        let config = SearchIndexConfig::default();
+        let tasks_by_id = PersistentTreeMap::new();
+
+        let delta = SearchIndexDelta::from_changes(&changes, &config, &tasks_by_id);
+
+        // title_full_add should contain the normalized title
+        assert!(!delta.title_full_add.is_empty());
+        assert!(delta.title_full_add.contains_key("test task"));
+        assert!(delta.title_full_remove.is_empty());
+    }
+
+    /// Tests that Update change collects both add and remove entries.
+    #[rstest]
+    fn delta_from_update_change_collects_both_add_and_remove() {
+        let task_id = task_id_from_u128(1);
+        let old_task = create_task_with_title_and_id("Old Title", task_id.clone());
+        let new_task = create_task_with_title_and_id("New Title", task_id);
+        let changes = vec![TaskChange::Update {
+            old: old_task,
+            new: new_task,
+        }];
+        let config = SearchIndexConfig::default();
+        let tasks_by_id = PersistentTreeMap::new();
+
+        let delta = SearchIndexDelta::from_changes(&changes, &config, &tasks_by_id);
+
+        // Add should contain new title
+        assert!(!delta.title_full_add.is_empty());
+        assert!(delta.title_full_add.contains_key("new title"));
+
+        // Remove should contain old title
+        assert!(!delta.title_full_remove.is_empty());
+        assert!(delta.title_full_remove.contains_key("old title"));
+    }
+
+    /// Tests that Remove change uses `tasks_by_id` to find the task.
+    #[rstest]
+    fn delta_from_remove_change_uses_tasks_by_id() {
+        let task = create_task_with_title_and_id("Test Task", task_id_from_u128(1));
+        let task_id = task.task_id.clone();
+        let tasks_by_id = PersistentTreeMap::new().insert(task_id.clone(), task);
+
+        let changes = vec![TaskChange::Remove(task_id)];
+        let config = SearchIndexConfig::default();
+
+        let delta = SearchIndexDelta::from_changes(&changes, &config, &tasks_by_id);
+
+        // Remove should be populated from tasks_by_id lookup
+        assert!(!delta.title_full_remove.is_empty());
+        assert!(delta.title_full_remove.contains_key("test task"));
+    }
+
+    /// Tests that Remove for nonexistent `TaskId` is idempotent (no-op).
+    #[rstest]
+    fn delta_from_remove_nonexistent_is_idempotent() {
+        let changes = vec![TaskChange::Remove(task_id_from_u128(999))];
+        let config = SearchIndexConfig::default();
+        let tasks_by_id = PersistentTreeMap::new();
+
+        let delta = SearchIndexDelta::from_changes(&changes, &config, &tasks_by_id);
+
+        // All fields should remain empty for nonexistent task
+        assert!(delta.title_full_remove.is_empty());
+        assert!(delta.title_word_remove.is_empty());
+        assert!(delta.tag_remove.is_empty());
+    }
+
+    /// Tests Add followed by Remove in the same batch.
+    /// Both operations should be recorded (`pending_tasks` tracking).
+    #[rstest]
+    fn delta_from_add_then_remove_in_same_batch() {
+        let task = create_task_with_title_and_id("Test Task", task_id_from_u128(1));
+        let config = SearchIndexConfig::default();
+        let tasks_by_id = PersistentTreeMap::new();
+        let task_id = task.task_id.clone();
+
+        let changes = vec![TaskChange::Add(task), TaskChange::Remove(task_id)];
+
+        let delta = SearchIndexDelta::from_changes(&changes, &config, &tasks_by_id);
+
+        // Both add and remove should be recorded
+        assert!(!delta.title_full_add.is_empty());
+        assert!(!delta.title_full_remove.is_empty());
+    }
+
+    /// Tests Update followed by Remove in the same batch.
+    #[rstest]
+    fn delta_from_update_then_remove_in_same_batch() {
+        let task_id = task_id_from_u128(1);
+        let old_task = create_task_with_title_and_id("Old Title", task_id.clone());
+        let new_task = create_task_with_title_and_id("New Title", task_id);
+        let config = SearchIndexConfig::default();
+        let tasks_by_id =
+            PersistentTreeMap::new().insert(old_task.task_id.clone(), old_task.clone());
+        let new_task_id = new_task.task_id.clone();
+
+        let changes = vec![
+            TaskChange::Update {
+                old: old_task,
+                new: new_task,
+            },
+            TaskChange::Remove(new_task_id),
+        ];
+
+        let delta = SearchIndexDelta::from_changes(&changes, &config, &tasks_by_id);
+
+        // Update: old removed, new added
+        // Remove: new removed (from pending_tasks)
+        // Result: add has new, remove has old + new
+        assert!(!delta.title_full_add.is_empty());
+        assert!(!delta.title_full_remove.is_empty());
+        // old title and new title should both be in remove
+        assert!(delta.title_full_remove.contains_key("old title"));
+        assert!(delta.title_full_remove.contains_key("new title"));
+    }
+
+    /// Tests that Remove followed by Add panics (forbidden pattern).
+    #[rstest]
+    #[should_panic(expected = "Remove followed by Add")]
+    fn delta_panics_on_remove_then_add() {
+        let task = create_task_with_title_and_id("Test Task", task_id_from_u128(1));
+        let config = SearchIndexConfig::default();
+        let task_id = task.task_id.clone();
+        let tasks_by_id = PersistentTreeMap::new().insert(task_id.clone(), task.clone());
+
+        let changes = vec![TaskChange::Remove(task_id), TaskChange::Add(task)];
+
+        // This should panic
+        let _ = SearchIndexDelta::from_changes(&changes, &config, &tasks_by_id);
+    }
+
+    /// Tests that Remove followed by Update panics (forbidden pattern).
+    #[rstest]
+    #[should_panic(expected = "Remove followed by Update")]
+    fn delta_panics_on_remove_then_update() {
+        let task_id = task_id_from_u128(1);
+        let task = create_task_with_title_and_id("Test Task", task_id.clone());
+        let updated_task = create_task_with_title_and_id("Updated Task", task_id);
+        let config = SearchIndexConfig::default();
+        let task_id_for_remove = task.task_id.clone();
+        let tasks_by_id = PersistentTreeMap::new().insert(task.task_id.clone(), task.clone());
+
+        let changes = vec![
+            TaskChange::Remove(task_id_for_remove),
+            TaskChange::Update {
+                old: task,
+                new: updated_task,
+            },
+        ];
+
+        // This should panic
+        let _ = SearchIndexDelta::from_changes(&changes, &config, &tasks_by_id);
+    }
+
+    /// Tests that `from_changes` respects `max_tokens_per_task` limit.
+    /// Tags are prioritized over words (matches existing `build_with_config` behavior).
+    #[rstest]
+    fn delta_respects_max_tokens_per_task() {
+        // 6 words + 2 tags = 8 tokens, max = 5
+        // Expected: tag_limit = 2 (all tags), word_limit = 5 - 2 = 3
+        let task = create_task_with_title_and_tags(
+            "alpha beta gamma delta epsilon zeta",
+            vec!["important", "urgent"],
+        );
+        let config = SearchIndexConfig {
+            max_tokens_per_task: 5,
+            ..Default::default()
+        };
+        let tasks_by_id = PersistentTreeMap::new();
+
+        let delta = SearchIndexDelta::from_changes(&[TaskChange::Add(task)], &config, &tasks_by_id);
+
+        // All 2 tags should be indexed
+        assert!(delta.tag_add.contains_key("important"));
+        assert!(delta.tag_add.contains_key("urgent"));
+
+        // Only first 3 words should be indexed (alpha, beta, gamma)
+        assert!(delta.title_word_add.contains_key("alpha"));
+        assert!(delta.title_word_add.contains_key("beta"));
+        assert!(delta.title_word_add.contains_key("gamma"));
+
+        // 4th+ words should NOT be indexed
+        assert!(!delta.title_word_add.contains_key("delta"));
+        assert!(!delta.title_word_add.contains_key("epsilon"));
+        assert!(!delta.title_word_add.contains_key("zeta"));
+    }
+
+    /// Tests that tag ordering matches existing code.
+    /// `Tag::new()` normalizes to lowercase, so sort is on normalized values.
+    /// Sorted order: "apple" < "banana" < "cherry" (ASCII lowercase)
+    #[rstest]
+    fn delta_tag_order_matches_existing_code() {
+        // Tag::new() normalizes to lowercase, so:
+        // "Cherry" -> "cherry", "apple" -> "apple", "BANANA" -> "banana"
+        // Sorted by as_str() (lowercase): ["apple", "banana", "cherry"]
+        // With max_tokens_per_task = 2: tag_limit = 2, word_limit = 0
+        // First 2 tags: ["apple", "banana"]
+        let task = create_task_with_title_and_tags("test", vec!["Cherry", "apple", "BANANA"]);
+        let config = SearchIndexConfig {
+            max_tokens_per_task: 2, // Forces tag_limit = 2, word_limit = 0
+            ..Default::default()
+        };
+        let tasks_by_id = PersistentTreeMap::new();
+
+        let delta = SearchIndexDelta::from_changes(&[TaskChange::Add(task)], &config, &tasks_by_id);
+
+        // "apple" and "banana" should be indexed (first 2 in sorted order)
+        assert!(delta.tag_add.contains_key("apple"));
+        assert!(delta.tag_add.contains_key("banana"));
+
+        // "cherry" should NOT be indexed (3rd in sorted order, tag_limit is 2)
+        assert!(!delta.tag_add.contains_key("cherry"));
+    }
+
+    /// Verifies delta matches existing `add_task` behavior for tag ordering and limits.
+    #[rstest]
+    fn delta_matches_add_task_for_tag_handling() {
+        let task = create_task_with_title_and_tags(
+            "alpha beta gamma delta",
+            vec!["urgent", "IMPORTANT", "later"],
+        );
+        let config = SearchIndexConfig {
+            max_tokens_per_task: 5, // 4 words + 3 tags = 7 > 5
+            ..Default::default()
+        };
+
+        // Build using add_task
+        let empty_index = SearchIndex::build_with_config(&PersistentVector::new(), config.clone());
+        let index_via_add = empty_index.add_task(&task);
+
+        // Build using from_changes
+        let tasks_by_id = PersistentTreeMap::new();
+        let delta = SearchIndexDelta::from_changes(&[TaskChange::Add(task)], &config, &tasks_by_id);
+
+        // tag_limit = min(3, 5) = 3, word_limit = 5 - 3 = 2
+        // Tags (ASCII sorted): ["IMPORTANT", "later", "urgent"]
+        // Normalized in order: ["important", "later", "urgent"]
+
+        // Verify both methods index the same tags
+        let delta_tags: std::collections::HashSet<_> = delta.tag_add.keys().collect();
+        let index_tags: std::collections::HashSet<_> = index_via_add
+            .tag_index
+            .keys()
+            .filter(|k| {
+                index_via_add
+                    .tag_index
+                    .get(*k)
+                    .is_some_and(|v| !v.is_empty())
+            })
+            .collect();
+
+        assert_eq!(delta_tags, index_tags, "Tag sets should match");
     }
 }
