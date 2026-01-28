@@ -28,6 +28,8 @@
 //! filtering and aggregation should be delegated to the repository layer for better
 //! performance with large datasets.
 
+use std::sync::Arc;
+
 use axum::{
     Json,
     extract::{Query, State},
@@ -1029,6 +1031,94 @@ type MutableNgramIndex = std::collections::HashMap<String, Vec<TaskId>>;
 
 /// Alias for prefix index deltas (same underlying type as `MutableNgramIndex`).
 type MutablePrefixIndex = MutableNgramIndex;
+
+/// N-gram key with reference-counted storage for O(1) cloning.
+///
+/// Used with [`NgramKeyPool`] to deduplicate n-gram strings within a single
+/// `apply_changes` operation. `Hash`/`Eq` delegate to underlying `str`.
+#[derive(Clone, Hash, Eq, PartialEq, Debug)]
+pub struct NgramKey(Arc<str>);
+
+impl NgramKey {
+    /// Creates a new `NgramKey`. Use [`NgramKeyPool::intern`] to reuse allocations.
+    pub fn new(value: &str) -> Self {
+        Self(Arc::from(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for NgramKey {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}", self.0)
+    }
+}
+
+/// Local interning pool for n-gram keys.
+///
+/// Deduplicates n-gram strings within a single `apply_changes` operation,
+/// converting repeated `String::clone()` calls into O(1) `Arc` pointer copies.
+/// Pool is created per-operation and dropped after completion.
+///
+/// # Memory Efficiency
+///
+/// Uses `HashMap<Arc<str>, NgramKey>` where both key and value share the same
+/// `Arc<str>` allocation, satisfying REQ-SEARCH-NGRAM-MEM-002's requirement
+/// for single allocation per unique string.
+#[derive(Default)]
+pub struct NgramKeyPool {
+    pool: std::collections::HashMap<Arc<str>, NgramKey>,
+    hit_count: usize,
+    miss_count: usize,
+}
+
+impl NgramKeyPool {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Interns a string, returning an `NgramKey`.
+    ///
+    /// Returns a clone of existing key (O(1)) on hit, or allocates new on miss.
+    ///
+    /// # Note on Purity
+    ///
+    /// This method is intentionally impure: it mutates internal cache state
+    /// (`pool`, `hit_count`, `miss_count`) for performance optimization.
+    /// This is acceptable because:
+    /// - The pool is locally scoped within a single `apply_changes` operation
+    /// - External behavior (returned `NgramKey` value) is deterministic
+    /// - Side effects are confined to internal memoization state
+    pub fn intern(&mut self, value: &str) -> NgramKey {
+        if let Some(key) = self.pool.get(value) {
+            self.hit_count += 1;
+            return key.clone();
+        }
+        self.miss_count += 1;
+        // Allocate Arc<str> once and share between HashMap key and NgramKey value
+        let arc: Arc<str> = Arc::from(value);
+        let key = NgramKey(arc.clone());
+        self.pool.insert(arc, key.clone());
+        key
+    }
+
+    /// Returns the cache hit rate as a ratio between 0.0 and 1.0.
+    #[allow(clippy::cast_precision_loss)]
+    pub fn hit_rate(&self) -> f64 {
+        let total = self.hit_count + self.miss_count;
+        if total == 0 { 0.0 } else { self.hit_count as f64 / total as f64 }
+    }
+
+    pub fn unique_count(&self) -> usize {
+        self.pool.len()
+    }
+
+    pub const fn total_count(&self) -> usize {
+        self.hit_count + self.miss_count
+    }
+}
 
 /// Represents the delta (difference) for a `SearchIndex` update.
 ///
@@ -2190,7 +2280,7 @@ pub fn measure_search_index_build(
 ///
 /// # Platform Support
 ///
-/// - **Linux**: Uses VmHWM (High Water Mark) from `/proc/self/status`
+/// - **Linux**: Uses `VmHWM` (High Water Mark) from `/proc/self/status`
 /// - **macOS**: Uses `libc::getrusage` to obtain `ru_maxrss` (maximum resident set size),
 ///   which represents the peak RSS during the process lifetime.
 /// - **Other platforms**: Returns `None`
@@ -12444,5 +12534,235 @@ mod search_index_build_metrics_tests {
         assert_eq!(deserialized.elapsed_ms, original.elapsed_ms);
         assert_eq!(deserialized.peak_rss_mb, original.peak_rss_mb);
         assert_eq!(deserialized.ngram_entries, original.ngram_entries);
+    }
+}
+
+// =============================================================================
+// NgramKey and NgramKeyPool Tests (REQ-SEARCH-NGRAM-MEM-001 Phase 1)
+// =============================================================================
+
+#[cfg(test)]
+mod ngram_key_tests {
+    use super::*;
+    use rstest::rstest;
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    // -------------------------------------------------------------------------
+    // NgramKey Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn ngram_key_new_creates_arc() {
+        // Arrange & Act
+        let key = NgramKey::new("test");
+
+        // Assert
+        assert_eq!(key.as_str(), "test");
+    }
+
+    #[rstest]
+    fn ngram_key_clone_is_shallow() {
+        // Arrange
+        let key1 = NgramKey::new("test");
+
+        // Act
+        let key2 = key1.clone();
+
+        // Assert: Arc::ptr_eq confirms same underlying allocation
+        assert!(Arc::ptr_eq(&key1.0, &key2.0));
+    }
+
+    #[rstest]
+    fn ngram_key_hash_eq_by_value() {
+        // Arrange: Two separate NgramKeys with same content
+        let key1 = NgramKey::new("test");
+        let key2 = NgramKey::new("test");
+
+        // Assert: Value equality (different Arc instances, same content)
+        assert_eq!(key1, key2);
+
+        // Assert: Hash equality
+        let mut hasher1 = DefaultHasher::new();
+        let mut hasher2 = DefaultHasher::new();
+        key1.hash(&mut hasher1);
+        key2.hash(&mut hasher2);
+        assert_eq!(hasher1.finish(), hasher2.finish());
+    }
+
+    #[rstest]
+    fn ngram_key_hash_ne_for_different_values() {
+        // Arrange
+        let key1 = NgramKey::new("abc");
+        let key2 = NgramKey::new("xyz");
+
+        // Assert: Not equal (value inequality)
+        assert_ne!(key1, key2);
+
+        // Note: We intentionally do NOT assert hash inequality here.
+        // Hash collisions are possible by definition, and asserting
+        // hash inequality would make this test theoretically flaky.
+        // The important property is that equal values have equal hashes
+        // (tested in ngram_key_hash_eq_by_value), not that different
+        // values have different hashes.
+
+        // Verify hashing does not panic for different values
+        let mut hasher1 = DefaultHasher::new();
+        let mut hasher2 = DefaultHasher::new();
+        key1.hash(&mut hasher1);
+        key2.hash(&mut hasher2);
+        let _ = hasher1.finish();
+        let _ = hasher2.finish();
+    }
+
+    #[rstest]
+    fn ngram_key_display_shows_content() {
+        // Arrange
+        let key = NgramKey::new("hello");
+
+        // Act
+        let displayed = key.to_string();
+
+        // Assert
+        assert_eq!(displayed, "hello");
+    }
+
+    #[rstest]
+    fn ngram_key_debug_shows_arc_wrapper() {
+        // Arrange
+        let key = NgramKey::new("test");
+
+        // Act
+        let debug_str = format!("{key:?}");
+
+        // Assert: Debug output contains the value
+        assert!(debug_str.contains("test"));
+    }
+
+    // -------------------------------------------------------------------------
+    // NgramKeyPool Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn ngram_key_pool_new_is_empty() {
+        // Arrange & Act
+        let pool = NgramKeyPool::new();
+
+        // Assert
+        assert_eq!(pool.unique_count(), 0);
+        assert_eq!(pool.total_count(), 0);
+        assert!(pool.hit_rate().abs() < f64::EPSILON);
+    }
+
+    #[rstest]
+    fn ngram_key_pool_default_is_empty() {
+        // Arrange & Act
+        let pool = NgramKeyPool::default();
+
+        // Assert
+        assert_eq!(pool.unique_count(), 0);
+        assert_eq!(pool.total_count(), 0);
+        assert!(pool.hit_rate().abs() < f64::EPSILON);
+    }
+
+    #[rstest]
+    fn ngram_key_pool_intern_creates_new_key() {
+        // Arrange
+        let mut pool = NgramKeyPool::new();
+
+        // Act
+        let key = pool.intern("test");
+
+        // Assert
+        assert_eq!(key.as_str(), "test");
+        assert_eq!(pool.unique_count(), 1);
+        assert_eq!(pool.total_count(), 1);
+        assert!(pool.hit_rate().abs() < f64::EPSILON); // All misses
+    }
+
+    #[rstest]
+    fn ngram_key_pool_intern_returns_same_arc() {
+        // Arrange
+        let mut pool = NgramKeyPool::new();
+        let key1 = pool.intern("test");
+
+        // Act
+        let key2 = pool.intern("test");
+
+        // Assert: Same Arc instance
+        assert!(Arc::ptr_eq(&key1.0, &key2.0));
+        assert_eq!(pool.unique_count(), 1);
+        assert_eq!(pool.total_count(), 2);
+    }
+
+    #[rstest]
+    fn ngram_key_pool_tracks_hit_rate() {
+        // Arrange
+        let mut pool = NgramKeyPool::new();
+
+        // Act: 2 misses, then 3 hits
+        pool.intern("a"); // miss
+        pool.intern("b"); // miss
+        pool.intern("a"); // hit
+        pool.intern("a"); // hit
+        pool.intern("b"); // hit
+
+        // Assert
+        assert_eq!(pool.unique_count(), 2);
+        assert_eq!(pool.total_count(), 5);
+        // Hit rate: 3 hits / 5 total = 0.6
+        assert!((pool.hit_rate() - 0.6).abs() < 0.001);
+    }
+
+    #[rstest]
+    fn ngram_key_pool_multiple_unique_keys() {
+        // Arrange
+        let mut pool = NgramKeyPool::new();
+
+        // Act
+        let key_abc = pool.intern("abc");
+        let key_def = pool.intern("def");
+        let key_ghi = pool.intern("ghi");
+
+        // Assert
+        assert_eq!(pool.unique_count(), 3);
+        assert_eq!(pool.total_count(), 3);
+        assert!(pool.hit_rate().abs() < f64::EPSILON); // All misses
+
+        // Verify keys are distinct
+        assert_ne!(key_abc.as_str(), key_def.as_str());
+        assert_ne!(key_def.as_str(), key_ghi.as_str());
+    }
+
+    #[rstest]
+    fn ngram_key_pool_empty_string() {
+        // Arrange
+        let mut pool = NgramKeyPool::new();
+
+        // Act
+        let key1 = pool.intern("");
+        let key2 = pool.intern("");
+
+        // Assert: Empty string is interned correctly
+        assert_eq!(key1.as_str(), "");
+        assert!(Arc::ptr_eq(&key1.0, &key2.0));
+        assert_eq!(pool.unique_count(), 1);
+    }
+
+    #[rstest]
+    fn ngram_key_pool_unicode_strings() {
+        // Arrange
+        let mut pool = NgramKeyPool::new();
+
+        // Act
+        let key_jp = pool.intern("日本語");
+        let key_emoji = pool.intern("🦀");
+        let key_jp2 = pool.intern("日本語");
+
+        // Assert
+        assert_eq!(key_jp.as_str(), "日本語");
+        assert_eq!(key_emoji.as_str(), "🦀");
+        assert!(Arc::ptr_eq(&key_jp.0, &key_jp2.0));
+        assert_eq!(pool.unique_count(), 2);
     }
 }
