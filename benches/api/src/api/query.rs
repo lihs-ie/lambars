@@ -3953,6 +3953,88 @@ impl SearchIndex {
         merged
     }
 
+    /// Computes `(existing ∪ add) - remove` in a single pass.
+    ///
+    /// # Preconditions
+    /// - All input slices must be sorted in ascending order
+    /// - All input slices must be deduplicated
+    #[allow(dead_code)]
+    fn compute_merged_posting_list_sorted(
+        existing: &[TaskId],
+        add: &[TaskId],
+        remove: &[TaskId],
+    ) -> Vec<TaskId> {
+        let mut result = Vec::with_capacity(existing.len() + add.len());
+
+        let mut existing_iterator = existing.iter().peekable();
+        let mut add_iterator = add.iter().peekable();
+        let mut remove_iterator = remove.iter().peekable();
+
+        fn should_remove<'a>(
+            candidate: &TaskId,
+            remove_iterator: &mut std::iter::Peekable<std::slice::Iter<'a, TaskId>>,
+        ) -> bool {
+            while let Some(remove_element) = remove_iterator.peek() {
+                match (*remove_element).cmp(candidate) {
+                    std::cmp::Ordering::Less => {
+                        remove_iterator.next();
+                    }
+                    std::cmp::Ordering::Equal => {
+                        remove_iterator.next();
+                        return true;
+                    }
+                    std::cmp::Ordering::Greater => {
+                        return false;
+                    }
+                }
+            }
+            false
+        }
+
+        loop {
+            match (existing_iterator.peek(), add_iterator.peek()) {
+                (None, None) => break,
+                (Some(&existing_element), None) => {
+                    existing_iterator.next();
+                    if !should_remove(existing_element, &mut remove_iterator) {
+                        result.push(existing_element.clone());
+                    }
+                }
+                (None, Some(&add_element)) => {
+                    add_iterator.next();
+                    if !should_remove(add_element, &mut remove_iterator) {
+                        result.push(add_element.clone());
+                    }
+                }
+                (Some(&existing_element), Some(&add_element)) => {
+                    match existing_element.cmp(add_element) {
+                        std::cmp::Ordering::Less => {
+                            existing_iterator.next();
+                            if !should_remove(existing_element, &mut remove_iterator) {
+                                result.push(existing_element.clone());
+                            }
+                        }
+                        std::cmp::Ordering::Greater => {
+                            add_iterator.next();
+                            if !should_remove(add_element, &mut remove_iterator) {
+                                result.push(add_element.clone());
+                            }
+                        }
+                        std::cmp::Ordering::Equal => {
+                            existing_iterator.next();
+                            add_iterator.next();
+                            if !should_remove(existing_element, &mut remove_iterator) {
+                                result.push(existing_element.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        result
+    }
+
     // -------------------------------------------------------------------------
     // Test-only accessors for internal index verification
     // -------------------------------------------------------------------------
@@ -4007,6 +4089,16 @@ impl SearchIndex {
         &self,
     ) -> &PersistentTreeMap<String, PersistentVector<TaskId>> {
         &self.tag_all_suffix_index
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub fn compute_merged_posting_list_sorted_for_test(
+        existing: &[TaskId],
+        add: &[TaskId],
+        remove: &[TaskId],
+    ) -> Vec<TaskId> {
+        Self::compute_merged_posting_list_sorted(existing, add, remove)
     }
 }
 
@@ -13945,5 +14037,355 @@ mod search_index_ngram_metrics_tests {
         assert_eq!(metrics.ngram_unique_total, 0);
         assert!((metrics.pool_hit_rate - 0.0).abs() < f64::EPSILON);
         assert_eq!(metrics.build_delta_elapsed_ms, 5);
+    }
+}
+
+// =============================================================================
+// compute_merged_posting_list_sorted Tests (REQ-SEARCH-PL-001 Part 2)
+// =============================================================================
+
+#[cfg(test)]
+mod compute_merged_posting_list_sorted_tests {
+    use super::*;
+    use rstest::rstest;
+    use uuid::Uuid;
+
+    fn task_ids(values: &[u128]) -> Vec<TaskId> {
+        values
+            .iter()
+            .map(|&v| TaskId::from_uuid(Uuid::from_u128(v)))
+            .collect()
+    }
+
+    // -------------------------------------------------------------------------
+    // Empty Input Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn compute_merged_posting_list_sorted_empty_inputs() {
+        // Arrange
+        let existing: Vec<TaskId> = vec![];
+        let add: Vec<TaskId> = vec![];
+        let remove: Vec<TaskId> = vec![];
+
+        // Act
+        let result = SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &add, &remove);
+
+        // Assert
+        assert!(result.is_empty());
+    }
+
+    #[rstest]
+    fn compute_merged_posting_list_sorted_all_empty_returns_empty() {
+        // Act
+        let result = SearchIndex::compute_merged_posting_list_sorted_for_test(&[], &[], &[]);
+
+        // Assert
+        assert!(result.is_empty());
+    }
+
+    // -------------------------------------------------------------------------
+    // Single Input Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn compute_merged_posting_list_sorted_existing_only() {
+        // Arrange
+        let existing = task_ids(&[1, 3, 5, 7, 9]);
+        let add: Vec<TaskId> = vec![];
+        let remove: Vec<TaskId> = vec![];
+
+        // Act
+        let result = SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &add, &remove);
+
+        // Assert
+        assert_eq!(result, task_ids(&[1, 3, 5, 7, 9]));
+    }
+
+    #[rstest]
+    fn compute_merged_posting_list_sorted_add_only() {
+        // Arrange
+        let existing: Vec<TaskId> = vec![];
+        let add = task_ids(&[2, 4, 6, 8, 10]);
+        let remove: Vec<TaskId> = vec![];
+
+        // Act
+        let result = SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &add, &remove);
+
+        // Assert
+        assert_eq!(result, task_ids(&[2, 4, 6, 8, 10]));
+    }
+
+    #[rstest]
+    fn compute_merged_posting_list_sorted_remove_only() {
+        // Arrange: remove without existing or add should return empty
+        let existing: Vec<TaskId> = vec![];
+        let add: Vec<TaskId> = vec![];
+        let remove = task_ids(&[1, 2, 3]);
+
+        // Act
+        let result = SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &add, &remove);
+
+        // Assert
+        assert!(result.is_empty());
+    }
+
+    // -------------------------------------------------------------------------
+    // Merge Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn compute_merged_posting_list_sorted_merge_all() {
+        // Arrange
+        let existing = task_ids(&[1, 3, 5, 7]);
+        let add = task_ids(&[2, 4, 6, 8]);
+        let remove = task_ids(&[3, 4]);
+
+        // Act
+        let result = SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &add, &remove);
+
+        // Assert: (existing ∪ add) - remove = {1,2,3,4,5,6,7,8} - {3,4} = {1,2,5,6,7,8}
+        assert_eq!(result, task_ids(&[1, 2, 5, 6, 7, 8]));
+    }
+
+    #[rstest]
+    fn compute_merged_posting_list_sorted_merge_with_no_remove() {
+        // Arrange
+        let existing = task_ids(&[1, 3, 5]);
+        let add = task_ids(&[2, 4, 6]);
+        let remove: Vec<TaskId> = vec![];
+
+        // Act
+        let result = SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &add, &remove);
+
+        // Assert
+        assert_eq!(result, task_ids(&[1, 2, 3, 4, 5, 6]));
+    }
+
+    #[rstest]
+    fn compute_merged_posting_list_sorted_remove_from_existing() {
+        // Arrange
+        let existing = task_ids(&[1, 2, 3, 4, 5]);
+        let add: Vec<TaskId> = vec![];
+        let remove = task_ids(&[2, 4]);
+
+        // Act
+        let result = SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &add, &remove);
+
+        // Assert
+        assert_eq!(result, task_ids(&[1, 3, 5]));
+    }
+
+    #[rstest]
+    fn compute_merged_posting_list_sorted_remove_from_add() {
+        // Arrange
+        let existing: Vec<TaskId> = vec![];
+        let add = task_ids(&[1, 2, 3, 4, 5]);
+        let remove = task_ids(&[2, 4]);
+
+        // Act
+        let result = SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &add, &remove);
+
+        // Assert
+        assert_eq!(result, task_ids(&[1, 3, 5]));
+    }
+
+    #[rstest]
+    fn compute_merged_posting_list_sorted_remove_from_both() {
+        // Arrange
+        let existing = task_ids(&[1, 3, 5]);
+        let add = task_ids(&[2, 4, 6]);
+        let remove = task_ids(&[3, 4]); // 3 is in existing, 4 is in add
+
+        // Act
+        let result = SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &add, &remove);
+
+        // Assert
+        assert_eq!(result, task_ids(&[1, 2, 5, 6]));
+    }
+
+    // -------------------------------------------------------------------------
+    // Duplicate Handling Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn compute_merged_posting_list_sorted_handles_duplicates_in_existing_and_add() {
+        // Arrange: same element appears in both existing and add
+        let existing = task_ids(&[1, 3, 5, 7]);
+        let add = task_ids(&[3, 5, 9]); // 3 and 5 are duplicates
+        let remove: Vec<TaskId> = vec![];
+
+        // Act
+        let result = SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &add, &remove);
+
+        // Assert: duplicates should be deduplicated
+        assert_eq!(result, task_ids(&[1, 3, 5, 7, 9]));
+    }
+
+    #[rstest]
+    fn compute_merged_posting_list_sorted_removes_duplicate_from_both() {
+        // Arrange: element appears in both existing and add, and is removed
+        let existing = task_ids(&[1, 3, 5]);
+        let add = task_ids(&[3, 7]); // 3 is duplicate
+        let remove = task_ids(&[3]); // remove the duplicate
+
+        // Act
+        let result = SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &add, &remove);
+
+        // Assert
+        assert_eq!(result, task_ids(&[1, 5, 7]));
+    }
+
+    // -------------------------------------------------------------------------
+    // Comparison with Original Implementation Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn compute_merged_posting_list_sorted_matches_original_simple() {
+        // Arrange
+        let existing = task_ids(&[1, 3, 5, 7, 9]);
+        let add = task_ids(&[2, 4, 6, 8, 10]);
+        let remove = task_ids(&[3, 4, 5]);
+
+        // Act
+        let sorted_result =
+            SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &add, &remove);
+        let original_result = SearchIndex::compute_merged_posting_list(
+            Some(existing),
+            Some(&add),
+            Some(&remove),
+        );
+
+        // Assert
+        assert_eq!(sorted_result, original_result);
+    }
+
+    #[rstest]
+    fn compute_merged_posting_list_sorted_matches_original_with_duplicates() {
+        // Arrange
+        let existing = task_ids(&[1, 2, 3, 4, 5]);
+        let add = task_ids(&[3, 4, 5, 6, 7]);
+        let remove = task_ids(&[2, 4, 6]);
+
+        // Act
+        let sorted_result =
+            SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &add, &remove);
+        let original_result = SearchIndex::compute_merged_posting_list(
+            Some(existing),
+            Some(&add),
+            Some(&remove),
+        );
+
+        // Assert
+        assert_eq!(sorted_result, original_result);
+    }
+
+    #[rstest]
+    #[case::empty_all(vec![], vec![], vec![])]
+    #[case::existing_only(task_ids(&[1, 2, 3]), vec![], vec![])]
+    #[case::add_only(vec![], task_ids(&[1, 2, 3]), vec![])]
+    #[case::remove_nonexistent(vec![], vec![], task_ids(&[1, 2, 3]))]
+    #[case::simple_merge(task_ids(&[1, 3]), task_ids(&[2, 4]), vec![])]
+    #[case::merge_with_remove(task_ids(&[1, 3, 5]), task_ids(&[2, 4]), task_ids(&[3]))]
+    #[case::all_removed(task_ids(&[1, 2]), task_ids(&[3, 4]), task_ids(&[1, 2, 3, 4]))]
+    #[case::overlapping(task_ids(&[1, 2, 3]), task_ids(&[2, 3, 4]), task_ids(&[2]))]
+    fn compute_merged_posting_list_sorted_matches_original_parametrized(
+        #[case] existing: Vec<TaskId>,
+        #[case] add: Vec<TaskId>,
+        #[case] remove: Vec<TaskId>,
+    ) {
+        // Act
+        let sorted_result =
+            SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &add, &remove);
+        let original_result = SearchIndex::compute_merged_posting_list(
+            if existing.is_empty() {
+                None
+            } else {
+                Some(existing)
+            },
+            if add.is_empty() { None } else { Some(&add) },
+            if remove.is_empty() {
+                None
+            } else {
+                Some(&remove)
+            },
+        );
+
+        // Assert
+        assert_eq!(sorted_result, original_result);
+    }
+
+    // -------------------------------------------------------------------------
+    // Edge Case Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn compute_merged_posting_list_sorted_remove_all() {
+        // Arrange
+        let existing = task_ids(&[1, 2, 3]);
+        let add = task_ids(&[4, 5, 6]);
+        let remove = task_ids(&[1, 2, 3, 4, 5, 6]);
+
+        // Act
+        let result = SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &add, &remove);
+
+        // Assert
+        assert!(result.is_empty());
+    }
+
+    #[rstest]
+    fn compute_merged_posting_list_sorted_remove_more_than_exists() {
+        // Arrange: remove contains elements that don't exist
+        let existing = task_ids(&[2, 4]);
+        let add = task_ids(&[6, 8]);
+        let remove = task_ids(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+
+        // Act
+        let result = SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &add, &remove);
+
+        // Assert
+        assert!(result.is_empty());
+    }
+
+    #[rstest]
+    fn compute_merged_posting_list_sorted_single_elements() {
+        // Arrange
+        let existing = task_ids(&[5]);
+        let add = task_ids(&[10]);
+        let remove = task_ids(&[5]);
+
+        // Act
+        let result = SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &add, &remove);
+
+        // Assert
+        assert_eq!(result, task_ids(&[10]));
+    }
+
+    #[rstest]
+    fn compute_merged_posting_list_sorted_large_gap_in_ids() {
+        // Arrange
+        let existing = task_ids(&[1, 1000000]);
+        let add = task_ids(&[500000]);
+        let remove: Vec<TaskId> = vec![];
+
+        // Act
+        let result = SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &add, &remove);
+
+        // Assert
+        assert_eq!(result, task_ids(&[1, 500000, 1000000]));
+    }
+
+    #[rstest]
+    fn compute_merged_posting_list_sorted_interleaved() {
+        // Arrange: alternating elements from existing and add
+        let existing = task_ids(&[1, 3, 5, 7, 9]);
+        let add = task_ids(&[2, 4, 6, 8, 10]);
+        let remove: Vec<TaskId> = vec![];
+
+        // Act
+        let result = SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &add, &remove);
+
+        // Assert
+        assert_eq!(result, task_ids(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]));
     }
 }
