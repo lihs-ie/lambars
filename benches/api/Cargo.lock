@@ -2380,6 +2380,7 @@ dependencies = [
  "futures",
  "lambars",
  "lambars-derive",
+ "libc",
  "lru",
  "proptest",
  "rand 0.9.2",
