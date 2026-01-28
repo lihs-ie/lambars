@@ -1233,6 +1233,51 @@ impl<'a> Iterator for NgramWindow<'a> {
 
 impl ExactSizeIterator for NgramWindow<'_> {}
 
+/// Interned n-gram index type for streaming operations.
+pub type MutableInternedNgramIndex = std::collections::HashMap<NgramKey, Vec<TaskId>>;
+
+/// Registers a token's n-grams into an interned index using streaming.
+///
+/// Generates n-grams one at a time via `NgramWindow` and inserts them directly into
+/// the index, avoiding the intermediate `Vec<String>` allocation of [`index_ngrams_batch`].
+///
+/// # Memory Efficiency
+///
+/// - N-grams are processed as `&str` slices (no per-n-gram allocation)
+/// - Keys are interned via `NgramKeyPool` (O(1) clone on cache hit)
+/// - Only `TaskId::clone()` is performed per n-gram
+///
+/// # Invariants Maintained
+///
+/// - **Insertion order**: `TaskId`s are appended in call order (not sorted)
+/// - Sorting and deduplication are deferred to finalization (same as batch version)
+pub fn index_ngrams_streaming(
+    index: &mut MutableInternedNgramIndex,
+    token: &str,
+    task_id: &TaskId,
+    config: &SearchIndexConfig,
+    pool: &mut NgramKeyPool,
+) {
+    debug_assert!(config.ngram_size >= 2, "ngram_size must be >= 2");
+
+    let mut previous_ngram: Option<&str> = None;
+
+    for ngram_str in NgramWindow::new(token, config.ngram_size, config.max_ngrams_per_token) {
+        // Skip consecutive duplicate n-grams within the same token
+        if previous_ngram == Some(ngram_str) {
+            continue;
+        }
+        previous_ngram = Some(ngram_str);
+
+        index.entry(pool.intern(ngram_str)).or_default().push(task_id.clone());
+    }
+}
+
+/// Semantic alias for [`index_ngrams_streaming`] when building removal deltas.
+///
+/// Provides clarity at call sites where add/remove deltas are built in parallel.
+pub use index_ngrams_streaming as remove_ngrams_streaming;
+
 /// Represents the delta (difference) for a `SearchIndex` update.
 ///
 /// Aggregates multiple `TaskChange`s into a single batch for efficient one-pass merging.
@@ -13095,5 +13140,286 @@ mod ngram_key_tests {
         assert_eq!(key_emoji.as_str(), "🦀");
         assert!(Arc::ptr_eq(&key_jp.0, &key_jp2.0));
         assert_eq!(pool.unique_count(), 2);
+    }
+}
+
+// =============================================================================
+// index_ngrams_streaming Tests (REQ-SEARCH-NGRAM-MEM-001 Phase 3)
+// =============================================================================
+
+#[cfg(test)]
+mod index_ngrams_streaming_tests {
+    use super::*;
+    use rstest::rstest;
+
+    /// Creates a default SearchIndexConfig with n-gram mode enabled.
+    fn default_config() -> SearchIndexConfig {
+        SearchIndexConfig::default()
+    }
+
+    // -------------------------------------------------------------------------
+    // Basic Functionality Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn index_ngrams_streaming_basic() {
+        // Arrange
+        let mut index: MutableInternedNgramIndex = std::collections::HashMap::new();
+        let mut pool = NgramKeyPool::new();
+        let config = default_config();
+        let task_id = TaskId::generate();
+
+        // Act
+        index_ngrams_streaming(&mut index, "hello", &task_id, &config, &mut pool);
+
+        // Assert: "hello" generates 3-grams: "hel", "ell", "llo"
+        assert_eq!(index.len(), 3);
+        for key in index.keys() {
+            let ids = index.get(key).unwrap();
+            assert_eq!(ids.len(), 1);
+            assert_eq!(&ids[0], &task_id);
+        }
+    }
+
+    #[rstest]
+    fn index_ngrams_streaming_multiple_tasks() {
+        // Arrange
+        let mut index: MutableInternedNgramIndex = std::collections::HashMap::new();
+        let mut pool = NgramKeyPool::new();
+        let config = default_config();
+        let task_id1 = TaskId::generate();
+        let task_id2 = TaskId::generate();
+
+        // Act: Register same token for different tasks
+        index_ngrams_streaming(&mut index, "test", &task_id1, &config, &mut pool);
+        index_ngrams_streaming(&mut index, "test", &task_id2, &config, &mut pool);
+
+        // Assert: Same n-gram has both task IDs
+        let key = pool.intern("tes");
+        let ids = index.get(&key).unwrap();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&task_id1));
+        assert!(ids.contains(&task_id2));
+    }
+
+    #[rstest]
+    fn index_ngrams_streaming_matches_batch() {
+        // Arrange
+        let config = default_config();
+        let task_id = TaskId::generate();
+
+        // Act: streaming version
+        let mut streaming_index: MutableInternedNgramIndex = std::collections::HashMap::new();
+        let mut pool = NgramKeyPool::new();
+        index_ngrams_streaming(&mut streaming_index, "テスト", &task_id, &config, &mut pool);
+
+        // Act: batch version
+        let mut batch_index: MutableNgramIndex = std::collections::HashMap::new();
+        index_ngrams_batch(&mut batch_index, "テスト", &task_id, &config);
+
+        // Assert: Key counts match
+        assert_eq!(streaming_index.len(), batch_index.len());
+
+        // Assert: Each key's TaskId list matches
+        for (key, ids) in &streaming_index {
+            let batch_ids = batch_index.get(key.as_str()).unwrap();
+            assert_eq!(ids, batch_ids);
+        }
+    }
+
+    #[rstest]
+    fn index_ngrams_streaming_pool_reuse() {
+        // Arrange
+        let mut index: MutableInternedNgramIndex = std::collections::HashMap::new();
+        let mut pool = NgramKeyPool::new();
+        let config = default_config();
+        let task_id = TaskId::generate();
+
+        // Act: Register tokens with overlapping n-grams
+        index_ngrams_streaming(&mut index, "hello", &task_id, &config, &mut pool);
+        index_ngrams_streaming(&mut index, "jello", &task_id, &config, &mut pool);
+
+        // Assert: "ell" and "llo" are common -> pool should have hits
+        assert!(pool.hit_rate() > 0.0);
+    }
+
+    #[rstest]
+    fn index_ngrams_streaming_empty_token() {
+        // Arrange
+        let mut index: MutableInternedNgramIndex = std::collections::HashMap::new();
+        let mut pool = NgramKeyPool::new();
+        let config = default_config();
+        let task_id = TaskId::generate();
+
+        // Act
+        index_ngrams_streaming(&mut index, "", &task_id, &config, &mut pool);
+
+        // Assert: No n-grams generated
+        assert!(index.is_empty());
+    }
+
+    #[rstest]
+    fn index_ngrams_streaming_token_shorter_than_ngram_size() {
+        // Arrange
+        let mut index: MutableInternedNgramIndex = std::collections::HashMap::new();
+        let mut pool = NgramKeyPool::new();
+        let config = default_config(); // ngram_size = 3
+        let task_id = TaskId::generate();
+
+        // Act: Token "ab" is shorter than ngram_size (3)
+        index_ngrams_streaming(&mut index, "ab", &task_id, &config, &mut pool);
+
+        // Assert: No n-grams generated
+        assert!(index.is_empty());
+    }
+
+    // -------------------------------------------------------------------------
+    // Unicode Support Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn index_ngrams_streaming_unicode_japanese() {
+        // Arrange
+        let mut index: MutableInternedNgramIndex = std::collections::HashMap::new();
+        let mut pool = NgramKeyPool::new();
+        let config = default_config();
+        let task_id = TaskId::generate();
+
+        // Act: "関数型" generates: "関数型" (only 3 chars, so 1 n-gram)
+        index_ngrams_streaming(&mut index, "関数型", &task_id, &config, &mut pool);
+
+        // Assert
+        assert_eq!(index.len(), 1);
+        let key = pool.intern("関数型");
+        assert!(index.contains_key(&key));
+    }
+
+    #[rstest]
+    fn index_ngrams_streaming_unicode_longer() {
+        // Arrange
+        let mut index: MutableInternedNgramIndex = std::collections::HashMap::new();
+        let mut pool = NgramKeyPool::new();
+        let config = default_config();
+        let task_id = TaskId::generate();
+
+        // Act: "プログラミング" (7 chars) generates 5 n-grams
+        index_ngrams_streaming(&mut index, "プログラミング", &task_id, &config, &mut pool);
+
+        // Assert: 7 - 3 + 1 = 5 n-grams
+        assert_eq!(index.len(), 5);
+    }
+
+    // -------------------------------------------------------------------------
+    // remove_ngrams_streaming Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn remove_ngrams_streaming_basic() {
+        // Arrange
+        let mut index: MutableInternedNgramIndex = std::collections::HashMap::new();
+        let mut pool = NgramKeyPool::new();
+        let config = default_config();
+        let task_id = TaskId::generate();
+
+        // Act
+        remove_ngrams_streaming(&mut index, "hello", &task_id, &config, &mut pool);
+
+        // Assert: Same behavior as index_ngrams_streaming
+        assert_eq!(index.len(), 3);
+        for key in index.keys() {
+            let ids = index.get(key).unwrap();
+            assert_eq!(ids.len(), 1);
+            assert_eq!(&ids[0], &task_id);
+        }
+    }
+
+    #[rstest]
+    fn remove_ngrams_streaming_matches_index_streaming() {
+        // Arrange
+        let config = default_config();
+        let task_id = TaskId::generate();
+
+        // Act: index version
+        let mut add_index: MutableInternedNgramIndex = std::collections::HashMap::new();
+        let mut pool1 = NgramKeyPool::new();
+        index_ngrams_streaming(&mut add_index, "hello", &task_id, &config, &mut pool1);
+
+        // Act: remove version
+        let mut remove_index: MutableInternedNgramIndex = std::collections::HashMap::new();
+        let mut pool2 = NgramKeyPool::new();
+        remove_ngrams_streaming(&mut remove_index, "hello", &task_id, &config, &mut pool2);
+
+        // Assert: Both produce identical results
+        assert_eq!(add_index.len(), remove_index.len());
+
+        for (key, add_ids) in &add_index {
+            // Find matching key in remove_index by value
+            let remove_key = pool2.intern(key.as_str());
+            let remove_ids = remove_index.get(&remove_key).unwrap();
+            assert_eq!(add_ids, remove_ids);
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Edge Cases
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn index_ngrams_streaming_max_ngrams_limit() {
+        // Arrange
+        let mut index: MutableInternedNgramIndex = std::collections::HashMap::new();
+        let mut pool = NgramKeyPool::new();
+        let config = SearchIndexConfig {
+            max_ngrams_per_token: 2, // Limit to 2 n-grams
+            ..default_config()
+        };
+        let task_id = TaskId::generate();
+
+        // Act: "hello" would generate 3 n-grams, but limited to 2
+        index_ngrams_streaming(&mut index, "hello", &task_id, &config, &mut pool);
+
+        // Assert: Only 2 n-grams generated
+        assert_eq!(index.len(), 2);
+
+        // Verify it's "hel" and "ell" (first 2 n-grams)
+        let key_hel = pool.intern("hel");
+        let key_ell = pool.intern("ell");
+        assert!(index.contains_key(&key_hel));
+        assert!(index.contains_key(&key_ell));
+    }
+
+    #[rstest]
+    fn index_ngrams_streaming_exact_ngram_size() {
+        // Arrange
+        let mut index: MutableInternedNgramIndex = std::collections::HashMap::new();
+        let mut pool = NgramKeyPool::new();
+        let config = default_config(); // ngram_size = 3
+        let task_id = TaskId::generate();
+
+        // Act: Token exactly equals ngram_size
+        index_ngrams_streaming(&mut index, "abc", &task_id, &config, &mut pool);
+
+        // Assert: Exactly 1 n-gram
+        assert_eq!(index.len(), 1);
+        let key = pool.intern("abc");
+        assert!(index.contains_key(&key));
+    }
+
+    #[rstest]
+    fn index_ngrams_streaming_repeated_same_task() {
+        // Arrange
+        let mut index: MutableInternedNgramIndex = std::collections::HashMap::new();
+        let mut pool = NgramKeyPool::new();
+        let config = default_config();
+        let task_id = TaskId::generate();
+
+        // Act: Register same token twice for same task
+        index_ngrams_streaming(&mut index, "test", &task_id, &config, &mut pool);
+        index_ngrams_streaming(&mut index, "test", &task_id, &config, &mut pool);
+
+        // Assert: Same task appears twice (dedup happens at finalization)
+        let key = pool.intern("tes");
+        let ids = index.get(&key).unwrap();
+        assert_eq!(ids.len(), 2);
     }
 }
