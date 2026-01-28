@@ -1,0 +1,189 @@
+# SearchIndex インフィクス検索再設計 要件定義
+#
+# 概要:
+#   all-suffix インデックスを廃止し、n-gram 逆引きインデックスに置換して
+#   bulk/update の秒単位レイテンシを解消する。
+#
+# 設計方針:
+#   1. 純粋関数としてインデックス構築/検索を定義し、I/O を境界に封じる
+#   2. 検索互換性は設定で切替可能にし、段階的移行を許容する
+#   3. メモリ上限と生成量の制約を設け、指数的増加を禁止する
+#
+# 参照:
+#   - benches/results/profiling-investigation.yaml
+#   - benches/api/src/api/query.rs
+#   - benches/results/api-profiling-all-*/tasks_bulk/stacks.folded
+
+version: "1.0.0"
+name: "search_index_ngram"
+description: |
+  SearchIndex の all-suffix インデックスを n-gram 逆引きインデックスへ置換する。
+  これにより、全サフィックス生成による O(W * L) の爆発を抑制し、
+  bulk/update を含む書き込み系ワークロードのレイテンシを 1 桁以上削減する。
+
+background:
+  problem: |
+    all-suffix インデックスは全文字位置の部分文字列を生成し、
+    1 タスクあたり数百〜数千件の追加挿入を発生させる。
+    tasks_bulk / tasks_eff では index_all_suffixes が CPU の大半を占有し、
+    平均レイテンシが秒単位、RPS が目標を大きく下回っている。
+  motivation: |
+    本番運用を前提とした検索性能と更新性能を両立させるため、
+    インデックス構造とクエリ戦略を再設計し、アルゴリズム的ボトルネックを排除する。
+  prior_art:
+    - name: "SearchIndex::index_all_suffixes"
+      description: "現行の all-suffix 生成実装。文字長に比例して指数的に増加する。"
+    - name: "Profiling: tasks_bulk"
+      description: "SearchIndex::index_all_suffixes が 50%以上のサンプルを占有。"
+
+requirements:
+  # ======================================================================
+  # 1. 検索モード/設定の明示化
+  # ======================================================================
+  - id: "REQ-SEARCH-NGRAM-001"
+    name: "SearchIndexConfig を導入し検索モードを明示する"
+    description: |
+      - SearchIndex 構築時に `SearchIndexConfig` を必須引数で受け取る。
+      - infix 検索の有効/無効、n-gram サイズ、最大生成数を設定可能にする。
+      - 既存の検索仕様は `infix_mode=legacy_all_suffix` で明示的に選択できる。
+
+    laws:
+      - name: "config_default_deterministic"
+        description: |
+          SearchIndexConfig::default は環境依存を排除し、常に同一値を返す。
+        equation: "default() = default()"
+        property_test: |
+          #[test]
+          fn config_default_is_deterministic() {
+              let left = SearchIndexConfig::default();
+              let right = SearchIndexConfig::default();
+              assert_eq!(left, right);
+          }
+
+    methods:
+      - name: "SearchIndexConfig::default"
+        signature: "fn default() -> SearchIndexConfig"
+        description: |
+          - ngram_size=3, min_query_len_for_infix=3, max_ngrams_per_token=128 を採用する。
+          - infix_mode は n-gram をデフォルトとし、legacy は明示指定のみ許可する。
+        examples:
+          - description: "デフォルト設定の生成"
+            code: |
+              let config = SearchIndexConfig::default();
+              assert_eq!(config.ngram_size, 3);
+
+    implementations:
+      - type: "SearchIndexConfig"
+        description: |
+          - fields:
+            - infix_mode: InfixMode (Ngram | LegacyAllSuffix | Disabled)
+            - ngram_size: usize (>= 2)
+            - min_query_len_for_infix: usize
+            - max_ngrams_per_token: usize
+            - max_tokens_per_task: usize
+
+  # ======================================================================
+  # 2. n-gram 逆引きインデックスの構築
+  # ======================================================================
+  - id: "REQ-SEARCH-NGRAM-002"
+    name: "n-gram 逆引きインデックスを純粋関数で構築する"
+    description: |
+      - 正規化済みトークンから n-gram を生成し、逆引きインデックスに登録する。
+      - n-gram は `char_indices()` で UTF-8 安全にスライド生成する。
+      - 1 トークンあたりの生成数は `max_ngrams_per_token` を上限とする。
+      - 重複 TaskId は登録しない（安定した一意性を保証）。
+
+    methods:
+      - name: "SearchIndex::build_with_config"
+        signature: "fn build_with_config(tasks: &PersistentVector<Task>, config: SearchIndexConfig) -> SearchIndex"
+        description: |
+          - タイトル/タグの正規化は既存関数を使用し、純粋関数で完結させる。
+          - n-gram インデックスはタイトル全文・単語・タグに対して生成する。
+          - `config.infix_mode=Disabled` の場合は n-gram 生成を行わない。
+        examples:
+          - description: "infix 無効で構築"
+            code: |
+              let config = SearchIndexConfig { infix_mode: InfixMode::Disabled, ..Default::default() };
+              let index = SearchIndex::build_with_config(&tasks, config);
+
+    implementations:
+      - type: "NgramIndex"
+        description: |
+          - PersistentHashMap<String, PersistentVector<TaskId>> を使用する。
+          - TaskId リストは常に重複排除し、昇順ソートを保持する。
+          - 挿入は transient builder で行い、最後に永続化する。
+
+  # ======================================================================
+  # 3. 検索時の候補抽出と正確性保証
+  # ======================================================================
+  - id: "REQ-SEARCH-NGRAM-003"
+    name: "n-gram 候補集合の交差で検索候補を絞り込み、実文字列で検証する"
+    description: |
+      - クエリ長 >= n の場合、クエリ n-gram を全て生成し posting list を交差する。
+      - 交差結果は候補集合であり、最終的に実文字列で部分一致を検証する。
+      - クエリ長 < n の場合は既存 prefix 検索にフォールバックする。
+
+    laws:
+      - name: "infix_search_soundness"
+        description: |
+          インデックスが返す結果は必ず実文字列で部分一致を満たす。
+        equation: "query ⊆ title_or_tag => result contains task"
+        property_test: |
+          #[test]
+          fn infix_search_returns_only_true_matches() {
+              let task = Task::new("id-1", "important meeting", vec!["urgent".into()]);
+              let index = SearchIndex::build_with_config(&vec![task.clone()].into(), SearchIndexConfig::default());
+              let result = index.search_by_title("meeting").unwrap();
+              assert!(result.tasks.iter().all(|t| t.title.contains("meeting")));
+          }
+
+    methods:
+      - name: "SearchIndex::search_by_title"
+        signature: "fn search_by_title(&self, query: &str) -> Option<SearchResult>"
+        description: |
+          - クエリを正規化し、n-gram 有効時は候補集合を交差して絞り込む。
+          - 候補が空なら即座に None を返す。
+          - 候補数が上限を超える場合は limit を適用する。
+        examples:
+          - description: "n-gram 検索の利用"
+            code: |
+              let result = index.search_by_title("meeting");
+              assert!(result.is_some());
+
+    implementations:
+      - type: "SearchIndex"
+        description: |
+          - tasks_by_id は不変参照のための唯一の真実とする。
+          - n-gram 候補集合は TaskId の昇順 Vec として扱い、
+            2 つずつマージ交差する（O(n)）。
+
+  # ======================================================================
+  # 4. 性能・メモリ要件
+  # ======================================================================
+  - id: "REQ-SEARCH-NGRAM-004"
+    name: "bulk/update の性能目標を満たす"
+    description: |
+      - tasks_bulk: 平均レイテンシ <= 500ms、RPS >= 500 を満たす。
+      - tasks_eff: 平均レイテンシ <= 500ms、RPS >= 900 を満たす。
+      - tasks_update_steady: avg <= 5ms、RPS >= 100 を維持する。
+      - インデックス生成における一時メモリは 512MB を超過しない。
+
+non_functional_requirements:
+  performance:
+    - "n-gram 構築は O(T * L) に抑制し、all-suffix 相当の O(T * L^2) を禁止する。"
+    - "SearchIndex 構築は 1e4 件で 1s 以内 (4コア/15GB) を目標とする。"
+  compatibility:
+    - "検索 API の入出力スキーマは既存の /tasks/search と互換にする。"
+    - "legacy_all_suffix は機能フラグで温存するが、デフォルトでは無効とする。"
+  testing:
+    - "n-gram と legacy の結果差分を比較する差分テストを追加する。"
+    - "候補集合の交差ロジックに対する property test を追加する。"
+
+future_extensions:
+  - id: "EXT-SEARCH-001"
+    name: "suffix automaton への置換"
+    description: |
+      さらに高精度な infix 検索が必要な場合、
+      suffix automaton または DAWG へ移行する。
+    rationale: |
+      現時点では実装コストが高く、n-gram で性能目標を満たすため。
