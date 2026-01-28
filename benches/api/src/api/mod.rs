@@ -68,7 +68,10 @@ pub use project::{
     create_project_handler, get_project_handler, get_project_progress_handler,
     get_project_stats_handler,
 };
-pub use query::{count_by_priority, list_tasks, search_tasks};
+pub use query::{
+    SearchIndexBuildMetrics, SearchIndexConfig, count_by_priority, list_tasks,
+    measure_search_index_build, search_tasks,
+};
 pub use recursive::{aggregate_tree, flatten_subtasks, resolve_dependencies};
 pub use transaction::{add_subtask, add_tag, update_status, update_task};
 pub use traversable::{

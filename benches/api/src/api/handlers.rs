@@ -35,7 +35,9 @@ use super::dto::{
     CreateTaskRequest, TaskResponse, validate_description, validate_tags, validate_title,
 };
 use super::error::ApiErrorResponse;
-use super::query::{SearchCache, SearchIndex, TaskChange};
+use super::query::{
+    SearchCache, SearchIndex, SearchIndexConfig, TaskChange, measure_search_index_build,
+};
 use crate::domain::{EventId, Priority, Tag, Task, TaskId, Timestamp, create_task_created_event};
 use crate::infrastructure::{
     CacheStatus, EventStore, ExternalDataSource, ExternalSources, Pagination, ProjectRepository,
@@ -326,8 +328,43 @@ impl AppState {
             .await?;
 
         // Build the search index from all tasks (pure function)
+        // If SEARCH_INDEX_METRICS_PATH is set, measure build performance and output metrics
         let tasks: PersistentVector<Task> = all_tasks.items.clone().into_iter().collect();
-        let search_index = SearchIndex::build(&tasks);
+        let metrics_output_path = std::env::var("SEARCH_INDEX_METRICS_PATH").ok();
+
+        let search_index = metrics_output_path.as_ref().map_or_else(
+            || SearchIndex::build(&tasks),
+            |path| {
+                // Measure build with performance metrics (I/O boundary)
+                let (index, metrics) =
+                    measure_search_index_build(&tasks, SearchIndexConfig::default());
+
+                // Write metrics to JSON file
+                if let Ok(json) = serde_json::to_string_pretty(&metrics) {
+                    let output_path = std::path::Path::new(path);
+                    if let Some(parent) = output_path.parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    if let Err(error) = std::fs::write(output_path, json) {
+                        tracing::warn!(
+                            path = %path,
+                            %error,
+                            "Failed to write SearchIndex build metrics"
+                        );
+                    } else {
+                        tracing::info!(
+                            path = %path,
+                            elapsed_ms = metrics.elapsed_ms,
+                            peak_rss_mb = metrics.peak_rss_mb,
+                            ngram_entries = metrics.ngram_entries,
+                            "SearchIndex build metrics written"
+                        );
+                    }
+                }
+
+                index
+            },
+        );
 
         // Perform backfill processing (unless SKIP_BACKFILL=true)
         let skip_backfill = std::env::var("SKIP_BACKFILL")

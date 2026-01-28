@@ -2069,6 +2069,188 @@ fn intersect_sorted_vecs(left: &[TaskId], right: &[TaskId]) -> Vec<TaskId> {
 }
 
 // -----------------------------------------------------------------------------
+// SearchIndex Build Metrics (REQ-SEARCH-NGRAM-PERF-002)
+// -----------------------------------------------------------------------------
+
+/// Metrics from `SearchIndex` construction.
+///
+/// This struct captures performance metrics during `SearchIndex` build:
+/// - Time elapsed during construction
+/// - Peak resident set size (RSS) of the process
+/// - Total n-gram entries across all indexes
+///
+/// # Usage
+///
+/// These metrics are intended for benchmarking and capacity planning.
+/// The `measure_search_index_build` function returns this struct alongside
+/// the constructed `SearchIndex`.
+///
+/// # Output Format
+///
+/// When `SEARCH_INDEX_METRICS_PATH` environment variable is set, metrics are
+/// serialized to JSON at the specified path.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SearchIndexBuildMetrics {
+    /// Time elapsed during index construction (milliseconds).
+    pub elapsed_ms: u128,
+    /// Peak resident set size of the process (megabytes).
+    ///
+    /// On macOS, this is obtained via `getrusage(RUSAGE_SELF)`.
+    /// On Linux, this is obtained from `/proc/self/status` (`VmHWM`).
+    /// On unsupported platforms, this is `0`.
+    pub peak_rss_mb: u64,
+    /// Total n-gram entries across all indexes.
+    ///
+    /// Sum of:
+    /// - `title_full_ngram_index.len()`
+    /// - `title_word_ngram_index.len()`
+    /// - `tag_ngram_index.len()`
+    pub ngram_entries: usize,
+}
+
+/// Builds a `SearchIndex` with performance measurement (I/O boundary function).
+///
+/// This function wraps `SearchIndex::build_with_config` with timing and memory
+/// measurement. It is intended for benchmarking and capacity planning.
+///
+/// # Arguments
+///
+/// * `tasks` - Collection of tasks to index
+/// * `config` - Configuration controlling index behavior
+///
+/// # Returns
+///
+/// A tuple of `(SearchIndex, SearchIndexBuildMetrics)`.
+///
+/// # Side Effects
+///
+/// - Emits a `tracing::info` log with metrics (target: `search_index_build`)
+/// - Measures system resources (time, RSS)
+///
+/// # Platform Support
+///
+/// RSS measurement is supported on:
+/// - macOS: via `getrusage(RUSAGE_SELF)`
+/// - Linux: via `/proc/self/status` (`VmHWM`)
+/// - Other platforms: returns 0
+///
+/// # Example
+///
+/// ```ignore
+/// use lambars::persistent::PersistentVector;
+/// use task_management_benchmark_api::api::query::{
+///     measure_search_index_build, SearchIndexConfig
+/// };
+///
+/// let tasks = PersistentVector::new();
+/// let config = SearchIndexConfig::default();
+/// let (index, metrics) = measure_search_index_build(&tasks, config);
+///
+/// println!("Build took {}ms, peak RSS: {}MB", metrics.elapsed_ms, metrics.peak_rss_mb);
+/// ```
+#[must_use]
+pub fn measure_search_index_build(
+    tasks: &PersistentVector<Task>,
+    config: SearchIndexConfig,
+) -> (SearchIndex, SearchIndexBuildMetrics) {
+    let start = std::time::Instant::now();
+
+    // Call the pure function (SearchIndex::build_with_config is unchanged)
+    let index = SearchIndex::build_with_config(tasks, config);
+
+    let elapsed_ms = start.elapsed().as_millis();
+
+    // Get peak RSS (absolute value)
+    let peak_rss_mb = get_peak_rss_absolute_mb().unwrap_or(0);
+
+    // Count n-gram entries
+    let ngram_entries = index.ngram_entry_count();
+
+    let metrics = SearchIndexBuildMetrics {
+        elapsed_ms,
+        peak_rss_mb,
+        ngram_entries,
+    };
+
+    tracing::info!(
+        target: "search_index_build",
+        elapsed_ms = elapsed_ms,
+        peak_rss_mb = peak_rss_mb,
+        ngram_entries = ngram_entries,
+        "SearchIndex build metrics"
+    );
+
+    (index, metrics)
+}
+
+/// Gets the peak resident set size (RSS) in megabytes.
+///
+/// This function returns the peak RSS of the current process, which represents
+/// the maximum amount of physical memory used at any point during execution.
+///
+/// # Platform Support
+///
+/// - **Linux**: Uses VmHWM (High Water Mark) from `/proc/self/status`
+/// - **macOS**: Uses `libc::getrusage` to obtain `ru_maxrss` (maximum resident set size),
+///   which represents the peak RSS during the process lifetime.
+/// - **Other platforms**: Returns `None`
+///
+/// # Returns
+///
+/// `Some(mb)` on success, `None` on failure or unsupported platform.
+#[allow(unsafe_code)]
+fn get_peak_rss_absolute_mb() -> Option<u64> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::mem::MaybeUninit;
+
+        let mut usage = MaybeUninit::<libc::rusage>::uninit();
+
+        // SAFETY: rusage is a well-defined FFI structure, and we check the return value
+        // to ensure the call succeeded before reading from it. RUSAGE_SELF is a valid
+        // constant for requesting resource usage of the calling process.
+        unsafe {
+            if libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) == 0 {
+                let usage = usage.assume_init();
+                // macOS returns ru_maxrss in bytes (unlike Linux which returns kilobytes)
+                // ru_maxrss is i64 but should always be non-negative; use try_into for safe conversion
+                let bytes: u64 = usage.ru_maxrss.try_into().ok()?;
+                // Round up to megabytes
+                let megabytes = bytes.div_ceil(1024 * 1024);
+                return Some(megabytes);
+            }
+        }
+
+        None
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        // Read /proc/self/status to get VmHWM (peak resident set size)
+        if let Ok(content) = std::fs::read_to_string("/proc/self/status") {
+            for line in content.lines() {
+                if line.starts_with("VmHWM:") {
+                    // Format: "VmHWM:     12345 kB"
+                    if let Some(kilobytes_str) = line.split_whitespace().nth(1) {
+                        if let Ok(kilobytes) = kilobytes_str.parse::<u64>() {
+                            // Round up to megabytes
+                            return Some(kilobytes.div_ceil(1024));
+                        }
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        None
+    }
+}
+
+// -----------------------------------------------------------------------------
 // SearchIndex Structure
 // -----------------------------------------------------------------------------
 
@@ -2374,6 +2556,24 @@ impl SearchIndex {
             tag_ngram_index: finalize_ngram_index(tag_ngram_batch),
             config,
         }
+    }
+
+    /// Returns the total number of n-gram entries across all n-gram indexes.
+    ///
+    /// This is the sum of:
+    /// - `title_full_ngram_index.len()` (unique n-grams in full titles)
+    /// - `title_word_ngram_index.len()` (unique n-grams in title words)
+    /// - `tag_ngram_index.len()` (unique n-grams in tags)
+    ///
+    /// # Returns
+    ///
+    /// The total count of unique n-gram keys across all three indexes.
+    /// In `InfixMode::LegacyAllSuffix` or `InfixMode::Disabled`, this returns 0.
+    #[must_use]
+    pub const fn ngram_entry_count(&self) -> usize {
+        self.title_full_ngram_index.len()
+            + self.title_word_ngram_index.len()
+            + self.tag_ngram_index.len()
     }
 
     /// Indexes all suffixes of a word for arbitrary position substring matching.
@@ -12015,5 +12215,234 @@ mod apply_changes_tests {
 
         // 追加して削除したタスクは見つからないはず
         assert_search_results_equal(&batch_result, &sequential_result, "Temporary");
+    }
+}
+
+// =============================================================================
+// SearchIndexBuildMetrics Tests (REQ-SEARCH-NGRAM-PERF-002)
+// =============================================================================
+
+#[cfg(test)]
+mod search_index_build_metrics_tests {
+    use super::*;
+    use crate::domain::{Tag, Task, TaskId, Timestamp};
+    use rstest::rstest;
+
+    // -------------------------------------------------------------------------
+    // Test Helpers
+    // -------------------------------------------------------------------------
+
+    /// Creates a task with the given title.
+    fn create_test_task(title: &str) -> Task {
+        Task::new(TaskId::generate(), title, Timestamp::now())
+    }
+
+    /// Creates a task with the given title and tags.
+    fn create_test_task_with_tags(title: &str, tags: Vec<&str>) -> Task {
+        let base = create_test_task(title);
+        tags.into_iter()
+            .fold(base, |task, tag| task.add_tag(Tag::new(tag)))
+    }
+
+    /// Generates random tasks for testing.
+    fn generate_random_tasks(count: usize) -> PersistentVector<Task> {
+        (0..count)
+            .map(|i| {
+                create_test_task_with_tags(
+                    &format!("Task {i} with some title words"),
+                    vec!["work", "test"],
+                )
+            })
+            .collect()
+    }
+
+    // -------------------------------------------------------------------------
+    // measure_search_index_build Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn measure_search_index_build_returns_valid_metrics() {
+        // Arrange
+        let tasks = generate_random_tasks(100);
+        let config = SearchIndexConfig::default();
+
+        // Act
+        let (index, metrics) = measure_search_index_build(&tasks, config);
+
+        // Assert: Index is built correctly
+        assert!(!index.tasks_by_id.is_empty());
+        assert_eq!(index.tasks_by_id.len(), 100);
+
+        // Assert: Metrics are populated
+        // elapsed_ms could be 0 for very fast builds on modern CPUs
+        // so we only check that it's a valid value (not checking > 0)
+        assert!(metrics.ngram_entries > 0, "ngram_entries should be > 0");
+    }
+
+    #[rstest]
+    fn measure_search_index_build_with_empty_tasks() {
+        // Arrange
+        let tasks = PersistentVector::new();
+        let config = SearchIndexConfig::default();
+
+        // Act
+        let (index, metrics) = measure_search_index_build(&tasks, config);
+
+        // Assert: Index is empty
+        assert!(index.tasks_by_id.is_empty());
+
+        // Assert: Metrics show no n-gram entries
+        assert_eq!(metrics.ngram_entries, 0);
+    }
+
+    #[rstest]
+    fn measure_search_index_build_with_legacy_mode_has_zero_ngrams() {
+        // Arrange
+        let tasks = generate_random_tasks(10);
+        let config = SearchIndexConfig {
+            infix_mode: InfixMode::LegacyAllSuffix,
+            ..SearchIndexConfig::default()
+        };
+
+        // Act
+        let (_, metrics) = measure_search_index_build(&tasks, config);
+
+        // Assert: No n-gram entries in legacy mode
+        assert_eq!(
+            metrics.ngram_entries, 0,
+            "LegacyAllSuffix mode should have 0 ngram_entries"
+        );
+    }
+
+    #[rstest]
+    fn measure_search_index_build_with_disabled_mode_has_zero_ngrams() {
+        // Arrange
+        let tasks = generate_random_tasks(10);
+        let config = SearchIndexConfig {
+            infix_mode: InfixMode::Disabled,
+            ..SearchIndexConfig::default()
+        };
+
+        // Act
+        let (_, metrics) = measure_search_index_build(&tasks, config);
+
+        // Assert: No n-gram entries in disabled mode
+        assert_eq!(
+            metrics.ngram_entries, 0,
+            "Disabled mode should have 0 ngram_entries"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // SearchIndex::ngram_entry_count Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn ngram_entry_count_returns_sum_of_all_ngram_indexes() {
+        // Arrange
+        let tasks = generate_random_tasks(10);
+        let config = SearchIndexConfig::default();
+        let index = SearchIndex::build_with_config(&tasks, config);
+
+        // Act
+        let count = index.ngram_entry_count();
+
+        // Assert: Count should be > 0 for Ngram mode
+        assert!(count > 0, "ngram_entry_count should be > 0 for Ngram mode");
+    }
+
+    #[rstest]
+    fn ngram_entry_count_is_zero_for_disabled_mode() {
+        // Arrange
+        let tasks = generate_random_tasks(10);
+        let config = SearchIndexConfig {
+            infix_mode: InfixMode::Disabled,
+            ..SearchIndexConfig::default()
+        };
+        let index = SearchIndex::build_with_config(&tasks, config);
+
+        // Act
+        let count = index.ngram_entry_count();
+
+        // Assert
+        assert_eq!(count, 0, "ngram_entry_count should be 0 for Disabled mode");
+    }
+
+    #[rstest]
+    fn ngram_entry_count_is_zero_for_legacy_all_suffix_mode() {
+        // Arrange
+        let tasks = generate_random_tasks(10);
+        let config = SearchIndexConfig {
+            infix_mode: InfixMode::LegacyAllSuffix,
+            ..SearchIndexConfig::default()
+        };
+        let index = SearchIndex::build_with_config(&tasks, config);
+
+        // Act
+        let count = index.ngram_entry_count();
+
+        // Assert
+        assert_eq!(
+            count, 0,
+            "ngram_entry_count should be 0 for LegacyAllSuffix mode"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // SearchIndexBuildMetrics Serialization Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn search_index_build_metrics_serializes_to_json() {
+        // Arrange
+        let metrics = SearchIndexBuildMetrics {
+            elapsed_ms: 123,
+            peak_rss_mb: 456,
+            ngram_entries: 789,
+        };
+
+        // Act
+        let json = serde_json::to_string(&metrics).expect("serialization should succeed");
+
+        // Assert
+        assert!(json.contains("\"elapsed_ms\":123"));
+        assert!(json.contains("\"peak_rss_mb\":456"));
+        assert!(json.contains("\"ngram_entries\":789"));
+    }
+
+    #[rstest]
+    fn search_index_build_metrics_deserializes_from_json() {
+        // Arrange
+        let json = r#"{"elapsed_ms":100,"peak_rss_mb":200,"ngram_entries":300}"#;
+
+        // Act
+        let metrics: SearchIndexBuildMetrics =
+            serde_json::from_str(json).expect("deserialization should succeed");
+
+        // Assert
+        assert_eq!(metrics.elapsed_ms, 100);
+        assert_eq!(metrics.peak_rss_mb, 200);
+        assert_eq!(metrics.ngram_entries, 300);
+    }
+
+    #[rstest]
+    fn search_index_build_metrics_roundtrip() {
+        // Arrange
+        let original = SearchIndexBuildMetrics {
+            elapsed_ms: 999,
+            peak_rss_mb: 888,
+            ngram_entries: 777,
+        };
+
+        // Act
+        let json = serde_json::to_string(&original).expect("serialization should succeed");
+        let deserialized: SearchIndexBuildMetrics =
+            serde_json::from_str(&json).expect("deserialization should succeed");
+
+        // Assert
+        assert_eq!(deserialized.elapsed_ms, original.elapsed_ms);
+        assert_eq!(deserialized.peak_rss_mb, original.peak_rss_mb);
+        assert_eq!(deserialized.ngram_entries, original.ngram_entries);
     }
 }

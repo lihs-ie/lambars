@@ -45,6 +45,9 @@ futures = "0.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
+# System calls (for memory profiling)
+libc = "0.2"
+
 # Lock-free data structures
 arc-swap = "1.7"
 
@@ -69,7 +72,9 @@ name = "task-management-benchmark-api"
 path = "src/main.rs"
 
 [lints.rust]
-unsafe_code = "forbid"
+# Note: unsafe_code is "deny" instead of "forbid" to allow specific exceptions
+# like libc::getrusage for peak RSS measurement. Exceptions must have SAFETY comments.
+unsafe_code = "deny"
 
 [lints.clippy]
 all = { level = "warn", priority = -1 }
