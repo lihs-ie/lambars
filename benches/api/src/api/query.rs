@@ -1023,13 +1023,40 @@ type NgramIndex = PersistentHashMap<String, PersistentVector<TaskId>>;
 
 /// Mutable n-gram index for efficient batch construction.
 ///
-/// This uses standard Rust `HashMap` and `Vec` for O(1) amortized insertion
-/// during batch index building, avoiding the O(n) overhead of rebuilding
-/// `PersistentVector` for each insertion.
-///
-/// After batch construction is complete, convert to `NgramIndex` using
-/// [`finalize_ngram_index`].
+/// Mutable index type using `HashMap` for O(1) amortized insertion during batch operations.
+/// After batch construction, convert to persistent structures via [`finalize_ngram_index`].
 type MutableNgramIndex = std::collections::HashMap<String, Vec<TaskId>>;
+
+/// Alias for prefix index deltas (same underlying type as `MutableNgramIndex`).
+type MutablePrefixIndex = MutableNgramIndex;
+
+/// Represents the delta (difference) for a `SearchIndex` update.
+///
+/// Aggregates multiple `TaskChange`s into a single batch for efficient one-pass merging.
+/// Uses `HashMap<String, Vec<TaskId>>` for O(1) amortized insertion during construction.
+///
+/// # Requirements Reference
+///
+/// Implements REQ-SEARCH-NGRAM-PERF-001 from:
+/// `docs/internal/requirements/20260128_1255_search_index_ngram_perf_remediation.yaml`
+#[derive(Debug, Clone, Default)]
+pub struct SearchIndexDelta {
+    // Prefix index deltas (TreeMap-based indices)
+    pub title_full_add: MutablePrefixIndex,
+    pub title_full_remove: MutablePrefixIndex,
+    pub title_word_add: MutablePrefixIndex,
+    pub title_word_remove: MutablePrefixIndex,
+    pub tag_add: MutablePrefixIndex,
+    pub tag_remove: MutablePrefixIndex,
+
+    // N-gram index deltas
+    pub title_full_ngram_add: MutableNgramIndex,
+    pub title_full_ngram_remove: MutableNgramIndex,
+    pub title_word_ngram_add: MutableNgramIndex,
+    pub title_word_ngram_remove: MutableNgramIndex,
+    pub tag_ngram_add: MutableNgramIndex,
+    pub tag_ngram_remove: MutableNgramIndex,
+}
 
 // -----------------------------------------------------------------------------
 // N-gram Generation (REQ-SEARCH-NGRAM-002 Part 1)
@@ -9845,5 +9872,83 @@ mod performance_tests {
             println!("NOTE: Performance assertion skipped in debug build.");
             println!("Run with --release for accurate performance measurement.");
         }
+    }
+}
+
+#[cfg(test)]
+mod search_index_delta_tests {
+    use super::*;
+    use rstest::rstest;
+
+    #[rstest]
+    fn default_creates_empty_delta() {
+        let delta = SearchIndexDelta::default();
+
+        assert!(delta.title_full_add.is_empty());
+        assert!(delta.title_full_remove.is_empty());
+        assert!(delta.title_word_add.is_empty());
+        assert!(delta.title_word_remove.is_empty());
+        assert!(delta.tag_add.is_empty());
+        assert!(delta.tag_remove.is_empty());
+
+        assert!(delta.title_full_ngram_add.is_empty());
+        assert!(delta.title_full_ngram_remove.is_empty());
+        assert!(delta.title_word_ngram_add.is_empty());
+        assert!(delta.title_word_ngram_remove.is_empty());
+        assert!(delta.tag_ngram_add.is_empty());
+        assert!(delta.tag_ngram_remove.is_empty());
+    }
+
+    /// Verifies structure matches REQ-SEARCH-NGRAM-PERF-001 specification (12 fields).
+    #[rstest]
+    fn has_all_required_fields() {
+        let delta = SearchIndexDelta::default();
+
+        let _ = &delta.title_full_add;
+        let _ = &delta.title_full_remove;
+        let _ = &delta.title_word_add;
+        let _ = &delta.title_word_remove;
+        let _ = &delta.tag_add;
+        let _ = &delta.tag_remove;
+
+        let _ = &delta.title_full_ngram_add;
+        let _ = &delta.title_full_ngram_remove;
+        let _ = &delta.title_word_ngram_add;
+        let _ = &delta.title_word_ngram_remove;
+        let _ = &delta.tag_ngram_add;
+        let _ = &delta.tag_ngram_remove;
+    }
+
+    #[rstest]
+    fn clone_preserves_data() {
+        let mut delta = SearchIndexDelta::default();
+        let task_id = TaskId::generate();
+
+        delta
+            .title_full_add
+            .insert("test title".to_string(), vec![task_id.clone()]);
+        delta
+            .tag_ngram_add
+            .insert("tes".to_string(), vec![task_id.clone()]);
+
+        let cloned = delta.clone();
+
+        assert_eq!(cloned.title_full_add.len(), 1);
+        assert_eq!(cloned.tag_ngram_add.len(), 1);
+        assert_eq!(
+            cloned.title_full_add.get("test title"),
+            Some(&vec![task_id.clone()])
+        );
+        assert_eq!(cloned.tag_ngram_add.get("tes"), Some(&vec![task_id]));
+    }
+
+    #[rstest]
+    fn debug_format_includes_struct_and_fields() {
+        let delta = SearchIndexDelta::default();
+        let debug_str = format!("{delta:?}");
+
+        assert!(debug_str.contains("SearchIndexDelta"));
+        assert!(debug_str.contains("title_full_add"));
+        assert!(debug_str.contains("tag_ngram_remove"));
     }
 }
