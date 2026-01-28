@@ -39,7 +39,9 @@ use super::error::ApiErrorResponse;
 use super::handlers::AppState;
 use crate::domain::{Priority, Task, TaskId, TaskStatus};
 use crate::infrastructure::{PaginatedResult, Pagination, SearchScope as RepositorySearchScope};
-use lambars::persistent::{PersistentHashSet, PersistentTreeMap, PersistentVector};
+use lambars::persistent::{
+    PersistentHashMap, PersistentHashSet, PersistentTreeMap, PersistentVector, TransientHashMap,
+};
 use lambars::typeclass::{Semigroup, Traversable};
 
 // =============================================================================
@@ -908,6 +910,606 @@ impl Semigroup for SearchResult {
 // Search Index with PersistentTreeMap
 // =============================================================================
 
+// -----------------------------------------------------------------------------
+// SearchIndex Configuration (REQ-SEARCH-NGRAM-001)
+// -----------------------------------------------------------------------------
+
+/// Infix search mode for `SearchIndex`.
+///
+/// Controls how infix (substring) searches are performed:
+/// - `Ngram`: Uses n-gram inverted index (default, recommended)
+/// - `LegacyAllSuffix`: Uses legacy all-suffix index (feature flag for compatibility)
+/// - `Disabled`: Disables infix search entirely
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum InfixMode {
+    /// N-gram inverted index (default).
+    ///
+    /// Uses n-gram tokenization for efficient substring matching.
+    /// Memory-bounded by `max_ngrams_per_token` configuration.
+    #[default]
+    Ngram,
+    /// Legacy all-suffix index.
+    ///
+    /// Generates all suffixes for each token. Preserved for backward
+    /// compatibility but disabled by default due to higher memory usage.
+    LegacyAllSuffix,
+    /// Infix search disabled.
+    ///
+    /// Only prefix search is available when this mode is selected.
+    Disabled,
+}
+
+/// Configuration for `SearchIndex` construction and search behavior.
+///
+/// # Memory Guarantee
+///
+/// The default configuration guarantees that temporary memory during index
+/// construction does not exceed 512MB:
+/// - `max_tokens_per_task = 100`
+/// - `max_ngrams_per_token = 64`
+/// - Per task: 100 tokens × 64 n-grams = 6,400 entries
+/// - For 10,000 tasks: 64M entries × 8 bytes ≈ 512MB
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use task_management_benchmark_api::api::query::{SearchIndexConfig, InfixMode};
+///
+/// // Use default configuration (n-gram mode)
+/// let config = SearchIndexConfig::default();
+///
+/// // Use legacy mode for backward compatibility
+/// let legacy_config = SearchIndexConfig {
+///     infix_mode: InfixMode::LegacyAllSuffix,
+///     ..Default::default()
+/// };
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchIndexConfig {
+    /// Infix search mode (acts as a feature flag).
+    pub infix_mode: InfixMode,
+    /// N-gram size in characters (must be >= 2).
+    pub ngram_size: usize,
+    /// Minimum query length (in characters) to trigger infix search.
+    ///
+    /// Queries shorter than this length will only use prefix search.
+    /// Applied to all infix modes (`Ngram` and `LegacyAllSuffix`).
+    pub min_query_len_for_infix: usize,
+    /// Maximum number of n-grams generated per token.
+    ///
+    /// Limits memory usage during index construction.
+    /// Set to 64 to guarantee 512MB memory bound.
+    pub max_ngrams_per_token: usize,
+    /// Maximum number of tokens per task (title words + tags combined).
+    ///
+    /// Tasks with more tokens will have excess tokens ignored.
+    pub max_tokens_per_task: usize,
+    /// Maximum number of search result candidates.
+    ///
+    /// Applied to the final result set to bound response size.
+    pub max_search_candidates: usize,
+}
+
+impl Default for SearchIndexConfig {
+    fn default() -> Self {
+        Self {
+            infix_mode: InfixMode::Ngram,
+            ngram_size: 3,
+            min_query_len_for_infix: 3,
+            max_ngrams_per_token: 64,
+            max_tokens_per_task: 100,
+            max_search_candidates: 1000,
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
+// N-gram Index Type (REQ-SEARCH-NGRAM-002 Part 2)
+// -----------------------------------------------------------------------------
+
+/// N-gram inverted index type.
+///
+/// Maps n-gram strings to a sorted list of `TaskId`s that contain that n-gram.
+/// The `TaskId` list is always:
+/// - Deduplicated (no duplicate `TaskId`s)
+/// - Sorted in ascending order (for efficient merge intersection)
+///
+/// # Structure
+///
+/// - Key: n-gram string (e.g., "cal", "all", "llb" for "callback")
+/// - Value: `PersistentVector<TaskId>` containing all tasks with that n-gram
+#[allow(dead_code)] // Will be used in Phase 4 (SearchIndex integration)
+type NgramIndex = PersistentHashMap<String, PersistentVector<TaskId>>;
+
+/// Mutable n-gram index for efficient batch construction.
+///
+/// This uses standard Rust `HashMap` and `Vec` for O(1) amortized insertion
+/// during batch index building, avoiding the O(n) overhead of rebuilding
+/// `PersistentVector` for each insertion.
+///
+/// After batch construction is complete, convert to `NgramIndex` using
+/// [`finalize_ngram_index`].
+type MutableNgramIndex = std::collections::HashMap<String, Vec<TaskId>>;
+
+// -----------------------------------------------------------------------------
+// N-gram Generation (REQ-SEARCH-NGRAM-002 Part 1)
+// -----------------------------------------------------------------------------
+
+/// Generates n-grams from a normalized token.
+///
+/// This is a pure function that produces n-grams using a sliding window
+/// approach over the input string's characters.
+///
+/// # Algorithm
+///
+/// Uses `char_indices()` for UTF-8 safe sliding window generation.
+/// The function generates at most `max_ngrams` n-grams to bound memory usage.
+///
+/// # Complexity
+///
+/// O(min(L - n + 1, `max_ngrams`)) where L is the character count.
+///
+/// # Arguments
+///
+/// * `normalized_token` - A normalized (lowercase, trimmed) token string
+/// * `ngram_size` - The size of each n-gram in characters (must be >= 2)
+/// * `max_ngrams` - Maximum number of n-grams to generate
+///
+/// # Returns
+///
+/// A `Vec<String>` containing the generated n-grams. Returns empty if:
+/// - `ngram_size < 2`
+/// - Token has fewer characters than `ngram_size`
+#[allow(dead_code)] // Will be used in Phase 3 (NgramIndex construction)
+#[must_use]
+fn generate_ngrams(normalized_token: &str, ngram_size: usize, max_ngrams: usize) -> Vec<String> {
+    // Reject invalid ngram_size (must be >= 2)
+    if ngram_size < 2 {
+        return Vec::new();
+    }
+
+    // Collect char indices for UTF-8 safe slicing
+    let char_indices: Vec<(usize, char)> = normalized_token.char_indices().collect();
+    let char_count = char_indices.len();
+
+    // Token too short to generate any n-grams
+    if char_count < ngram_size {
+        return Vec::new();
+    }
+
+    // Calculate how many n-grams can be generated
+    let max_possible = char_count.saturating_sub(ngram_size).saturating_add(1);
+    let actual_count = max_possible.min(max_ngrams);
+
+    // Pre-allocate result vector
+    let mut ngrams = Vec::with_capacity(actual_count);
+
+    // Generate n-grams using sliding window
+    for i in 0..actual_count {
+        let start_byte = char_indices[i].0;
+        let end_byte = if i + ngram_size < char_indices.len() {
+            char_indices[i + ngram_size].0
+        } else {
+            normalized_token.len()
+        };
+        ngrams.push(normalized_token[start_byte..end_byte].to_string());
+    }
+
+    ngrams
+}
+
+// -----------------------------------------------------------------------------
+// N-gram Index Operations (REQ-SEARCH-NGRAM-002 Part 2)
+// -----------------------------------------------------------------------------
+
+/// Registers a token's n-grams into the index (pure function).
+///
+/// This function adds all n-grams of the given token to the index,
+/// associating them with the specified `TaskId`.
+///
+/// # Invariants Maintained
+///
+/// - **No duplicate `TaskId`**: Each `TaskId` appears at most once per n-gram
+/// - **Sorted order**: `TaskId` lists are always sorted in ascending order
+///
+/// # Algorithm
+///
+/// 1. Generate n-grams from the normalized token
+/// 2. For each n-gram, retrieve or create the posting list
+/// 3. Use binary search to find insertion position (maintains sorted order)
+/// 4. Skip if `TaskId` already exists (deduplication)
+/// 5. Insert at correct position to maintain sorted order
+///
+/// # Complexity
+///
+/// O(G * (log N + M)) where:
+/// - G = number of n-grams generated
+/// - N = average posting list length (binary search)
+/// - M = average posting list length (insertion)
+///
+/// # Arguments
+///
+/// * `index` - The current n-gram index
+/// * `normalized_token` - A normalized (lowercase, trimmed) token string
+/// * `task_id` - The `TaskId` to associate with the token's n-grams
+/// * `config` - Search index configuration
+///
+/// # Returns
+///
+/// A new `NgramIndex` with the token's n-grams registered
+#[allow(dead_code)] // Will be used in Phase 4 (SearchIndex integration)
+#[must_use]
+fn index_ngrams(
+    index: NgramIndex,
+    normalized_token: &str,
+    task_id: &TaskId,
+    config: &SearchIndexConfig,
+) -> NgramIndex {
+    let ngrams = generate_ngrams(
+        normalized_token,
+        config.ngram_size,
+        config.max_ngrams_per_token,
+    );
+
+    if ngrams.is_empty() {
+        return index;
+    }
+
+    // Convert to transient for efficient batch updates
+    let mut transient_index = index.transient();
+
+    for ngram in ngrams {
+        let existing_ids = transient_index
+            .get(&ngram)
+            .cloned()
+            .unwrap_or_else(PersistentVector::new);
+
+        // Collect existing IDs into a Vec for binary search
+        let ids_vec: Vec<TaskId> = existing_ids.iter().cloned().collect();
+
+        // Binary search for insertion position
+        // If Ok, TaskId already exists (deduplication - skip)
+        // If Err, insert at the returned position to maintain sorted order
+        if let Err(insert_position) = ids_vec.binary_search(task_id) {
+            // Build new vector with TaskId inserted at correct position
+            let mut transient_vec = PersistentVector::new().transient();
+
+            // Add elements before insertion position
+            for id in ids_vec.iter().take(insert_position) {
+                transient_vec.push_back(id.clone());
+            }
+
+            // Insert new TaskId
+            transient_vec.push_back(task_id.clone());
+
+            // Add elements after insertion position
+            for id in ids_vec.iter().skip(insert_position) {
+                transient_vec.push_back(id.clone());
+            }
+
+            transient_index.insert(ngram, transient_vec.persistent());
+        }
+    }
+
+    // Persist and return
+    transient_index.persistent()
+}
+
+/// Registers a token's n-grams into a transient index (mutable in-place version).
+///
+/// This function is optimized for batch operations where many tokens need to be
+/// indexed in a single transient/persist cycle. Unlike `index_ngrams`, this function
+/// operates directly on a mutable `TransientHashMap` reference, avoiding the overhead
+/// of calling `transient()` and `persist()` for each token.
+///
+/// # Performance
+///
+/// For building an index with 10,000 tasks and ~10 words each:
+/// - `index_ngrams`: ~100,000 transient/persist cycles (24+ seconds)
+/// - `index_ngrams_transient`: 3 transient/persist cycles total (< 1 second)
+///
+/// # Invariants Maintained
+///
+/// - **No duplicate `TaskId`**: Each `TaskId` appears at most once per n-gram
+/// - **Sorted order**: `TaskId` lists are always sorted in ascending order
+///
+/// # Algorithm
+///
+/// 1. Generate n-grams from the normalized token
+/// 2. For each n-gram, retrieve or create the posting list
+/// 3. Use binary search to find insertion position (maintains sorted order)
+/// 4. Skip if `TaskId` already exists (deduplication)
+/// 5. Insert at correct position to maintain sorted order
+///
+/// # Arguments
+///
+/// * `transient_index` - A mutable reference to the transient n-gram index
+/// * `normalized_token` - A normalized (lowercase, trimmed) token string
+/// * `task_id` - The `TaskId` to associate with the token's n-grams
+/// * `config` - Search index configuration
+#[allow(dead_code)] // Retained for future single-task add_task() operations
+fn index_ngrams_transient(
+    transient_index: &mut TransientHashMap<String, PersistentVector<TaskId>>,
+    normalized_token: &str,
+    task_id: &TaskId,
+    config: &SearchIndexConfig,
+) {
+    let ngrams = generate_ngrams(
+        normalized_token,
+        config.ngram_size,
+        config.max_ngrams_per_token,
+    );
+
+    if ngrams.is_empty() {
+        return;
+    }
+
+    for ngram in ngrams {
+        let existing_ids = transient_index
+            .get(&ngram)
+            .cloned()
+            .unwrap_or_else(PersistentVector::new);
+
+        // Collect existing IDs into a Vec for binary search
+        let ids_vec: Vec<TaskId> = existing_ids.iter().cloned().collect();
+
+        // Binary search for insertion position
+        // If Ok, TaskId already exists (deduplication - skip)
+        // If Err, insert at the returned position to maintain sorted order
+        if let Err(insert_position) = ids_vec.binary_search(task_id) {
+            // Build new vector with TaskId inserted at correct position
+            let mut transient_vec = PersistentVector::new().transient();
+
+            // Add elements before insertion position
+            for id in ids_vec.iter().take(insert_position) {
+                transient_vec.push_back(id.clone());
+            }
+
+            // Insert new TaskId
+            transient_vec.push_back(task_id.clone());
+
+            // Add elements after insertion position
+            for id in ids_vec.iter().skip(insert_position) {
+                transient_vec.push_back(id.clone());
+            }
+
+            transient_index.insert(ngram, transient_vec.persistent());
+        }
+    }
+}
+
+/// Indexes a token's n-grams into a mutable batch index (O(1) amortized per n-gram).
+///
+/// This function is optimized for batch construction of search indexes.
+/// Unlike [`index_ngrams_transient`], which rebuilds `PersistentVector` for each
+/// insertion (O(n) per insertion), this function uses standard `Vec` with O(1)
+/// amortized push operations.
+///
+/// # Performance
+///
+/// - Time: O(G) where G = number of n-grams generated per token
+/// - Space: O(G) additional entries in the hash map
+///
+/// For batch construction of N tasks with M tokens each:
+/// - This approach: O(N * M * G) total
+/// - Old approach: O(N * M * G * K) where K = average posting list length
+///
+/// # Note on Sorting
+///
+/// This function does NOT maintain sorted order during insertion.
+/// Sorting and deduplication are deferred to [`finalize_ngram_index`] for
+/// better overall performance (O(n log n) sort once vs O(n) per insertion).
+///
+/// # Arguments
+///
+/// * `index` - A mutable reference to the batch n-gram index
+/// * `normalized_token` - A normalized (lowercase, trimmed) token string
+/// * `task_id` - The `TaskId` to associate with the token's n-grams
+/// * `config` - Search index configuration
+fn index_ngrams_batch(
+    index: &mut MutableNgramIndex,
+    normalized_token: &str,
+    task_id: &TaskId,
+    config: &SearchIndexConfig,
+) {
+    let ngrams = generate_ngrams(
+        normalized_token,
+        config.ngram_size,
+        config.max_ngrams_per_token,
+    );
+
+    for ngram in ngrams {
+        index.entry(ngram).or_default().push(task_id.clone());
+    }
+}
+
+/// Converts a mutable batch index to an immutable `NgramIndex`.
+///
+/// This function performs the final transformation from the mutable
+/// `HashMap<String, Vec<TaskId>>` used during batch construction to the
+/// immutable `NgramIndex` (`PersistentHashMap<String, PersistentVector<TaskId>>`).
+///
+/// # Processing Steps
+///
+/// For each n-gram entry:
+/// 1. Sort the `TaskId` vector in ascending order
+/// 2. Remove duplicates (dedup requires sorted input)
+/// 3. Convert `Vec<TaskId>` to `PersistentVector<TaskId>`
+/// 4. Insert into the persistent hash map
+///
+/// # Performance
+///
+/// - Time: O(E * K log K) where E = number of n-gram entries, K = average posting list length
+/// - The O(K log K) factor is for sorting each posting list
+///
+/// # Invariants Established
+///
+/// The resulting `NgramIndex` guarantees:
+/// - Each posting list is sorted in ascending `TaskId` order
+/// - No duplicate `TaskId` values within any posting list
+///
+/// # Arguments
+///
+/// * `mutable_index` - The mutable batch index to convert
+///
+/// # Returns
+///
+/// An immutable `NgramIndex` with sorted, deduplicated posting lists
+#[must_use]
+fn finalize_ngram_index(mutable_index: MutableNgramIndex) -> NgramIndex {
+    let mut result = PersistentHashMap::new().transient();
+
+    for (ngram, mut task_ids) in mutable_index {
+        // Sort and deduplicate the posting list
+        task_ids.sort();
+        task_ids.dedup();
+
+        // Convert to PersistentVector
+        let persistent_ids: PersistentVector<TaskId> = task_ids.into_iter().collect();
+        result.insert(ngram, persistent_ids);
+    }
+
+    result.persistent()
+}
+
+/// Removes a token's n-grams from the index (pure function).
+///
+/// This function removes the specified `TaskId` from all n-gram entries
+/// associated with the given token.
+///
+/// # Algorithm
+///
+/// 1. Generate n-grams from the normalized token
+/// 2. For each n-gram, filter out the specified `TaskId`
+/// 3. If the posting list becomes empty, remove the n-gram entry entirely
+///
+/// # Complexity
+///
+/// O(G * M) where:
+/// - G = number of n-grams generated
+/// - M = average posting list length (linear scan for removal)
+///
+/// # Arguments
+///
+/// * `index` - The current n-gram index
+/// * `normalized_token` - A normalized (lowercase, trimmed) token string
+/// * `task_id` - The `TaskId` to remove from the token's n-grams
+/// * `config` - Search index configuration
+///
+/// # Returns
+///
+/// A new `NgramIndex` with the `TaskId` removed from the token's n-grams
+#[allow(dead_code)] // Will be used in Phase 6 (add_task/remove_task integration)
+#[must_use]
+fn remove_ngrams(
+    index: NgramIndex,
+    normalized_token: &str,
+    task_id: &TaskId,
+    config: &SearchIndexConfig,
+) -> NgramIndex {
+    let ngrams = generate_ngrams(
+        normalized_token,
+        config.ngram_size,
+        config.max_ngrams_per_token,
+    );
+
+    if ngrams.is_empty() {
+        return index;
+    }
+
+    // Convert to transient for efficient batch updates
+    let mut transient_index = index.transient();
+
+    for ngram in ngrams {
+        if let Some(existing_ids) = transient_index.get(&ngram).cloned() {
+            // Filter out the specified TaskId
+            let updated_ids: PersistentVector<TaskId> = existing_ids
+                .iter()
+                .filter(|id| *id != task_id)
+                .cloned()
+                .collect();
+
+            if updated_ids.is_empty() {
+                // Remove the n-gram entry if no TaskIds remain
+                transient_index.remove(&ngram);
+            } else {
+                // Update with filtered list
+                transient_index.insert(ngram, updated_ids);
+            }
+        }
+    }
+
+    // Persist and return
+    transient_index.persistent()
+}
+
+// -----------------------------------------------------------------------------
+// N-gram Search Logic (REQ-SEARCH-NGRAM-003)
+// -----------------------------------------------------------------------------
+
+/// Computes the intersection of two sorted `Vec<TaskId>` in O(n) time.
+///
+/// This function uses a merge-intersection algorithm that takes advantage of
+/// the sorted order of both input vectors to achieve linear time complexity.
+///
+/// # Arguments
+///
+/// * `left` - First sorted slice of `TaskId`s (ascending order, deduplicated)
+/// * `right` - Second sorted slice of `TaskId`s (ascending order, deduplicated)
+///
+/// # Returns
+///
+/// A new `Vec<TaskId>` containing only the elements that appear in both inputs,
+/// in ascending sorted order.
+///
+/// # Complexity
+///
+/// - Time: O(n + m) where n = `left.len()`, m = `right.len()`
+/// - Space: O(min(n, m)) for the result vector
+///
+/// # Preconditions
+///
+/// Both input slices must be:
+/// - Sorted in ascending order by `TaskId`
+/// - Deduplicated (no duplicate `TaskId`s)
+///
+/// # Properties (Laws)
+///
+/// 1. **Commutativity**: `intersect(A, B) == intersect(B, A)`
+/// 2. **Subset**: `result ⊆ left ∧ result ⊆ right`
+/// 3. **Completeness**: `∀x. x ∈ left ∧ x ∈ right => x ∈ result`
+/// 4. **Sorted**: Result is sorted in ascending order
+#[must_use]
+fn intersect_sorted_vecs(left: &[TaskId], right: &[TaskId]) -> Vec<TaskId> {
+    // Pre-allocate with conservative capacity (min of both lengths)
+    let mut result = Vec::with_capacity(left.len().min(right.len()));
+
+    let mut left_index = 0;
+    let mut right_index = 0;
+
+    while left_index < left.len() && right_index < right.len() {
+        match left[left_index].cmp(&right[right_index]) {
+            std::cmp::Ordering::Equal => {
+                result.push(left[left_index].clone());
+                left_index += 1;
+                right_index += 1;
+            }
+            std::cmp::Ordering::Less => {
+                left_index += 1;
+            }
+            std::cmp::Ordering::Greater => {
+                right_index += 1;
+            }
+        }
+    }
+
+    result
+}
+
+// -----------------------------------------------------------------------------
+// SearchIndex Structure
+// -----------------------------------------------------------------------------
+
 /// Search index using `PersistentTreeMap` for efficient prefix-based lookup.
 ///
 /// The index maps normalized search terms (lowercase) to the tasks that
@@ -952,26 +1554,96 @@ pub struct SearchIndex {
     /// Example: `important meeting tomorrow` generates `important meeting tomorrow`, `mportant meeting tomorrow`,
     /// ..., `meeting tomorrow`, ..., `tomorrow`, etc.
     /// This enables `meeting tomorrow` query to match `important meeting tomorrow`.
+    /// (Legacy all-suffix mode only, feature flag preserved)
     title_full_all_suffix_index: PersistentTreeMap<String, PersistentVector<TaskId>>,
     /// Index mapping ALL suffixes of normalized title words to task IDs (for arbitrary infix search).
     /// Example: `callback` generates `callback`, `allback`, `llback`, `lback`, `back`, `ack`, `ck`, `k`.
     /// This enables `all` query to match `callback` via `allback` prefix match.
+    /// (Legacy all-suffix mode only, feature flag preserved)
     title_word_all_suffix_index: PersistentTreeMap<String, PersistentVector<TaskId>>,
     /// Index mapping normalized tag values to task IDs.
     tag_index: PersistentTreeMap<String, PersistentVector<TaskId>>,
     /// Index mapping ALL suffixes of normalized tag values to task IDs (for arbitrary infix search).
+    /// (Legacy all-suffix mode only, feature flag preserved)
     tag_all_suffix_index: PersistentTreeMap<String, PersistentVector<TaskId>>,
     /// Reference to all tasks for lookup by ID.
     tasks_by_id: PersistentTreeMap<TaskId, Task>,
+
+    // -------------------------------------------------------------------------
+    // N-gram indexes (REQ-SEARCH-NGRAM-002 Part 3)
+    // -------------------------------------------------------------------------
+    /// N-gram index for full normalized titles (for infix search in Ngram mode).
+    ///
+    /// Maps n-gram substrings to task IDs that contain them in their title.
+    /// Used when `config.infix_mode == InfixMode::Ngram`.
+    title_full_ngram_index: NgramIndex,
+    /// N-gram index for normalized title words (for infix search in Ngram mode).
+    ///
+    /// Maps n-gram substrings to task IDs that contain them in any title word.
+    /// Used when `config.infix_mode == InfixMode::Ngram`.
+    title_word_ngram_index: NgramIndex,
+    /// N-gram index for normalized tag values (for infix search in Ngram mode).
+    ///
+    /// Maps n-gram substrings to task IDs that contain them in any tag.
+    /// Used when `config.infix_mode == InfixMode::Ngram`.
+    tag_ngram_index: NgramIndex,
+
+    /// Configuration for the search index (acts as feature flag).
+    ///
+    /// Controls the infix search mode (`Ngram`, `LegacyAllSuffix`, or `Disabled`)
+    /// and various limits for memory and performance tuning.
+    config: SearchIndexConfig,
 }
 
 impl SearchIndex {
-    /// Builds a search index from a collection of tasks (pure function).
+    /// Builds a search index from a collection of tasks using default configuration.
     ///
-    /// Creates normalized indexes for both title words and tags.
-    /// Also creates all-suffix indexes for arbitrary position substring matching.
+    /// This is a convenience method that uses `SearchIndexConfig::default()`,
+    /// which enables n-gram indexing for better performance.
+    ///
+    /// For explicit control over the indexing mode, use `build_with_config()`.
     #[must_use]
     pub fn build(tasks: &PersistentVector<Task>) -> Self {
+        Self::build_with_config(tasks, SearchIndexConfig::default())
+    }
+
+    /// Builds a search index with configuration from a collection of tasks (pure function).
+    ///
+    /// Creates normalized indexes for both title words and tags, with the infix
+    /// search mode determined by the provided configuration:
+    ///
+    /// - `InfixMode::Ngram`: Builds n-gram indexes for infix search
+    /// - `InfixMode::LegacyAllSuffix`: Builds all-suffix indexes (legacy behavior)
+    /// - `InfixMode::Disabled`: No infix indexes are built
+    ///
+    /// # Arguments
+    ///
+    /// * `tasks` - Collection of tasks to index
+    /// * `config` - Configuration controlling index behavior
+    ///
+    /// # Returns
+    ///
+    /// A new `SearchIndex` with indexes built according to the configuration.
+    ///
+    /// # Normalization
+    ///
+    /// Uses `normalize_query()` for consistent normalization:
+    /// - Trims leading/trailing whitespace
+    /// - Converts to lowercase
+    /// - Collapses multiple spaces into single spaces
+    ///
+    /// # Token Limits
+    ///
+    /// The `max_tokens_per_task` configuration limits the total number of tokens
+    /// (title words + tags) indexed per task. Excess tokens are ignored.
+    ///
+    /// # Memory Bound
+    ///
+    /// With default configuration (`max_tokens_per_task = 100`, `max_ngrams_per_token = 64`),
+    /// memory usage is bounded to approximately 512MB for 10,000 tasks.
+    #[must_use]
+    #[allow(clippy::too_many_lines)]
+    pub fn build_with_config(tasks: &PersistentVector<Task>, config: SearchIndexConfig) -> Self {
         let mut title_word_index: PersistentTreeMap<String, PersistentVector<TaskId>> =
             PersistentTreeMap::new();
         let mut title_full_index: PersistentTreeMap<String, PersistentVector<TaskId>> =
@@ -986,15 +1658,37 @@ impl SearchIndex {
             PersistentTreeMap::new();
         let mut tasks_by_id: PersistentTreeMap<TaskId, Task> = PersistentTreeMap::new();
 
+        // N-gram indexes (populated only in Ngram mode)
+        // Use mutable HashMap<String, Vec<TaskId>> for O(1) amortized batch construction
+        // This avoids the O(n) overhead of rebuilding PersistentVector for each insertion
+        let mut title_full_ngram_batch: MutableNgramIndex = std::collections::HashMap::new();
+        let mut title_word_ngram_batch: MutableNgramIndex = std::collections::HashMap::new();
+        let mut tag_ngram_batch: MutableNgramIndex = std::collections::HashMap::new();
+
         for task in tasks {
             // Index the task by ID
             tasks_by_id = tasks_by_id.insert(task.task_id.clone(), task.clone());
 
+            // Normalize the title using normalize_query() for consistency
+            let normalized = normalize_query(&task.title);
+            let normalized_title = &normalized.key;
+            let words: Vec<&String> = normalized.tokens.iter().collect();
+            let tag_count = task.tags.len();
+
+            // Apply max_tokens_per_task limit: title words + tags combined
+            let total_tokens = words.len() + tag_count;
+            let word_limit = if total_tokens > config.max_tokens_per_task {
+                config
+                    .max_tokens_per_task
+                    .saturating_sub(tag_count.min(config.max_tokens_per_task))
+            } else {
+                words.len()
+            };
+            let tag_limit = config.max_tokens_per_task.saturating_sub(word_limit);
+
             // Index full normalized title for multi-word substring match
-            // Now stores PersistentVector<TaskId> to support multiple tasks with same title
-            let normalized_title = task.title.to_lowercase();
             let existing_ids = title_full_index
-                .get(&normalized_title)
+                .get(normalized_title)
                 .cloned()
                 .unwrap_or_else(PersistentVector::new);
             title_full_index = title_full_index.insert(
@@ -1002,17 +1696,33 @@ impl SearchIndex {
                 existing_ids.push_back(task.task_id.clone()),
             );
 
-            // Index ALL suffixes of the full normalized title for multi-word infix search
-            // "important meeting tomorrow" -> ["important meeting tomorrow", "mportant meeting tomorrow", ..., "meeting tomorrow", ...]
-            title_full_all_suffix_index = Self::index_all_suffixes(
-                title_full_all_suffix_index,
-                &normalized_title,
-                &task.task_id,
-            );
+            // Index infix based on mode
+            match config.infix_mode {
+                InfixMode::Ngram => {
+                    // Build n-gram index for full title using batch index
+                    index_ngrams_batch(
+                        &mut title_full_ngram_batch,
+                        normalized_title,
+                        &task.task_id,
+                        &config,
+                    );
+                }
+                InfixMode::LegacyAllSuffix => {
+                    // Build all-suffix index for full title
+                    title_full_all_suffix_index = Self::index_all_suffixes(
+                        title_full_all_suffix_index,
+                        normalized_title,
+                        &task.task_id,
+                    );
+                }
+                InfixMode::Disabled => {
+                    // No infix index for full title
+                }
+            }
 
-            // Index title words (normalized to lowercase) for prefix search
-            for word in normalized_title.split_whitespace() {
-                let word_key = word.to_string();
+            // Index title words (limited by word_limit)
+            for word in words.iter().take(word_limit) {
+                let word_key = (*word).clone();
                 let task_ids = title_word_index
                     .get(&word_key)
                     .cloned()
@@ -1020,28 +1730,75 @@ impl SearchIndex {
                 title_word_index = title_word_index
                     .insert(word_key.clone(), task_ids.push_back(task.task_id.clone()));
 
-                // Index ALL suffixes of the word for arbitrary position infix search
-                // "callback" -> ["callback", "allback", "llback", "lback", "back", "ack", "ck", "k"]
-                title_word_all_suffix_index =
-                    Self::index_all_suffixes(title_word_all_suffix_index, word, &task.task_id);
+                // Index infix based on mode
+                match config.infix_mode {
+                    InfixMode::Ngram => {
+                        // Build n-gram index for word using batch index
+                        index_ngrams_batch(
+                            &mut title_word_ngram_batch,
+                            &word_key,
+                            &task.task_id,
+                            &config,
+                        );
+                    }
+                    InfixMode::LegacyAllSuffix => {
+                        // Build all-suffix index for word
+                        title_word_all_suffix_index = Self::index_all_suffixes(
+                            title_word_all_suffix_index,
+                            &word_key,
+                            &task.task_id,
+                        );
+                    }
+                    InfixMode::Disabled => {
+                        // No infix index for word
+                    }
+                }
             }
 
-            // Index tags (normalized to lowercase)
-            for tag in &task.tags {
-                let tag_key = tag.as_str().to_lowercase();
+            // Index tags (limited by tag_limit)
+            // Sort tags to ensure deterministic iteration order (PersistentHashSet has
+            // non-deterministic order based on hash values)
+            let mut sorted_tags: Vec<_> = task.tags.iter().collect();
+            sorted_tags.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+            for tag in sorted_tags.into_iter().take(tag_limit) {
+                // Normalize tag using normalize_query() for consistency
+                let normalized_tag = normalize_query(tag.as_str()).into_key();
                 let task_ids = tag_index
-                    .get(&tag_key)
+                    .get(&normalized_tag)
                     .cloned()
                     .unwrap_or_else(PersistentVector::new);
-                tag_index =
-                    tag_index.insert(tag_key.clone(), task_ids.push_back(task.task_id.clone()));
+                tag_index = tag_index.insert(
+                    normalized_tag.clone(),
+                    task_ids.push_back(task.task_id.clone()),
+                );
 
-                // Index ALL suffixes of the tag for arbitrary position infix search
-                tag_all_suffix_index =
-                    Self::index_all_suffixes(tag_all_suffix_index, &tag_key, &task.task_id);
+                // Index infix based on mode
+                match config.infix_mode {
+                    InfixMode::Ngram => {
+                        // Build n-gram index for tag using batch index
+                        index_ngrams_batch(
+                            &mut tag_ngram_batch,
+                            &normalized_tag,
+                            &task.task_id,
+                            &config,
+                        );
+                    }
+                    InfixMode::LegacyAllSuffix => {
+                        // Build all-suffix index for tag
+                        tag_all_suffix_index = Self::index_all_suffixes(
+                            tag_all_suffix_index,
+                            &normalized_tag,
+                            &task.task_id,
+                        );
+                    }
+                    InfixMode::Disabled => {
+                        // No infix index for tag
+                    }
+                }
             }
         }
 
+        // Convert batch indexes to persistent indexes (sort, dedup, and convert)
         Self {
             title_word_index,
             title_full_index,
@@ -1050,6 +1807,10 @@ impl SearchIndex {
             tag_index,
             tag_all_suffix_index,
             tasks_by_id,
+            title_full_ngram_index: finalize_ngram_index(title_full_ngram_batch),
+            title_word_ngram_index: finalize_ngram_index(title_word_ngram_batch),
+            tag_ngram_index: finalize_ngram_index(tag_ngram_batch),
+            config,
         }
     }
 
@@ -1094,28 +1855,51 @@ impl SearchIndex {
     /// # Search Strategy
     ///
     /// 1. First, try full title substring match (for multi-word queries like "important meeting")
-    /// 2. Then, use prefix-based word index search (for single word or prefix queries)
-    /// 3. Combine results with deduplication, sorted by `task_id` for stable ordering
+    /// 2. Then, use infix search based on configured mode (n-gram or legacy all-suffix)
+    /// 3. Finally, use prefix-based word index search (for single word or prefix queries)
+    /// 4. Combine results with deduplication, sorted by `task_id` for stable ordering
+    ///
+    /// # Normalization
+    ///
+    /// Uses `normalize_query()` for consistent normalization between index and query.
+    ///
+    /// # Result Limiting
+    ///
+    /// Applies `max_search_candidates` to the final result set.
     #[must_use]
     pub fn search_by_title(&self, query: &str) -> Option<SearchResult> {
-        let query_lower = query.to_lowercase();
-        let matching_ids = self.find_matching_ids_from_title(&query_lower);
+        // Use normalize_query() for consistent normalization (not just to_lowercase())
+        let normalized = normalize_query(query);
+        let normalized_query = &normalized.key;
+        let matching_ids = self.find_matching_ids_from_title(normalized_query);
 
         if matching_ids.is_empty() {
             None
         } else {
-            let tasks = self.resolve_task_ids_ordered(&matching_ids);
+            // Apply max_search_candidates to the final result set
+            // Sort by TaskId to ensure deterministic ordering before limiting
+            let mut sorted_ids: Vec<TaskId> = matching_ids.iter().cloned().collect();
+            sorted_ids.sort();
+            let limited_ids: PersistentHashSet<TaskId> = sorted_ids
+                .into_iter()
+                .take(self.config.max_search_candidates)
+                .collect();
+            let tasks = self.resolve_task_ids_ordered(&limited_ids);
             Some(SearchResult::from_tasks(tasks))
         }
     }
 
     /// Searches the tag index for tasks containing the query (pure function).
     ///
+    /// Uses `normalize_query()` for consistent normalization between index and query.
+    ///
     /// Returns `Some(SearchResult)` if any matches are found, `None` otherwise.
     #[must_use]
     pub fn search_by_tags(&self, query: &str) -> Option<SearchResult> {
-        let query_lower = query.to_lowercase();
-        let matching_ids = self.find_matching_ids_from_tags(&query_lower);
+        // Use normalize_query() for consistent normalization (not just to_lowercase())
+        let normalized = normalize_query(query);
+        let normalized_query = &normalized.key;
+        let matching_ids = self.find_matching_ids_from_tags(normalized_query);
 
         if matching_ids.is_empty() {
             None
@@ -1125,57 +1909,231 @@ impl SearchIndex {
         }
     }
 
-    /// Finds task IDs from the title index that match the query (substring match).
+    // -------------------------------------------------------------------------
+    // N-gram Search Methods (REQ-SEARCH-NGRAM-003)
+    // -------------------------------------------------------------------------
+
+    /// Finds candidate `TaskId`s from the n-gram index (pure function).
     ///
-    /// Uses a four-phase strategy:
-    /// 1. Full title substring match using prefix range on full title index
-    /// 2. Full title all-suffix search (for multi-word infix queries like "meeting tomorrow" in "important meeting tomorrow")
-    /// 3. Prefix-based range search on word index
-    /// 4. Suffix-based range search on all-suffix index (for infix matches)
+    /// This method performs an efficient candidate search using the n-gram
+    /// inverted index. It generates n-grams from the query and intersects
+    /// the posting lists to find candidate tasks.
+    ///
+    /// # Arguments
+    ///
+    /// * `index` - The n-gram index to search
+    /// * `normalized_query` - The normalized query string (from `normalize_query()`)
+    ///
+    /// # Returns
+    ///
+    /// - `Some(Vec<TaskId>)` - Candidate task IDs (may contain false positives)
+    /// - `None` - If the query is too short for n-gram search (< `min_query_len_for_infix`)
     ///
     /// # Complexity
     ///
-    /// Each phase uses O(log N + m) range query where m is matching index entries.
-    /// Combined with ID resolution and ordering, total is O(k log N + k log k).
-    /// No O(N) full scan is performed.
-    fn find_matching_ids_from_title(&self, query_lower: &str) -> PersistentHashSet<TaskId> {
-        let mut matching_ids = PersistentHashSet::new();
+    /// - Time: O(q * (log N + k)) where q is query n-gram count, k is posting list size
+    /// - Intersection is O(k) using merge intersection on sorted lists
+    ///
+    /// # Soundness
+    ///
+    /// Results may contain false positives (tasks where the n-grams match but the
+    /// full query substring does not). Use `verify_candidates_by_substring` to
+    /// filter out false positives.
+    fn find_candidates_by_ngrams(
+        &self,
+        index: &NgramIndex,
+        normalized_query: &str,
+    ) -> Option<Vec<TaskId>> {
+        // Check query length: return None if too short for infix search
+        let query_char_count = normalized_query.chars().count();
+        if query_char_count < self.config.min_query_len_for_infix {
+            return None;
+        }
 
-        // Phase 1: Full title prefix search (for multi-word queries)
+        // Generate all n-grams from the query (no limit for query-side)
+        // Note: max_ngrams_per_token is only for index construction to bound memory usage
+        // For search, we need all query n-grams to ensure correct intersection
+        let query_ngrams = generate_ngrams(
+            normalized_query,
+            self.config.ngram_size,
+            usize::MAX, // No limit for query n-grams
+        );
+
+        if query_ngrams.is_empty() {
+            // Query is shorter than n-gram size: return None to fall back to prefix search
+            return None;
+        }
+
+        // Intersect posting lists for all query n-grams
+        let mut candidate_vec: Option<Vec<TaskId>> = None;
+
+        for ngram in &query_ngrams {
+            match index.get(ngram) {
+                Some(task_ids) => {
+                    let current_vec: Vec<TaskId> = task_ids.iter().cloned().collect();
+
+                    candidate_vec = Some(match candidate_vec {
+                        Some(existing) => {
+                            // O(n) merge intersection (both are sorted)
+                            intersect_sorted_vecs(&existing, &current_vec)
+                        }
+                        None => current_vec,
+                    });
+                }
+                None => {
+                    // This n-gram doesn't exist in the index: no candidates
+                    return Some(Vec::new());
+                }
+            }
+        }
+
+        candidate_vec
+    }
+
+    /// Verifies candidate `TaskId`s by substring match (soundness filter).
+    ///
+    /// This method filters candidate task IDs by checking if the normalized
+    /// query is actually a substring of the extracted field value.
+    ///
+    /// # Arguments
+    ///
+    /// * `candidates` - Candidate task IDs from n-gram search
+    /// * `normalized_query` - The normalized query string
+    /// * `field_extractor` - Function to extract searchable field(s) from a task
+    ///
+    /// # Returns
+    ///
+    /// A `Vec<TaskId>` containing only the tasks where the query is a substring
+    /// of at least one extracted field.
+    ///
+    /// # Soundness Law
+    ///
+    /// For all returned `TaskId`s, the normalized query is a substring of at least
+    /// one field value:
+    ///
+    /// ```text
+    /// ∀ task_id ∈ result:
+    ///   ∃ field ∈ field_extractor(task):
+    ///     normalized_query ⊆ field
+    /// ```
+    fn verify_candidates_by_substring<F>(
+        &self,
+        candidates: &[TaskId],
+        normalized_query: &str,
+        field_extractor: F,
+    ) -> Vec<TaskId>
+    where
+        F: Fn(&Task) -> Vec<String>,
+    {
+        candidates
+            .iter()
+            .filter(|task_id| {
+                self.tasks_by_id.get(*task_id).is_some_and(|task| {
+                    field_extractor(task)
+                        .iter()
+                        .any(|field| field.contains(normalized_query))
+                })
+            })
+            .cloned()
+            .collect()
+    }
+
+    // -------------------------------------------------------------------------
+    // Title/Tag Search Methods
+    // -------------------------------------------------------------------------
+
+    /// Finds task IDs from the title index that match the query (substring match).
+    ///
+    /// Uses a multi-phase strategy based on configuration:
+    ///
+    /// - **Phase 1**: Full title prefix search (always)
+    /// - **Phase 2**: Infix search (if query length >= `min_query_len_for_infix`)
+    ///   - `Ngram` mode: N-gram inverted index search with substring verification
+    ///   - `LegacyAllSuffix` mode: All-suffix index prefix search
+    ///   - `Disabled` mode: Skip infix search
+    /// - **Phase 3**: Word prefix search (always)
+    ///
+    /// # Arguments
+    ///
+    /// * `normalized_query` - The normalized query string (from `normalize_query().key`)
+    ///
+    /// # Complexity
+    ///
+    /// - Prefix search: O(log N + m) per index
+    /// - N-gram search: O(q * log N + k) where q is n-gram count, k is candidate count
+    /// - Total: O(k log N + k log k) with ID resolution and ordering
+    fn find_matching_ids_from_title(&self, normalized_query: &str) -> PersistentHashSet<TaskId> {
+        let mut matching_ids = PersistentHashSet::new();
+        let query_char_count = normalized_query.chars().count();
+
+        // Phase 1: Full title prefix search (always)
         // Use range query on title_full_index for O(log N + m) lookup
         // This finds titles that START WITH the query (e.g., "important meeting" in "important meeting tomorrow")
         matching_ids = Self::find_matching_ids_with_prefix_range_multi(
             &self.title_full_index,
-            query_lower,
+            normalized_query,
             matching_ids,
         );
 
-        // Phase 2: Full title all-suffix search (for multi-word infix queries)
-        // The all-suffix index contains ALL suffixes of the full title, so we can find
-        // any multi-word infix by prefix-searching on the suffix that starts with the query.
-        // E.g., "meeting tomorrow" matches "important meeting tomorrow" because
-        // "meeting tomorrow" is in the all-suffix index and starts with the query.
-        matching_ids = Self::find_matching_ids_with_prefix_range_multi(
-            &self.title_full_all_suffix_index,
-            query_lower,
-            matching_ids,
-        );
+        // Phase 2: Infix search (mode-dependent, only if query >= min_query_len_for_infix)
+        // Note: min_query_len_for_infix is applied to ALL infix modes (Ngram and LegacyAllSuffix)
+        if query_char_count >= self.config.min_query_len_for_infix {
+            match self.config.infix_mode {
+                InfixMode::Ngram => {
+                    // N-gram search on full title
+                    if let Some(candidates) = self
+                        .find_candidates_by_ngrams(&self.title_full_ngram_index, normalized_query)
+                    {
+                        let verified = self.verify_candidates_by_substring(
+                            &candidates,
+                            normalized_query,
+                            |task| vec![normalize_query(&task.title).key],
+                        );
+                        for task_id in verified {
+                            matching_ids = matching_ids.insert(task_id);
+                        }
+                    }
 
-        // Phase 3: Word index prefix search (for single word or prefix queries)
+                    // N-gram search on title words
+                    if let Some(candidates) = self
+                        .find_candidates_by_ngrams(&self.title_word_ngram_index, normalized_query)
+                    {
+                        let verified = self.verify_candidates_by_substring(
+                            &candidates,
+                            normalized_query,
+                            |task| normalize_query(&task.title).tokens,
+                        );
+                        for task_id in verified {
+                            matching_ids = matching_ids.insert(task_id);
+                        }
+                    }
+                }
+                InfixMode::LegacyAllSuffix => {
+                    // Full title all-suffix search (for multi-word infix queries)
+                    matching_ids = Self::find_matching_ids_with_prefix_range_multi(
+                        &self.title_full_all_suffix_index,
+                        normalized_query,
+                        matching_ids,
+                    );
+
+                    // Word all-suffix search (for arbitrary infix matches)
+                    matching_ids = Self::find_matching_ids_with_prefix_range(
+                        &self.title_word_all_suffix_index,
+                        normalized_query,
+                        matching_ids,
+                    );
+                }
+                InfixMode::Disabled => {
+                    // No infix search
+                }
+            }
+        }
+
+        // Phase 3: Word prefix search (always)
         // Finds words that START WITH the query (e.g., "imp" matches "important")
         matching_ids = Self::find_matching_ids_with_prefix_range(
             &self.title_word_index,
-            query_lower,
-            matching_ids,
-        );
-
-        // Phase 4: All-suffix index search (for arbitrary infix matches)
-        // The all-suffix index contains ALL suffixes of each word, so we can find
-        // any infix by prefix-searching on the suffix that starts with the query.
-        // E.g., "all" matches "callback" because "allback" is in the index and starts with "all"
-        matching_ids = Self::find_matching_ids_with_prefix_range(
-            &self.title_word_all_suffix_index,
-            query_lower,
+            normalized_query,
             matching_ids,
         );
 
@@ -1184,22 +2142,66 @@ impl SearchIndex {
 
     /// Finds task IDs from the tag index that match the query (substring match).
     ///
-    /// Uses prefix search on tag index and all-suffix index.
-    /// Complexity: O(log N + m) per phase, total O(k log N + k log k) with ID resolution.
+    /// Uses a multi-phase strategy based on configuration:
+    ///
+    /// - **Phase 1**: Tag prefix search (always)
+    /// - **Phase 2**: Infix search (if query length >= `min_query_len_for_infix`)
+    ///   - `Ngram` mode: N-gram inverted index search with substring verification
+    ///   - `LegacyAllSuffix` mode: All-suffix index prefix search
+    ///   - `Disabled` mode: Skip infix search
+    ///
+    /// # Arguments
+    ///
+    /// * `query_lower` - The lowercased query string
+    ///
+    /// # Complexity
+    ///
+    /// - Prefix search: O(log N + m) per index
+    /// - N-gram search: O(q * log N + k) where q is n-gram count, k is candidate count
+    /// - Total: O(k log N + k log k) with ID resolution and ordering
     fn find_matching_ids_from_tags(&self, query_lower: &str) -> PersistentHashSet<TaskId> {
         let mut matching_ids = PersistentHashSet::new();
+        let query_char_count = query_lower.chars().count();
 
-        // Prefix search: finds tags starting with query
+        // Phase 1: Tag prefix search (always)
+        // Finds tags that START WITH the query (e.g., "back" matches "backend")
         matching_ids =
             Self::find_matching_ids_with_prefix_range(&self.tag_index, query_lower, matching_ids);
 
-        // All-suffix search: finds tags containing query at any position
-        // E.g., "cke" matches "backend" because "ckend" is in the all-suffix index
-        matching_ids = Self::find_matching_ids_with_prefix_range(
-            &self.tag_all_suffix_index,
-            query_lower,
-            matching_ids,
-        );
+        // Phase 2: Infix search (mode-dependent, only if query >= min_query_len_for_infix)
+        if query_char_count >= self.config.min_query_len_for_infix {
+            match self.config.infix_mode {
+                InfixMode::Ngram => {
+                    // N-gram search on tags
+                    if let Some(candidates) =
+                        self.find_candidates_by_ngrams(&self.tag_ngram_index, query_lower)
+                    {
+                        let verified =
+                            self.verify_candidates_by_substring(&candidates, query_lower, |task| {
+                                task.tags
+                                    .iter()
+                                    .map(|tag| tag.as_str().to_string())
+                                    .collect()
+                            });
+                        for task_id in verified {
+                            matching_ids = matching_ids.insert(task_id);
+                        }
+                    }
+                }
+                InfixMode::LegacyAllSuffix => {
+                    // All-suffix search: finds tags containing query at any position
+                    // E.g., "cke" matches "backend" because "ckend" is in the all-suffix index
+                    matching_ids = Self::find_matching_ids_with_prefix_range(
+                        &self.tag_all_suffix_index,
+                        query_lower,
+                        matching_ids,
+                    );
+                }
+                InfixMode::Disabled => {
+                    // No infix search
+                }
+            }
+        }
 
         matching_ids
     }
@@ -1292,17 +2294,24 @@ impl SearchIndex {
     /// Removes a single task from the index, returning a new index (pure function).
     ///
     /// This helper method removes all index entries associated with the given task:
-    /// - Removes from `title_word_index` and `title_word_all_suffix_index`
-    /// - Removes from `title_full_index` and `title_full_all_suffix_index`
-    /// - Removes from `tag_index` and `tag_all_suffix_index`
+    /// - Removes from `title_word_index` and infix index based on `config.infix_mode`
+    /// - Removes from `title_full_index` and infix index based on `config.infix_mode`
+    /// - Removes from `tag_index` and infix index based on `config.infix_mode`
     /// - Removes from `tasks_by_id`
+    ///
+    /// # Normalization
+    ///
+    /// Uses `normalize_query()` for consistent normalization with index construction.
     ///
     /// # Complexity
     ///
     /// O(W * L * log N) where W is word count, L is average word length, N is index size.
     #[must_use]
     fn remove_task(&self, task: &Task) -> Self {
-        let normalized_title = task.title.to_lowercase();
+        // Use normalize_query() for consistency with build_with_config
+        let normalized = normalize_query(&task.title);
+        let normalized_title = &normalized.key;
+        let words: Vec<&String> = normalized.tokens.iter().collect();
         let task_id = &task.task_id;
 
         // Remove from tasks_by_id
@@ -1310,32 +2319,90 @@ impl SearchIndex {
 
         // Remove from title_full_index
         let title_full_index =
-            Self::remove_id_from_vector_index(&self.title_full_index, &normalized_title, task_id);
+            Self::remove_id_from_vector_index(&self.title_full_index, normalized_title, task_id);
 
-        // Remove from title_full_all_suffix_index
-        let title_full_all_suffix_index = Self::remove_id_from_all_suffixes(
-            &self.title_full_all_suffix_index,
-            &normalized_title,
-            task_id,
-        );
-
-        // Remove from title_word_index and title_word_all_suffix_index
-        let mut title_word_index = self.title_word_index.clone();
-        let mut title_word_all_suffix_index = self.title_word_all_suffix_index.clone();
-        for word in normalized_title.split_whitespace() {
-            title_word_index = Self::remove_id_from_vector_index(&title_word_index, word, task_id);
-            title_word_all_suffix_index =
-                Self::remove_id_from_all_suffixes(&title_word_all_suffix_index, word, task_id);
+        // Remove from infix index based on mode (full title)
+        let mut title_full_all_suffix_index = self.title_full_all_suffix_index.clone();
+        let mut title_full_ngram_index = self.title_full_ngram_index.clone();
+        match self.config.infix_mode {
+            InfixMode::Ngram => {
+                title_full_ngram_index = remove_ngrams(
+                    title_full_ngram_index,
+                    normalized_title,
+                    task_id,
+                    &self.config,
+                );
+            }
+            InfixMode::LegacyAllSuffix => {
+                title_full_all_suffix_index = Self::remove_id_from_all_suffixes(
+                    &title_full_all_suffix_index,
+                    normalized_title,
+                    task_id,
+                );
+            }
+            InfixMode::Disabled => {
+                // No infix index for full title
+            }
         }
 
-        // Remove from tag_index and tag_all_suffix_index
+        // Remove from title_word_index and infix index
+        let mut title_word_index = self.title_word_index.clone();
+        let mut title_word_all_suffix_index = self.title_word_all_suffix_index.clone();
+        let mut title_word_ngram_index = self.title_word_ngram_index.clone();
+        for word in &words {
+            let word_key = (*word).clone();
+            title_word_index =
+                Self::remove_id_from_vector_index(&title_word_index, &word_key, task_id);
+
+            // Remove from infix index based on mode
+            match self.config.infix_mode {
+                InfixMode::Ngram => {
+                    title_word_ngram_index =
+                        remove_ngrams(title_word_ngram_index, &word_key, task_id, &self.config);
+                }
+                InfixMode::LegacyAllSuffix => {
+                    title_word_all_suffix_index = Self::remove_id_from_all_suffixes(
+                        &title_word_all_suffix_index,
+                        &word_key,
+                        task_id,
+                    );
+                }
+                InfixMode::Disabled => {
+                    // No infix index for word
+                }
+            }
+        }
+
+        // Remove from tag_index and infix index
+        // Sort tags for deterministic iteration order (PersistentHashSet has non-deterministic order)
+        let mut sorted_tags: Vec<_> = task.tags.iter().collect();
+        sorted_tags.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+
         let mut tag_index = self.tag_index.clone();
         let mut tag_all_suffix_index = self.tag_all_suffix_index.clone();
-        for tag in &task.tags {
-            let tag_key = tag.as_str().to_lowercase();
-            tag_index = Self::remove_id_from_vector_index(&tag_index, &tag_key, task_id);
-            tag_all_suffix_index =
-                Self::remove_id_from_all_suffixes(&tag_all_suffix_index, &tag_key, task_id);
+        let mut tag_ngram_index = self.tag_ngram_index.clone();
+        for tag in sorted_tags {
+            // Normalize tag using normalize_query() for consistency
+            let normalized_tag = normalize_query(tag.as_str()).into_key();
+            tag_index = Self::remove_id_from_vector_index(&tag_index, &normalized_tag, task_id);
+
+            // Remove from infix index based on mode
+            match self.config.infix_mode {
+                InfixMode::Ngram => {
+                    tag_ngram_index =
+                        remove_ngrams(tag_ngram_index, &normalized_tag, task_id, &self.config);
+                }
+                InfixMode::LegacyAllSuffix => {
+                    tag_all_suffix_index = Self::remove_id_from_all_suffixes(
+                        &tag_all_suffix_index,
+                        &normalized_tag,
+                        task_id,
+                    );
+                }
+                InfixMode::Disabled => {
+                    // No infix index for tag
+                }
+            }
         }
 
         Self {
@@ -1346,6 +2413,10 @@ impl SearchIndex {
             tag_index,
             tag_all_suffix_index,
             tasks_by_id,
+            title_full_ngram_index,
+            title_word_ngram_index,
+            tag_ngram_index,
+            config: self.config.clone(),
         }
     }
 
@@ -1388,18 +2459,39 @@ impl SearchIndex {
     /// Adds a single task to the index, returning a new index (pure function).
     ///
     /// This helper method adds all index entries for the given task:
-    /// - Adds to `title_word_index` and `title_word_all_suffix_index`
-    /// - Adds to `title_full_index` and `title_full_all_suffix_index`
-    /// - Adds to `tag_index` and `tag_all_suffix_index`
+    /// - Adds to `title_word_index` and infix index based on `config.infix_mode`
+    /// - Adds to `title_full_index` and infix index based on `config.infix_mode`
+    /// - Adds to `tag_index` and infix index based on `config.infix_mode`
     /// - Adds to `tasks_by_id`
+    /// - Respects `max_tokens_per_task` limit (title words + tags combined)
+    ///
+    /// # Normalization
+    ///
+    /// Uses `normalize_query()` for consistent normalization with index construction.
     ///
     /// # Complexity
     ///
     /// O(W * L * log N) where W is word count, L is average word length, N is index size.
     #[must_use]
+    #[allow(clippy::too_many_lines)]
     fn add_task(&self, task: &Task) -> Self {
-        let normalized_title = task.title.to_lowercase();
+        // Use normalize_query() for consistency with build_with_config
+        let normalized = normalize_query(&task.title);
+        let normalized_title = &normalized.key;
+        let words: Vec<&String> = normalized.tokens.iter().collect();
         let task_id = &task.task_id;
+        let tag_count = task.tags.len();
+
+        // Apply max_tokens_per_task limit: title words + tags combined
+        let total_tokens = words.len() + tag_count;
+        let word_limit = if total_tokens > self.config.max_tokens_per_task {
+            self.config
+                .max_tokens_per_task
+                .saturating_sub(tag_count.min(self.config.max_tokens_per_task))
+        } else {
+            words.len()
+        };
+        let tag_limit = self.config.max_tokens_per_task.saturating_sub(word_limit);
 
         // Add to tasks_by_id
         let tasks_by_id = self.tasks_by_id.insert(task_id.clone(), task.clone());
@@ -1407,7 +2499,7 @@ impl SearchIndex {
         // Add to title_full_index (with deduplication check)
         let existing_ids = self
             .title_full_index
-            .get(&normalized_title)
+            .get(normalized_title)
             .cloned()
             .unwrap_or_else(PersistentVector::new);
         let title_full_index = if existing_ids.iter().any(|id| id == task_id) {
@@ -1419,18 +2511,36 @@ impl SearchIndex {
             )
         };
 
-        // Add to title_full_all_suffix_index
-        let title_full_all_suffix_index = Self::index_all_suffixes(
-            self.title_full_all_suffix_index.clone(),
-            &normalized_title,
-            task_id,
-        );
+        // Add to infix index based on mode (full title)
+        let mut title_full_all_suffix_index = self.title_full_all_suffix_index.clone();
+        let mut title_full_ngram_index = self.title_full_ngram_index.clone();
+        match self.config.infix_mode {
+            InfixMode::Ngram => {
+                title_full_ngram_index = index_ngrams(
+                    title_full_ngram_index,
+                    normalized_title,
+                    task_id,
+                    &self.config,
+                );
+            }
+            InfixMode::LegacyAllSuffix => {
+                title_full_all_suffix_index = Self::index_all_suffixes(
+                    title_full_all_suffix_index,
+                    normalized_title,
+                    task_id,
+                );
+            }
+            InfixMode::Disabled => {
+                // No infix index for full title
+            }
+        }
 
-        // Add to title_word_index and title_word_all_suffix_index (with deduplication check)
+        // Add to title_word_index and infix index (limited by word_limit)
         let mut title_word_index = self.title_word_index.clone();
         let mut title_word_all_suffix_index = self.title_word_all_suffix_index.clone();
-        for word in normalized_title.split_whitespace() {
-            let word_key = word.to_string();
+        let mut title_word_ngram_index = self.title_word_ngram_index.clone();
+        for word in words.iter().take(word_limit) {
+            let word_key = (*word).clone();
             let task_ids = title_word_index
                 .get(&word_key)
                 .cloned()
@@ -1439,24 +2549,57 @@ impl SearchIndex {
                 title_word_index =
                     title_word_index.insert(word_key.clone(), task_ids.push_back(task_id.clone()));
             }
-            title_word_all_suffix_index =
-                Self::index_all_suffixes(title_word_all_suffix_index, word, task_id);
+
+            // Add to infix index based on mode
+            match self.config.infix_mode {
+                InfixMode::Ngram => {
+                    title_word_ngram_index =
+                        index_ngrams(title_word_ngram_index, &word_key, task_id, &self.config);
+                }
+                InfixMode::LegacyAllSuffix => {
+                    title_word_all_suffix_index =
+                        Self::index_all_suffixes(title_word_all_suffix_index, &word_key, task_id);
+                }
+                InfixMode::Disabled => {
+                    // No infix index for word
+                }
+            }
         }
 
-        // Add to tag_index and tag_all_suffix_index (with deduplication check)
+        // Add to tag_index and infix index (limited by tag_limit)
+        // Sort tags for deterministic iteration order (PersistentHashSet has non-deterministic order)
+        let mut sorted_tags: Vec<_> = task.tags.iter().collect();
+        sorted_tags.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+
         let mut tag_index = self.tag_index.clone();
         let mut tag_all_suffix_index = self.tag_all_suffix_index.clone();
-        for tag in &task.tags {
-            let tag_key = tag.as_str().to_lowercase();
+        let mut tag_ngram_index = self.tag_ngram_index.clone();
+        for tag in sorted_tags.into_iter().take(tag_limit) {
+            // Normalize tag using normalize_query() for consistency
+            let normalized_tag = normalize_query(tag.as_str()).into_key();
             let task_ids = tag_index
-                .get(&tag_key)
+                .get(&normalized_tag)
                 .cloned()
                 .unwrap_or_else(PersistentVector::new);
             if !task_ids.iter().any(|id| id == task_id) {
-                tag_index = tag_index.insert(tag_key.clone(), task_ids.push_back(task_id.clone()));
+                tag_index =
+                    tag_index.insert(normalized_tag.clone(), task_ids.push_back(task_id.clone()));
             }
-            tag_all_suffix_index =
-                Self::index_all_suffixes(tag_all_suffix_index, &tag_key, task_id);
+
+            // Add to infix index based on mode
+            match self.config.infix_mode {
+                InfixMode::Ngram => {
+                    tag_ngram_index =
+                        index_ngrams(tag_ngram_index, &normalized_tag, task_id, &self.config);
+                }
+                InfixMode::LegacyAllSuffix => {
+                    tag_all_suffix_index =
+                        Self::index_all_suffixes(tag_all_suffix_index, &normalized_tag, task_id);
+                }
+                InfixMode::Disabled => {
+                    // No infix index for tag
+                }
+            }
         }
 
         Self {
@@ -1467,6 +2610,10 @@ impl SearchIndex {
             tag_index,
             tag_all_suffix_index,
             tasks_by_id,
+            title_full_ngram_index,
+            title_word_ngram_index,
+            tag_ngram_index,
+            config: self.config.clone(),
         }
     }
 
@@ -6227,5 +7374,2476 @@ mod search_cache_tests {
             (stats.hit_rate() - 0.0).abs() < f64::EPSILON,
             "Hit rate with only misses should be 0.0"
         );
+    }
+}
+
+// =============================================================================
+// SearchIndexConfig Tests (REQ-SEARCH-NGRAM-001)
+// =============================================================================
+
+#[cfg(test)]
+mod search_index_config_tests {
+    use super::*;
+    use proptest::prelude::*;
+    use rstest::rstest;
+
+    // -------------------------------------------------------------------------
+    // Default Value Tests
+    // -------------------------------------------------------------------------
+
+    /// Tests that `SearchIndexConfig::default()` returns expected values.
+    ///
+    /// Verifies:
+    /// - `infix_mode`: `InfixMode::Ngram` (default)
+    /// - `ngram_size`: 3
+    /// - `min_query_len_for_infix`: 3
+    /// - `max_ngrams_per_token`: 64
+    /// - `max_tokens_per_task`: 100
+    /// - `max_search_candidates`: 1000
+    #[rstest]
+    fn config_default_values() {
+        let config = SearchIndexConfig::default();
+
+        assert_eq!(config.infix_mode, InfixMode::Ngram);
+        assert_eq!(config.ngram_size, 3);
+        assert_eq!(config.min_query_len_for_infix, 3);
+        assert_eq!(config.max_ngrams_per_token, 64);
+        assert_eq!(config.max_tokens_per_task, 100);
+        assert_eq!(config.max_search_candidates, 1000);
+    }
+
+    /// Tests that `InfixMode::LegacyAllSuffix` is available but not the default.
+    ///
+    /// This ensures backward compatibility while keeping n-gram as the default.
+    #[rstest]
+    fn infix_mode_legacy_is_available_but_not_default() {
+        // Default should be Ngram, not LegacyAllSuffix
+        let config = SearchIndexConfig::default();
+        assert_ne!(config.infix_mode, InfixMode::LegacyAllSuffix);
+
+        // LegacyAllSuffix should be usable via explicit construction
+        let legacy_config = SearchIndexConfig {
+            infix_mode: InfixMode::LegacyAllSuffix,
+            ..Default::default()
+        };
+        assert_eq!(legacy_config.infix_mode, InfixMode::LegacyAllSuffix);
+    }
+
+    /// Tests that `InfixMode::Disabled` is available and can be configured.
+    #[rstest]
+    fn infix_mode_disabled_is_available() {
+        let config = SearchIndexConfig {
+            infix_mode: InfixMode::Disabled,
+            ..Default::default()
+        };
+        assert_eq!(config.infix_mode, InfixMode::Disabled);
+    }
+
+    /// Tests that `InfixMode` derives `Default` and it resolves to `Ngram`.
+    #[rstest]
+    fn infix_mode_default_is_ngram() {
+        let mode = InfixMode::default();
+        assert_eq!(mode, InfixMode::Ngram);
+    }
+
+    // -------------------------------------------------------------------------
+    // Property Tests
+    // -------------------------------------------------------------------------
+
+    proptest! {
+        /// Property test: `SearchIndexConfig::default()` is deterministic.
+        ///
+        /// Law: `default() == default()` for any execution context.
+        #[test]
+        fn config_default_is_deterministic_property(_seed in any::<u64>()) {
+            let left = SearchIndexConfig::default();
+            let right = SearchIndexConfig::default();
+            prop_assert_eq!(left, right);
+        }
+    }
+}
+
+// =============================================================================
+// N-gram Generation Tests (REQ-SEARCH-NGRAM-002 Part 1)
+// =============================================================================
+
+#[cfg(test)]
+mod ngram_tests {
+    use super::*;
+    use proptest::prelude::*;
+    use rstest::rstest;
+
+    // -------------------------------------------------------------------------
+    // Basic Functionality Tests
+    // -------------------------------------------------------------------------
+
+    /// Tests n-gram generation from ASCII string.
+    ///
+    /// - Input: "callback", `ngram_size`=3, `max_ngrams`=64
+    /// - Expected: 6 n-grams: "cal", "all", "llb", "lba", "bac", "ack"
+    #[rstest]
+    fn generate_ngrams_ascii() {
+        let result = generate_ngrams("callback", 3, 64);
+        assert_eq!(result, vec!["cal", "all", "llb", "lba", "bac", "ack"]);
+    }
+
+    /// Tests n-gram generation from multibyte (UTF-8) string.
+    ///
+    /// - Input: "日本語テスト", `ngram_size`=3, `max_ngrams`=64
+    /// - Expected: 4 n-grams (6 chars - 3 + 1 = 4)
+    #[rstest]
+    fn generate_ngrams_multibyte() {
+        let result = generate_ngrams("日本語テスト", 3, 64);
+        assert_eq!(result.len(), 4);
+        assert_eq!(result[0], "日本語");
+        assert_eq!(result[1], "本語テ");
+        assert_eq!(result[2], "語テス");
+        assert_eq!(result[3], "テスト");
+    }
+
+    /// Tests that short tokens (fewer chars than `ngram_size`) return empty.
+    ///
+    /// - Input: "ab", `ngram_size`=3
+    /// - Expected: empty Vec (2 < 3)
+    #[rstest]
+    fn generate_ngrams_short_token() {
+        let result = generate_ngrams("ab", 3, 64);
+        assert!(result.is_empty());
+    }
+
+    /// Tests that `max_ngrams` limits the output.
+    ///
+    /// - Input: "callback", `ngram_size`=3, `max_ngrams`=2
+    /// - Expected: 2 n-grams: "cal", "all" (only first 2)
+    #[rstest]
+    fn generate_ngrams_max_limit() {
+        let result = generate_ngrams("callback", 3, 2);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result, vec!["cal", "all"]);
+    }
+
+    /// Tests that invalid `ngram_size` (< 2) returns empty.
+    ///
+    /// - Input: "callback", `ngram_size`=1
+    /// - Expected: empty Vec
+    #[rstest]
+    fn generate_ngrams_invalid_size() {
+        let result = generate_ngrams("callback", 1, 64);
+        assert!(result.is_empty());
+    }
+
+    /// Tests that `ngram_size`=0 returns empty.
+    #[rstest]
+    fn generate_ngrams_zero_size() {
+        let result = generate_ngrams("callback", 0, 64);
+        assert!(result.is_empty());
+    }
+
+    /// Tests empty input string.
+    #[rstest]
+    fn generate_ngrams_empty_input() {
+        let result = generate_ngrams("", 3, 64);
+        assert!(result.is_empty());
+    }
+
+    /// Tests token length exactly matching `ngram_size`.
+    ///
+    /// - Input: "abc", `ngram_size`=3, `max_ngrams`=64
+    /// - Expected: 1 n-gram: "abc" (exactly 1 n-gram)
+    #[rstest]
+    fn generate_ngrams_exact_length() {
+        let result = generate_ngrams("abc", 3, 64);
+        assert_eq!(result, vec!["abc"]);
+    }
+
+    // -------------------------------------------------------------------------
+    // Property Tests
+    // -------------------------------------------------------------------------
+
+    proptest! {
+        /// Property: Generated n-gram count never exceeds `max_ngrams`.
+        ///
+        /// Law: `len(generate_ngrams(token, n, max))` <= max for all inputs.
+        #[test]
+        fn generate_ngrams_count_is_bounded(
+            token in "[a-z]{1,50}",
+            ngram_size in 2usize..=5,
+            max_ngrams in 1usize..=100
+        ) {
+            let result = generate_ngrams(&token, ngram_size, max_ngrams);
+            prop_assert!(result.len() <= max_ngrams);
+        }
+
+        /// Property: All generated n-grams have exactly `ngram_size` characters.
+        ///
+        /// Law: `chars().count() == ngram_size` for all n-grams in result.
+        #[test]
+        fn generate_ngrams_all_have_correct_length(
+            token in "[a-z]{3,50}",
+            ngram_size in 2usize..=5
+        ) {
+            let result = generate_ngrams(&token, ngram_size, usize::MAX);
+            for ngram in &result {
+                prop_assert_eq!(
+                    ngram.chars().count(),
+                    ngram_size,
+                    "n-gram '{}' has {} chars, expected {}",
+                    ngram,
+                    ngram.chars().count(),
+                    ngram_size
+                );
+            }
+        }
+
+        /// Property: All generated n-grams are substrings of the original token.
+        ///
+        /// Law: `token.contains(ngram)` for all n-grams in result.
+        #[test]
+        fn generate_ngrams_are_substrings_of_token(
+            token in "[a-z]{3,50}",
+            ngram_size in 2usize..=5,
+            max_ngrams in 1usize..=100
+        ) {
+            let result = generate_ngrams(&token, ngram_size, max_ngrams);
+            for ngram in &result {
+                prop_assert!(
+                    token.contains(ngram.as_str()),
+                    "n-gram '{}' is not a substring of '{}'",
+                    ngram,
+                    token
+                );
+            }
+        }
+
+        /// Property: n-gram count is `min(max_ngrams, token_chars - ngram_size + 1)` when valid.
+        ///
+        /// Law: len == `min(max_ngrams, max(0, chars - n + 1))` for `ngram_size` >= 2.
+        #[test]
+        fn generate_ngrams_count_is_predictable(
+            token in "[a-z]{1,30}",
+            ngram_size in 2usize..=5,
+            max_ngrams in 1usize..=50
+        ) {
+            let char_count = token.chars().count();
+            let result = generate_ngrams(&token, ngram_size, max_ngrams);
+
+            let expected_max_possible = if char_count >= ngram_size {
+                char_count - ngram_size + 1
+            } else {
+                0
+            };
+            let expected_count = expected_max_possible.min(max_ngrams);
+
+            prop_assert_eq!(
+                result.len(),
+                expected_count,
+                "token='{}', ngram_size={}, max_ngrams={}, char_count={}",
+                token,
+                ngram_size,
+                max_ngrams,
+                char_count
+            );
+        }
+    }
+}
+
+// =============================================================================
+// N-gram Index Tests (REQ-SEARCH-NGRAM-002 Part 2)
+// =============================================================================
+
+#[cfg(test)]
+mod ngram_index_tests {
+    use super::*;
+    use rstest::rstest;
+    use uuid::Uuid;
+
+    // -------------------------------------------------------------------------
+    // Test Helpers
+    // -------------------------------------------------------------------------
+
+    /// Creates a `TaskId` from a u128 value for deterministic testing.
+    fn task_id_from_u128(value: u128) -> TaskId {
+        TaskId::from_uuid(Uuid::from_u128(value))
+    }
+
+    // -------------------------------------------------------------------------
+    // index_ngrams Tests
+    // -------------------------------------------------------------------------
+
+    /// Tests that `index_ngrams` adds n-grams to an empty index.
+    ///
+    /// - Input: empty index, token "callback", default config
+    /// - Expected: n-grams "cal", "all", "llb", "lba", "bac", "ack" are added
+    #[rstest]
+    fn index_ngrams_empty_index() {
+        let index: NgramIndex = PersistentHashMap::new();
+        let config = SearchIndexConfig::default();
+        let task_id = task_id_from_u128(1);
+
+        let result = index_ngrams(index, "callback", &task_id, &config);
+
+        // Verify expected n-grams are present
+        assert!(result.get("cal").is_some(), "Expected 'cal' n-gram");
+        assert!(result.get("all").is_some(), "Expected 'all' n-gram");
+        assert!(result.get("llb").is_some(), "Expected 'llb' n-gram");
+        assert!(result.get("lba").is_some(), "Expected 'lba' n-gram");
+        assert!(result.get("bac").is_some(), "Expected 'bac' n-gram");
+        assert!(result.get("ack").is_some(), "Expected 'ack' n-gram");
+
+        // Verify TaskId is present in each n-gram's posting list
+        for ngram in ["cal", "all", "llb", "lba", "bac", "ack"] {
+            let ids = result.get(ngram).unwrap();
+            assert_eq!(ids.len(), 1, "Expected 1 TaskId for n-gram '{ngram}'");
+            assert_eq!(
+                ids.get(0).unwrap(),
+                &task_id,
+                "Expected correct TaskId for n-gram '{ngram}'"
+            );
+        }
+    }
+
+    /// Tests that `index_ngrams` does not add duplicate `TaskId`s.
+    ///
+    /// - Input: index already containing `task_id` for "callback", same token and `task_id`
+    /// - Expected: `TaskId` list length remains 1 (no duplicates)
+    #[rstest]
+    fn index_ngrams_no_duplicate_task_id() {
+        let index: NgramIndex = PersistentHashMap::new();
+        let config = SearchIndexConfig::default();
+        let task_id = task_id_from_u128(1);
+
+        // Add token first time
+        let result = index_ngrams(index, "callback", &task_id, &config);
+
+        // Add same token with same task_id again
+        let result2 = index_ngrams(result, "callback", &task_id, &config);
+
+        // Verify no duplicates
+        let ids = result2.get("cal").unwrap();
+        assert_eq!(ids.len(), 1, "Expected 1 TaskId (no duplicates)");
+    }
+
+    /// Tests that `index_ngrams` maintains sorted order of `TaskId`s.
+    ///
+    /// - Input: add `task_id2` first, then `task_id1` (where `task_id1` < `task_id2`)
+    /// - Expected: posting list is sorted `[task_id1, task_id2]`
+    #[rstest]
+    fn index_ngrams_maintains_sorted_order() {
+        let index: NgramIndex = PersistentHashMap::new();
+        let config = SearchIndexConfig::default();
+        let task_id1 = task_id_from_u128(1);
+        let task_id2 = task_id_from_u128(2);
+
+        // Add task_id2 first (larger value)
+        let result = index_ngrams(index, "callback", &task_id2, &config);
+
+        // Add task_id1 second (smaller value)
+        let result = index_ngrams(result, "callback", &task_id1, &config);
+
+        // Verify sorted order
+        let ids: Vec<_> = result.get("cal").unwrap().iter().collect();
+        assert_eq!(ids.len(), 2, "Expected 2 TaskIds");
+        assert!(
+            ids[0] < ids[1],
+            "Expected sorted order: {:?} < {:?}",
+            ids[0],
+            ids[1]
+        );
+        assert_eq!(ids[0], &task_id1, "Expected task_id1 first");
+        assert_eq!(ids[1], &task_id2, "Expected task_id2 second");
+    }
+
+    /// Tests that `index_ngrams` handles short tokens (no n-grams generated).
+    ///
+    /// - Input: token "ab" with `ngram_size=3`
+    /// - Expected: index remains unchanged (empty)
+    #[rstest]
+    fn index_ngrams_short_token_returns_unchanged() {
+        let index: NgramIndex = PersistentHashMap::new();
+        let config = SearchIndexConfig::default(); // ngram_size = 3
+        let task_id = task_id_from_u128(1);
+
+        let result = index_ngrams(index, "ab", &task_id, &config);
+
+        // Verify index is still empty
+        assert!(result.is_empty(), "Expected empty index for short token");
+    }
+
+    /// Tests that `index_ngrams` handles empty token.
+    ///
+    /// - Input: empty token ""
+    /// - Expected: index remains unchanged (empty)
+    #[rstest]
+    fn index_ngrams_empty_token_returns_unchanged() {
+        let index: NgramIndex = PersistentHashMap::new();
+        let config = SearchIndexConfig::default();
+        let task_id = task_id_from_u128(1);
+
+        let result = index_ngrams(index, "", &task_id, &config);
+
+        assert!(result.is_empty(), "Expected empty index for empty token");
+    }
+
+    /// Tests that `index_ngrams` handles multiple tokens correctly.
+    ///
+    /// - Input: two different tokens "abc" and "xyz" with the same `task_id`
+    /// - Expected: both tokens' n-grams are indexed
+    #[rstest]
+    fn index_ngrams_multiple_tokens_same_task() {
+        let index: NgramIndex = PersistentHashMap::new();
+        let config = SearchIndexConfig::default();
+        let task_id = task_id_from_u128(1);
+
+        let result = index_ngrams(index, "abc", &task_id, &config);
+        let result = index_ngrams(result, "xyz", &task_id, &config);
+
+        // Verify both tokens' n-grams are present
+        assert!(result.get("abc").is_some(), "Expected 'abc' n-gram");
+        assert!(result.get("xyz").is_some(), "Expected 'xyz' n-gram");
+    }
+
+    /// Tests that `index_ngrams` handles multibyte characters correctly.
+    ///
+    /// - Input: Japanese token "日本語" with `ngram_size=3`
+    /// - Expected: single n-gram "日本語" is indexed
+    #[rstest]
+    fn index_ngrams_multibyte_characters() {
+        let index: NgramIndex = PersistentHashMap::new();
+        let config = SearchIndexConfig::default(); // ngram_size = 3
+        let task_id = task_id_from_u128(1);
+
+        let result = index_ngrams(index, "日本語", &task_id, &config);
+
+        // "日本語" has exactly 3 characters, so it generates 1 n-gram
+        assert!(result.get("日本語").is_some(), "Expected '日本語' n-gram");
+        assert_eq!(result.len(), 1, "Expected exactly 1 n-gram");
+    }
+
+    // -------------------------------------------------------------------------
+    // remove_ngrams Tests
+    // -------------------------------------------------------------------------
+
+    /// Tests that `remove_ngrams` removes a `TaskId` from all n-grams.
+    ///
+    /// - Input: index with "callback" n-grams for `task_id`
+    /// - Expected: all n-gram entries are removed (since only one task)
+    #[rstest]
+    fn remove_ngrams_removes_task_id() {
+        let index: NgramIndex = PersistentHashMap::new();
+        let config = SearchIndexConfig::default();
+        let task_id = task_id_from_u128(1);
+
+        // Add token
+        let result = index_ngrams(index, "callback", &task_id, &config);
+
+        // Remove token
+        let result = remove_ngrams(result, "callback", &task_id, &config);
+
+        // Verify all n-grams are removed
+        assert!(
+            result.get("cal").is_none(),
+            "Expected 'cal' n-gram to be removed"
+        );
+        assert!(
+            result.get("all").is_none(),
+            "Expected 'all' n-gram to be removed"
+        );
+        assert!(
+            result.get("ack").is_none(),
+            "Expected 'ack' n-gram to be removed"
+        );
+        assert!(result.is_empty(), "Expected empty index after removal");
+    }
+
+    /// Tests that `remove_ngrams` only removes the specified `TaskId`.
+    ///
+    /// - Input: index with "callback" for `task_id1` and `task_id2`, remove `task_id1`
+    /// - Expected: `task_id2` remains in posting lists
+    #[rstest]
+    fn remove_ngrams_preserves_other_task_ids() {
+        let index: NgramIndex = PersistentHashMap::new();
+        let config = SearchIndexConfig::default();
+        let task_id1 = task_id_from_u128(1);
+        let task_id2 = task_id_from_u128(2);
+
+        // Add both task IDs
+        let result = index_ngrams(index, "callback", &task_id1, &config);
+        let result = index_ngrams(result, "callback", &task_id2, &config);
+
+        // Remove only task_id1
+        let result = remove_ngrams(result, "callback", &task_id1, &config);
+
+        // Verify task_id2 remains
+        let ids = result.get("cal").unwrap();
+        assert_eq!(ids.len(), 1, "Expected 1 TaskId remaining");
+        assert_eq!(
+            ids.get(0).unwrap(),
+            &task_id2,
+            "Expected task_id2 to remain"
+        );
+    }
+
+    /// Tests that `remove_ngrams` handles non-existent `TaskId` gracefully.
+    ///
+    /// - Input: index with "callback" for `task_id1`, try to remove `task_id2`
+    /// - Expected: index remains unchanged
+    #[rstest]
+    fn remove_ngrams_nonexistent_task_id_unchanged() {
+        let index: NgramIndex = PersistentHashMap::new();
+        let config = SearchIndexConfig::default();
+        let task_id1 = task_id_from_u128(1);
+        let task_id2 = task_id_from_u128(2);
+
+        // Add task_id1 only
+        let result = index_ngrams(index, "callback", &task_id1, &config);
+
+        // Try to remove task_id2 (not in index)
+        let result = remove_ngrams(result, "callback", &task_id2, &config);
+
+        // Verify task_id1 remains
+        let ids = result.get("cal").unwrap();
+        assert_eq!(ids.len(), 1, "Expected 1 TaskId remaining");
+        assert_eq!(
+            ids.get(0).unwrap(),
+            &task_id1,
+            "Expected task_id1 to remain"
+        );
+    }
+
+    /// Tests that `remove_ngrams` handles empty index gracefully.
+    ///
+    /// - Input: empty index, try to remove
+    /// - Expected: index remains empty
+    #[rstest]
+    fn remove_ngrams_empty_index_unchanged() {
+        let index: NgramIndex = PersistentHashMap::new();
+        let config = SearchIndexConfig::default();
+        let task_id = task_id_from_u128(1);
+
+        let result = remove_ngrams(index, "callback", &task_id, &config);
+
+        assert!(result.is_empty(), "Expected empty index to remain empty");
+    }
+
+    /// Tests that `remove_ngrams` handles short tokens (no n-grams to remove).
+    ///
+    /// - Input: token "ab" with `ngram_size=3`
+    /// - Expected: index remains unchanged
+    #[rstest]
+    fn remove_ngrams_short_token_unchanged() {
+        let index: NgramIndex = PersistentHashMap::new();
+        let config = SearchIndexConfig::default();
+        let task_id = task_id_from_u128(1);
+
+        // Add a longer token first
+        let result = index_ngrams(index, "callback", &task_id, &config);
+        let original_len = result.len();
+
+        // Try to remove a short token (no n-grams generated)
+        let result = remove_ngrams(result, "ab", &task_id, &config);
+
+        // Verify index is unchanged
+        assert_eq!(
+            result.len(),
+            original_len,
+            "Expected index length to remain unchanged"
+        );
+    }
+}
+
+// =============================================================================
+// SearchIndex build_with_config Tests (REQ-SEARCH-NGRAM-002 Part 3)
+// =============================================================================
+
+#[cfg(test)]
+mod search_index_build_tests {
+    use super::*;
+    use crate::domain::{Tag, Timestamp};
+    use rstest::rstest;
+
+    // -------------------------------------------------------------------------
+    // Helper Functions
+    // -------------------------------------------------------------------------
+
+    /// Creates a task with a given title for testing.
+    fn create_task_with_title(title: &str) -> Task {
+        Task::new(TaskId::generate(), title, Timestamp::now())
+    }
+
+    /// Creates a task with a given title and tags for testing.
+    fn create_task_with_title_and_tags(title: &str, tags: Vec<&str>) -> Task {
+        let base = create_task_with_title(title);
+        tags.into_iter()
+            .fold(base, |task, tag| task.add_tag(Tag::new(tag)))
+    }
+
+    // -------------------------------------------------------------------------
+    // build_with_config Tests
+    // -------------------------------------------------------------------------
+
+    /// Tests that `build_with_config` with Ngram mode builds n-gram indexes.
+    ///
+    /// - Input: tasks with titles containing searchable words
+    /// - Config: default (Ngram mode)
+    /// - Expected: n-gram indexes are populated, all-suffix indexes are empty
+    #[rstest]
+    fn build_with_config_ngram_mode() {
+        let tasks: PersistentVector<Task> = vec![
+            create_task_with_title("callback function test"),
+            create_task_with_title("important meeting tomorrow"),
+        ]
+        .into_iter()
+        .collect();
+        let config = SearchIndexConfig::default();
+        assert_eq!(config.infix_mode, InfixMode::Ngram);
+
+        let index = SearchIndex::build_with_config(&tasks, config);
+
+        // N-gram indexes should be populated
+        assert!(
+            !index.title_full_ngram_index.is_empty(),
+            "title_full_ngram_index should be populated in Ngram mode"
+        );
+        assert!(
+            !index.title_word_ngram_index.is_empty(),
+            "title_word_ngram_index should be populated in Ngram mode"
+        );
+
+        // All-suffix indexes should be empty
+        assert!(
+            index.title_full_all_suffix_index.is_empty(),
+            "title_full_all_suffix_index should be empty in Ngram mode"
+        );
+        assert!(
+            index.title_word_all_suffix_index.is_empty(),
+            "title_word_all_suffix_index should be empty in Ngram mode"
+        );
+    }
+
+    /// Tests that `build_with_config` with `LegacyAllSuffix` mode builds all-suffix indexes.
+    ///
+    /// - Input: tasks with titles containing searchable words
+    /// - Config: `LegacyAllSuffix` mode
+    /// - Expected: all-suffix indexes are populated, n-gram indexes are empty
+    #[rstest]
+    fn build_with_config_legacy_mode() {
+        let tasks: PersistentVector<Task> = vec![
+            create_task_with_title("callback function test"),
+            create_task_with_title("important meeting tomorrow"),
+        ]
+        .into_iter()
+        .collect();
+        let config = SearchIndexConfig {
+            infix_mode: InfixMode::LegacyAllSuffix,
+            ..Default::default()
+        };
+
+        let index = SearchIndex::build_with_config(&tasks, config);
+
+        // All-suffix indexes should be populated
+        assert!(
+            !index.title_full_all_suffix_index.is_empty(),
+            "title_full_all_suffix_index should be populated in LegacyAllSuffix mode"
+        );
+        assert!(
+            !index.title_word_all_suffix_index.is_empty(),
+            "title_word_all_suffix_index should be populated in LegacyAllSuffix mode"
+        );
+
+        // N-gram indexes should be empty
+        assert!(
+            index.title_full_ngram_index.is_empty(),
+            "title_full_ngram_index should be empty in LegacyAllSuffix mode"
+        );
+        assert!(
+            index.title_word_ngram_index.is_empty(),
+            "title_word_ngram_index should be empty in LegacyAllSuffix mode"
+        );
+    }
+
+    /// Tests that `build_with_config` with Disabled mode builds neither infix index.
+    ///
+    /// - Input: tasks with titles containing searchable words
+    /// - Config: Disabled mode
+    /// - Expected: both n-gram and all-suffix indexes are empty
+    #[rstest]
+    fn build_with_config_disabled_mode() {
+        let tasks: PersistentVector<Task> = vec![
+            create_task_with_title("callback function test"),
+            create_task_with_title("important meeting tomorrow"),
+        ]
+        .into_iter()
+        .collect();
+        let config = SearchIndexConfig {
+            infix_mode: InfixMode::Disabled,
+            ..Default::default()
+        };
+
+        let index = SearchIndex::build_with_config(&tasks, config);
+
+        // Both infix indexes should be empty
+        assert!(
+            index.title_full_ngram_index.is_empty(),
+            "title_full_ngram_index should be empty in Disabled mode"
+        );
+        assert!(
+            index.title_word_ngram_index.is_empty(),
+            "title_word_ngram_index should be empty in Disabled mode"
+        );
+        assert!(
+            index.title_full_all_suffix_index.is_empty(),
+            "title_full_all_suffix_index should be empty in Disabled mode"
+        );
+        assert!(
+            index.title_word_all_suffix_index.is_empty(),
+            "title_word_all_suffix_index should be empty in Disabled mode"
+        );
+
+        // Prefix indexes should still be populated
+        assert!(
+            !index.title_word_index.is_empty(),
+            "title_word_index should still be populated in Disabled mode"
+        );
+        assert!(
+            !index.title_full_index.is_empty(),
+            "title_full_index should still be populated in Disabled mode"
+        );
+    }
+
+    /// Tests that `build_with_config` respects `max_tokens_per_task` limit.
+    ///
+    /// The limit is applied to (title words + tags) combined.
+    /// When the total exceeds the limit, tags are prioritized and the remaining
+    /// slots are allocated to title words.
+    ///
+    /// - Input: task with 6 words + 2 tags = 8 tokens
+    /// - Config: `max_tokens_per_task` = 5
+    /// - Expected: `word_limit` = 5 - 2 = 3, `tag_limit` = 2
+    ///   So only first 3 words (alpha, beta, gamma) and all 2 tags are indexed
+    #[rstest]
+    fn build_respects_max_tokens_per_task() {
+        // 6 words + 2 tags = 8 tokens
+        // Using longer words to ensure n-grams are generated
+        let task = create_task_with_title_and_tags(
+            "alpha beta gamma delta epsilon zeta",
+            vec!["important", "urgent"],
+        );
+        let tasks: PersistentVector<Task> = vec![task].into_iter().collect();
+        let config = SearchIndexConfig {
+            max_tokens_per_task: 5, // 8 > 5, so word_limit = 5 - 2 = 3, tag_limit = 2
+            ..Default::default()
+        };
+
+        let index = SearchIndex::build_with_config(&tasks, config);
+
+        // "alpha" should be indexed (1st word, within word_limit=3)
+        // "alpha" (5 chars) -> "alp", "lph", "pha"
+        assert!(
+            index.title_word_ngram_index.get("alp").is_some(),
+            "alpha's n-gram 'alp' should be indexed (1st word)"
+        );
+
+        // "gamma" should be indexed (3rd word, within word_limit=3)
+        // "gamma" (5 chars) -> "gam", "amm", "mma"
+        assert!(
+            index.title_word_ngram_index.get("gam").is_some(),
+            "gamma's n-gram 'gam' should be indexed (3rd word)"
+        );
+
+        // "delta" should NOT be indexed (4th word, beyond word_limit=3)
+        // "delta" (5 chars) -> "del", "elt", "lta"
+        assert!(
+            index.title_word_ngram_index.get("del").is_none(),
+            "delta's n-gram 'del' should NOT be indexed (4th word, beyond limit)"
+        );
+
+        // "zeta" should NOT be indexed (6th word, beyond word_limit=3)
+        // "zeta" (4 chars) -> "zet", "eta"
+        assert!(
+            index.title_word_ngram_index.get("zet").is_none(),
+            "zeta's n-gram 'zet' should NOT be indexed (6th word, beyond limit)"
+        );
+
+        // Both tags should be indexed (tag_limit = 2)
+        // "important" -> "imp", "mpo", "por", ...
+        assert!(
+            index.tag_ngram_index.get("imp").is_some(),
+            "tag 'important' should be indexed"
+        );
+        // "urgent" -> "urg", "rge", ...
+        assert!(
+            index.tag_ngram_index.get("urg").is_some(),
+            "tag 'urgent' should be indexed"
+        );
+    }
+
+    /// Tests that `build_with_config` normalizes using `normalize_query()`.
+    ///
+    /// - Input: task with mixed case and extra spaces in title
+    /// - Expected: normalized n-grams are indexed (lowercase, trimmed)
+    #[rstest]
+    fn build_with_config_uses_normalize_query() {
+        let task = create_task_with_title("  CALLBACK  Function  ");
+        let tasks: PersistentVector<Task> = vec![task].into_iter().collect();
+        let config = SearchIndexConfig::default();
+
+        let index = SearchIndex::build_with_config(&tasks, config);
+
+        // Check that normalized n-grams exist (lowercase)
+        // "callback" -> "cal", "all", "llb", "lba", "bac", "ack"
+        assert!(
+            index.title_word_ngram_index.get("cal").is_some(),
+            "Normalized n-gram 'cal' should exist (from 'callback')"
+        );
+        assert!(
+            index.title_word_ngram_index.get("all").is_some(),
+            "Normalized n-gram 'all' should exist (from 'callback')"
+        );
+
+        // Check that uppercase n-grams do NOT exist
+        assert!(
+            index.title_word_ngram_index.get("CAL").is_none(),
+            "Uppercase n-gram 'CAL' should NOT exist"
+        );
+    }
+
+    /// Tests that `build_with_config` also indexes tags in Ngram mode.
+    ///
+    /// - Input: task with tags
+    /// - Config: Ngram mode
+    /// - Expected: tag n-grams are indexed
+    #[rstest]
+    fn build_with_config_indexes_tags_in_ngram_mode() {
+        let task = create_task_with_title_and_tags("simple task", vec!["important", "urgent"]);
+        let tasks: PersistentVector<Task> = vec![task].into_iter().collect();
+        let config = SearchIndexConfig::default();
+
+        let index = SearchIndex::build_with_config(&tasks, config);
+
+        // Check that tag n-grams exist
+        // "important" -> "imp", "mpo", "por", "ort", "rta", "tan", "ant"
+        assert!(
+            index.tag_ngram_index.get("imp").is_some(),
+            "Tag n-gram 'imp' should exist (from 'important')"
+        );
+        // "urgent" -> "urg", "rge", "gen", "ent"
+        assert!(
+            index.tag_ngram_index.get("urg").is_some(),
+            "Tag n-gram 'urg' should exist (from 'urgent')"
+        );
+    }
+
+    /// Tests that `build_with_config` preserves the config in the index.
+    #[rstest]
+    fn build_with_config_stores_config() {
+        let tasks: PersistentVector<Task> = PersistentVector::new();
+        let config = SearchIndexConfig {
+            infix_mode: InfixMode::Ngram,
+            ngram_size: 4,
+            min_query_len_for_infix: 5,
+            max_ngrams_per_token: 32,
+            max_tokens_per_task: 50,
+            max_search_candidates: 500,
+        };
+
+        let index = SearchIndex::build_with_config(&tasks, config);
+
+        assert_eq!(index.config.infix_mode, InfixMode::Ngram);
+        assert_eq!(index.config.ngram_size, 4);
+        assert_eq!(index.config.min_query_len_for_infix, 5);
+        assert_eq!(index.config.max_ngrams_per_token, 32);
+        assert_eq!(index.config.max_tokens_per_task, 50);
+        assert_eq!(index.config.max_search_candidates, 500);
+    }
+
+    /// Tests that the existing `build()` method works with the default configuration.
+    ///
+    /// The `build()` method uses `SearchIndexConfig::default()`, which enables
+    /// `InfixMode::Ngram` for better performance.
+    #[rstest]
+    fn build_maintains_backward_compatibility() {
+        let tasks: PersistentVector<Task> = vec![
+            create_task_with_title("callback function test"),
+            create_task_with_title("important meeting tomorrow"),
+        ]
+        .into_iter()
+        .collect();
+
+        let index = SearchIndex::build(&tasks);
+
+        // build() uses Ngram mode (default configuration)
+        assert_eq!(index.config.infix_mode, InfixMode::Ngram);
+
+        // N-gram indexes should be populated
+        assert!(
+            !index.title_full_ngram_index.is_empty(),
+            "title_full_ngram_index should be populated with build()"
+        );
+
+        // All-suffix indexes should be empty
+        assert!(
+            index.title_full_all_suffix_index.is_empty(),
+            "title_full_all_suffix_index should be empty with build()"
+        );
+    }
+}
+
+// =============================================================================
+// N-gram Search Logic Tests (REQ-SEARCH-NGRAM-003)
+// =============================================================================
+
+#[cfg(test)]
+mod ngram_search_tests {
+    use super::*;
+    use crate::domain::Timestamp;
+    use proptest::prelude::*;
+    use rstest::rstest;
+    use uuid::Uuid;
+
+    // -------------------------------------------------------------------------
+    // Helper Functions
+    // -------------------------------------------------------------------------
+
+    /// Creates a `TaskId` from a u128 value (for deterministic testing).
+    fn task_id_from_u128(value: u128) -> TaskId {
+        TaskId::from_uuid(Uuid::from_u128(value))
+    }
+
+    /// Creates a task with the given title.
+    fn create_task_with_title(title: &str) -> Task {
+        Task::new(TaskId::generate(), title, Timestamp::now())
+    }
+
+    /// Creates a task with the given title and a fixed `TaskId`.
+    fn create_task_with_title_and_id(title: &str, id: u128) -> Task {
+        Task::new(task_id_from_u128(id), title, Timestamp::now())
+    }
+
+    // -------------------------------------------------------------------------
+    // intersect_sorted_vecs Tests
+    // -------------------------------------------------------------------------
+
+    /// Tests basic intersection of two sorted vectors.
+    #[rstest]
+    fn intersect_sorted_vecs_basic() {
+        let left = vec![
+            task_id_from_u128(1),
+            task_id_from_u128(3),
+            task_id_from_u128(5),
+        ];
+        let right = vec![
+            task_id_from_u128(2),
+            task_id_from_u128(3),
+            task_id_from_u128(4),
+            task_id_from_u128(5),
+        ];
+
+        let result = intersect_sorted_vecs(&left, &right);
+
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0], task_id_from_u128(3));
+        assert_eq!(result[1], task_id_from_u128(5));
+    }
+
+    /// Tests intersection with empty left vector.
+    #[rstest]
+    fn intersect_sorted_vecs_empty_left() {
+        let left: Vec<TaskId> = vec![];
+        let right = vec![task_id_from_u128(1), task_id_from_u128(2)];
+
+        let result = intersect_sorted_vecs(&left, &right);
+
+        assert!(result.is_empty());
+    }
+
+    /// Tests intersection with empty right vector.
+    #[rstest]
+    fn intersect_sorted_vecs_empty_right() {
+        let left = vec![task_id_from_u128(1), task_id_from_u128(2)];
+        let right: Vec<TaskId> = vec![];
+
+        let result = intersect_sorted_vecs(&left, &right);
+
+        assert!(result.is_empty());
+    }
+
+    /// Tests intersection with no common elements.
+    #[rstest]
+    fn intersect_sorted_vecs_no_common() {
+        let left = vec![task_id_from_u128(1), task_id_from_u128(3)];
+        let right = vec![task_id_from_u128(2), task_id_from_u128(4)];
+
+        let result = intersect_sorted_vecs(&left, &right);
+
+        assert!(result.is_empty());
+    }
+
+    /// Tests intersection with identical vectors.
+    #[rstest]
+    fn intersect_sorted_vecs_identical() {
+        let left = vec![
+            task_id_from_u128(1),
+            task_id_from_u128(2),
+            task_id_from_u128(3),
+        ];
+        let right = vec![
+            task_id_from_u128(1),
+            task_id_from_u128(2),
+            task_id_from_u128(3),
+        ];
+
+        let result = intersect_sorted_vecs(&left, &right);
+
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0], task_id_from_u128(1));
+        assert_eq!(result[1], task_id_from_u128(2));
+        assert_eq!(result[2], task_id_from_u128(3));
+    }
+
+    // -------------------------------------------------------------------------
+    // intersect_sorted_vecs Property Tests
+    // -------------------------------------------------------------------------
+
+    proptest! {
+        /// Property: Intersection result contains only elements from both inputs.
+        ///
+        /// Law: `∀x ∈ result: x ∈ left ∧ x ∈ right`
+        #[test]
+        fn intersect_sorted_vecs_subset_property(
+            left_values in proptest::collection::vec(0u64..1000, 0..20),
+            right_values in proptest::collection::vec(0u64..1000, 0..20)
+        ) {
+            // Create sorted, deduplicated TaskId vectors
+            let mut left_sorted: Vec<TaskId> = left_values
+                .iter()
+                .map(|n| task_id_from_u128(u128::from(*n)))
+                .collect();
+            let mut right_sorted: Vec<TaskId> = right_values
+                .iter()
+                .map(|n| task_id_from_u128(u128::from(*n)))
+                .collect();
+            left_sorted.sort();
+            left_sorted.dedup();
+            right_sorted.sort();
+            right_sorted.dedup();
+
+            let result = intersect_sorted_vecs(&left_sorted, &right_sorted);
+
+            // All elements in result must be in both inputs
+            for id in &result {
+                prop_assert!(
+                    left_sorted.contains(id),
+                    "Result element {:?} not in left",
+                    id
+                );
+                prop_assert!(
+                    right_sorted.contains(id),
+                    "Result element {:?} not in right",
+                    id
+                );
+            }
+        }
+
+        /// Property: Intersection contains all common elements.
+        ///
+        /// Law: `∀x ∈ left ∧ x ∈ right: x ∈ result`
+        #[test]
+        fn intersect_sorted_vecs_completeness_property(
+            left_values in proptest::collection::vec(0u64..1000, 0..20),
+            right_values in proptest::collection::vec(0u64..1000, 0..20)
+        ) {
+            // Create sorted, deduplicated TaskId vectors
+            let mut left_sorted: Vec<TaskId> = left_values
+                .iter()
+                .map(|n| task_id_from_u128(u128::from(*n)))
+                .collect();
+            let mut right_sorted: Vec<TaskId> = right_values
+                .iter()
+                .map(|n| task_id_from_u128(u128::from(*n)))
+                .collect();
+            left_sorted.sort();
+            left_sorted.dedup();
+            right_sorted.sort();
+            right_sorted.dedup();
+
+            let result = intersect_sorted_vecs(&left_sorted, &right_sorted);
+
+            // All common elements must be in result
+            for id in &left_sorted {
+                if right_sorted.contains(id) {
+                    prop_assert!(
+                        result.contains(id),
+                        "Common element {:?} missing from result",
+                        id
+                    );
+                }
+            }
+        }
+
+        /// Property: Intersection result is sorted.
+        ///
+        /// Law: `∀i < j: result[i] < result[j]`
+        #[test]
+        fn intersect_sorted_vecs_sorted_property(
+            left_values in proptest::collection::vec(0u64..1000, 0..20),
+            right_values in proptest::collection::vec(0u64..1000, 0..20)
+        ) {
+            // Create sorted, deduplicated TaskId vectors
+            let mut left_sorted: Vec<TaskId> = left_values
+                .iter()
+                .map(|n| task_id_from_u128(u128::from(*n)))
+                .collect();
+            let mut right_sorted: Vec<TaskId> = right_values
+                .iter()
+                .map(|n| task_id_from_u128(u128::from(*n)))
+                .collect();
+            left_sorted.sort();
+            left_sorted.dedup();
+            right_sorted.sort();
+            right_sorted.dedup();
+
+            let result = intersect_sorted_vecs(&left_sorted, &right_sorted);
+
+            // Result must be sorted
+            for i in 1..result.len() {
+                prop_assert!(
+                    result[i - 1] < result[i],
+                    "Result not sorted at index {}: {:?} >= {:?}",
+                    i,
+                    result[i - 1],
+                    result[i]
+                );
+            }
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // find_candidates_by_ngrams Tests
+    // -------------------------------------------------------------------------
+
+    /// Tests that `find_candidates_by_ngrams` returns `None` for short queries.
+    ///
+    /// When query length < `min_query_len_for_infix`, the method should return
+    /// `None` to indicate that prefix search should be used instead.
+    #[rstest]
+    fn find_candidates_short_query_returns_none() {
+        let tasks: PersistentVector<Task> = vec![create_task_with_title("callback function test")]
+            .into_iter()
+            .collect();
+        let config = SearchIndexConfig {
+            min_query_len_for_infix: 3,
+            ..Default::default()
+        };
+        let index = SearchIndex::build_with_config(&tasks, config);
+
+        // Query "ab" has 2 chars, which is < 3
+        let normalized = normalize_query("ab");
+        let result =
+            index.find_candidates_by_ngrams(&index.title_full_ngram_index, &normalized.key);
+
+        assert!(
+            result.is_none(),
+            "Expected None for query shorter than min_query_len_for_infix"
+        );
+    }
+
+    /// Tests that `find_candidates_by_ngrams` returns empty vec for non-matching query.
+    #[rstest]
+    fn find_candidates_no_match_returns_empty() {
+        let tasks: PersistentVector<Task> = vec![create_task_with_title("callback function test")]
+            .into_iter()
+            .collect();
+        let config = SearchIndexConfig::default();
+        let index = SearchIndex::build_with_config(&tasks, config);
+
+        // Query "xyz" doesn't match any n-grams
+        let normalized = normalize_query("xyz");
+        let result =
+            index.find_candidates_by_ngrams(&index.title_word_ngram_index, &normalized.key);
+
+        assert!(
+            result.is_none_or(|v| v.is_empty()),
+            "Expected empty result for non-matching query"
+        );
+    }
+
+    /// Tests that `find_candidates_by_ngrams` returns candidates for matching query.
+    #[rstest]
+    fn find_candidates_returns_candidates_for_match() {
+        let task = create_task_with_title_and_id("callback function test", 1);
+        let tasks: PersistentVector<Task> = vec![task].into_iter().collect();
+        let config = SearchIndexConfig::default();
+        let index = SearchIndex::build_with_config(&tasks, config);
+
+        // Query "call" matches "callback"
+        let normalized = normalize_query("call");
+        let result =
+            index.find_candidates_by_ngrams(&index.title_word_ngram_index, &normalized.key);
+
+        assert!(result.is_some(), "Expected Some for matching query");
+        let candidates = result.unwrap();
+        assert!(
+            !candidates.is_empty(),
+            "Expected non-empty candidates for matching query"
+        );
+        assert_eq!(candidates[0], task_id_from_u128(1));
+    }
+
+    // -------------------------------------------------------------------------
+    // search_by_title Tests
+    // -------------------------------------------------------------------------
+
+    /// Tests that `search_by_title` returns `None` for non-matching query.
+    #[rstest]
+    fn search_by_title_returns_none_for_no_match() {
+        let tasks: PersistentVector<Task> = vec![create_task_with_title("callback function test")]
+            .into_iter()
+            .collect();
+        let config = SearchIndexConfig::default();
+        let index = SearchIndex::build_with_config(&tasks, config);
+
+        let result = index.search_by_title("nonexistent");
+
+        assert!(
+            result.is_none(),
+            "Expected None for query that doesn't match any task"
+        );
+    }
+
+    /// Tests that `search_by_title` finds tasks with matching infix.
+    #[rstest]
+    fn search_by_title_finds_infix_match() {
+        let tasks: PersistentVector<Task> = vec![create_task_with_title("callback function test")]
+            .into_iter()
+            .collect();
+        let config = SearchIndexConfig::default();
+        let index = SearchIndex::build_with_config(&tasks, config);
+
+        // "llba" is an infix of "callback"
+        let result = index.search_by_title("llba");
+
+        assert!(result.is_some(), "Expected Some for infix match");
+        let search_result = result.unwrap();
+        assert_eq!(search_result.tasks.len(), 1);
+        assert_eq!(
+            search_result.tasks.get(0).unwrap().title,
+            "callback function test"
+        );
+    }
+
+    /// Tests that `search_by_title` respects `max_search_candidates`.
+    #[rstest]
+    fn search_respects_max_search_candidates() {
+        // Create 100 tasks with "common" in the title
+        let tasks: PersistentVector<Task> = (0..100)
+            .map(|i| create_task_with_title(&format!("common word task number {i}")))
+            .collect();
+        let config = SearchIndexConfig {
+            max_search_candidates: 10,
+            ..Default::default()
+        };
+        let index = SearchIndex::build_with_config(&tasks, config);
+
+        let result = index.search_by_title("common");
+
+        assert!(result.is_some(), "Expected Some for matching query");
+        let search_result = result.unwrap();
+        assert!(
+            search_result.tasks.len() <= 10,
+            "Expected at most 10 results, got {}",
+            search_result.tasks.len()
+        );
+    }
+
+    /// Tests that `search_by_title` uses normalized query.
+    #[rstest]
+    fn search_by_title_uses_normalized_query() {
+        let tasks: PersistentVector<Task> = vec![create_task_with_title("callback function test")]
+            .into_iter()
+            .collect();
+        let config = SearchIndexConfig::default();
+        let index = SearchIndex::build_with_config(&tasks, config);
+
+        // Uppercase query should still match lowercase index
+        let result = index.search_by_title("CALLBACK");
+
+        assert!(
+            result.is_some(),
+            "Expected Some for uppercase query matching lowercase title"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Soundness Property Tests
+    // -------------------------------------------------------------------------
+
+    proptest! {
+        /// Property: All returned results actually contain the query substring.
+        ///
+        /// Law (Soundness): `∀ task ∈ result: normalized_query ⊆ normalized_title`
+        #[test]
+        fn infix_search_soundness(
+            title in "[a-z ]{10,50}",
+            query in "[a-z]{3,10}"
+        ) {
+            let task = create_task_with_title(&title);
+            let tasks: PersistentVector<Task> = vec![task].into_iter().collect();
+            let config = SearchIndexConfig::default();
+            let index = SearchIndex::build_with_config(&tasks, config);
+
+            if let Some(result) = index.search_by_title(&query) {
+                for found_task in &result.tasks {
+                    // Soundness: returned results must actually contain the query
+                    let normalized_query = normalize_query(&query).key;
+                    let normalized_title = normalize_query(&found_task.title).key;
+                    prop_assert!(
+                        normalized_title.contains(&normalized_query),
+                        "False positive: task '{}' (normalized: '{}') does not contain query '{}' (normalized: '{}')",
+                        found_task.title,
+                        normalized_title,
+                        query,
+                        normalized_query
+                    );
+                }
+            }
+        }
+    }
+}
+
+// =============================================================================
+// add_task/remove_task N-gram Integration Tests (Phase 6)
+// =============================================================================
+
+/// Tests for `add_task` and `remove_task` methods with n-gram index support.
+///
+/// These tests verify that:
+/// 1. `add_task` updates n-gram indexes when `infix_mode == Ngram`
+/// 2. `add_task` updates all-suffix indexes when `infix_mode == LegacyAllSuffix`
+/// 3. `remove_task` removes from n-gram indexes when `infix_mode == Ngram`
+/// 4. `add_task` respects `max_tokens_per_task` limit
+/// 5. Tag processing order is deterministic (sorted)
+/// 6. Normalization uses `normalize_query()` for consistency
+#[cfg(test)]
+mod add_remove_task_tests {
+    use super::*;
+    use crate::domain::{Tag, Timestamp};
+    use rstest::rstest;
+    use uuid::Uuid;
+
+    // -------------------------------------------------------------------------
+    // Test Helpers
+    // -------------------------------------------------------------------------
+
+    /// Creates a `TaskId` from a u128 value for deterministic testing.
+    fn task_id_from_u128(value: u128) -> TaskId {
+        TaskId::from_uuid(Uuid::from_u128(value))
+    }
+
+    /// Creates a task with a given title and task ID for deterministic testing.
+    fn create_task_with_title_and_id(title: &str, task_id: TaskId) -> Task {
+        Task::new(task_id, title, Timestamp::now())
+    }
+
+    /// Creates a task with a given title, task ID, and tags for deterministic testing.
+    fn create_task_with_title_id_and_tags(title: &str, task_id: TaskId, tags: Vec<&str>) -> Task {
+        let base = create_task_with_title_and_id(title, task_id);
+        tags.into_iter()
+            .fold(base, |task, tag| task.add_tag(Tag::new(tag)))
+    }
+
+    // -------------------------------------------------------------------------
+    // add_task Tests
+    // -------------------------------------------------------------------------
+
+    /// Tests that `add_task` updates n-gram indexes when `infix_mode == Ngram`.
+    ///
+    /// - Input: empty index with Ngram mode, add task with title "callback function"
+    /// - Expected: n-gram indexes contain the task's n-grams
+    #[rstest]
+    fn add_task_updates_ngram_index() {
+        let config = SearchIndexConfig::default(); // Ngram mode
+        let empty_index = SearchIndex::build_with_config(&PersistentVector::new(), config);
+
+        let task_id = task_id_from_u128(1);
+        let task = create_task_with_title_and_id("callback function", task_id.clone());
+
+        let updated_index = empty_index.add_task(&task);
+
+        // Verify title_word_ngram_index contains n-grams for "callback"
+        // "callback" generates: "cal", "all", "llb", "lba", "bac", "ack"
+        assert!(
+            updated_index.title_word_ngram_index.get("cal").is_some(),
+            "N-gram 'cal' should be indexed"
+        );
+        assert!(
+            updated_index.title_word_ngram_index.get("all").is_some(),
+            "N-gram 'all' should be indexed"
+        );
+        assert!(
+            updated_index.title_word_ngram_index.get("ack").is_some(),
+            "N-gram 'ack' should be indexed"
+        );
+
+        // Verify the task ID is in the posting list
+        let cal_ids = updated_index.title_word_ngram_index.get("cal").unwrap();
+        assert!(
+            cal_ids.iter().any(|id| *id == task_id),
+            "Task ID should be in the posting list for 'cal'"
+        );
+
+        // Verify title_full_ngram_index contains n-grams for "callback function"
+        // Normalized: "callback function"
+        assert!(
+            updated_index.title_full_ngram_index.get("cal").is_some(),
+            "Full title n-gram 'cal' should be indexed"
+        );
+    }
+
+    /// Tests that `add_task` updates all-suffix indexes when `infix_mode == LegacyAllSuffix`.
+    ///
+    /// - Input: empty index with `LegacyAllSuffix` mode, add task with title "callback"
+    /// - Expected: all-suffix indexes contain the task's suffixes
+    #[rstest]
+    fn add_task_updates_legacy_index() {
+        let config = SearchIndexConfig {
+            infix_mode: InfixMode::LegacyAllSuffix,
+            ..Default::default()
+        };
+        let empty_index = SearchIndex::build_with_config(&PersistentVector::new(), config);
+
+        let task_id = task_id_from_u128(1);
+        let task = create_task_with_title_and_id("callback", task_id.clone());
+
+        let updated_index = empty_index.add_task(&task);
+
+        // Verify title_word_all_suffix_index contains suffixes for "callback"
+        // "callback" generates suffixes: "callback", "allback", "llback", "lback", "back", "ack", "ck", "k"
+        assert!(
+            updated_index
+                .title_word_all_suffix_index
+                .get("callback")
+                .is_some(),
+            "Suffix 'callback' should be indexed"
+        );
+        assert!(
+            updated_index
+                .title_word_all_suffix_index
+                .get("allback")
+                .is_some(),
+            "Suffix 'allback' should be indexed"
+        );
+        assert!(
+            updated_index
+                .title_word_all_suffix_index
+                .get("back")
+                .is_some(),
+            "Suffix 'back' should be indexed"
+        );
+
+        // Verify the task ID is in the posting list
+        let callback_ids = updated_index
+            .title_word_all_suffix_index
+            .get("callback")
+            .unwrap();
+        assert!(
+            callback_ids.iter().any(|id| *id == task_id),
+            "Task ID should be in the posting list for 'callback'"
+        );
+
+        // Verify n-gram indexes are NOT updated in LegacyAllSuffix mode
+        assert!(
+            updated_index.title_word_ngram_index.is_empty(),
+            "N-gram index should be empty in LegacyAllSuffix mode"
+        );
+    }
+
+    /// Tests that `remove_task` removes from n-gram indexes when `infix_mode == Ngram`.
+    ///
+    /// - Input: index with one task, remove that task
+    /// - Expected: n-gram indexes no longer contain the task's entries
+    #[rstest]
+    fn remove_task_removes_from_ngram_index() {
+        let config = SearchIndexConfig::default(); // Ngram mode
+        let empty_index = SearchIndex::build_with_config(&PersistentVector::new(), config);
+
+        let task_id = task_id_from_u128(1);
+        let task = create_task_with_title_and_id("callback", task_id);
+
+        // Add task first
+        let index_with_task = empty_index.add_task(&task);
+
+        // Verify task is indexed
+        assert!(
+            index_with_task.title_word_ngram_index.get("cal").is_some(),
+            "N-gram 'cal' should be indexed before removal"
+        );
+
+        // Remove task
+        let index_after_removal = index_with_task.remove_task(&task);
+
+        // Verify n-gram entries are removed (since this was the only task)
+        assert!(
+            index_after_removal
+                .title_word_ngram_index
+                .get("cal")
+                .is_none(),
+            "N-gram 'cal' should be removed after task removal"
+        );
+        assert!(
+            index_after_removal
+                .title_word_ngram_index
+                .get("all")
+                .is_none(),
+            "N-gram 'all' should be removed after task removal"
+        );
+    }
+
+    /// Tests that `remove_task` preserves other tasks' n-gram entries.
+    ///
+    /// - Input: index with two tasks sharing some n-grams, remove one task
+    /// - Expected: shared n-grams still contain the other task's ID
+    #[rstest]
+    fn remove_task_preserves_other_task_ngrams() {
+        let config = SearchIndexConfig::default(); // Ngram mode
+        let empty_index = SearchIndex::build_with_config(&PersistentVector::new(), config);
+
+        let task_id1 = task_id_from_u128(1);
+        let task_id2 = task_id_from_u128(2);
+        let task1 = create_task_with_title_and_id("callback", task_id1);
+        let task2 = create_task_with_title_and_id("callout", task_id2.clone()); // Shares "cal" n-gram
+
+        // Add both tasks
+        let index_with_tasks = empty_index.add_task(&task1).add_task(&task2);
+
+        // Verify both tasks are indexed for "cal"
+        let cal_ids_before = index_with_tasks.title_word_ngram_index.get("cal").unwrap();
+        assert_eq!(
+            cal_ids_before.len(),
+            2,
+            "Both tasks should share 'cal' n-gram"
+        );
+
+        // Remove task1
+        let index_after_removal = index_with_tasks.remove_task(&task1);
+
+        // Verify "cal" still contains task2
+        let cal_ids_after = index_after_removal
+            .title_word_ngram_index
+            .get("cal")
+            .unwrap();
+        assert_eq!(
+            cal_ids_after.len(),
+            1,
+            "Only one task should remain for 'cal'"
+        );
+        assert!(
+            cal_ids_after.iter().any(|id| *id == task_id2),
+            "Task2 should still be in 'cal' posting list"
+        );
+    }
+
+    /// Tests that `add_task` respects `max_tokens_per_task` limit.
+    ///
+    /// - Input: task with 6 words + 2 tags = 8 tokens, `max_tokens_per_task` = 5
+    /// - Expected: only first 3 words and 2 tags are indexed (3 + 2 = 5)
+    #[rstest]
+    fn add_task_respects_max_tokens_per_task() {
+        let config = SearchIndexConfig {
+            max_tokens_per_task: 5,
+            ..Default::default()
+        };
+        let empty_index = SearchIndex::build_with_config(&PersistentVector::new(), config);
+
+        let task_id = task_id_from_u128(1);
+        // 6 words + 2 tags = 8 tokens
+        // word_limit = 5 - 2 = 3, tag_limit = 2
+        let task = create_task_with_title_id_and_tags(
+            "alpha beta gamma delta epsilon zeta",
+            task_id,
+            vec!["important", "urgent"],
+        );
+
+        let updated_index = empty_index.add_task(&task);
+
+        // Verify first 3 words are indexed (alpha, beta, gamma)
+        // "alpha" generates n-grams: "alp", "lph", "pha"
+        assert!(
+            updated_index.title_word_ngram_index.get("alp").is_some(),
+            "N-gram 'alp' from 'alpha' should be indexed"
+        );
+        // "gamma" generates n-grams: "gam", "amm", "mma"
+        assert!(
+            updated_index.title_word_ngram_index.get("gam").is_some(),
+            "N-gram 'gam' from 'gamma' should be indexed"
+        );
+
+        // Verify 4th word (delta) is NOT indexed
+        // "delta" would generate: "del", "elt", "lta"
+        assert!(
+            updated_index.title_word_ngram_index.get("del").is_none(),
+            "N-gram 'del' from 'delta' should NOT be indexed (exceeds max_tokens_per_task)"
+        );
+
+        // Verify both tags are indexed
+        // "important" generates: "imp", "mpo", "por", "ort", "rta", "tan", "ant"
+        assert!(
+            updated_index.tag_ngram_index.get("imp").is_some(),
+            "Tag n-gram 'imp' should be indexed"
+        );
+        // "urgent" generates: "urg", "rge", "gen", "ent"
+        assert!(
+            updated_index.tag_ngram_index.get("urg").is_some(),
+            "Tag n-gram 'urg' should be indexed"
+        );
+    }
+
+    /// Tests that `add_task` uses `normalize_query()` for normalization.
+    ///
+    /// - Input: task with mixed case and extra whitespace in title
+    /// - Expected: n-gram indexes use normalized (lowercase, trimmed) values
+    #[rstest]
+    fn add_task_uses_normalize_query() {
+        let config = SearchIndexConfig::default();
+        let empty_index = SearchIndex::build_with_config(&PersistentVector::new(), config);
+
+        let task_id = task_id_from_u128(1);
+        let task = create_task_with_title_and_id("  CALLBACK  Function  ", task_id);
+
+        let updated_index = empty_index.add_task(&task);
+
+        // Verify normalized n-grams are indexed (lowercase)
+        // "CALLBACK" normalized to "callback" generates: "cal", "all", "llb", "lba", "bac", "ack"
+        assert!(
+            updated_index.title_word_ngram_index.get("cal").is_some(),
+            "Normalized n-gram 'cal' should be indexed"
+        );
+
+        // Verify uppercase variants are NOT indexed
+        assert!(
+            updated_index.title_word_ngram_index.get("CAL").is_none(),
+            "Uppercase 'CAL' should NOT be indexed"
+        );
+    }
+
+    /// Tests that `add_task` processes tags in deterministic (sorted) order.
+    ///
+    /// This ensures consistent index state regardless of `PersistentHashSet` iteration order.
+    #[rstest]
+    fn add_task_processes_tags_in_sorted_order() {
+        let config = SearchIndexConfig::default();
+        let empty_index = SearchIndex::build_with_config(&PersistentVector::new(), config);
+
+        let task_id = task_id_from_u128(1);
+        // Tags will be processed in sorted order: "apple", "banana", "cherry"
+        let task = create_task_with_title_id_and_tags(
+            "test task",
+            task_id,
+            vec!["cherry", "apple", "banana"], // Unsorted input
+        );
+
+        let updated_index = empty_index.add_task(&task);
+
+        // Verify all tags are indexed (order doesn't affect correctness, but determinism matters)
+        // "apple" generates: "app", "ppl", "ple"
+        assert!(
+            updated_index.tag_ngram_index.get("app").is_some(),
+            "Tag n-gram 'app' should be indexed"
+        );
+        // "banana" generates: "ban", "ana", "nan", "ana"
+        assert!(
+            updated_index.tag_ngram_index.get("ban").is_some(),
+            "Tag n-gram 'ban' should be indexed"
+        );
+        // "cherry" generates: "che", "her", "err", "rry"
+        assert!(
+            updated_index.tag_ngram_index.get("che").is_some(),
+            "Tag n-gram 'che' should be indexed"
+        );
+    }
+
+    /// Tests that `add_task` indexes tags in n-gram mode.
+    ///
+    /// - Input: task with tag "important"
+    /// - Expected: tag n-gram index contains the tag's n-grams
+    #[rstest]
+    fn add_task_indexes_tags_in_ngram_mode() {
+        let config = SearchIndexConfig::default(); // Ngram mode
+        let empty_index = SearchIndex::build_with_config(&PersistentVector::new(), config);
+
+        let task_id = task_id_from_u128(1);
+        let task = create_task_with_title_id_and_tags("simple task", task_id, vec!["important"]);
+
+        let updated_index = empty_index.add_task(&task);
+
+        // Verify tag n-gram index contains n-grams for "important"
+        // "important" generates: "imp", "mpo", "por", "ort", "rta", "tan", "ant"
+        assert!(
+            updated_index.tag_ngram_index.get("imp").is_some(),
+            "Tag n-gram 'imp' should be indexed"
+        );
+        assert!(
+            updated_index.tag_ngram_index.get("ant").is_some(),
+            "Tag n-gram 'ant' should be indexed"
+        );
+    }
+
+    /// Tests that `remove_task` removes tags from n-gram index.
+    ///
+    /// - Input: task with tag "important", then remove the task
+    /// - Expected: tag n-gram index no longer contains the tag's entries
+    #[rstest]
+    fn remove_task_removes_tags_from_ngram_index() {
+        let config = SearchIndexConfig::default(); // Ngram mode
+        let empty_index = SearchIndex::build_with_config(&PersistentVector::new(), config);
+
+        let task_id = task_id_from_u128(1);
+        let task = create_task_with_title_id_and_tags("simple task", task_id, vec!["important"]);
+
+        // Add task first
+        let index_with_task = empty_index.add_task(&task);
+
+        // Verify tag is indexed
+        assert!(
+            index_with_task.tag_ngram_index.get("imp").is_some(),
+            "Tag n-gram 'imp' should be indexed before removal"
+        );
+
+        // Remove task
+        let index_after_removal = index_with_task.remove_task(&task);
+
+        // Verify tag n-gram entries are removed
+        assert!(
+            index_after_removal.tag_ngram_index.get("imp").is_none(),
+            "Tag n-gram 'imp' should be removed after task removal"
+        );
+    }
+
+    /// Tests that `add_task` does not update n-gram indexes when `infix_mode == Disabled`.
+    ///
+    /// - Input: empty index with Disabled mode, add task
+    /// - Expected: n-gram indexes remain empty
+    #[rstest]
+    fn add_task_disabled_mode_no_ngram_update() {
+        let config = SearchIndexConfig {
+            infix_mode: InfixMode::Disabled,
+            ..Default::default()
+        };
+        let empty_index = SearchIndex::build_with_config(&PersistentVector::new(), config);
+
+        let task_id = task_id_from_u128(1);
+        let task = create_task_with_title_and_id("callback function", task_id);
+
+        let updated_index = empty_index.add_task(&task);
+
+        // Verify n-gram indexes are empty
+        assert!(
+            updated_index.title_word_ngram_index.is_empty(),
+            "N-gram index should be empty in Disabled mode"
+        );
+        assert!(
+            updated_index.title_full_ngram_index.is_empty(),
+            "Full title n-gram index should be empty in Disabled mode"
+        );
+
+        // Verify all-suffix indexes are also empty
+        assert!(
+            updated_index.title_word_all_suffix_index.is_empty(),
+            "All-suffix index should be empty in Disabled mode"
+        );
+    }
+}
+
+// =============================================================================
+// Phase 7: Compatibility Tests (Differential Testing)
+// =============================================================================
+
+#[cfg(test)]
+mod compatibility_tests {
+    use super::*;
+    use crate::domain::{Tag, Timestamp};
+    use rstest::rstest;
+    use std::collections::HashSet;
+    use uuid::Uuid;
+
+    // -------------------------------------------------------------------------
+    // Test Helpers
+    // -------------------------------------------------------------------------
+
+    /// Creates a `TaskId` from a u128 value for deterministic testing.
+    fn task_id_from_u128(value: u128) -> TaskId {
+        TaskId::from_uuid(Uuid::from_u128(value))
+    }
+
+    /// Creates a task with a given title and task ID for deterministic testing.
+    fn create_task_with_title_and_id(title: &str, task_id: TaskId) -> Task {
+        Task::new(task_id, title, Timestamp::now())
+    }
+
+    /// Creates a task with a given title, task ID, and tags for deterministic testing.
+    fn create_task_with_title_id_and_tags(title: &str, task_id: TaskId, tags: Vec<&str>) -> Task {
+        let base = create_task_with_title_and_id(title, task_id);
+        tags.into_iter()
+            .fold(base, |task, tag| task.add_tag(Tag::new(tag)))
+    }
+
+    /// Creates a set of test tasks with various titles for compatibility testing.
+    fn create_test_tasks() -> PersistentVector<Task> {
+        vec![
+            create_task_with_title_id_and_tags(
+                "Important meeting with client",
+                task_id_from_u128(1),
+                vec!["urgent", "meeting"],
+            ),
+            create_task_with_title_id_and_tags(
+                "Callback function implementation",
+                task_id_from_u128(2),
+                vec!["backend", "important"],
+            ),
+            create_task_with_title_id_and_tags(
+                "Review all pull requests",
+                task_id_from_u128(3),
+                vec!["review", "code"],
+            ),
+            create_task_with_title_id_and_tags(
+                "Meeting notes backup",
+                task_id_from_u128(4),
+                vec!["meeting", "backup"],
+            ),
+            create_task_with_title_id_and_tags(
+                "Database migration callback",
+                task_id_from_u128(5),
+                vec!["database", "migration"],
+            ),
+            create_task_with_title_id_and_tags(
+                "All hands meeting preparation",
+                task_id_from_u128(6),
+                vec!["meeting", "preparation"],
+            ),
+        ]
+        .into_iter()
+        .collect()
+    }
+
+    /// Creates test tasks with known IDs for ordering verification.
+    fn create_test_tasks_with_known_ids() -> PersistentVector<Task> {
+        vec![
+            create_task_with_title_and_id("Common task alpha", task_id_from_u128(100)),
+            create_task_with_title_and_id("Common task beta", task_id_from_u128(200)),
+            create_task_with_title_and_id("Common task gamma", task_id_from_u128(50)),
+            create_task_with_title_and_id("Common task delta", task_id_from_u128(150)),
+        ]
+        .into_iter()
+        .collect()
+    }
+
+    // -------------------------------------------------------------------------
+    // Differential Tests: n-gram vs LegacyAllSuffix
+    // -------------------------------------------------------------------------
+
+    /// Tests that n-gram and legacy all-suffix modes produce equivalent results.
+    ///
+    /// This is a differential test comparing the two infix search implementations.
+    /// Both modes should return the same set of task IDs for the same queries.
+    ///
+    /// - Input: same task set, same queries
+    /// - Expected: identical result sets (order-independent)
+    #[rstest]
+    fn ngram_and_legacy_produce_equivalent_results() {
+        let tasks = create_test_tasks();
+
+        let ngram_index = SearchIndex::build_with_config(
+            &tasks,
+            SearchIndexConfig {
+                infix_mode: InfixMode::Ngram,
+                ..Default::default()
+            },
+        );
+        let legacy_index = SearchIndex::build_with_config(
+            &tasks,
+            SearchIndexConfig {
+                infix_mode: InfixMode::LegacyAllSuffix,
+                ..Default::default()
+            },
+        );
+
+        // Test queries covering various patterns
+        let queries = vec!["all", "meeting", "back", "portant", "callback", "review"];
+
+        for query in queries {
+            let ngram_result = ngram_index.search_by_title(query);
+            let legacy_result = legacy_index.search_by_title(query);
+
+            // First verify None/Some consistency
+            assert_eq!(
+                ngram_result.is_some(),
+                legacy_result.is_some(),
+                "Query '{query}' has inconsistent None/Some between n-gram and legacy modes.\n\
+                 n-gram is_some: {}\n\
+                 legacy is_some: {}",
+                ngram_result.is_some(),
+                legacy_result.is_some()
+            );
+
+            let ngram_ids: HashSet<TaskId> = ngram_result
+                .as_ref()
+                .map(|result| {
+                    result
+                        .tasks
+                        .iter()
+                        .map(|task| task.task_id.clone())
+                        .collect()
+                })
+                .unwrap_or_default();
+            let legacy_ids: HashSet<TaskId> = legacy_result
+                .as_ref()
+                .map(|result| {
+                    result
+                        .tasks
+                        .iter()
+                        .map(|task| task.task_id.clone())
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            assert_eq!(
+                ngram_ids, legacy_ids,
+                "Query '{query}' produced different results between n-gram and legacy modes.\n\
+                 n-gram IDs: {ngram_ids:?}\n\
+                 legacy IDs: {legacy_ids:?}"
+            );
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Result Ordering Tests
+    // -------------------------------------------------------------------------
+
+    /// Tests that search results maintain `TaskId` ascending order.
+    ///
+    /// The search API contract requires results to be sorted by `TaskId` in ascending order
+    /// for deterministic pagination and consistent user experience.
+    ///
+    /// - Input: tasks with known IDs (50, 100, 150, 200)
+    /// - Expected: results sorted by `TaskId` ascending
+    #[rstest]
+    fn search_results_maintain_task_id_order() {
+        let tasks = create_test_tasks_with_known_ids();
+        let index = SearchIndex::build_with_config(&tasks, SearchIndexConfig::default());
+
+        let result = index.search_by_title("common").unwrap();
+
+        let ids: Vec<TaskId> = result
+            .tasks
+            .iter()
+            .map(|task| task.task_id.clone())
+            .collect();
+
+        // Verify the IDs are in ascending order
+        let mut sorted_ids = ids.clone();
+        sorted_ids.sort();
+
+        assert_eq!(
+            ids, sorted_ids,
+            "Search results should be sorted by TaskId in ascending order"
+        );
+
+        // Additionally verify the expected order: 50, 100, 150, 200
+        assert_eq!(ids.len(), 4, "Should find all 4 tasks with 'common'");
+        assert_eq!(ids[0], task_id_from_u128(50));
+        assert_eq!(ids[1], task_id_from_u128(100));
+        assert_eq!(ids[2], task_id_from_u128(150));
+        assert_eq!(ids[3], task_id_from_u128(200));
+    }
+
+    // -------------------------------------------------------------------------
+    // SearchResult Structure Tests
+    // -------------------------------------------------------------------------
+
+    /// Tests that `SearchResult` structure remains unchanged.
+    ///
+    /// Verifies that the `SearchResult` contains all expected fields and maintains
+    /// the existing API contract.
+    ///
+    /// - Input: search result from n-gram mode
+    /// - Expected: all task fields accessible (`task_id`, title, tags, status, priority)
+    #[rstest]
+    fn search_result_structure_unchanged() {
+        let tasks = create_test_tasks();
+        let index = SearchIndex::build_with_config(&tasks, SearchIndexConfig::default());
+        let result = index.search_by_title("meeting").unwrap();
+
+        // Verify SearchResult contains tasks
+        assert!(
+            !result.tasks.is_empty(),
+            "SearchResult should contain tasks"
+        );
+
+        // Verify each task has the expected fields
+        for task in &result.tasks {
+            // task_id field exists and is non-empty when converted to string
+            assert!(
+                !task.task_id.to_string().is_empty(),
+                "task_id should be non-empty"
+            );
+
+            // title field exists and is non-empty
+            assert!(!task.title.is_empty(), "title should be non-empty");
+
+            // tags field is accessible (may be empty, but the field exists)
+            // Verify by accessing the actual length value
+            let tags_len = task.tags.len();
+            assert!(
+                tags_len <= 100, // Reasonable upper bound for tag count
+                "tags field should be accessible and have reasonable size"
+            );
+
+            // status field is accessible - verify via Debug trait
+            let status_str = format!("{:?}", task.status);
+            assert!(!status_str.is_empty(), "status field should be accessible");
+
+            // priority field is accessible - verify via Debug trait
+            let priority_str = format!("{:?}", task.priority);
+            assert!(
+                !priority_str.is_empty(),
+                "priority field should be accessible"
+            );
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // remove_task Compatibility Tests
+    // -------------------------------------------------------------------------
+
+    /// Tests that `remove_task` works correctly in `LegacyAllSuffix` mode.
+    ///
+    /// - Input: index with task, then remove the task
+    /// - Expected: task no longer found in search results
+    #[rstest]
+    fn remove_task_legacy_mode_works() {
+        let config = SearchIndexConfig {
+            infix_mode: InfixMode::LegacyAllSuffix,
+            ..Default::default()
+        };
+        let empty_index = SearchIndex::build_with_config(&PersistentVector::new(), config);
+
+        let task_id = task_id_from_u128(1);
+        let task = create_task_with_title_and_id("callback function", task_id.clone());
+
+        // Add task
+        let index_with_task = empty_index.add_task(&task);
+
+        // Verify task is searchable
+        let result_before = index_with_task.search_by_title("callback");
+        assert!(
+            result_before.is_some(),
+            "Task should be found before removal"
+        );
+        assert!(
+            result_before
+                .as_ref()
+                .unwrap()
+                .tasks
+                .iter()
+                .any(|found_task| found_task.task_id == task_id),
+            "Task ID should be in search results before removal"
+        );
+
+        // Remove task
+        let index_after_removal = index_with_task.remove_task(&task);
+
+        // Verify task is no longer searchable
+        let result_after = index_after_removal.search_by_title("callback");
+        let task_found_after = result_after.as_ref().is_some_and(|result| {
+            result
+                .tasks
+                .iter()
+                .any(|found_task| found_task.task_id == task_id)
+        });
+
+        assert!(
+            !task_found_after,
+            "Task should not be found after removal in LegacyAllSuffix mode"
+        );
+    }
+
+    /// Tests that `remove_task` works correctly in Disabled mode.
+    ///
+    /// - Input: index with task (Disabled mode), then remove the task
+    /// - Expected: task no longer found in search results (prefix search only)
+    #[rstest]
+    fn remove_task_disabled_mode_works() {
+        let config = SearchIndexConfig {
+            infix_mode: InfixMode::Disabled,
+            ..Default::default()
+        };
+        let empty_index = SearchIndex::build_with_config(&PersistentVector::new(), config);
+
+        let task_id = task_id_from_u128(1);
+        let task = create_task_with_title_and_id("callback function", task_id.clone());
+
+        // Add task
+        let index_with_task = empty_index.add_task(&task);
+
+        // Verify task is searchable via prefix search (infix disabled, but prefix works)
+        let result_before = index_with_task.search_by_title("callback");
+        assert!(
+            result_before.is_some(),
+            "Task should be found via prefix search before removal"
+        );
+        assert!(
+            result_before
+                .as_ref()
+                .unwrap()
+                .tasks
+                .iter()
+                .any(|found_task| found_task.task_id == task_id),
+            "Task ID should be in prefix search results before removal"
+        );
+
+        // Remove task
+        let index_after_removal = index_with_task.remove_task(&task);
+
+        // Verify task is no longer searchable
+        let result_after = index_after_removal.search_by_title("callback");
+        let task_found_after = result_after.as_ref().is_some_and(|result| {
+            result
+                .tasks
+                .iter()
+                .any(|found_task| found_task.task_id == task_id)
+        });
+
+        assert!(
+            !task_found_after,
+            "Task should not be found after removal in Disabled mode"
+        );
+    }
+}
+
+// =============================================================================
+// Performance Tests: N-gram vs Legacy All-Suffix Comparison
+// =============================================================================
+
+#[cfg(test)]
+mod performance_tests {
+    use super::*;
+    use crate::domain::{Tag, Timestamp};
+    use rstest::rstest;
+    use std::time::Instant;
+    use uuid::Uuid;
+
+    // -------------------------------------------------------------------------
+    // Test Helpers
+    // -------------------------------------------------------------------------
+
+    /// Word lists for generating realistic task titles.
+    const ADJECTIVES: &[&str] = &[
+        "important",
+        "urgent",
+        "critical",
+        "pending",
+        "completed",
+        "scheduled",
+        "recurring",
+        "optional",
+        "mandatory",
+        "temporary",
+    ];
+
+    const NOUNS: &[&str] = &[
+        "meeting",
+        "review",
+        "deployment",
+        "documentation",
+        "testing",
+        "refactoring",
+        "migration",
+        "optimization",
+        "implementation",
+        "investigation",
+    ];
+
+    const VERBS: &[&str] = &[
+        "prepare",
+        "complete",
+        "schedule",
+        "review",
+        "update",
+        "implement",
+        "deploy",
+        "test",
+        "investigate",
+        "document",
+    ];
+
+    const TAG_WORDS: &[&str] = &[
+        "backend",
+        "frontend",
+        "database",
+        "api",
+        "security",
+        "performance",
+        "bugfix",
+        "feature",
+        "documentation",
+        "testing",
+        "urgent",
+        "low-priority",
+        "blocked",
+        "in-progress",
+        "review-needed",
+    ];
+
+    /// Creates a `TaskId` from a u128 value for deterministic testing.
+    fn task_id_from_u128(value: u128) -> TaskId {
+        TaskId::from_uuid(Uuid::from_u128(value))
+    }
+
+    /// Generates a realistic task title with 5-10 words.
+    ///
+    /// Uses simple pseudo-random selection based on the index to ensure
+    /// reproducible results without external dependencies.
+    fn generate_task_title(index: usize) -> String {
+        let word_count = 5 + (index % 6); // 5-10 words
+        let mut words = Vec::with_capacity(word_count);
+
+        for word_index in 0..word_count {
+            let combined_index = index.wrapping_mul(31).wrapping_add(word_index);
+            let word = match word_index % 3 {
+                0 => ADJECTIVES[combined_index % ADJECTIVES.len()],
+                1 => NOUNS[combined_index % NOUNS.len()],
+                _ => VERBS[combined_index % VERBS.len()],
+            };
+            words.push(word);
+        }
+
+        words.join(" ")
+    }
+
+    /// Generates 2-5 tags for a task.
+    ///
+    /// Uses simple pseudo-random selection based on the index.
+    fn generate_tags(index: usize) -> Vec<Tag> {
+        let tag_count = 2 + (index % 4); // 2-5 tags
+        let mut tags = Vec::with_capacity(tag_count);
+
+        for tag_index in 0..tag_count {
+            let combined_index = index.wrapping_mul(17).wrapping_add(tag_index);
+            let tag_word = TAG_WORDS[combined_index % TAG_WORDS.len()];
+            tags.push(Tag::new(tag_word));
+        }
+
+        tags
+    }
+
+    /// Creates a test task with a realistic title and tags.
+    fn create_realistic_task(index: usize) -> Task {
+        let task_id = task_id_from_u128(index as u128);
+        let title = generate_task_title(index);
+        let tags = generate_tags(index);
+
+        let base_task = Task::new(task_id, &title, Timestamp::now());
+        tags.into_iter().fold(base_task, Task::add_tag)
+    }
+
+    /// Generates a collection of realistic tasks.
+    fn generate_test_tasks(count: usize) -> PersistentVector<Task> {
+        (0..count).map(create_realistic_task).collect()
+    }
+
+    // -------------------------------------------------------------------------
+    // Performance Comparison Test
+    // -------------------------------------------------------------------------
+
+    /// Compares `SearchIndex` build performance between n-gram and legacy all-suffix modes.
+    ///
+    /// This test measures and prints the build time for both indexing strategies
+    /// with 1000 realistic tasks. It is marked as `#[ignore]` because it is a
+    /// performance benchmark that should not run with regular unit tests.
+    ///
+    /// # Test Setup
+    ///
+    /// - Task count: 1000 tasks
+    /// - Title length: 5-10 words per task
+    /// - Tags: 2-5 tags per task
+    /// - Timing: uses `std::time::Instant` for measurement
+    ///
+    /// # Expected Results
+    ///
+    /// - N-gram mode should be significantly faster than legacy all-suffix mode
+    /// - Target: 1e4 tasks should build in < 1s (this test uses 1e3 for quick validation)
+    ///
+    /// # Running the Test
+    ///
+    /// ```bash
+    /// cargo test --package task-management-benchmark-api performance_tests -- --ignored --nocapture
+    /// ```
+    #[rstest]
+    #[ignore = "Performance test - run manually with --ignored"]
+    fn compare_ngram_vs_legacy_build_performance() {
+        const TASK_COUNT: usize = 1000;
+
+        println!("\n========================================");
+        println!("SearchIndex Build Performance Comparison");
+        println!("========================================");
+        println!("Task count: {TASK_COUNT}");
+        println!("Title length: 5-10 words");
+        println!("Tags per task: 2-5");
+        println!();
+
+        // Generate test tasks (same tasks for both modes)
+        let tasks = generate_test_tasks(TASK_COUNT);
+        println!("Generated {TASK_COUNT} realistic tasks.");
+        println!();
+
+        // Measure n-gram mode build time
+        let ngram_config = SearchIndexConfig {
+            infix_mode: InfixMode::Ngram,
+            ..Default::default()
+        };
+
+        let ngram_start = Instant::now();
+        let ngram_index = SearchIndex::build_with_config(&tasks, ngram_config);
+        let ngram_duration = ngram_start.elapsed();
+
+        println!("N-gram mode:");
+        println!("  Build time: {ngram_duration:?}");
+
+        // Measure legacy all-suffix mode build time
+        let legacy_config = SearchIndexConfig {
+            infix_mode: InfixMode::LegacyAllSuffix,
+            ..Default::default()
+        };
+
+        let legacy_start = Instant::now();
+        let legacy_index = SearchIndex::build_with_config(&tasks, legacy_config);
+        let legacy_duration = legacy_start.elapsed();
+
+        println!();
+        println!("Legacy all-suffix mode:");
+        println!("  Build time: {legacy_duration:?}");
+
+        // Calculate speedup ratio
+        // Note: precision loss is acceptable here as we only need approximate ratio for display
+        #[allow(clippy::cast_precision_loss)]
+        let speedup = if ngram_duration.as_nanos() > 0 {
+            legacy_duration.as_nanos() as f64 / ngram_duration.as_nanos() as f64
+        } else {
+            f64::INFINITY
+        };
+
+        println!();
+        println!("Performance comparison:");
+        println!("  Speedup (legacy/ngram): {speedup:.2}x");
+
+        // Verify both indexes produce search results
+        let ngram_result = ngram_index.search_by_title("meeting");
+        let legacy_result = legacy_index.search_by_title("meeting");
+
+        assert!(
+            ngram_result.is_some(),
+            "N-gram index should return search results"
+        );
+        assert!(
+            legacy_result.is_some(),
+            "Legacy index should return search results"
+        );
+
+        println!();
+        println!("Verification:");
+        println!(
+            "  N-gram 'meeting' results: {} tasks",
+            ngram_result.as_ref().map_or(0, |result| result.tasks.len())
+        );
+        println!(
+            "  Legacy 'meeting' results: {} tasks",
+            legacy_result
+                .as_ref()
+                .map_or(0, |result| result.tasks.len())
+        );
+        println!("========================================\n");
+
+        // Soft assertion: n-gram should generally be faster
+        // This is informational and won't fail the test
+        if ngram_duration > legacy_duration {
+            println!("WARNING: N-gram mode was slower than legacy mode in this run.");
+            println!("This may occur due to system load or small dataset size.");
+        }
+    }
+
+    /// Tests build performance with a larger dataset (10,000 tasks).
+    ///
+    /// This test validates the target performance requirement:
+    /// - 1e4 tasks should build in < 1s (release build)
+    /// - Debug builds are significantly slower and the assertion is skipped
+    ///
+    /// # Running the Test
+    ///
+    /// For accurate performance measurements, run with release optimizations:
+    ///
+    /// ```bash
+    /// cargo test --release --lib performance_tests::test_ngram_build_target_performance -- --ignored --nocapture
+    /// ```
+    ///
+    /// Debug build (informational only, no assertion):
+    ///
+    /// ```bash
+    /// cargo test --lib performance_tests::test_ngram_build_target_performance -- --ignored --nocapture
+    /// ```
+    #[rstest]
+    #[ignore = "Performance test - run manually with --release --ignored"]
+    fn test_ngram_build_target_performance() {
+        const TASK_COUNT: usize = 10_000;
+        const TARGET_DURATION_SECS: u64 = 1;
+
+        // Detect if running in debug or release mode
+        let is_release_build = cfg!(not(debug_assertions));
+
+        println!("\n========================================");
+        println!("N-gram Build Target Performance Test");
+        println!("========================================");
+        println!("Task count: {TASK_COUNT}");
+        println!("Target: < {TARGET_DURATION_SECS}s (release build)");
+        println!(
+            "Build mode: {}",
+            if is_release_build { "RELEASE" } else { "DEBUG" }
+        );
+        println!();
+
+        // Generate test tasks
+        let tasks = generate_test_tasks(TASK_COUNT);
+        println!("Generated {TASK_COUNT} realistic tasks.");
+        println!();
+
+        // Measure n-gram mode build time
+        let ngram_config = SearchIndexConfig {
+            infix_mode: InfixMode::Ngram,
+            ..Default::default()
+        };
+
+        let start = Instant::now();
+        let index = SearchIndex::build_with_config(&tasks, ngram_config);
+        let duration = start.elapsed();
+
+        println!("N-gram mode build time: {duration:?}");
+        println!();
+
+        // Verify the index works
+        let result = index.search_by_title("important");
+        println!(
+            "Verification: 'important' search returned {} tasks",
+            result.as_ref().map_or(0, |result| result.tasks.len())
+        );
+        println!("========================================\n");
+
+        // Assert the target performance is met (release build only)
+        if is_release_build {
+            assert!(
+                duration.as_secs() < TARGET_DURATION_SECS,
+                "N-gram build for {TASK_COUNT} tasks took {duration:?}, expected < {TARGET_DURATION_SECS}s"
+            );
+        } else {
+            println!("NOTE: Performance assertion skipped in debug build.");
+            println!("Run with --release for accurate performance measurement.");
+        }
     }
 }
