@@ -912,10 +912,6 @@ impl Semigroup for SearchResult {
 // Search Index with PersistentTreeMap
 // =============================================================================
 
-// -----------------------------------------------------------------------------
-// SearchIndex Configuration (REQ-SEARCH-NGRAM-001)
-// -----------------------------------------------------------------------------
-
 /// Infix search mode for `SearchIndex`.
 ///
 /// Controls how infix (substring) searches are performed:
@@ -1005,10 +1001,6 @@ impl Default for SearchIndexConfig {
     }
 }
 
-// -----------------------------------------------------------------------------
-// N-gram Index Type (REQ-SEARCH-NGRAM-002 Part 2)
-// -----------------------------------------------------------------------------
-
 /// N-gram inverted index type.
 ///
 /// Maps n-gram strings to a sorted list of `TaskId`s that contain that n-gram.
@@ -1020,25 +1012,17 @@ impl Default for SearchIndexConfig {
 ///
 /// - Key: n-gram string (e.g., "cal", "all", "llb" for "callback")
 /// - Value: `PersistentVector<TaskId>` containing all tasks with that n-gram
-#[allow(dead_code)] // Will be used in Phase 4 (SearchIndex integration)
-type NgramIndex = PersistentHashMap<String, PersistentVector<TaskId>>;
-
-/// Mutable n-gram index for efficient batch construction.
 ///
-/// Mutable index type using `HashMap` for O(1) amortized insertion during batch operations.
-/// After batch construction, convert to persistent structures via [`finalize_ngram_index`].
-type MutableNgramIndex = std::collections::HashMap<String, Vec<TaskId>>;
+/// Uses `NgramKey` (Arc<str>) for O(1) clone during merge operations.
+/// Supports `&str` lookups via `Borrow<str>` implementation.
+type NgramIndex = PersistentHashMap<NgramKey, PersistentVector<TaskId>>;
 
-/// Interned index type for prefix keys (O(1) clone via `NgramKey`).
-pub type MutableInternedIndex = std::collections::HashMap<NgramKey, Vec<TaskId>>;
+/// Mutable index for batch construction. O(1) amortized insertion, O(1) key clone via `NgramKey`.
+type MutableIndex = std::collections::HashMap<NgramKey, Vec<TaskId>>;
 
-/// Persistent prefix index with interned keys for O(1) clone.
 pub type PrefixIndex = PersistentTreeMap<NgramKey, PersistentVector<TaskId>>;
 
 /// N-gram key with reference-counted storage for O(1) cloning.
-///
-/// Used with [`KeyPool`] to deduplicate strings within a single `apply_changes` operation.
-/// `Hash`/`Eq`/`Ord` delegate to underlying `str`.
 #[derive(Clone, Hash, Eq, PartialEq, Debug)]
 pub struct NgramKey(Arc<str>);
 
@@ -1076,10 +1060,7 @@ impl std::borrow::Borrow<str> for NgramKey {
     }
 }
 
-/// Local interning pool for string keys.
-///
-/// Deduplicates strings within a single `apply_changes` operation,
-/// converting repeated `String::clone()` calls into O(1) `Arc` pointer copies.
+/// Local interning pool for string keys. O(1) clone on cache hit.
 #[derive(Default)]
 pub struct KeyPool {
     pool: std::collections::HashSet<NgramKey>,
@@ -1087,17 +1068,11 @@ pub struct KeyPool {
     miss_count: usize,
 }
 
-/// Type alias for backward compatibility.
-pub type NgramKeyPool = KeyPool;
-
 impl KeyPool {
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Interns a string, returning an `NgramKey`.
-    ///
-    /// Returns a clone of existing key (O(1)) on hit, or allocates new on miss.
     pub fn intern(&mut self, value: &str) -> NgramKey {
         if let Some(key) = self.pool.get(value) {
             self.hit_count += 1;
@@ -1128,27 +1103,7 @@ impl KeyPool {
     }
 }
 
-// -----------------------------------------------------------------------------
-// Streaming N-gram Generation (REQ-SEARCH-NGRAM-MEM-001)
-// -----------------------------------------------------------------------------
-
-/// Streaming n-gram generation window.
-///
-/// Generates n-grams as an iterator, avoiding intermediate `Vec<String>` allocation.
-/// Returns `&str` slices instead of owned `String`s to eliminate per-n-gram allocation.
-///
-/// # UTF-8 Safety
-///
-/// Uses `char_indices()` to ensure byte boundaries align with UTF-8 character boundaries,
-/// supporting multi-byte characters correctly.
-///
-/// # Example
-///
-/// ```ignore
-/// let window = NgramWindow::new("hello", 3, 100);
-/// let ngrams: Vec<&str> = window.collect();
-/// assert_eq!(ngrams, vec!["hel", "ell", "llo"]);
-/// ```
+/// Streaming n-gram generation window returning `&str` slices. UTF-8 safe.
 pub struct NgramWindow<'a> {
     token: &'a str,
     char_indices: Vec<usize>,
@@ -1158,12 +1113,7 @@ pub struct NgramWindow<'a> {
 }
 
 impl<'a> NgramWindow<'a> {
-    /// Creates a UTF-8 safe n-gram window.
-    ///
-    /// Returns an empty iterator if `ngram_size < 2`, `max_ngrams == 0`,
-    /// or token is shorter than `ngram_size`.
     pub fn new(token: &'a str, ngram_size: usize, max_ngrams: usize) -> Self {
-        // Early return: invalid ngram_size or max_ngrams == 0
         if ngram_size < 2 || max_ngrams == 0 {
             return Self {
                 token,
@@ -1174,7 +1124,6 @@ impl<'a> NgramWindow<'a> {
             };
         }
 
-        // Collect only byte positions (char values are unused)
         let char_indices: Vec<usize> = token.char_indices().map(|(i, _)| i).collect();
         let char_count = char_indices.len();
 
@@ -1237,16 +1186,9 @@ impl<'a> Iterator for NgramWindow<'a> {
 
 impl ExactSizeIterator for NgramWindow<'_> {}
 
-/// Interned n-gram index type for streaming operations.
-pub type MutableInternedNgramIndex = std::collections::HashMap<NgramKey, Vec<TaskId>>;
-
-/// Registers a token's n-grams into an interned index using streaming.
-///
-/// Generates n-grams via `NgramWindow` and inserts directly into the index.
-/// Keys are interned via `KeyPool` for O(1) clone on cache hit.
-/// Sorting and deduplication are deferred to finalization.
+/// Registers a token's n-grams into an index using streaming generation.
 pub fn index_ngrams_streaming(
-    index: &mut MutableInternedNgramIndex,
+    index: &mut MutableIndex,
     token: &str,
     task_id: &TaskId,
     config: &SearchIndexConfig,
@@ -1270,14 +1212,8 @@ pub fn index_ngrams_streaming(
     }
 }
 
-/// Semantic alias for [`index_ngrams_streaming`] when building removal deltas.
-///
-/// Provides clarity at call sites where add/remove deltas are built in parallel.
+/// Alias for [`index_ngrams_streaming`] used when building removal deltas.
 pub use index_ngrams_streaming as remove_ngrams_streaming;
-
-// -----------------------------------------------------------------------------
-// Key Pool Metrics (REQ-SEARCH-NGRAM-MEM-005)
-// -----------------------------------------------------------------------------
 
 /// Metrics for key pool memory efficiency.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -1296,26 +1232,26 @@ pub type SearchIndexNgramMetrics = SearchIndexKeyMetrics;
 /// Aggregates multiple `TaskChange`s into a single batch for efficient one-pass merging.
 #[derive(Debug, Clone, Default)]
 pub struct SearchIndexDelta {
-    pub title_full_add: MutableInternedIndex,
-    pub title_full_remove: MutableInternedIndex,
-    pub title_word_add: MutableInternedIndex,
-    pub title_word_remove: MutableInternedIndex,
-    pub tag_add: MutableInternedIndex,
-    pub tag_remove: MutableInternedIndex,
+    pub title_full_add: MutableIndex,
+    pub title_full_remove: MutableIndex,
+    pub title_word_add: MutableIndex,
+    pub title_word_remove: MutableIndex,
+    pub tag_add: MutableIndex,
+    pub tag_remove: MutableIndex,
 
-    pub title_full_ngram_add: MutableInternedNgramIndex,
-    pub title_full_ngram_remove: MutableInternedNgramIndex,
-    pub title_word_ngram_add: MutableInternedNgramIndex,
-    pub title_word_ngram_remove: MutableInternedNgramIndex,
-    pub tag_ngram_add: MutableInternedNgramIndex,
-    pub tag_ngram_remove: MutableInternedNgramIndex,
+    pub title_full_ngram_add: MutableIndex,
+    pub title_full_ngram_remove: MutableIndex,
+    pub title_word_ngram_add: MutableIndex,
+    pub title_word_ngram_remove: MutableIndex,
+    pub tag_ngram_add: MutableIndex,
+    pub tag_ngram_remove: MutableIndex,
 
-    pub title_full_all_suffix_add: MutableInternedIndex,
-    pub title_full_all_suffix_remove: MutableInternedIndex,
-    pub title_word_all_suffix_add: MutableInternedIndex,
-    pub title_word_all_suffix_remove: MutableInternedIndex,
-    pub tag_all_suffix_add: MutableInternedIndex,
-    pub tag_all_suffix_remove: MutableInternedIndex,
+    pub title_full_all_suffix_add: MutableIndex,
+    pub title_full_all_suffix_remove: MutableIndex,
+    pub title_word_all_suffix_add: MutableIndex,
+    pub title_word_all_suffix_remove: MutableIndex,
+    pub tag_all_suffix_add: MutableIndex,
+    pub tag_all_suffix_remove: MutableIndex,
 }
 
 /// Cached normalization result for a task. Tags are sorted for stable ordering.
@@ -1474,7 +1410,12 @@ impl SearchIndexDelta {
                     );
                 }
                 InfixMode::LegacyAllSuffix => {
-                    index_all_suffixes_batch(&mut self.title_word_all_suffix_add, word, task_id, pool);
+                    index_all_suffixes_batch(
+                        &mut self.title_word_all_suffix_add,
+                        word,
+                        task_id,
+                        pool,
+                    );
                 }
                 InfixMode::Disabled => {}
             }
@@ -1487,13 +1428,7 @@ impl SearchIndexDelta {
                 .push(task_id.clone());
             match config.infix_mode {
                 InfixMode::Ngram => {
-                    index_ngrams_streaming(
-                        &mut self.tag_ngram_add,
-                        tag,
-                        task_id,
-                        config,
-                        pool,
-                    );
+                    index_ngrams_streaming(&mut self.tag_ngram_add, tag, task_id, config, pool);
                 }
                 InfixMode::LegacyAllSuffix => {
                     index_all_suffixes_batch(&mut self.tag_all_suffix_add, tag, task_id, pool);
@@ -1553,7 +1488,12 @@ impl SearchIndexDelta {
                     );
                 }
                 InfixMode::LegacyAllSuffix => {
-                    index_all_suffixes_batch(&mut self.title_word_all_suffix_remove, word, task_id, pool);
+                    index_all_suffixes_batch(
+                        &mut self.title_word_all_suffix_remove,
+                        word,
+                        task_id,
+                        pool,
+                    );
                 }
                 InfixMode::Disabled => {}
             }
@@ -1566,13 +1506,7 @@ impl SearchIndexDelta {
                 .push(task_id.clone());
             match config.infix_mode {
                 InfixMode::Ngram => {
-                    remove_ngrams_streaming(
-                        &mut self.tag_ngram_remove,
-                        tag,
-                        task_id,
-                        config,
-                        pool,
-                    );
+                    remove_ngrams_streaming(&mut self.tag_ngram_remove, tag, task_id, config, pool);
                 }
                 InfixMode::LegacyAllSuffix => {
                     index_all_suffixes_batch(&mut self.tag_all_suffix_remove, tag, task_id, pool);
@@ -1638,7 +1572,12 @@ impl SearchIndexDelta {
         let (new_word_limit, new_tag_limit) = Self::compute_token_limits(new_data, config);
 
         if old_data.title_key != new_data.title_key {
-            Self::push_to_index(&mut self.title_full_remove, &old_data.title_key, task_id, pool);
+            Self::push_to_index(
+                &mut self.title_full_remove,
+                &old_data.title_key,
+                task_id,
+                pool,
+            );
             Self::push_to_index(&mut self.title_full_add, &new_data.title_key, task_id, pool);
             match config.infix_mode {
                 InfixMode::Ngram => {
@@ -1735,7 +1674,7 @@ impl SearchIndexDelta {
         }
     }
 
-    fn push_to_index(index: &mut MutableInternedIndex, key: &str, task_id: &TaskId, pool: &mut KeyPool) {
+    fn push_to_index(index: &mut MutableIndex, key: &str, task_id: &TaskId, pool: &mut KeyPool) {
         index
             .entry(pool.intern(key))
             .or_default()
@@ -1743,8 +1682,8 @@ impl SearchIndexDelta {
     }
 
     fn collect_token_diff<'a>(
-        remove_index: &mut MutableInternedIndex,
-        add_index: &mut MutableInternedIndex,
+        remove_index: &mut MutableIndex,
+        add_index: &mut MutableIndex,
         old_tokens: impl Iterator<Item = &'a String>,
         new_tokens: impl Iterator<Item = &'a String>,
         task_id: &TaskId,
@@ -1762,8 +1701,8 @@ impl SearchIndexDelta {
     }
 
     fn apply_ngram_diff(
-        remove_index: &mut MutableInternedNgramIndex,
-        add_index: &mut MutableInternedNgramIndex,
+        remove_index: &mut MutableIndex,
+        add_index: &mut MutableIndex,
         old_ngrams: &std::collections::HashSet<String>,
         new_ngrams: &std::collections::HashSet<String>,
         task_id: &TaskId,
@@ -1784,8 +1723,8 @@ impl SearchIndexDelta {
     }
 
     fn collect_ngram_diff(
-        remove_index: &mut MutableInternedNgramIndex,
-        add_index: &mut MutableInternedNgramIndex,
+        remove_index: &mut MutableIndex,
+        add_index: &mut MutableIndex,
         old_key: &str,
         new_key: &str,
         task_id: &TaskId,
@@ -1809,8 +1748,8 @@ impl SearchIndexDelta {
     }
 
     fn collect_tokens_ngram_diff<'a>(
-        remove_index: &mut MutableInternedNgramIndex,
-        add_index: &mut MutableInternedNgramIndex,
+        remove_index: &mut MutableIndex,
+        add_index: &mut MutableIndex,
         old_tokens: impl Iterator<Item = &'a String>,
         new_tokens: impl Iterator<Item = &'a String>,
         task_id: &TaskId,
@@ -1840,8 +1779,8 @@ impl SearchIndexDelta {
     }
 
     fn apply_suffix_diff(
-        remove_index: &mut MutableInternedIndex,
-        add_index: &mut MutableInternedIndex,
+        remove_index: &mut MutableIndex,
+        add_index: &mut MutableIndex,
         old_suffixes: &std::collections::HashSet<String>,
         new_suffixes: &std::collections::HashSet<String>,
         task_id: &TaskId,
@@ -1862,8 +1801,8 @@ impl SearchIndexDelta {
     }
 
     fn collect_all_suffix_diff(
-        remove_index: &mut MutableInternedIndex,
-        add_index: &mut MutableInternedIndex,
+        remove_index: &mut MutableIndex,
+        add_index: &mut MutableIndex,
         old_key: &str,
         new_key: &str,
         task_id: &TaskId,
@@ -1882,8 +1821,8 @@ impl SearchIndexDelta {
     }
 
     fn collect_tokens_all_suffix_diff<'a>(
-        remove_index: &mut MutableInternedIndex,
-        add_index: &mut MutableInternedIndex,
+        remove_index: &mut MutableIndex,
+        add_index: &mut MutableIndex,
         old_tokens: impl Iterator<Item = &'a String>,
         new_tokens: impl Iterator<Item = &'a String>,
         task_id: &TaskId,
@@ -1905,9 +1844,6 @@ impl SearchIndexDelta {
         );
     }
 
-    /// Prepares delta posting lists by sorting, deduplicating, and removing empty entries.
-    ///
-    /// Call before merging the delta into the main index.
     pub fn prepare_posting_lists(&mut self) {
         prepare_index(&mut self.title_full_add);
         prepare_index(&mut self.title_full_remove);
@@ -1932,7 +1868,6 @@ impl SearchIndexDelta {
     }
 }
 
-/// Sorts and deduplicates posting lists in an index, removing empty entries.
 fn prepare_index<K: Eq + std::hash::Hash>(index: &mut std::collections::HashMap<K, Vec<TaskId>>) {
     index.retain(|_, posting_list| {
         posting_list.sort();
@@ -1941,53 +1876,21 @@ fn prepare_index<K: Eq + std::hash::Hash>(index: &mut std::collections::HashMap<
     });
 }
 
-// -----------------------------------------------------------------------------
-// N-gram Generation (REQ-SEARCH-NGRAM-002 Part 1)
-// -----------------------------------------------------------------------------
-
-/// Generates n-grams from a normalized token.
-///
-/// This is a pure function that produces n-grams using a sliding window
-/// approach over the input string's characters.
-///
-/// # Algorithm
-///
-/// Uses `char_indices()` for UTF-8 safe sliding window generation.
-/// The function generates at most `max_ngrams` n-grams to bound memory usage.
-///
-/// # Complexity
-///
-/// O(min(L - n + 1, `max_ngrams`)) where L is the character count.
-///
-/// # Arguments
-///
-/// * `normalized_token` - A normalized (lowercase, trimmed) token string
-/// * `ngram_size` - The size of each n-gram in characters (must be >= 2)
-/// * `max_ngrams` - Maximum number of n-grams to generate
-///
-/// # Returns
-///
-/// A `Vec<String>` containing the generated n-grams. Returns empty if:
-/// - `ngram_size < 2`
-/// - Token has fewer characters than `ngram_size`
-#[allow(dead_code)] // Will be used in Phase 3 (NgramIndex construction)
+/// Generates n-grams from a normalized token using UTF-8 safe sliding window.
+#[allow(dead_code)]
 #[must_use]
 fn generate_ngrams(normalized_token: &str, ngram_size: usize, max_ngrams: usize) -> Vec<String> {
-    // Reject invalid ngram_size (must be >= 2)
     if ngram_size < 2 {
         return Vec::new();
     }
 
-    // Collect char indices for UTF-8 safe slicing
     let char_indices: Vec<(usize, char)> = normalized_token.char_indices().collect();
     let char_count = char_indices.len();
 
-    // Token too short to generate any n-grams
     if char_count < ngram_size {
         return Vec::new();
     }
 
-    // Calculate how many n-grams can be generated
     let max_possible = char_count.saturating_sub(ngram_size).saturating_add(1);
     let actual_count = max_possible.min(max_ngrams);
 
@@ -2007,10 +1910,6 @@ fn generate_ngrams(normalized_token: &str, ngram_size: usize, max_ngrams: usize)
 
     ngrams
 }
-
-// -----------------------------------------------------------------------------
-// N-gram Index Operations (REQ-SEARCH-NGRAM-002 Part 2)
-// -----------------------------------------------------------------------------
 
 /// Registers a token's n-grams into the index (pure function).
 ///
@@ -2069,8 +1968,9 @@ fn index_ngrams(
     let mut transient_index = index.transient();
 
     for ngram in ngrams {
+        let ngram_key = NgramKey::new(&ngram);
         let existing_ids = transient_index
-            .get(&ngram)
+            .get(ngram_key.as_str())
             .cloned()
             .unwrap_or_else(PersistentVector::new);
 
@@ -2097,7 +1997,7 @@ fn index_ngrams(
                 transient_vec.push_back(id.clone());
             }
 
-            transient_index.insert(ngram, transient_vec.persistent());
+            transient_index.insert(ngram_key, transient_vec.persistent());
         }
     }
 
@@ -2139,7 +2039,7 @@ fn index_ngrams(
 /// * `config` - Search index configuration
 #[allow(dead_code)] // Retained for future single-task add_task() operations
 fn index_ngrams_transient(
-    transient_index: &mut TransientHashMap<String, PersistentVector<TaskId>>,
+    transient_index: &mut TransientHashMap<NgramKey, PersistentVector<TaskId>>,
     normalized_token: &str,
     task_id: &TaskId,
     config: &SearchIndexConfig,
@@ -2155,8 +2055,9 @@ fn index_ngrams_transient(
     }
 
     for ngram in ngrams {
+        let ngram_key = NgramKey::new(&ngram);
         let existing_ids = transient_index
-            .get(&ngram)
+            .get(ngram_key.as_str())
             .cloned()
             .unwrap_or_else(PersistentVector::new);
 
@@ -2183,7 +2084,7 @@ fn index_ngrams_transient(
                 transient_vec.push_back(id.clone());
             }
 
-            transient_index.insert(ngram, transient_vec.persistent());
+            transient_index.insert(ngram_key, transient_vec.persistent());
         }
     }
 }
@@ -2217,7 +2118,7 @@ fn index_ngrams_transient(
 /// * `task_id` - The `TaskId` to associate with the token's n-grams
 /// * `config` - Search index configuration
 fn index_ngrams_batch(
-    index: &mut MutableNgramIndex,
+    index: &mut MutableIndex,
     normalized_token: &str,
     task_id: &TaskId,
     config: &SearchIndexConfig,
@@ -2229,14 +2130,22 @@ fn index_ngrams_batch(
     );
 
     for ngram in ngrams {
-        index.entry(ngram).or_default().push(task_id.clone());
+        index
+            .entry(NgramKey::new(&ngram))
+            .or_default()
+            .push(task_id.clone());
     }
 }
 
 /// Indexes all suffixes of a word into a mutable batch index.
 ///
 /// For example, "hello" generates suffixes: "hello", "ello", "llo", "lo", "o".
-fn index_all_suffixes_batch(index: &mut MutableInternedIndex, word: &str, task_id: &TaskId, pool: &mut KeyPool) {
+fn index_all_suffixes_batch(
+    index: &mut MutableIndex,
+    word: &str,
+    task_id: &TaskId,
+    pool: &mut KeyPool,
+) {
     for (byte_index, _) in word.char_indices() {
         let suffix = &word[byte_index..];
         index
@@ -2246,11 +2155,8 @@ fn index_all_suffixes_batch(index: &mut MutableInternedIndex, word: &str, task_i
     }
 }
 
-/// Converts a mutable batch index to an immutable `NgramIndex`.
-///
-/// Sorts, deduplicates each posting list, and converts to persistent structures.
 #[must_use]
-fn finalize_ngram_index(mutable_index: MutableNgramIndex) -> NgramIndex {
+fn finalize_ngram_index(mutable_index: MutableIndex) -> NgramIndex {
     let mut result = PersistentHashMap::new().transient();
 
     for (ngram, mut task_ids) in mutable_index {
@@ -2312,7 +2218,8 @@ fn remove_ngrams(
     let mut transient_index = index.transient();
 
     for ngram in ngrams {
-        if let Some(existing_ids) = transient_index.get(&ngram).cloned() {
+        let ngram_key = NgramKey::new(&ngram);
+        if let Some(existing_ids) = transient_index.get(ngram_key.as_str()).cloned() {
             // Filter out the specified TaskId
             let updated_ids: PersistentVector<TaskId> = existing_ids
                 .iter()
@@ -2322,10 +2229,10 @@ fn remove_ngrams(
 
             if updated_ids.is_empty() {
                 // Remove the n-gram entry if no TaskIds remain
-                transient_index.remove(&ngram);
+                transient_index.remove(ngram_key.as_str());
             } else {
                 // Update with filtered list
-                transient_index.insert(ngram, updated_ids);
+                transient_index.insert(ngram_key, updated_ids);
             }
         }
     }
@@ -2333,10 +2240,6 @@ fn remove_ngrams(
     // Persist and return
     transient_index.persistent()
 }
-
-// -----------------------------------------------------------------------------
-// N-gram Search Logic (REQ-SEARCH-NGRAM-003)
-// -----------------------------------------------------------------------------
 
 /// Computes the intersection of two sorted `Vec<TaskId>` in O(n) time.
 ///
@@ -2396,10 +2299,6 @@ fn intersect_sorted_vecs(left: &[TaskId], right: &[TaskId]) -> Vec<TaskId> {
 
     result
 }
-
-// -----------------------------------------------------------------------------
-// SearchIndex Build Metrics (REQ-SEARCH-NGRAM-PERF-002)
-// -----------------------------------------------------------------------------
 
 /// Metrics from `SearchIndex` construction.
 ///
@@ -2579,10 +2478,6 @@ fn get_peak_rss_absolute_mb() -> Option<u64> {
     }
 }
 
-// -----------------------------------------------------------------------------
-// SearchIndex Structure
-// -----------------------------------------------------------------------------
-
 /// Search index using `PersistentTreeMap` for efficient prefix-based lookup.
 ///
 /// The index maps normalized search terms (lowercase) to the tasks that
@@ -2734,9 +2629,9 @@ impl SearchIndex {
         // N-gram indexes (populated only in Ngram mode)
         // Use mutable HashMap<String, Vec<TaskId>> for O(1) amortized batch construction
         // This avoids the O(n) overhead of rebuilding PersistentVector for each insertion
-        let mut title_full_ngram_batch: MutableNgramIndex = std::collections::HashMap::new();
-        let mut title_word_ngram_batch: MutableNgramIndex = std::collections::HashMap::new();
-        let mut tag_ngram_batch: MutableNgramIndex = std::collections::HashMap::new();
+        let mut title_full_ngram_batch: MutableIndex = std::collections::HashMap::new();
+        let mut title_word_ngram_batch: MutableIndex = std::collections::HashMap::new();
+        let mut tag_ngram_batch: MutableIndex = std::collections::HashMap::new();
 
         for task in tasks {
             // Index the task by ID
@@ -2800,8 +2695,10 @@ impl SearchIndex {
                     .get(word_str)
                     .cloned()
                     .unwrap_or_else(PersistentVector::new);
-                title_word_index = title_word_index
-                    .insert(NgramKey::new(word_str), task_ids.push_back(task.task_id.clone()));
+                title_word_index = title_word_index.insert(
+                    NgramKey::new(word_str),
+                    task_ids.push_back(task.task_id.clone()),
+                );
 
                 // Index infix based on mode
                 match config.infix_mode {
@@ -3058,7 +2955,7 @@ impl SearchIndex {
         let mut candidate_vec: Option<Vec<TaskId>> = None;
 
         for ngram in &query_ngrams {
-            match index.get(ngram) {
+            match index.get(ngram.as_str()) {
                 Some(task_ids) => {
                     let current_vec: Vec<TaskId> = task_ids.iter().cloned().collect();
 
@@ -3515,7 +3412,11 @@ impl SearchIndex {
     /// Removes a task ID from a vector-valued index entry.
     ///
     /// If the resulting vector is empty, removes the entire entry.
-    fn remove_id_from_vector_index(index: &PrefixIndex, key: &str, task_id: &TaskId) -> PrefixIndex {
+    fn remove_id_from_vector_index(
+        index: &PrefixIndex,
+        key: &str,
+        task_id: &TaskId,
+    ) -> PrefixIndex {
         index.get(key).map_or_else(
             || index.clone(),
             |ids| {
@@ -3531,7 +3432,11 @@ impl SearchIndex {
     }
 
     /// Removes a task ID from all suffix entries of a word.
-    fn remove_id_from_all_suffixes(index: &PrefixIndex, word: &str, task_id: &TaskId) -> PrefixIndex {
+    fn remove_id_from_all_suffixes(
+        index: &PrefixIndex,
+        word: &str,
+        task_id: &TaskId,
+    ) -> PrefixIndex {
         let mut result = index.clone();
         for (byte_index, _) in word.char_indices() {
             let suffix = &word[byte_index..];
@@ -3648,8 +3553,8 @@ impl SearchIndex {
                 .cloned()
                 .unwrap_or_else(PersistentVector::new);
             if !task_ids.iter().any(|id| id == task_id) {
-                title_word_index =
-                    title_word_index.insert(NgramKey::new(word_str), task_ids.push_back(task_id.clone()));
+                title_word_index = title_word_index
+                    .insert(NgramKey::new(word_str), task_ids.push_back(task_id.clone()));
             }
 
             // Add to infix index based on mode
@@ -3680,8 +3585,10 @@ impl SearchIndex {
                 .cloned()
                 .unwrap_or_else(PersistentVector::new);
             if !task_ids.iter().any(|id| id == task_id) {
-                tag_index =
-                    tag_index.insert(NgramKey::new(normalized_tag_str), task_ids.push_back(task_id.clone()));
+                tag_index = tag_index.insert(
+                    NgramKey::new(normalized_tag_str),
+                    task_ids.push_back(task_id.clone()),
+                );
             }
 
             // Add to infix index based on mode
@@ -3779,7 +3686,9 @@ impl SearchIndex {
         if changes.is_empty() {
             return self.clone();
         }
-        let delta = SearchIndexDelta::from_changes(changes, &self.config, &self.tasks_by_id);
+        let mut delta = SearchIndexDelta::from_changes(changes, &self.config, &self.tasks_by_id);
+        // Sort and deduplicate posting lists to satisfy merge preconditions
+        delta.prepare_posting_lists();
         self.apply_delta(&delta, changes)
     }
 
@@ -3846,8 +3755,8 @@ impl SearchIndex {
     /// Computes `(existing ∪ add) - remove` for a `PrefixIndex`.
     fn merge_index_delta(
         index: &PrefixIndex,
-        add: &MutableInternedIndex,
-        remove: &MutableInternedIndex,
+        add: &MutableIndex,
+        remove: &MutableIndex,
     ) -> PrefixIndex {
         let all_keys: std::collections::HashSet<_> = add.keys().chain(remove.keys()).collect();
 
@@ -3868,11 +3777,10 @@ impl SearchIndex {
         })
     }
 
-    /// Computes `(existing ∪ add) - remove` for a `NgramIndex`.
     fn merge_ngram_delta(
         index: &NgramIndex,
-        add: &MutableInternedNgramIndex,
-        remove: &MutableInternedNgramIndex,
+        add: &MutableIndex,
+        remove: &MutableIndex,
     ) -> NgramIndex {
         let all_keys: std::collections::HashSet<_> = add.keys().chain(remove.keys()).collect();
         let mut result = index.clone().transient();
@@ -3889,7 +3797,8 @@ impl SearchIndex {
             if merged.is_empty() {
                 result.remove(key_str);
             } else {
-                result.insert(key_str.to_string(), merged.into_iter().collect());
+                // O(1) clone via Arc<str> instead of String allocation
+                result.insert(key.clone(), merged.into_iter().collect());
             }
         }
 
@@ -11932,7 +11841,8 @@ mod search_index_delta_tests {
         // Normalized in order: ["important", "later", "urgent"]
 
         // Verify both methods index the same tags
-        let delta_tags: std::collections::HashSet<&str> = delta.tag_add.keys().map(super::NgramKey::as_str).collect();
+        let delta_tags: std::collections::HashSet<&str> =
+            delta.tag_add.keys().map(super::NgramKey::as_str).collect();
         let index_tags: std::collections::HashSet<&str> = index_via_add
             .tag_index
             .keys()
@@ -12610,7 +12520,12 @@ mod apply_changes_tests {
 
         // title_full_index から空のエントリが除去される
         let normalized = normalize_query(&task.title);
-        assert!(result.title_full_index.get(normalized.key.as_str()).is_none());
+        assert!(
+            result
+                .title_full_index
+                .get(normalized.key.as_str())
+                .is_none()
+        );
     }
 
     // =========================================================================
@@ -12636,7 +12551,12 @@ mod apply_changes_tests {
 
         // インデックスにもエントリが残らない
         let normalized = normalize_query(&task.title);
-        assert!(result.title_full_index.get(normalized.key.as_str()).is_none());
+        assert!(
+            result
+                .title_full_index
+                .get(normalized.key.as_str())
+                .is_none()
+        );
     }
 
     /// Test 9: Update followed by Remove cancels out in same batch
@@ -12667,8 +12587,18 @@ mod apply_changes_tests {
         // old と new のどちらのインデックスも存在しない
         let old_normalized = normalize_query(&old_task.title);
         let new_normalized = normalize_query(&new_task.title);
-        assert!(result.title_full_index.get(old_normalized.key.as_str()).is_none());
-        assert!(result.title_full_index.get(new_normalized.key.as_str()).is_none());
+        assert!(
+            result
+                .title_full_index
+                .get(old_normalized.key.as_str())
+                .is_none()
+        );
+        assert!(
+            result
+                .title_full_index
+                .get(new_normalized.key.as_str())
+                .is_none()
+        );
     }
 
     // =========================================================================
@@ -13427,7 +13357,7 @@ mod ngram_key_tests {
     #[rstest]
     fn interned_keys_in_mutable_index_no_string_clone() {
         let mut pool = KeyPool::new();
-        let mut index: MutableInternedIndex = std::collections::HashMap::new();
+        let mut index: MutableIndex = std::collections::HashMap::new();
         let task_id = TaskId::generate();
 
         let key1 = pool.intern("index_test_key");
@@ -13458,7 +13388,7 @@ mod index_ngrams_streaming_tests {
 
     #[rstest]
     fn index_ngrams_streaming_basic() {
-        let mut index: MutableInternedNgramIndex = std::collections::HashMap::new();
+        let mut index: MutableIndex = std::collections::HashMap::new();
         let mut pool = KeyPool::new();
         let config = default_config();
         let task_id = TaskId::generate();
@@ -13475,7 +13405,7 @@ mod index_ngrams_streaming_tests {
 
     #[rstest]
     fn index_ngrams_streaming_multiple_tasks() {
-        let mut index: MutableInternedNgramIndex = std::collections::HashMap::new();
+        let mut index: MutableIndex = std::collections::HashMap::new();
         let mut pool = KeyPool::new();
         let config = default_config();
         let task_id1 = TaskId::generate();
@@ -13496,11 +13426,11 @@ mod index_ngrams_streaming_tests {
         let config = default_config();
         let task_id = TaskId::generate();
 
-        let mut streaming_index: MutableInternedNgramIndex = std::collections::HashMap::new();
+        let mut streaming_index: MutableIndex = std::collections::HashMap::new();
         let mut pool = KeyPool::new();
         index_ngrams_streaming(&mut streaming_index, "テスト", &task_id, &config, &mut pool);
 
-        let mut batch_index: MutableNgramIndex = std::collections::HashMap::new();
+        let mut batch_index: MutableIndex = std::collections::HashMap::new();
         index_ngrams_batch(&mut batch_index, "テスト", &task_id, &config);
 
         assert_eq!(streaming_index.len(), batch_index.len());
@@ -13512,7 +13442,7 @@ mod index_ngrams_streaming_tests {
 
     #[rstest]
     fn index_ngrams_streaming_pool_reuse() {
-        let mut index: MutableInternedNgramIndex = std::collections::HashMap::new();
+        let mut index: MutableIndex = std::collections::HashMap::new();
         let mut pool = KeyPool::new();
         let config = default_config();
         let task_id = TaskId::generate();
@@ -13525,7 +13455,7 @@ mod index_ngrams_streaming_tests {
 
     #[rstest]
     fn index_ngrams_streaming_empty_token() {
-        let mut index: MutableInternedNgramIndex = std::collections::HashMap::new();
+        let mut index: MutableIndex = std::collections::HashMap::new();
         let mut pool = KeyPool::new();
         let config = default_config();
         let task_id = TaskId::generate();
@@ -13537,7 +13467,7 @@ mod index_ngrams_streaming_tests {
 
     #[rstest]
     fn index_ngrams_streaming_token_shorter_than_ngram_size() {
-        let mut index: MutableInternedNgramIndex = std::collections::HashMap::new();
+        let mut index: MutableIndex = std::collections::HashMap::new();
         let mut pool = KeyPool::new();
         let config = default_config();
         let task_id = TaskId::generate();
@@ -13549,7 +13479,7 @@ mod index_ngrams_streaming_tests {
 
     #[rstest]
     fn index_ngrams_streaming_unicode_japanese() {
-        let mut index: MutableInternedNgramIndex = std::collections::HashMap::new();
+        let mut index: MutableIndex = std::collections::HashMap::new();
         let mut pool = KeyPool::new();
         let config = default_config();
         let task_id = TaskId::generate();
@@ -13563,7 +13493,7 @@ mod index_ngrams_streaming_tests {
 
     #[rstest]
     fn index_ngrams_streaming_unicode_longer() {
-        let mut index: MutableInternedNgramIndex = std::collections::HashMap::new();
+        let mut index: MutableIndex = std::collections::HashMap::new();
         let mut pool = KeyPool::new();
         let config = default_config();
         let task_id = TaskId::generate();
@@ -13575,7 +13505,7 @@ mod index_ngrams_streaming_tests {
 
     #[rstest]
     fn remove_ngrams_streaming_basic() {
-        let mut index: MutableInternedNgramIndex = std::collections::HashMap::new();
+        let mut index: MutableIndex = std::collections::HashMap::new();
         let mut pool = KeyPool::new();
         let config = default_config();
         let task_id = TaskId::generate();
@@ -13595,11 +13525,11 @@ mod index_ngrams_streaming_tests {
         let config = default_config();
         let task_id = TaskId::generate();
 
-        let mut add_index: MutableInternedNgramIndex = std::collections::HashMap::new();
+        let mut add_index: MutableIndex = std::collections::HashMap::new();
         let mut pool1 = KeyPool::new();
         index_ngrams_streaming(&mut add_index, "hello", &task_id, &config, &mut pool1);
 
-        let mut remove_index: MutableInternedNgramIndex = std::collections::HashMap::new();
+        let mut remove_index: MutableIndex = std::collections::HashMap::new();
         let mut pool2 = KeyPool::new();
         remove_ngrams_streaming(&mut remove_index, "hello", &task_id, &config, &mut pool2);
 
@@ -13613,7 +13543,7 @@ mod index_ngrams_streaming_tests {
 
     #[rstest]
     fn index_ngrams_streaming_max_ngrams_limit() {
-        let mut index: MutableInternedNgramIndex = std::collections::HashMap::new();
+        let mut index: MutableIndex = std::collections::HashMap::new();
         let mut pool = KeyPool::new();
         let config = SearchIndexConfig {
             max_ngrams_per_token: 2,
@@ -13632,7 +13562,7 @@ mod index_ngrams_streaming_tests {
 
     #[rstest]
     fn index_ngrams_streaming_exact_ngram_size() {
-        let mut index: MutableInternedNgramIndex = std::collections::HashMap::new();
+        let mut index: MutableIndex = std::collections::HashMap::new();
         let mut pool = KeyPool::new();
         let config = default_config();
         let task_id = TaskId::generate();
@@ -13646,7 +13576,7 @@ mod index_ngrams_streaming_tests {
 
     #[rstest]
     fn index_ngrams_streaming_repeated_same_task() {
-        let mut index: MutableInternedNgramIndex = std::collections::HashMap::new();
+        let mut index: MutableIndex = std::collections::HashMap::new();
         let mut pool = KeyPool::new();
         let config = default_config();
         let task_id = TaskId::generate();
@@ -13884,7 +13814,8 @@ mod compute_merged_posting_list_sorted_tests {
         let remove: Vec<TaskId> = vec![];
 
         // Act
-        let result = SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &add, &remove);
+        let result =
+            SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &add, &remove);
 
         // Assert
         assert!(result.is_empty());
@@ -13911,7 +13842,8 @@ mod compute_merged_posting_list_sorted_tests {
         let remove: Vec<TaskId> = vec![];
 
         // Act
-        let result = SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &add, &remove);
+        let result =
+            SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &add, &remove);
 
         // Assert
         assert_eq!(result, task_ids(&[1, 3, 5, 7, 9]));
@@ -13925,7 +13857,8 @@ mod compute_merged_posting_list_sorted_tests {
         let remove: Vec<TaskId> = vec![];
 
         // Act
-        let result = SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &add, &remove);
+        let result =
+            SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &add, &remove);
 
         // Assert
         assert_eq!(result, task_ids(&[2, 4, 6, 8, 10]));
@@ -13939,7 +13872,8 @@ mod compute_merged_posting_list_sorted_tests {
         let remove = task_ids(&[1, 2, 3]);
 
         // Act
-        let result = SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &add, &remove);
+        let result =
+            SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &add, &remove);
 
         // Assert
         assert!(result.is_empty());
@@ -13957,7 +13891,8 @@ mod compute_merged_posting_list_sorted_tests {
         let remove = task_ids(&[3, 4]);
 
         // Act
-        let result = SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &add, &remove);
+        let result =
+            SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &add, &remove);
 
         // Assert: (existing ∪ add) - remove = {1,2,3,4,5,6,7,8} - {3,4} = {1,2,5,6,7,8}
         assert_eq!(result, task_ids(&[1, 2, 5, 6, 7, 8]));
@@ -13971,7 +13906,8 @@ mod compute_merged_posting_list_sorted_tests {
         let remove: Vec<TaskId> = vec![];
 
         // Act
-        let result = SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &add, &remove);
+        let result =
+            SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &add, &remove);
 
         // Assert
         assert_eq!(result, task_ids(&[1, 2, 3, 4, 5, 6]));
@@ -13985,7 +13921,8 @@ mod compute_merged_posting_list_sorted_tests {
         let remove = task_ids(&[2, 4]);
 
         // Act
-        let result = SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &add, &remove);
+        let result =
+            SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &add, &remove);
 
         // Assert
         assert_eq!(result, task_ids(&[1, 3, 5]));
@@ -13999,7 +13936,8 @@ mod compute_merged_posting_list_sorted_tests {
         let remove = task_ids(&[2, 4]);
 
         // Act
-        let result = SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &add, &remove);
+        let result =
+            SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &add, &remove);
 
         // Assert
         assert_eq!(result, task_ids(&[1, 3, 5]));
@@ -14013,7 +13951,8 @@ mod compute_merged_posting_list_sorted_tests {
         let remove = task_ids(&[3, 4]); // 3 is in existing, 4 is in add
 
         // Act
-        let result = SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &add, &remove);
+        let result =
+            SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &add, &remove);
 
         // Assert
         assert_eq!(result, task_ids(&[1, 2, 5, 6]));
@@ -14031,7 +13970,8 @@ mod compute_merged_posting_list_sorted_tests {
         let remove: Vec<TaskId> = vec![];
 
         // Act
-        let result = SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &add, &remove);
+        let result =
+            SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &add, &remove);
 
         // Assert: duplicates should be deduplicated
         assert_eq!(result, task_ids(&[1, 3, 5, 7, 9]));
@@ -14045,7 +13985,8 @@ mod compute_merged_posting_list_sorted_tests {
         let remove = task_ids(&[3]); // remove the duplicate
 
         // Act
-        let result = SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &add, &remove);
+        let result =
+            SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &add, &remove);
 
         // Assert
         assert_eq!(result, task_ids(&[1, 5, 7]));
@@ -14065,11 +14006,8 @@ mod compute_merged_posting_list_sorted_tests {
         // Act
         let sorted_result =
             SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &add, &remove);
-        let original_result = SearchIndex::compute_merged_posting_list(
-            Some(existing),
-            Some(&add),
-            Some(&remove),
-        );
+        let original_result =
+            SearchIndex::compute_merged_posting_list(Some(existing), Some(&add), Some(&remove));
 
         // Assert
         assert_eq!(sorted_result, original_result);
@@ -14085,11 +14023,8 @@ mod compute_merged_posting_list_sorted_tests {
         // Act
         let sorted_result =
             SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &add, &remove);
-        let original_result = SearchIndex::compute_merged_posting_list(
-            Some(existing),
-            Some(&add),
-            Some(&remove),
-        );
+        let original_result =
+            SearchIndex::compute_merged_posting_list(Some(existing), Some(&add), Some(&remove));
 
         // Assert
         assert_eq!(sorted_result, original_result);
@@ -14142,7 +14077,8 @@ mod compute_merged_posting_list_sorted_tests {
         let remove = task_ids(&[1, 2, 3, 4, 5, 6]);
 
         // Act
-        let result = SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &add, &remove);
+        let result =
+            SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &add, &remove);
 
         // Assert
         assert!(result.is_empty());
@@ -14156,7 +14092,8 @@ mod compute_merged_posting_list_sorted_tests {
         let remove = task_ids(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
 
         // Act
-        let result = SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &add, &remove);
+        let result =
+            SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &add, &remove);
 
         // Assert
         assert!(result.is_empty());
@@ -14170,7 +14107,8 @@ mod compute_merged_posting_list_sorted_tests {
         let remove = task_ids(&[5]);
 
         // Act
-        let result = SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &add, &remove);
+        let result =
+            SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &add, &remove);
 
         // Assert
         assert_eq!(result, task_ids(&[10]));
@@ -14184,7 +14122,8 @@ mod compute_merged_posting_list_sorted_tests {
         let remove: Vec<TaskId> = vec![];
 
         // Act
-        let result = SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &add, &remove);
+        let result =
+            SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &add, &remove);
 
         // Assert
         assert_eq!(result, task_ids(&[1, 500_000, 1_000_000]));
@@ -14198,7 +14137,8 @@ mod compute_merged_posting_list_sorted_tests {
         let remove: Vec<TaskId> = vec![];
 
         // Act
-        let result = SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &add, &remove);
+        let result =
+            SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &add, &remove);
 
         // Assert
         assert_eq!(result, task_ids(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]));
@@ -14249,12 +14189,18 @@ mod compute_merged_posting_list_iter_tests {
     #[rstest]
     fn union_minus_remove() {
         // (1,2,3) ∪ (4,5,6) - (2,5) = (1,3,4,6)
-        assert_eq!(merge(&[1, 2, 3], &[4, 5, 6], &[2, 5]), task_ids(&[1, 3, 4, 6]));
+        assert_eq!(
+            merge(&[1, 2, 3], &[4, 5, 6], &[2, 5]),
+            task_ids(&[1, 3, 4, 6])
+        );
     }
 
     #[rstest]
     fn merge_without_remove_produces_sorted_union() {
-        assert_eq!(merge(&[1, 3, 5], &[2, 4, 6], &[]), task_ids(&[1, 2, 3, 4, 5, 6]));
+        assert_eq!(
+            merge(&[1, 3, 5], &[2, 4, 6], &[]),
+            task_ids(&[1, 2, 3, 4, 5, 6])
+        );
     }
 
     #[rstest]
@@ -14269,7 +14215,10 @@ mod compute_merged_posting_list_iter_tests {
 
     #[rstest]
     fn remove_from_both() {
-        assert_eq!(merge(&[1, 2, 3], &[4, 5, 6], &[1, 2, 4, 5]), task_ids(&[3, 6]));
+        assert_eq!(
+            merge(&[1, 2, 3], &[4, 5, 6], &[1, 2, 4, 5]),
+            task_ids(&[3, 6])
+        );
     }
 
     #[rstest]
@@ -14289,7 +14238,10 @@ mod compute_merged_posting_list_iter_tests {
 
     #[rstest]
     fn large_gap_in_ids() {
-        assert_eq!(merge(&[1, 1_000_000], &[500_000], &[]), task_ids(&[1, 500_000, 1_000_000]));
+        assert_eq!(
+            merge(&[1, 1_000_000], &[500_000], &[]),
+            task_ids(&[1, 500_000, 1_000_000])
+        );
     }
 
     #[rstest]
