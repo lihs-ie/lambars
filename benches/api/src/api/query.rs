@@ -1281,6 +1281,19 @@ pub fn index_ngrams_streaming(
 /// Provides clarity at call sites where add/remove deltas are built in parallel.
 pub use index_ngrams_streaming as remove_ngrams_streaming;
 
+// -----------------------------------------------------------------------------
+// N-gram Metrics (REQ-SEARCH-NGRAM-MEM-005)
+// -----------------------------------------------------------------------------
+
+/// Metrics for n-gram pool memory efficiency (REQ-SEARCH-NGRAM-MEM-005).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SearchIndexNgramMetrics {
+    pub ngram_generated_total: usize,
+    pub ngram_unique_total: usize,
+    pub pool_hit_rate: f64,
+    pub build_delta_elapsed_ms: u128,
+}
+
 /// Represents the delta (difference) for a `SearchIndex` update.
 ///
 /// Aggregates multiple `TaskChange`s into a single batch for efficient one-pass merging.
@@ -1351,6 +1364,31 @@ impl SearchIndexDelta {
         config: &SearchIndexConfig,
         tasks_by_id: &PersistentTreeMap<TaskId, Task>,
     ) -> Self {
+        Self::build_delta(changes, config, tasks_by_id).0
+    }
+
+    /// Constructs a delta from task changes and returns metrics (REQ-SEARCH-NGRAM-MEM-005).
+    ///
+    /// # Panics
+    ///
+    /// Panics on Remove followed by Add/Update for the same `TaskId`.
+    #[must_use]
+    pub fn from_changes_with_metrics(
+        changes: &[TaskChange],
+        config: &SearchIndexConfig,
+        tasks_by_id: &PersistentTreeMap<TaskId, Task>,
+    ) -> (Self, SearchIndexNgramMetrics) {
+        let start = std::time::Instant::now();
+        let (delta, ngram_pool) = Self::build_delta(changes, config, tasks_by_id);
+        let metrics = Self::create_metrics(&ngram_pool, start.elapsed().as_millis());
+        (delta, metrics)
+    }
+
+    fn build_delta(
+        changes: &[TaskChange],
+        config: &SearchIndexConfig,
+        tasks_by_id: &PersistentTreeMap<TaskId, Task>,
+    ) -> (Self, NgramKeyPool) {
         let mut delta = Self::default();
         let mut pending_tasks: std::collections::HashMap<TaskId, (Task, NormalizedTaskData)> =
             std::collections::HashMap::new();
@@ -1402,7 +1440,17 @@ impl SearchIndexDelta {
             }
         }
 
-        delta
+        (delta, ngram_pool)
+    }
+
+    #[must_use]
+    pub fn create_metrics(pool: &NgramKeyPool, elapsed_ms: u128) -> SearchIndexNgramMetrics {
+        SearchIndexNgramMetrics {
+            ngram_generated_total: pool.total_count(),
+            ngram_unique_total: pool.unique_count(),
+            pool_hit_rate: pool.hit_rate(),
+            build_delta_elapsed_ms: elapsed_ms,
+        }
     }
 
     fn collect_add(
@@ -13454,5 +13502,266 @@ mod index_ngrams_streaming_tests {
         let key = pool.intern("tes");
         let ids = index.get(&key).unwrap();
         assert_eq!(ids.len(), 2);
+    }
+}
+
+// =============================================================================
+// SearchIndexNgramMetrics Tests (REQ-SEARCH-NGRAM-MEM-005)
+// =============================================================================
+
+#[cfg(test)]
+mod search_index_ngram_metrics_tests {
+    use super::*;
+    use rstest::rstest;
+
+    // -------------------------------------------------------------------------
+    // Serialize/Deserialize Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn serialize_deserialize_roundtrip() {
+        // Arrange
+        let metrics = SearchIndexNgramMetrics {
+            ngram_generated_total: 1000,
+            ngram_unique_total: 500,
+            pool_hit_rate: 0.5,
+            build_delta_elapsed_ms: 42,
+        };
+
+        // Act
+        let json = serde_json::to_string(&metrics).expect("serialize should succeed");
+        let deserialized: SearchIndexNgramMetrics =
+            serde_json::from_str(&json).expect("deserialize should succeed");
+
+        // Assert
+        assert_eq!(deserialized.ngram_generated_total, 1000);
+        assert_eq!(deserialized.ngram_unique_total, 500);
+        assert!((deserialized.pool_hit_rate - 0.5).abs() < f64::EPSILON);
+        assert_eq!(deserialized.build_delta_elapsed_ms, 42);
+    }
+
+    #[rstest]
+    fn serialize_json_structure() {
+        // Arrange
+        let metrics = SearchIndexNgramMetrics {
+            ngram_generated_total: 100,
+            ngram_unique_total: 50,
+            pool_hit_rate: 0.75,
+            build_delta_elapsed_ms: 10,
+        };
+
+        // Act
+        let json = serde_json::to_string(&metrics).expect("serialize should succeed");
+
+        // Assert: Check JSON contains expected keys
+        assert!(json.contains("\"ngram_generated_total\":100"));
+        assert!(json.contains("\"ngram_unique_total\":50"));
+        assert!(json.contains("\"pool_hit_rate\":0.75"));
+        assert!(json.contains("\"build_delta_elapsed_ms\":10"));
+    }
+
+    #[rstest]
+    fn deserialize_from_json_string() {
+        // Arrange
+        let json = r#"{
+            "ngram_generated_total": 200,
+            "ngram_unique_total": 80,
+            "pool_hit_rate": 0.6,
+            "build_delta_elapsed_ms": 25
+        }"#;
+
+        // Act
+        let metrics: SearchIndexNgramMetrics =
+            serde_json::from_str(json).expect("deserialize should succeed");
+
+        // Assert
+        assert_eq!(metrics.ngram_generated_total, 200);
+        assert_eq!(metrics.ngram_unique_total, 80);
+        assert!((metrics.pool_hit_rate - 0.6).abs() < f64::EPSILON);
+        assert_eq!(metrics.build_delta_elapsed_ms, 25);
+    }
+
+    // -------------------------------------------------------------------------
+    // NgramKeyPool::hit_rate Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn hit_rate_zero_when_empty() {
+        // Arrange
+        let pool = NgramKeyPool::new();
+
+        // Act
+        let rate = pool.hit_rate();
+
+        // Assert
+        assert!((rate - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[rstest]
+    fn hit_rate_zero_when_all_misses() {
+        // Arrange
+        let mut pool = NgramKeyPool::new();
+
+        // Act: All unique strings -> all misses
+        pool.intern("abc");
+        pool.intern("def");
+        pool.intern("ghi");
+
+        // Assert
+        assert!((pool.hit_rate() - 0.0).abs() < f64::EPSILON);
+        assert_eq!(pool.total_count(), 3);
+        assert_eq!(pool.unique_count(), 3);
+    }
+
+    #[rstest]
+    fn hit_rate_half_when_duplicates() {
+        // Arrange
+        let mut pool = NgramKeyPool::new();
+
+        // Act: 2 unique + 2 hits = 50% hit rate
+        pool.intern("abc"); // miss
+        pool.intern("def"); // miss
+        pool.intern("abc"); // hit
+        pool.intern("def"); // hit
+
+        // Assert
+        assert!((pool.hit_rate() - 0.5).abs() < f64::EPSILON);
+        assert_eq!(pool.total_count(), 4);
+        assert_eq!(pool.unique_count(), 2);
+    }
+
+    #[rstest]
+    fn hit_rate_high_with_repeated_access() {
+        // Arrange
+        let mut pool = NgramKeyPool::new();
+
+        // Act: 1 miss + 9 hits = 90% hit rate
+        pool.intern("test"); // miss
+        for _ in 0..9 {
+            pool.intern("test"); // hit
+        }
+
+        // Assert
+        assert!((pool.hit_rate() - 0.9).abs() < f64::EPSILON);
+        assert_eq!(pool.total_count(), 10);
+        assert_eq!(pool.unique_count(), 1);
+    }
+
+    // -------------------------------------------------------------------------
+    // SearchIndexDelta::from_changes_with_metrics Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn from_changes_with_metrics_returns_correct_delta() {
+        use crate::domain::{Tag, Timestamp};
+
+        // Arrange
+        let config = SearchIndexConfig::default();
+        let tasks_by_id: PersistentTreeMap<TaskId, Task> = PersistentTreeMap::new();
+        let timestamp = Timestamp::now();
+        let task = Task::new(TaskId::generate(), "Hello World", timestamp)
+            .with_tags(PersistentHashSet::new().insert(Tag::new("tag1")));
+        let changes = vec![TaskChange::Add(task.clone())];
+
+        // Act
+        let (delta, metrics) =
+            SearchIndexDelta::from_changes_with_metrics(&changes, &config, &tasks_by_id);
+
+        // Assert: Delta should have entries
+        assert!(!delta.title_full_add.is_empty());
+
+        // Assert: Metrics should have valid values
+        assert!(metrics.ngram_generated_total > 0);
+        assert!(metrics.ngram_unique_total > 0);
+        // With n-gram mode enabled, we expect some n-grams
+        assert!(metrics.pool_hit_rate >= 0.0 && metrics.pool_hit_rate <= 1.0);
+    }
+
+    #[rstest]
+    fn from_changes_with_metrics_matches_from_changes() {
+        use crate::domain::{Tag, Timestamp};
+
+        // Arrange
+        let config = SearchIndexConfig::default();
+        let tasks_by_id: PersistentTreeMap<TaskId, Task> = PersistentTreeMap::new();
+        let timestamp = Timestamp::now();
+        let tags = PersistentHashSet::new()
+            .insert(Tag::new("rust"))
+            .insert(Tag::new("test"));
+        let task = Task::new(TaskId::generate(), "Test Task", timestamp).with_tags(tags);
+        let changes = vec![TaskChange::Add(task)];
+
+        // Act
+        let delta_only = SearchIndexDelta::from_changes(&changes, &config, &tasks_by_id);
+        let (delta_with_metrics, _) =
+            SearchIndexDelta::from_changes_with_metrics(&changes, &config, &tasks_by_id);
+
+        // Assert: Both deltas should produce same prefix index entries
+        assert_eq!(
+            delta_only.title_full_add.len(),
+            delta_with_metrics.title_full_add.len()
+        );
+        assert_eq!(
+            delta_only.title_word_add.len(),
+            delta_with_metrics.title_word_add.len()
+        );
+        assert_eq!(delta_only.tag_add.len(), delta_with_metrics.tag_add.len());
+    }
+
+    #[rstest]
+    fn from_changes_with_metrics_empty_changes() {
+        // Arrange
+        let config = SearchIndexConfig::default();
+        let tasks_by_id: PersistentTreeMap<TaskId, Task> = PersistentTreeMap::new();
+        let changes: Vec<TaskChange> = vec![];
+
+        // Act
+        let (delta, metrics) =
+            SearchIndexDelta::from_changes_with_metrics(&changes, &config, &tasks_by_id);
+
+        // Assert
+        assert!(delta.title_full_add.is_empty());
+        assert_eq!(metrics.ngram_generated_total, 0);
+        assert_eq!(metrics.ngram_unique_total, 0);
+        assert!((metrics.pool_hit_rate - 0.0).abs() < f64::EPSILON);
+    }
+
+    // -------------------------------------------------------------------------
+    // SearchIndexDelta::create_metrics Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn create_metrics_from_pool() {
+        // Arrange
+        let mut pool = NgramKeyPool::new();
+        pool.intern("abc"); // miss
+        pool.intern("def"); // miss
+        pool.intern("abc"); // hit
+        let elapsed_ms = 100;
+
+        // Act
+        let metrics = SearchIndexDelta::create_metrics(&pool, elapsed_ms);
+
+        // Assert
+        assert_eq!(metrics.ngram_generated_total, 3);
+        assert_eq!(metrics.ngram_unique_total, 2);
+        assert!((metrics.pool_hit_rate - (1.0 / 3.0)).abs() < 0.001);
+        assert_eq!(metrics.build_delta_elapsed_ms, 100);
+    }
+
+    #[rstest]
+    fn create_metrics_empty_pool() {
+        // Arrange
+        let pool = NgramKeyPool::new();
+        let elapsed_ms = 5;
+
+        // Act
+        let metrics = SearchIndexDelta::create_metrics(&pool, elapsed_ms);
+
+        // Assert
+        assert_eq!(metrics.ngram_generated_total, 0);
+        assert_eq!(metrics.ngram_unique_total, 0);
+        assert!((metrics.pool_hit_rate - 0.0).abs() < f64::EPSILON);
+        assert_eq!(metrics.build_delta_elapsed_ms, 5);
     }
 }
