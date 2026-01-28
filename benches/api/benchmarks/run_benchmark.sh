@@ -2216,6 +2216,8 @@ merge_phase_results() {
     # Initialize latency tracking arrays
     declare -a avg_latencies=()
     declare -a p50_latencies=()
+    declare -a p75_latencies=()
+    declare -a p90_latencies=()
     declare -a p95_latencies=()
     declare -a p99_latencies=()
 
@@ -2276,14 +2278,18 @@ merge_phase_results() {
                 fi
 
                 # Collect latencies for potential averaging
-                local avg_lat p50_lat p95_lat p99_lat
+                local avg_lat p50_lat p75_lat p90_lat p95_lat p99_lat
                 avg_lat=$(grep "Latency" "${wrk_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
                 p50_lat=$(grep -E "^[[:space:]]+50%" "${wrk_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
+                p75_lat=$(grep -E "^[[:space:]]+75%" "${wrk_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
+                p90_lat=$(grep -E "^[[:space:]]+90%" "${wrk_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
                 p95_lat=$(grep -E "^[[:space:]]+95%" "${wrk_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
                 p99_lat=$(grep -E "^[[:space:]]+99%" "${wrk_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
 
                 [[ -n "${avg_lat}" ]] && avg_latencies+=("${avg_lat}")
                 [[ -n "${p50_lat}" ]] && p50_latencies+=("${p50_lat}")
+                [[ -n "${p75_lat}" ]] && p75_latencies+=("${p75_lat}")
+                [[ -n "${p90_lat}" ]] && p90_latencies+=("${p90_lat}")
                 [[ -n "${p95_lat}" ]] && p95_latencies+=("${p95_lat}")
                 [[ -n "${p99_lat}" ]] && p99_latencies+=("${p99_lat}")
             fi
@@ -2308,12 +2314,18 @@ merge_phase_results() {
 
     # Use the last phase's latency values for the merged output (representative of peak load)
     # Exception: p99 uses max_p99 (worst case across all phases) for conservative reporting
-    local last_avg="" last_p50="" last_p95="" last_p99=""
+    local last_avg="" last_p50="" last_p75="" last_p90="" last_p95="" last_p99=""
     if [[ ${#avg_latencies[@]} -gt 0 ]]; then
         last_avg="${avg_latencies[-1]}"
     fi
     if [[ ${#p50_latencies[@]} -gt 0 ]]; then
         last_p50="${p50_latencies[-1]}"
+    fi
+    if [[ ${#p75_latencies[@]} -gt 0 ]]; then
+        last_p75="${p75_latencies[-1]}"
+    fi
+    if [[ ${#p90_latencies[@]} -gt 0 ]]; then
+        last_p90="${p90_latencies[-1]}"
     fi
     if [[ ${#p95_latencies[@]} -gt 0 ]]; then
         last_p95="${p95_latencies[-1]}"
@@ -2351,8 +2363,8 @@ Running ${total_duration}s test @ ${API_URL}
 
   Latency Distribution
      50%    ${last_p50:-N/A}
-     75%    N/A
-     90%    N/A
+     75%    ${last_p75:-N/A}
+     90%    ${last_p90:-N/A}
      95%    ${last_p95:-N/A}
      99%    ${max_p99_display}
      99.9%  N/A
