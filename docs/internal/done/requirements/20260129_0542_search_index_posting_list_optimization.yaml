@@ -1,0 +1,180 @@
+# SearchIndex posting list 最適化 Phase 3 要件定義
+#
+# 概要:
+#   compute_merged_posting_list のボトルネックを解消し、
+#   posting list マージと prefix index の String clone を削減する。
+#
+# 設計方針:
+#   1. posting list のマージは 1 パスで完結し、余計な Vec 再確保を避ける
+#   2. prefix index も n-gram と同様に局所インターン化を適用する
+#   3. 結果の順序と互換性は維持し、決定性を崩さない
+#
+# 参照:
+#   - docs/internal/requirements/20260128_1930_search_index_ngram_memory_optimization.yaml
+#   - benches/api/src/api/query.rs
+#   - benches/results/after/api-profiling-all-f06e3f8fe2bf4fe5d39991950abbcff5ed86da4f/tasks_bulk/benchmark/summary.txt
+#   - benches/results/after/api-profiling-all-f06e3f8fe2bf4fe5d39991950abbcff5ed86da4f/tasks_eff/benchmark/summary.txt
+
+version: "1.0.0"
+name: "search_index_posting_list_optimization"
+description: |
+  posting list マージ処理 (compute_merged_posting_list) を最適化し、
+  prefix index の String::clone を削減することで bulk/eff の性能目標を達成する。
+
+background:
+  problem: |
+    Flamegraph で compute_merged_posting_list が最大のボトルネックとなり、
+    merge_ngram_delta が次点、prefix index の String::clone も残存している。
+    n-gram インターンで一部改善したが、posting list マージのコストが支配的で
+    tasks_bulk / tasks_eff の目標に届いていない。
+  motivation: |
+    posting list のマージ効率を抜本改善し、更新コストの上限を引き下げる。
+  prior_art:
+    - name: "n-gram メモリ最適化 Phase 2"
+      description: "インターン化で n-gram の malloc は削減したが、マージ負荷が残存。"
+
+requirements:
+  # ======================================================================
+  # 1. posting list マージの最適化
+  # ======================================================================
+  - id: "REQ-SEARCH-PL-001"
+    name: "compute_merged_posting_list を 1 パスで最適化する"
+    description: |
+      - existing + add - remove を 1 パスで統合する。
+      - Vec の再確保を抑制するため、事前に容量を見積もる。
+      - 追加と削除の相殺は no-op とし、余計な確保を行わない。
+      - add/remove は key ごとに事前に sort + dedup されていることを前提とする。
+
+    methods:
+      - name: "compute_merged_posting_list"
+        signature: "fn compute_merged_posting_list(existing: &[TaskId], add: &[TaskId], remove: &[TaskId]) -> Vec<TaskId>"
+        description: |
+          - 入力はすべて TaskId の昇順 (sort + dedup 済み) を前提とする。
+          - 3 つのスライスを 1 回走査して結果を構築する。
+      - name: "prepare_delta_posting_lists"
+        signature: "fn prepare_delta_posting_lists(delta: &mut SearchIndexDelta)"
+        description: |
+          - delta の add/remove を key 単位で sort + dedup し、merge 前提を満たす。
+          - 追加と削除が空の key は事前に削除する。
+
+    implementations:
+      - type: "PostingListMergeStrategy"
+        description: |
+          - two-pointer 方式で add/remove を同時に消化する。
+          - remove は比較で捨て、add は順序を保って挿入する。
+          - 結果が空なら key を削除する。
+      - type: "DeltaPostingListPreparation"
+        description: |
+          - add/remove の Vec を key 単位で sort + dedup する。
+          - 1 回だけ整形し、merge 中の sort/dedup を禁止する。
+
+  # ======================================================================
+  # 2. prefix index の String clone 削減
+  # ======================================================================
+  - id: "REQ-SEARCH-PL-002"
+    name: "prefix index も局所インターン化する"
+    description: |
+      - title_full_index / title_word_index / tag_index の key 生成を intern 経由にする。
+      - SearchIndexDelta の prefix 系 key は clone ではなく参照共有で保持する。
+      - n-gram と同じインターンテーブルを共有し、重複を排除する。
+      - prefix/n-gram の key 型は Arc<str> など clone が O(1) の型に統一する。
+
+    methods:
+      - name: "PrefixKeyPool::intern"
+        signature: "fn intern(&mut self, value: &str) -> PrefixKey"
+        description: |
+          - 既存の key は再利用し、新規確保は 1 回だけ行う。
+      - name: "SearchIndexDelta::from_changes_with_prefix_pool"
+        signature: "fn from_changes_with_prefix_pool(changes: &[TaskChange], config: &SearchIndexConfig, pool: &mut KeyPool, scratch: &mut DeltaScratch) -> SearchIndexDelta"
+        description: |
+          - prefix key の生成はすべて pool を通す。
+          - token 正規化は 1 回だけ行い、再利用する。
+
+    implementations:
+      - type: "KeyPool"
+        description: |
+          - n-gram と prefix の両方を intern できる共通プール。
+          - ライフタイムは apply_changes の 1 回に限定する。
+      - type: "DeltaScratch"
+        description: |
+          - token 化と key 収集用のバッファを使い回す。
+          - token/keys の Vec は clear で再利用する。
+      - type: "PrefixIndexKeyMigration"
+        description: |
+          - PersistentTreeMap の key を String から Arc<str> へ移行する。
+          - NgramKey と同様に Hash/Eq/Ord は str 値で比較する。
+
+  # ======================================================================
+  # 3. existing の収集回避
+  # ======================================================================
+  - id: "REQ-SEARCH-PL-003"
+    name: "existing の Vec 収集を回避する"
+    description: |
+      - PersistentVector からの iterator を直接 merge へ渡す。
+      - 既存 posting list を Vec にコピーするパスを禁止する。
+
+    methods:
+      - name: "compute_merged_posting_list_iter"
+        signature: "fn compute_merged_posting_list_iter(existing: impl Iterator<Item = TaskId>, add: &[TaskId], remove: &[TaskId]) -> Vec<TaskId>"
+        description: |
+          - existing を iterator で受け取り、追加の Vec 生成をしない。
+
+    implementations:
+      - type: "PostingListMergeIter"
+        description: |
+          - existing iterator を 1 パスで消費し、結果 Vec のみ確保する。
+
+  # ======================================================================
+  # 4. 計測と評価
+  # ======================================================================
+  - id: "REQ-SEARCH-PL-004"
+    name: "posting list マージの効果を計測する"
+    description: |
+      - compute_merged_posting_list の呼び出し回数と合計時間を計測する。
+      - prefix key の clone 回数を 0 にする。
+      - tasks_bulk / tasks_eff の Avg Latency が 500ms 以下になるまで継続評価する。
+
+    implementations:
+      - type: "SearchIndexMergeMetrics"
+        description: |
+          - fields:
+            - merge_calls_total: usize
+            - merge_elapsed_ms: u128
+            - prefix_key_clones: usize
+          - 出力先: benches/results/**/benchmark/meta/search_index_merge_metrics.json
+
+non_functional_requirements:
+  performance:
+    - "compute_merged_posting_list の CPU サンプルを現状比 80% 以上削減する。"
+    - "tasks_bulk / tasks_eff の RPS を現状比 2 倍以上に引き上げる。"
+  compatibility:
+    - "検索結果の一致性は維持し、差分テストは全て通過する。"
+  testing:
+    - "posting list マージの入力順序が崩れないことを property test で検証する。"
+    - "prefix key の clone が発生しないことを単体テストで検証する。"
+
+future_extensions:
+  - id: "EXT-SEARCH-PL-001"
+    name: "posting list 圧縮形式の検討"
+    description: |
+      Roaring Bitmap などの圧縮形式の適用可能性を評価する。
+    rationale: |
+      現段階では実装コストが高いため、Phase 3 の範囲外とする。
+
+implementation_plan:
+  - step: "delta 事前整形 (sort/dedup)"
+    details: |
+      add/remove の posting list を key 単位で整形し、merge 前提を満たす。
+  - step: "posting list マージの 1 パス実装"
+    details: |
+      compute_merged_posting_list のアルゴリズムを置換し、
+      事前容量確保と 1 パス統合を実装する。
+  - step: "prefix key の局所インターン化と key 移行"
+    details: |
+      KeyPool と DeltaScratch を導入し、prefix key の clone を排除する。
+  - step: "existing 収集回避"
+    details: |
+      PersistentVector の iterator を直接 merge に渡す実装へ置換する。
+  - step: "計測と性能評価"
+    details: |
+      SearchIndexMergeMetrics を meta に追加し、tasks_bulk / tasks_eff を再計測する。
