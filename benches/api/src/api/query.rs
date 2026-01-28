@@ -1900,6 +1900,41 @@ impl SearchIndexDelta {
             task_id,
         );
     }
+
+    /// Prepares delta posting lists by sorting, deduplicating, and removing empty entries.
+    ///
+    /// Call before merging the delta into the main index.
+    pub fn prepare_posting_lists(&mut self) {
+        prepare_index(&mut self.title_full_add);
+        prepare_index(&mut self.title_full_remove);
+        prepare_index(&mut self.title_word_add);
+        prepare_index(&mut self.title_word_remove);
+        prepare_index(&mut self.tag_add);
+        prepare_index(&mut self.tag_remove);
+
+        prepare_index(&mut self.title_full_ngram_add);
+        prepare_index(&mut self.title_full_ngram_remove);
+        prepare_index(&mut self.title_word_ngram_add);
+        prepare_index(&mut self.title_word_ngram_remove);
+        prepare_index(&mut self.tag_ngram_add);
+        prepare_index(&mut self.tag_ngram_remove);
+
+        prepare_index(&mut self.title_full_all_suffix_add);
+        prepare_index(&mut self.title_full_all_suffix_remove);
+        prepare_index(&mut self.title_word_all_suffix_add);
+        prepare_index(&mut self.title_word_all_suffix_remove);
+        prepare_index(&mut self.tag_all_suffix_add);
+        prepare_index(&mut self.tag_all_suffix_remove);
+    }
+}
+
+/// Sorts and deduplicates posting lists in an index, removing empty entries.
+fn prepare_index<K: Eq + std::hash::Hash>(index: &mut std::collections::HashMap<K, Vec<TaskId>>) {
+    index.retain(|_, posting_list| {
+        posting_list.sort();
+        posting_list.dedup();
+        !posting_list.is_empty()
+    });
 }
 
 // -----------------------------------------------------------------------------
@@ -11844,11 +11879,158 @@ mod search_index_delta_tests {
 
         assert_eq!(delta_tags, index_tags, "Tag sets should match");
     }
-}
 
-// =============================================================================
-// SearchIndex::apply_changes Tests (REQ-SEARCH-NGRAM-PERF-001 Part 3)
-// =============================================================================
+    #[rstest]
+    fn prepare_posting_lists_sorts_task_ids() {
+        let mut delta = SearchIndexDelta::default();
+        let task_id_1 = task_id_from_u128(100);
+        let task_id_2 = task_id_from_u128(50);
+        let task_id_3 = task_id_from_u128(75);
+
+        // Insert in unsorted order
+        delta.title_full_add.insert(
+            "test".to_string(),
+            vec![task_id_1.clone(), task_id_2.clone(), task_id_3.clone()],
+        );
+
+        delta.prepare_posting_lists();
+
+        let posting_list = delta.title_full_add.get("test").expect("key should exist");
+        let expected = {
+            let mut ids = vec![task_id_1, task_id_2, task_id_3];
+            ids.sort();
+            ids
+        };
+        assert_eq!(posting_list, &expected, "posting list should be sorted");
+    }
+
+    #[rstest]
+    fn prepare_posting_lists_removes_duplicates() {
+        let mut delta = SearchIndexDelta::default();
+        let task_id = task_id_from_u128(42);
+
+        delta.tag_add.insert(
+            "tag".to_string(),
+            vec![task_id.clone(), task_id.clone(), task_id.clone()],
+        );
+
+        delta.prepare_posting_lists();
+
+        let posting_list = delta.tag_add.get("tag").expect("key should exist");
+        assert_eq!(posting_list.len(), 1, "duplicates should be removed");
+        assert_eq!(posting_list[0], task_id);
+    }
+
+    #[rstest]
+    fn prepare_posting_lists_removes_empty_keys() {
+        let mut delta = SearchIndexDelta::default();
+
+        delta.title_word_add.insert("empty".to_string(), vec![]);
+
+        delta.prepare_posting_lists();
+
+        assert!(
+            !delta.title_word_add.contains_key("empty"),
+            "empty key should be removed"
+        );
+    }
+
+    #[rstest]
+    fn prepare_posting_lists_preserves_non_empty() {
+        let mut delta = SearchIndexDelta::default();
+        let task_id = task_id_from_u128(1);
+
+        delta
+            .title_full_add
+            .insert("title".to_string(), vec![task_id.clone()]);
+        delta
+            .tag_remove
+            .insert("tag".to_string(), vec![task_id.clone()]);
+
+        let ngram_key = NgramKey::new("ngr");
+        delta
+            .title_word_ngram_add
+            .insert(ngram_key.clone(), vec![task_id.clone()]);
+
+        delta.prepare_posting_lists();
+
+        assert!(
+            delta.title_full_add.contains_key("title"),
+            "non-empty title_full_add should be preserved"
+        );
+        assert!(
+            delta.tag_remove.contains_key("tag"),
+            "non-empty tag_remove should be preserved"
+        );
+        assert!(
+            delta.title_word_ngram_add.contains_key(&ngram_key),
+            "non-empty ngram index should be preserved"
+        );
+    }
+
+    #[rstest]
+    fn prepare_posting_lists_handles_interned_ngram_indexes() {
+        let mut delta = SearchIndexDelta::default();
+        let task_id_1 = task_id_from_u128(200);
+        let task_id_2 = task_id_from_u128(100);
+        let task_id_3 = task_id_from_u128(150);
+        let ngram_key = NgramKey::new("abc");
+
+        delta.tag_ngram_add.insert(
+            ngram_key.clone(),
+            vec![
+                task_id_1.clone(),
+                task_id_2.clone(),
+                task_id_1.clone(),
+                task_id_3.clone(),
+            ],
+        );
+
+        delta.prepare_posting_lists();
+
+        let posting_list = delta
+            .tag_ngram_add
+            .get(&ngram_key)
+            .expect("key should exist");
+        let expected = {
+            let mut ids = vec![task_id_1, task_id_2, task_id_3];
+            ids.sort();
+            ids
+        };
+        assert_eq!(
+            posting_list, &expected,
+            "ngram posting list should be sorted and deduplicated"
+        );
+    }
+
+    #[rstest]
+    fn prepare_posting_lists_handles_all_suffix_indexes() {
+        let mut delta = SearchIndexDelta::default();
+        let task_id_1 = task_id_from_u128(30);
+        let task_id_2 = task_id_from_u128(10);
+
+        delta.title_full_all_suffix_add.insert(
+            "suffix".to_string(),
+            vec![task_id_1.clone(), task_id_2.clone()],
+        );
+
+        delta.prepare_posting_lists();
+
+        let posting_list = delta
+            .title_full_all_suffix_add
+            .get("suffix")
+            .expect("key should exist");
+        let expected = {
+            let mut ids = vec![task_id_1, task_id_2];
+            ids.sort();
+            ids
+        };
+        assert_eq!(
+            posting_list, &expected,
+            "all-suffix posting list should be sorted"
+        );
+    }
+}
 
 #[cfg(test)]
 #[allow(
