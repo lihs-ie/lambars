@@ -1108,7 +1108,11 @@ impl NgramKeyPool {
     #[allow(clippy::cast_precision_loss)]
     pub fn hit_rate(&self) -> f64 {
         let total = self.hit_count + self.miss_count;
-        if total == 0 { 0.0 } else { self.hit_count as f64 / total as f64 }
+        if total == 0 {
+            0.0
+        } else {
+            self.hit_count as f64 / total as f64
+        }
     }
 
     pub fn unique_count(&self) -> usize {
@@ -1119,6 +1123,115 @@ impl NgramKeyPool {
         self.hit_count + self.miss_count
     }
 }
+
+// -----------------------------------------------------------------------------
+// Streaming N-gram Generation (REQ-SEARCH-NGRAM-MEM-001)
+// -----------------------------------------------------------------------------
+
+/// Streaming n-gram generation window.
+///
+/// Generates n-grams as an iterator, avoiding intermediate `Vec<String>` allocation.
+/// Returns `&str` slices instead of owned `String`s to eliminate per-n-gram allocation.
+///
+/// # UTF-8 Safety
+///
+/// Uses `char_indices()` to ensure byte boundaries align with UTF-8 character boundaries,
+/// supporting multi-byte characters correctly.
+///
+/// # Example
+///
+/// ```ignore
+/// let window = NgramWindow::new("hello", 3, 100);
+/// let ngrams: Vec<&str> = window.collect();
+/// assert_eq!(ngrams, vec!["hel", "ell", "llo"]);
+/// ```
+pub struct NgramWindow<'a> {
+    token: &'a str,
+    char_indices: Vec<usize>,
+    current: usize,
+    end: usize,
+    ngram_size: usize,
+}
+
+impl<'a> NgramWindow<'a> {
+    /// Creates a UTF-8 safe n-gram window.
+    ///
+    /// Returns an empty iterator if `ngram_size < 2`, `max_ngrams == 0`,
+    /// or token is shorter than `ngram_size`.
+    pub fn new(token: &'a str, ngram_size: usize, max_ngrams: usize) -> Self {
+        // Early return: invalid ngram_size or max_ngrams == 0
+        if ngram_size < 2 || max_ngrams == 0 {
+            return Self {
+                token,
+                char_indices: Vec::new(),
+                current: 0,
+                end: 0,
+                ngram_size,
+            };
+        }
+
+        // Collect only byte positions (char values are unused)
+        let char_indices: Vec<usize> = token.char_indices().map(|(i, _)| i).collect();
+        let char_count = char_indices.len();
+
+        if char_count < ngram_size {
+            return Self {
+                token,
+                char_indices: Vec::new(),
+                current: 0,
+                end: 0,
+                ngram_size,
+            };
+        }
+
+        let total = char_count - ngram_size + 1;
+        let end = total.min(max_ngrams);
+
+        Self {
+            token,
+            char_indices,
+            current: 0,
+            end,
+            ngram_size,
+        }
+    }
+
+    pub const fn len(&self) -> usize {
+        self.end.saturating_sub(self.current)
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+impl<'a> Iterator for NgramWindow<'a> {
+    type Item = &'a str;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.current >= self.end {
+            return None;
+        }
+
+        let start_byte = self.char_indices[self.current];
+        let end_index = self.current + self.ngram_size;
+        let end_byte = if end_index < self.char_indices.len() {
+            self.char_indices[end_index]
+        } else {
+            self.token.len()
+        };
+
+        self.current += 1;
+        Some(&self.token[start_byte..end_byte])
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.len();
+        (remaining, Some(remaining))
+    }
+}
+
+impl ExactSizeIterator for NgramWindow<'_> {}
 
 /// Represents the delta (difference) for a `SearchIndex` update.
 ///
@@ -8657,6 +8770,224 @@ mod ngram_tests {
                 char_count
             );
         }
+
+        /// Property: `NgramWindow` produces identical results to `generate_ngrams`.
+        ///
+        /// Law: `NgramWindow::new(t, n, m).collect() == generate_ngrams(t, n, m)`.
+        #[test]
+        fn ngram_window_matches_generate_ngrams_property(
+            token in "[a-z]{1,30}",
+            ngram_size in 2usize..=5,
+            max_ngrams in 1usize..=50
+        ) {
+            let window_result: Vec<String> = NgramWindow::new(&token, ngram_size, max_ngrams)
+                .map(ToString::to_string)
+                .collect();
+            let generate_result = generate_ngrams(&token, ngram_size, max_ngrams);
+
+            prop_assert_eq!(
+                window_result,
+                generate_result,
+                "token='{}', ngram_size={}, max_ngrams={}",
+                token,
+                ngram_size,
+                max_ngrams
+            );
+        }
+
+        /// Property: `NgramWindow` produces identical results for multibyte strings.
+        ///
+        /// Law: Multibyte UTF-8 strings are handled correctly by both implementations.
+        #[test]
+        fn ngram_window_matches_generate_ngrams_multibyte_property(
+            token in "[あ-ん]{1,15}",
+            ngram_size in 2usize..=4,
+            max_ngrams in 1usize..=30
+        ) {
+            let window_result: Vec<String> = NgramWindow::new(&token, ngram_size, max_ngrams)
+                .map(ToString::to_string)
+                .collect();
+            let generate_result = generate_ngrams(&token, ngram_size, max_ngrams);
+
+            prop_assert_eq!(
+                window_result,
+                generate_result,
+                "token='{}', ngram_size={}, max_ngrams={}",
+                token,
+                ngram_size,
+                max_ngrams
+            );
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // NgramWindow Unit Tests (REQ-SEARCH-NGRAM-MEM-001)
+    // -------------------------------------------------------------------------
+
+    /// Tests basic ASCII n-gram generation with `NgramWindow`.
+    ///
+    /// - Input: "hello", `ngram_size`=3, `max_ngrams`=100
+    /// - Expected: 3 n-grams: "hel", "ell", "llo"
+    #[rstest]
+    fn ngram_window_ascii_basic() {
+        let window = NgramWindow::new("hello", 3, 100);
+        let ngrams: Vec<&str> = window.collect();
+        assert_eq!(ngrams, vec!["hel", "ell", "llo"]);
+    }
+
+    /// Tests Unicode (Japanese) n-gram generation with `NgramWindow`.
+    ///
+    /// - Input: "こんにちは", `ngram_size`=2, `max_ngrams`=100
+    /// - Expected: 4 n-grams
+    #[rstest]
+    fn ngram_window_unicode_basic() {
+        let window = NgramWindow::new("こんにちは", 2, 100);
+        let ngrams: Vec<&str> = window.collect();
+        assert_eq!(ngrams, vec!["こん", "んに", "にち", "ちは"]);
+    }
+
+    /// Tests `max_ngrams` limit enforcement.
+    ///
+    /// - Input: "hello", `ngram_size`=3, `max_ngrams`=2
+    /// - Expected: Only first 2 n-grams: "hel", "ell"
+    #[rstest]
+    fn ngram_window_max_ngrams_limit() {
+        let window = NgramWindow::new("hello", 3, 2);
+        let ngrams: Vec<&str> = window.collect();
+        assert_eq!(ngrams, vec!["hel", "ell"]);
+    }
+
+    /// Tests that short strings (fewer chars than `ngram_size`) return empty.
+    ///
+    /// - Input: "ab", `ngram_size`=3, `max_ngrams`=100
+    /// - Expected: Empty
+    #[rstest]
+    fn ngram_window_short_string() {
+        let mut window = NgramWindow::new("ab", 3, 100);
+        assert!(window.next().is_none());
+    }
+
+    /// Tests exact length string (same chars as `ngram_size`).
+    ///
+    /// - Input: "abc", `ngram_size`=3, `max_ngrams`=100
+    /// - Expected: 1 n-gram: "abc"
+    #[rstest]
+    fn ngram_window_exact_length() {
+        let window = NgramWindow::new("abc", 3, 100);
+        let ngrams: Vec<&str> = window.collect();
+        assert_eq!(ngrams, vec!["abc"]);
+    }
+
+    /// Tests empty string input.
+    ///
+    /// - Input: "", `ngram_size`=3, `max_ngrams`=100
+    /// - Expected: Empty
+    #[rstest]
+    fn ngram_window_empty_string() {
+        let mut window = NgramWindow::new("", 3, 100);
+        assert!(window.next().is_none());
+    }
+
+    /// Tests `len()` and `is_empty()` methods.
+    ///
+    /// Verifies that `len()` decreases as items are consumed and
+    /// `is_empty()` returns `true` when exhausted.
+    #[rstest]
+    fn ngram_window_len_and_is_empty() {
+        let mut window = NgramWindow::new("hello", 3, 100);
+        assert_eq!(window.len(), 3);
+        assert!(!window.is_empty());
+
+        window.next();
+        assert_eq!(window.len(), 2);
+
+        window.next();
+        window.next();
+        assert_eq!(window.len(), 0);
+        assert!(window.is_empty());
+    }
+
+    /// Tests `size_hint()` implementation.
+    ///
+    /// Verifies that `size_hint()` returns exact bounds.
+    #[rstest]
+    fn ngram_window_size_hint() {
+        let window = NgramWindow::new("hello", 3, 100);
+        assert_eq!(window.size_hint(), (3, Some(3)));
+    }
+
+    /// Tests that `NgramWindow` matches `generate_ngrams` for ASCII.
+    ///
+    /// Ensures backward compatibility with existing implementation.
+    #[rstest]
+    fn ngram_window_matches_generate_ngrams_ascii() {
+        let token = "callback";
+        let config = SearchIndexConfig::default();
+
+        let window = NgramWindow::new(token, config.ngram_size, config.max_ngrams_per_token);
+        let window_ngrams: Vec<String> = window.map(ToString::to_string).collect();
+
+        let generated = generate_ngrams(token, config.ngram_size, config.max_ngrams_per_token);
+
+        assert_eq!(window_ngrams, generated);
+    }
+
+    /// Tests that `NgramWindow` matches `generate_ngrams` for Unicode.
+    ///
+    /// Ensures backward compatibility with existing implementation for multibyte strings.
+    #[rstest]
+    fn ngram_window_matches_generate_ngrams_unicode() {
+        let token = "テスト文字列";
+        let config = SearchIndexConfig::default();
+
+        let window = NgramWindow::new(token, config.ngram_size, config.max_ngrams_per_token);
+        let window_ngrams: Vec<String> = window.map(ToString::to_string).collect();
+
+        let generated = generate_ngrams(token, config.ngram_size, config.max_ngrams_per_token);
+
+        assert_eq!(window_ngrams, generated);
+    }
+
+    /// Tests invalid `ngram_size` (less than 2) returns empty.
+    ///
+    /// - Input: "hello", `ngram_size`=1, `max_ngrams`=100
+    /// - Expected: Empty (same as `generate_ngrams`)
+    #[rstest]
+    fn ngram_window_invalid_size() {
+        let mut window = NgramWindow::new("hello", 1, 100);
+        assert!(window.next().is_none());
+    }
+
+    /// Tests `ngram_size` of 0 returns empty.
+    ///
+    /// - Input: "hello", `ngram_size`=0, `max_ngrams`=100
+    /// - Expected: Empty (same as `generate_ngrams`)
+    #[rstest]
+    fn ngram_window_zero_size() {
+        let mut window = NgramWindow::new("hello", 0, 100);
+        assert!(window.next().is_none());
+    }
+
+    /// Tests `max_ngrams` of 0 returns empty without building `char_indices`.
+    ///
+    /// - Input: "hello", `ngram_size`=3, `max_ngrams`=0
+    /// - Expected: Empty (early return optimization)
+    #[rstest]
+    fn ngram_window_max_ngrams_zero() {
+        let mut window = NgramWindow::new("hello", 3, 0);
+        assert!(window.next().is_none());
+    }
+
+    /// Tests `ExactSizeIterator` trait implementation.
+    ///
+    /// Verifies that `len()` returns exact remaining count.
+    #[rstest]
+    fn ngram_window_exact_size_iterator() {
+        let window = NgramWindow::new("hello", 3, 100);
+
+        // ExactSizeIterator requires len() to match actual remaining items
+        let initial_len = window.len();
+        assert_eq!(window.count(), initial_len);
     }
 }
 
