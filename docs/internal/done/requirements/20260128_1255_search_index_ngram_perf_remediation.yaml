@@ -1,0 +1,182 @@
+# SearchIndex n-gram 性能ギャップ是正 要件定義
+#
+# 概要:
+#   n-gram 置換後も未達の bulk/eff 性能目標を満たすための改善と計測整備を行う。
+#
+# 設計方針:
+#   1. 既存 API 互換性を維持しつつ性能目標を達成する
+#   2. 計測データを拡充し、性能要件の判定可能性を担保する
+#   3. 変更影響を最小化し、更新系の低レイテンシを維持する
+#
+# 参照:
+#   - docs/internal/done/requirements/20260128_0905_search_index_ngram.yaml
+#   - benches/results/after/api-profiling-all-f06e3f8fe2bf4fe5d39991950abbcff5ed86da4f/tasks_bulk/benchmark/summary.txt
+#   - benches/results/after/api-profiling-all-f06e3f8fe2bf4fe5d39991950abbcff5ed86da4f/tasks_eff/benchmark/summary.txt
+#   - benches/results/after/api-profiling-all-f06e3f8fe2bf4fe5d39991950abbcff5ed86da4f/tasks_update_steady/benchmark/summary.txt
+
+version: "1.0.0"
+name: "search_index_ngram_perf_remediation"
+description: |
+  SearchIndex の n-gram 置換後に残った性能ギャップを解消する。
+  tasks_bulk / tasks_eff の平均レイテンシと RPS を要件内に収め、
+  併せて計測データを拡充して判定不能な要件をなくす。
+
+background:
+  problem: |
+    after のベンチマークでは tasks_bulk が平均 14.96s / 88.28 RPS、
+    tasks_eff が平均 10.98s / 318.34 RPS となり、
+    目標 (<=500ms, >=500/900 RPS) を大きく下回っている。
+    またインデックス生成の一時メモリ上限や構築時間の計測がなく、
+    要件適合性を判断できない。
+  motivation: |
+    bulk/update 系の遅延が継続すると実運用に耐えないため、
+    性能目標の再達成と計測の可観測性を担保する。
+  prior_art:
+    - name: "SearchIndex n-gram 再設計"
+      description: "all-suffix を廃止し n-gram に置換したが性能目標は未達。"
+
+change_scope:
+  target_files:
+    - "benches/api/src/api/query.rs: SearchIndex::apply_changes / SearchIndexDelta 追加"
+    - "benches/api/src/api/handlers.rs: update_search_index_batch 追加"
+    - "benches/api/src/api/bulk.rs: bulk 処理で batch 更新を使用"
+    - "benches/api/benchmarks/run_benchmark.sh: レイテンシ分位点の抽出強化"
+    - "benches/api/benchmarks/scripts/result_collector.lua: SearchIndex 計測の出力追加"
+  out_of_scope:
+    - "検索結果の互換性を破壊する仕様変更"
+    - "LegacyAllSuffix の廃止"
+
+requirements:
+  # ======================================================================
+  # 1. 性能目標の再達成
+  # ======================================================================
+  - id: "REQ-SEARCH-NGRAM-PERF-001"
+    name: "bulk/eff 性能目標を満たす"
+    description: |
+      - tasks_bulk: 平均レイテンシ <= 500ms、RPS >= 500 を満たす。
+      - tasks_eff: 平均レイテンシ <= 500ms、RPS >= 900 を満たす。
+      - tasks_update_steady: 平均レイテンシ <= 5ms、RPS >= 100 を維持する。
+      - 目標判定は summary.txt の Requests/sec と Avg Latency を基準とする。
+
+    methods:
+      - name: "SearchIndex::apply_changes"
+        signature: "fn apply_changes(&self, changes: &[TaskChange]) -> SearchIndex"
+        description: |
+          - TaskChange を集約して 1 回の更新で全インデックスへ反映する。
+          - 正規化・トークン化は 1 タスクにつき 1 回のみ行う。
+          - add/remove を batch 化し、Persistent 構造の更新回数を削減する。
+      - name: "AppState::update_search_index_batch"
+        signature: "fn update_search_index_batch(&self, changes: Vec<TaskChange>)"
+        description: |
+          - RCU 更新を 1 回にまとめ、bulk 処理中の CAS リトライを削減する。
+          - 計測用のタイミングログを残し、bulk 経路の時間内訳を可視化する。
+
+    implementations:
+      - type: "SearchIndexDelta"
+        description: |
+          - fields:
+            - title_full_add: HashMap<String, Vec<TaskId>>
+            - title_full_remove: HashMap<String, Vec<TaskId>>
+            - title_word_add: HashMap<String, Vec<TaskId>>
+            - title_word_remove: HashMap<String, Vec<TaskId>>
+            - tag_add: HashMap<String, Vec<TaskId>>
+            - tag_remove: HashMap<String, Vec<TaskId>>
+            - title_full_ngram_add: MutableNgramIndex
+            - title_full_ngram_remove: MutableNgramIndex
+            - title_word_ngram_add: MutableNgramIndex
+            - title_word_ngram_remove: MutableNgramIndex
+            - tag_ngram_add: MutableNgramIndex
+            - tag_ngram_remove: MutableNgramIndex
+      - type: "SearchIndex::apply_changes 実装方針"
+        description: |
+          - 変更を 1 パスで収集し、keys ごとに add/remove をまとめる。
+          - posting list の更新は「既存 + add - remove」を 1 回のマージで実施する。
+          - 変更結果が空になった key は index から除去する。
+      - type: "bulk 経路の更新"
+        description: |
+          - bulk_create_tasks / bulk_update_tasks は TaskChange を集約し、
+            update_search_index_batch を 1 回だけ呼び出す。
+          - tasks_eff / 単発 API は既存の update_search_index を維持する。
+
+  # ======================================================================
+  # 2. 計測の可観測性
+  # ======================================================================
+  - id: "REQ-SEARCH-NGRAM-PERF-002"
+    name: "インデックス構築のメモリと時間を計測する"
+    description: |
+      - SearchIndex 構築時のピーク一時メモリと構築時間を計測し、
+        ベンチマーク結果に残す。
+      - 1e4 件の構築時間 <= 1s、ピーク一時メモリ <= 512MB を満たす。
+
+    methods:
+      - name: "measure_search_index_build"
+        signature: "fn measure_search_index_build(tasks: &PersistentVector<Task>, config: SearchIndexConfig) -> (SearchIndex, SearchIndexBuildMetrics)"
+        description: |
+          - SearchIndex::build_with_config を純粋関数のまま維持し、
+            I/O 境界で時間・メモリを計測する。
+          - 計測結果は benchmark meta に保存する。
+
+    implementations:
+      - type: "SearchIndexBuildMetrics"
+        description: |
+          - fields:
+            - elapsed_ms: u128
+            - peak_rss_mb: u64
+            - ngram_entries: usize
+          - 出力先: benches/results/**/benchmark/meta/search_index_build.json
+      - type: "run_benchmark.sh 計測追加"
+        description: |
+          - SearchIndex 構築時に計測ラッパーを挟み、
+            build 時間と RSS ピークを meta に記録する。
+
+  # ======================================================================
+  # 3. 計測結果の完全性
+  # ======================================================================
+  - id: "REQ-SEARCH-NGRAM-PERF-003"
+    name: "レイテンシ分布を記録できる状態にする"
+    description: |
+      - P50/P90/P99 が N/A にならない計測設定を適用する。
+      - tasks_bulk / tasks_eff / tasks_update_steady の分位点を出力する。
+
+    implementations:
+      - type: "run_benchmark.sh 分位点抽出"
+        description: |
+          - wrk 出力の Latency Distribution から P50/P75/P90/P99 を抽出する。
+          - 抽出失敗時は error として扱い、N/A を残さない。
+      - type: "result_collector.lua 出力"
+        description: |
+          - 分位点と SearchIndex 計測結果を JSON に統合し、
+            meta の results に出力する。
+
+non_functional_requirements:
+  performance:
+    - "n-gram 構築は O(T * L) を維持し、all-suffix 相当の O(T * L^2) を禁止する。"
+  compatibility:
+    - "検索 API の入出力スキーマは既存の /tasks/search と互換にする。"
+  testing:
+    - "性能目標の判定に必要な結果ファイルを CI もしくは手動手順で再現可能にする。"
+    - "apply_changes は apply_change の逐次適用と結果が一致する差分テストを追加する。"
+    - "bulk 経路で update_search_index_batch が 1 回のみ呼ばれることを検証する。"
+
+implementation_plan:
+  - step: "計測の補強"
+    details: |
+      run_benchmark.sh と result_collector.lua に計測出力を追加し、
+      P50/P90/P99 と SearchIndexBuildMetrics を meta に保存する。
+  - step: "SearchIndex batch 更新の導入"
+    details: |
+      SearchIndex::apply_changes と SearchIndexDelta を追加し、
+      bulk 経路は update_search_index_batch に切り替える。
+  - step: "性能確認"
+    details: |
+      tasks_bulk / tasks_eff / tasks_update_steady の after 計測を再実行し、
+      REQ-SEARCH-NGRAM-PERF-001 の判定基準で合否を確認する。
+
+future_extensions:
+  - id: "EXT-SEARCH-PERF-001"
+    name: "suffix automaton への移行検討"
+    description: |
+      n-gram で性能目標が達成できない場合に備えて、
+      suffix automaton/DAWG を代替案として評価する。
+    rationale: |
+      実装コストが高いため、現段階では性能改善の方向性を優先する。
