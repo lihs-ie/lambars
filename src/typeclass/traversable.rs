@@ -516,7 +516,7 @@ pub trait Traversable: Functor + Foldable {
     where
         F: FnMut(Self::Inner) -> Reader<R, B>,
         R: Clone + 'static,
-        B: 'static,
+        B: Clone + 'static,
         Self::WithType<B>: 'static;
 
     /// Turns a structure of `Reader`s inside out.
@@ -544,7 +544,7 @@ pub trait Traversable: Functor + Foldable {
         Self: Sized,
         R: Clone + 'static,
         Self::Inner: ReaderLike<Environment = R> + 'static,
-        <Self::Inner as ReaderLike>::Value: 'static,
+        <Self::Inner as ReaderLike>::Value: Clone + 'static,
         Self::WithType<<Self::Inner as ReaderLike>::Value>: 'static,
     {
         self.traverse_reader(ReaderLike::into_reader)
@@ -644,7 +644,7 @@ pub trait Traversable: Functor + Foldable {
     where
         F: FnMut(Self::Inner) -> State<S, B>,
         S: Clone + 'static,
-        B: 'static,
+        B: Clone + 'static,
         Self::WithType<B>: 'static;
 
     /// Turns a structure of `State`s inside out.
@@ -674,7 +674,7 @@ pub trait Traversable: Functor + Foldable {
         Self: Sized,
         S: Clone + 'static,
         Self::Inner: StateLike<StateType = S> + 'static,
-        <Self::Inner as StateLike>::Value: 'static,
+        <Self::Inner as StateLike>::Value: Clone + 'static,
         Self::WithType<<Self::Inner as StateLike>::Value>: 'static,
     {
         self.traverse_state(StateLike::into_state)
@@ -1352,14 +1352,14 @@ impl<T> Traversable for Vec<T> {
     where
         F: FnMut(T) -> Reader<R, B>,
         R: Clone + 'static,
-        B: 'static,
+        B: Clone + 'static,
         Vec<B>: 'static,
     {
         let readers: Vec<Reader<R, B>> = self.into_iter().map(&mut function).collect();
         Reader::new(move |environment: R| {
             readers
                 .iter()
-                .map(|reader| reader.run(environment.clone()))
+                .map(|reader| reader.run_cloned(environment.clone()))
                 .collect()
         })
     }
@@ -1369,7 +1369,7 @@ impl<T> Traversable for Vec<T> {
     where
         F: FnMut(T) -> State<S, B>,
         S: Clone + 'static,
-        B: 'static,
+        B: Clone + 'static,
         Vec<B>: 'static,
     {
         let capacity = self.len();
@@ -1382,7 +1382,7 @@ impl<T> Traversable for Vec<T> {
             let mut result = Vec::with_capacity(capacity);
             let mut current_state = initial_state;
             for state_computation in &states {
-                let (value, new_state) = state_computation.run(current_state);
+                let (value, new_state) = state_computation.run_cloned(current_state);
                 result.push(value);
                 current_state = new_state;
             }

@@ -1,0 +1,72 @@
+# Pool Stress Test - Small Pool Configuration
+#
+# Tests backpressure behavior with a small connection pool (4 connections).
+# Designed to observe pool exhaustion and latency spikes under high concurrency.
+
+name: "pool_stress_small"
+description: "Small pool stress test (pool=4, workers=1) - tests backpressure and pool exhaustion"
+
+# Backend configuration
+storage_mode: postgres
+cache_mode: redis
+
+# Workload configuration
+load_pattern: mixed
+cache_state: warm
+data_scale: small
+payload_variant: standard
+rps_profile: constant
+
+# Load generation - high concurrency to stress the pool
+duration_seconds: 60
+connections: 50
+threads: 4
+warmup_seconds: 5
+
+# Target endpoints (mix of read and write operations)
+endpoints:
+  - "/tasks"
+  - "/tasks/{id}"
+  - "/projects"
+
+http_methods:
+  - GET
+  - POST
+  - PUT
+
+# Concurrency configuration - small pool to induce backpressure
+concurrency:
+  worker_threads: 1
+  database_pool_size: 4
+  redis_pool_size: 4
+  max_connections: 50
+
+# Contention level - medium to create some resource conflicts
+contention_level: medium
+
+# Pool configuration
+pool_sizes:
+  database_pool_size: 4
+  redis_pool_size: 4
+
+# Thresholds - relaxed due to expected pool contention
+thresholds:
+  max_error_rate: 0.05
+  p99_latency_ms: 500
+  min_rps_achieved: 50
+
+# Metadata
+metadata:
+  test_type: "pool_stress"
+  endpoint: "mixed"
+  payload: "medium"
+  cache_strategy: "read-through"
+  hit_rate: 50
+  fail_injection: 0
+  retry: false
+  profile: false
+  purpose: "Test backpressure behavior with small connection pool"
+  tags:
+    - pool_stress
+    - backpressure
+    - small_pool

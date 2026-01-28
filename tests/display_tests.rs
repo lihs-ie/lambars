@@ -31,21 +31,21 @@ fn test_either_right_display() {
 #[test]
 fn test_lazy_uninit_display() {
     let lazy = Lazy::new(|| 42);
-    assert_eq!(format!("{}", lazy), "Lazy(<uninit>)");
+    assert_eq!(format!("{}", lazy), "<uninit>");
 }
 
 #[test]
 fn test_lazy_evaluated_display() {
     let lazy = Lazy::new(|| 42);
     let _ = lazy.force();
-    assert_eq!(format!("{}", lazy), "Lazy(42)");
+    assert_eq!(format!("{}", lazy), "42");
 }
 
 #[test]
 fn test_lazy_poisoned_display() {
     let lazy = Lazy::new(|| -> i32 { panic!("initialization failed") });
     let _ = panic::catch_unwind(panic::AssertUnwindSafe(|| lazy.force()));
-    assert_eq!(format!("{}", lazy), "Lazy(<poisoned>)");
+    assert_eq!(format!("{}", lazy), "<poisoned>");
 }
 
 #[test]
@@ -150,13 +150,19 @@ fn test_writer_display() {
 #[test]
 fn test_reader_display() {
     let reader: Reader<i32, i32> = Reader::new(|environment| environment * 2);
-    assert_eq!(format!("{}", reader), "<Reader>");
+    assert_eq!(format!("{}", reader), "<Reader::Deferred>");
+
+    let reader_pure: Reader<i32, i32> = Reader::pure(42);
+    assert_eq!(format!("{}", reader_pure), "<Reader::Pure>");
 }
 
 #[test]
 fn test_state_display() {
     let state: State<i32, i32> = State::new(|state| (state * 2, state + 1));
-    assert_eq!(format!("{}", state), "<State>");
+    assert_eq!(format!("{}", state), "<State::Deferred>");
+
+    let state_pure: State<i32, i32> = State::pure(42);
+    assert_eq!(format!("{}", state_pure), "<State::Pure>");
 }
 
 #[test]

@@ -78,6 +78,6 @@ mod trampoline;
 pub use concurrent_lazy::{ConcurrentLazy, ConcurrentLazyPoisonedError};
 pub use continuation::Continuation;
 pub use either::Either;
-pub use freer::Freer;
-pub use lazy::{Lazy, LazyPoisonedError, LazyState};
+pub use freer::{Freer, InterpretError};
+pub use lazy::{Lazy, LazyPoisonedError};
 pub use trampoline::Trampoline;

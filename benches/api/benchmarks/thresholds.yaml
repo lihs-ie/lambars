@@ -1,0 +1,107 @@
+# benches/api/benchmarks/thresholds.yaml
+#
+# Performance regression detection thresholds.
+# Used by compare_results.sh --threshold to detect regressions.
+#
+# Levels:
+#   warning: Flags the metric for attention but does not fail CI.
+#   error:   Causes CI to fail (exit code 3).
+#
+# Metric explanations:
+#   p95_latency_ms:       95th percentile latency in milliseconds.
+#   p99_latency_ms:       99th percentile latency in milliseconds.
+#   error_rate:           Percentage of failed requests (0.01 = 1%).
+#   rps_degradation_percent: Percentage decrease in RPS compared to baseline.
+
+thresholds:
+  p95_latency_ms:
+    warning: 50
+    error: 100
+
+  p99_latency_ms:
+    warning: 100
+    error: 200
+
+  error_rate:
+    warning: 0.01
+    error: 0.05
+
+  rps_degradation_percent:
+    warning: 5
+    error: 10
+
+# Scenario-specific thresholds (REQ-SEARCH-MET-001)
+# These thresholds are used by check_thresholds.sh for search scenarios.
+#
+# Hot search: Cache warmed up, expecting fast responses.
+# Cold search: Cache miss scenario, allowing higher latency.
+scenarios:
+  tasks_search_hot:
+    p50_latency_ms:
+      warning: 40
+      error: 50
+    p95_latency_ms:
+      warning: 150
+      error: 200
+    p99_latency_ms:
+      warning: 300
+      error: 400
+    error_rate:
+      warning: 0.005
+      error: 0.01
+
+  tasks_search_cold:
+    p50_latency_ms:
+      warning: 80
+      error: 100
+    p95_latency_ms:
+      warning: 250
+      error: 300
+    p99_latency_ms:
+      warning: 400
+      error: 500
+    error_rate:
+      warning: 0.005
+      error: 0.01
+
+  # Update scenarios for tasks_update operations.
+  #
+  # Steady: Normal update operations without conflicts.
+  #   - High success rate required (>= 99.9%)
+  #   - Low conflict rate (< 0.1%)
+  tasks_update_steady:
+    p50_latency_ms:
+      warning: 25
+      error: 30
+    p95_latency_ms:
+      warning: 60
+      error: 80
+    p99_latency_ms:
+      warning: 120
+      error: 150
+    error_rate:
+      warning: 0.0005
+      error: 0.001
+    conflict_rate:
+      warning: 0.0005
+      error: 0.001
+
+  # Conflict: Update operations with concurrent modification simulation.
+  #   - Allows higher error rate after retries (<= 10%)
+  #   - Moderate conflict rate (< 1%)
+  tasks_update_conflict:
+    p50_latency_ms:
+      warning: 60
+      error: 80
+    p95_latency_ms:
+      warning: 150
+      error: 200
+    p99_latency_ms:
+      warning: 300
+      error: 400
+    error_rate:
+      warning: 0.05
+      error: 0.1
+    conflict_rate:
+      warning: 0.005
+      error: 0.01

@@ -110,6 +110,8 @@ cargo run
 
 ## 環境変数
 
+### 基本設定
+
 | 変数 | デフォルト | 説明 |
 |------|-----------|------|
 | `HOST` | `0.0.0.0` | サーバーのバインドアドレス |
@@ -120,6 +122,22 @@ cargo run
 | `REDIS_URL` | - | Redis接続URL（`CACHE_MODE=redis`時に必要） |
 | `RUST_LOG` | `info` | ログレベル |
 
+### キャッシュ設定（`CACHE_MODE=redis`時）
+
+| 変数 | デフォルト | 説明 |
+|------|-----------|------|
+| `CACHE_ENABLED` | `true` | キャッシュの有効/無効 |
+| `CACHE_STRATEGY` | `read-through` | キャッシュ戦略: `read-through`, `write-through` |
+| `CACHE_TTL_SECS` | `60` | キャッシュTTL（秒） |
+
+**キャッシュ戦略の説明**:
+- `read-through`: 読み取り時にキャッシュミスの場合、主ストレージから取得してキャッシュに書き込み
+- `write-through`: read-through + 書き込み時にキャッシュを同期更新
+
+**CACHE_ENABLED=false の場合**:
+- 読み取り: Redis をバイパスし、主ストレージを直接参照
+- 書き込み: 主ストレージ更新後、Redis キャッシュを無効化（再有効化時の整合性保証）
+
 ## ポート一覧
 
 | 起動方法 | APIポート | 説明 |
@@ -127,6 +145,32 @@ cargo run
 | ローカル | 3000 | `cargo run` |
 | Docker (dev) | 3001 | `docker compose --profile dev up` |
 | Docker (prod) | 3002 | `docker compose up` |
+
+## キャッシュヘッダー
+
+`CACHE_MODE=redis` の場合、キャッシュ対象エンドポイントのレスポンスには以下のヘッダーが付与されます:
+
+| ヘッダー | 値 | 説明 |
+|---------|-----|------|
+| `X-Cache` | `HIT` / `MISS` | キャッシュヒット/ミス |
+| `X-Cache-Status` | `hit` / `miss` / `bypass` / `error` | 詳細ステータス |
+| `X-Cache-Source` | `redis` / `memory` / `none` | キャッシュソース |
+
+**X-Cache-Status の値**:
+- `hit`: キャッシュから取得
+- `miss`: キャッシュになく主ストレージから取得
+- `bypass`: `CACHE_ENABLED=false` でバイパス
+- `error`: Redis 障害でフォールバック
+
+**キャッシュ対象エンドポイント**:
+- `GET /tasks/{id}` - 単一タスク取得（Redis）
+- `GET /projects/{id}` - 単一プロジェクト取得（Redis）
+- `GET /tasks/search` - タスク検索（in-memory SearchCache）
+
+**キャッシュ非対象エンドポイント**（X-Cache ヘッダーなし）:
+- 一覧系: `GET /tasks`, `GET /projects`
+- 集約系: `/dashboard`, `/projects/leaderboard`
+- 書き込み系: `POST`, `PUT`, `DELETE`
 
 ## APIエンドポイント
 
@@ -171,9 +215,35 @@ curl -X POST http://localhost:3002/tasks \
   -d '{"title": "Benchmark Task", "description": "Test task for benchmarking"}'
 ```
 
-### wrkによる負荷テスト（将来対応）
+### wrk/wrk2による負荷テスト
 
-エンドポイントの実装が完了次第、wrk + Luaスクリプトによる負荷テストを追加予定です。
+wrk2を使用した負荷テストが利用可能です。
+
+```bash
+cd benches/api/benchmarks
+
+# 基本的な負荷テスト（シナリオYAMLを使用）
+./run_benchmark.sh scenarios/read_heavy_warm.yaml
+
+# 負荷プロファイル付きテスト（wrk2推奨）
+wrk2 -t4 -c30 -d60s -R500 -s scripts/load_shape_demo.lua \
+    --latency http://localhost:3002 \
+    -- --profile=ramp_up_down --payload=standard --target-rps=500
+
+# シナリオマトリクスによるテスト
+./run_benchmark.sh scenarios/mixed_workload_burst.yaml
+./run_benchmark.sh scenarios/large_scale_read.yaml
+```
+
+シナリオYAMLで設定可能な項目:
+- `storage_mode`: `in_memory`, `postgres`
+- `cache_mode`: `in_memory`, `redis`
+- `load_pattern`: `read_heavy`, `write_heavy`, `mixed`
+- `rps_profile`: `constant`, `ramp_up_down`, `burst`, `step_up`
+- `payload_variant`: `minimal`, `standard`, `complex`, `heavy`
+- `data_scale`: `small`, `medium`, `large`
+
+詳細は `benchmarks/scenarios/` 内のYAMLファイルを参照してください。
 
 ## ディレクトリ構成
 
@@ -188,7 +258,8 @@ benches/api/
 │   │   ├── mod.rs
 │   │   ├── handlers.rs          # HTTPハンドラ
 │   │   ├── dto.rs               # リクエスト/レスポンス型
-│   │   └── error.rs             # エラー型
+│   │   ├── error.rs             # エラー型
+│   │   └── cache_header.rs      # X-Cacheヘッダーミドルウェア
 │   ├── domain/                  # ドメイン層
 │   │   ├── mod.rs
 │   │   ├── task.rs              # タスクモデル
@@ -200,7 +271,21 @@ benches/api/
 │       ├── factory.rs           # リポジトリファクトリ
 │       ├── in_memory.rs         # InMemory実装
 │       ├── postgres.rs          # PostgreSQL実装
-│       └── redis.rs             # Redis実装
+│       ├── redis.rs             # Redis実装
+│       ├── cache.rs             # CacheRepository（read-through/write-through）
+│       └── scenario.rs          # ベンチマークシナリオ設定
+├── benchmarks/                  # 負荷テスト
+│   ├── run_benchmark.sh         # ベンチマーク実行スクリプト
+│   ├── scenarios/               # シナリオYAML
+│   │   ├── matrix.yaml          # シナリオマトリクス定義
+│   │   ├── read_heavy_warm.yaml # 読み取り負荷テスト
+│   │   └── ...
+│   ├── scripts/                 # Luaスクリプト
+│   │   ├── common.lua           # 共通ユーティリティ
+│   │   ├── load_profile.lua     # 負荷プロファイル
+│   │   ├── cache_metrics.lua    # キャッシュ計測
+│   │   └── ...
+│   └── templates/               # シナリオテンプレート
 └── docker/
     ├── compose.yaml             # Docker Compose設定
     ├── Dockerfile               # APIコンテナ

@@ -7,9 +7,31 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 
-// =============================================================================
-// Basic Construction and Evaluation
-// =============================================================================
+/// force は初回のみ評価し、その後は同一値を返す。
+#[rstest]
+fn force_is_idempotent() {
+    let call_count = AtomicUsize::new(0);
+    let lazy = ConcurrentLazy::new(|| {
+        call_count.fetch_add(1, Ordering::SeqCst);
+        42
+    });
+
+    let v1 = lazy.force();
+    assert_eq!(
+        call_count.load(Ordering::SeqCst),
+        1,
+        "initializer should be called exactly once"
+    );
+
+    let v2 = lazy.force();
+    assert_eq!(
+        call_count.load(Ordering::SeqCst),
+        1,
+        "initializer should not be called again"
+    );
+
+    assert_eq!(v1, v2, "force should return the same value");
+}
 
 #[rstest]
 fn concurrent_lazy_defers_computation() {
@@ -454,7 +476,7 @@ fn concurrent_lazy_debug_init() {
 fn concurrent_lazy_display_uninit() {
     let lazy = ConcurrentLazy::new(|| 42);
     let display_str = format!("{}", lazy);
-    assert_eq!(display_str, "ConcurrentLazy(<uninit>)");
+    assert_eq!(display_str, "<uninit>");
 }
 
 #[rstest]
@@ -462,7 +484,7 @@ fn concurrent_lazy_display_init() {
     let lazy = ConcurrentLazy::new(|| 42);
     let _ = lazy.force();
     let display_str = format!("{}", lazy);
-    assert_eq!(display_str, "ConcurrentLazy(42)");
+    assert_eq!(display_str, "42");
 }
 
 // =============================================================================
@@ -520,7 +542,7 @@ fn concurrent_lazy_into_inner_with_complex_type() {
 // =============================================================================
 
 #[rstest]
-#[should_panic(expected = "initializer already consumed")]
+#[should_panic(expected = "ConcurrentLazy instance has been poisoned")]
 fn concurrent_lazy_force_after_panic_panics() {
     let lazy = ConcurrentLazy::new(|| -> i32 { panic!("initialization failed") });
 

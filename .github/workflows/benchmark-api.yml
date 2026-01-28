@@ -16,114 +16,940 @@ on:
       - 'lambars-derive/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
+  schedule:
+    # Nightly at 02:00 UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      scenario:
+        description: 'Scenario to run (or "all" for nightly set)'
+        required: false
+        default: 'in_memory_read_heavy_warm.yaml'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
 jobs:
-  benchmark:
-    name: API Workload Benchmark
+  # =============================================================================
+  # PR Benchmark (baseline on main)
+  # =============================================================================
+  benchmark-baseline:
+    name: Baseline Benchmark (main)
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: read
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          # Remove problematic Azure CLI repository that may return 403
+          sudo rm -f /etc/apt/sources.list.d/azure-cli.list || true
+          sudo apt-get update || true
+          sudo apt-get install -y build-essential libssl-dev git linux-tools-common linux-tools-generic
+          # Install yq (Mike Farah's YAML processor)
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+          # Build wrk2 from source (REQUIRED for rate control)
+          git clone --depth 1 https://github.com/giltene/wrk2.git /tmp/wrk2
+          cd /tmp/wrk2 && make -j$(nproc) && sudo cp wrk /usr/local/bin/wrk2
+          # Create wrk symlink for backward compatibility with main branch
+          sudo ln -sf /usr/local/bin/wrk2 /usr/local/bin/wrk
+          # Verify wrk2 installation
+          command -v wrk2 && wrk2 -v 2>&1 | head -1 || (echo "ERROR: wrk2 installation failed" && exit 1)
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build and start services
-        working-directory: benches/api/docker
-        run: |
-          docker compose -f compose.ci.yaml up -d --build --wait
-          docker compose -f compose.ci.yaml ps
+      - name: Checkout main branch for baseline
+        uses: actions/checkout@v4
+        with:
+          ref: main
 
-      - name: Install wrk
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y wrk
-
-      - name: Setup test data
+      - name: Run baseline benchmark
         working-directory: benches/api/benchmarks
+        env:
+          STORAGE_MODE: in_memory
+          CACHE_MODE: redis
+          HIT_RATE: 50
+          DATA_SCALE: small
+          PROFILE: false
         run: |
-          chmod +x setup_test_data.sh
-          API_URL=http://localhost:3002 ./setup_test_data.sh
-
-      - name: Run benchmarks
-        id: benchmark
-        working-directory: benches/api/benchmarks
-        continue-on-error: true
-        run: |
-          chmod +x run_benchmark.sh
-          API_URL=http://localhost:3002 DURATION=10s THREADS=2 CONNECTIONS=10 ./run_benchmark.sh --quick
-
-      - name: Show API logs on failure
-        if: failure()
-        working-directory: benches/api/docker
-        run: |
-          echo "=== API Container Logs ==="
-          docker compose -f compose.ci.yaml logs api --tail=100
-          echo ""
-          echo "=== Container Status ==="
-          docker compose -f compose.ci.yaml ps -a
-
-      - name: Check benchmark results
-        working-directory: benches/api/benchmarks
-        run: |
-          # Find the most recent results directory
-          RESULTS_DIR=$(ls -td results/*/ 2>/dev/null | head -1)
-          if [ -z "$RESULTS_DIR" ]; then
-            echo "No benchmark results found!"
-            exit 1
+          chmod +x run_benchmark.sh setup_test_data.sh
+          # Start services
+          cd ../docker && docker compose -f compose.ci.yaml up -d --build --wait
+          cd ../benchmarks
+          # Setup data
+          ./setup_test_data.sh --scale small
+          # Run benchmark
+          # Check if --scenario is supported (feature branch has it, main may not)
+          if grep -q -- '--scenario)' run_benchmark.sh 2>/dev/null; then
+            ./run_benchmark.sh --scenario scenarios/in_memory_read_heavy_warm.yaml --quick
+            # Save baseline (scenario directory level for compare_results.sh)
+            SCENARIO_DIR=$(ls -td results/*/in_memory_read_heavy_warm/ 2>/dev/null | head -1)
+          else
+            # Fallback for main branch without --scenario support
+            ./run_benchmark.sh --quick
+            # Save baseline (timestamp directory for legacy format)
+            SCENARIO_DIR=$(ls -td results/*/ 2>/dev/null | head -1)
           fi
 
-          echo "Checking results in: $RESULTS_DIR"
-          echo ""
-
-          # Count successful benchmarks (those with actual requests)
-          TOTAL=0
-          PASSED=0
-          FAILED_BENCHMARKS=""
-
-          for result_file in "$RESULTS_DIR"/*.txt; do
-            if [ -f "$result_file" ] && [ "$(basename "$result_file")" != "summary.txt" ]; then
-              TOTAL=$((TOTAL + 1))
-              BENCHMARK_NAME=$(basename "$result_file" .txt)
-
-              # Check if requests were made (not 0 requests)
-              REQUESTS=$(grep -o '[0-9]* requests in' "$result_file" | head -1 | awk '{print $1}')
-              if [ -n "$REQUESTS" ] && [ "$REQUESTS" -gt 0 ]; then
-                PASSED=$((PASSED + 1))
-                echo "  $BENCHMARK_NAME: PASSED ($REQUESTS requests)"
-              else
-                FAILED_BENCHMARKS="$FAILED_BENCHMARKS $BENCHMARK_NAME"
-                echo "  $BENCHMARK_NAME: FAILED (0 requests)"
-              fi
-            fi
-          done
-
-          echo ""
-          echo "Summary: $PASSED/$TOTAL benchmarks passed"
-
-          if [ "$PASSED" -lt "$TOTAL" ]; then
-            echo ""
-            echo "Failed benchmarks:$FAILED_BENCHMARKS"
-            echo ""
-            echo "This may indicate API issues. Check the API logs above."
-            exit 1
+          BASELINE_RESULTS_DIR="${GITHUB_WORKSPACE}/baseline_results"
+          rm -rf "${BASELINE_RESULTS_DIR}"
+          mkdir -p "${BASELINE_RESULTS_DIR}"
+          if [ -n "${SCENARIO_DIR}" ]; then
+            cp -r "${SCENARIO_DIR}/." "${BASELINE_RESULTS_DIR}/"
           fi
 
-      - name: Upload benchmark results
-        uses: actions/upload-artifact@v6
+          # Cleanup
+          cd ../docker && docker compose -f compose.ci.yaml down -v
+
+      - name: Upload baseline artifacts
+        uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: benchmark-results-${{ github.sha }}
-          path: benches/api/benchmarks/results/
+          name: benchmark-baseline-${{ github.sha }}
+          path: |
+            baseline_results/
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Cleanup
+        if: always()
+        working-directory: benches/api/docker
+        run: docker compose -f compose.ci.yaml down -v || true
+
+  # =============================================================================
+  # PR Benchmark (smoke test)
+  # =============================================================================
+  benchmark-pr:
+    name: PR Benchmark
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+
+    steps:
+      - name: Install dependencies
+        run: |
+          # Remove problematic Azure CLI repository that may return 403
+          sudo rm -f /etc/apt/sources.list.d/azure-cli.list || true
+          sudo apt-get update || true
+          sudo apt-get install -y build-essential libssl-dev git linux-tools-common linux-tools-generic
+          # Install yq (Mike Farah's YAML processor)
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+          # Build wrk2 from source (REQUIRED for rate control)
+          git clone --depth 1 https://github.com/giltene/wrk2.git /tmp/wrk2
+          cd /tmp/wrk2 && make -j$(nproc) && sudo cp wrk /usr/local/bin/wrk2
+          # Create wrk symlink for backward compatibility with main branch
+          sudo ln -sf /usr/local/bin/wrk2 /usr/local/bin/wrk
+          # Verify wrk2 installation
+          command -v wrk2 && wrk2 -v 2>&1 | head -1 || (echo "ERROR: wrk2 installation failed" && exit 1)
+          # Install Python jsonschema for meta.json validation
+          pip install jsonschema
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+
+      - name: Run Lua compatibility test
+        working-directory: benches/api/benchmarks
+        run: |
+          chmod +x test_lua_compatibility.sh run_benchmark.sh setup_test_data.sh
+          # Start services for Lua compatibility test
+          cd ../docker && docker compose -f compose.ci.yaml up -d --build --wait
+          cd ../benchmarks
+          # Run Lua compatibility test (port 3002 matches compose.ci.yaml)
+          ./test_lua_compatibility.sh --target http://localhost:3002 --duration 3 --rate 5
+
+      - name: Run RPS smoke tests (constant + step_up)
+        working-directory: benches/api/benchmarks
+        env:
+          STORAGE_MODE: in_memory
+          CACHE_MODE: none
+          DATA_SCALE: small
+          PROFILE: false
+          RPS_TOLERANCE_MODE: strict
+        run: |
+          # Setup minimal data for smoke tests
+          ./setup_test_data.sh --scale small
+
+          # Run constant RPS smoke test
+          echo "=== Running RPS smoke test (constant profile) ==="
+          ./run_benchmark.sh --scenario scenarios/rps_smoke_constant.yaml
+
+          # Run step_up RPS smoke test
+          echo "=== Running RPS smoke test (step_up profile) ==="
+          ./run_benchmark.sh --scenario scenarios/rps_smoke_step_up.yaml
+
+          # Verify RPS results
+          echo ""
+          echo "=== RPS Verification Results ==="
+          find results -name "rps_verification.log" -exec echo "--- {} ---" \; -exec cat {} \;
+
+      - name: Run PR benchmark
+        working-directory: benches/api/benchmarks
+        env:
+          STORAGE_MODE: in_memory
+          CACHE_MODE: redis
+          HIT_RATE: 50
+          DATA_SCALE: small
+          PROFILE: false
+        run: |
+          # Run main benchmark scenario
+          ./run_benchmark.sh --scenario scenarios/in_memory_read_heavy_warm.yaml --quick
+          # Get results directory (scenario directory level for compare_results.sh)
+          SCENARIO_DIR=$(ls -td results/*/in_memory_read_heavy_warm/ 2>/dev/null | head -1)
+
+          PR_RESULTS_DIR="${GITHUB_WORKSPACE}/pr_results"
+          rm -rf "${PR_RESULTS_DIR}"
+          mkdir -p "${PR_RESULTS_DIR}"
+          if [ -n "${SCENARIO_DIR}" ]; then
+            cp -r "${SCENARIO_DIR}/." "${PR_RESULTS_DIR}/"
+          fi
+
+          # Cleanup Docker services
+          cd ../docker && docker compose -f compose.ci.yaml down -v
+
+      - name: Validate meta.json schema
+        working-directory: benches/api/benchmarks
+        run: |
+          chmod +x validate_meta_schema.sh
+          ./validate_meta_schema.sh --all results/
+
+      - name: Validate meta_extended.json schema
+        working-directory: benches/api/benchmarks
+        run: |
+          ./validate_meta_schema.sh --all --extended results/
+
+      - name: Upload PR artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: benchmark-pr-${{ github.sha }}
+          path: |
+            pr_results/
+            benches/api/benchmarks/results/
+            benches/api/benchmarks/results/**/rps_verification.log
+            benches/api/benchmarks/results/**/resolved_params.log
+            benches/api/benchmarks/results/lua_compatibility/
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Cleanup
+        if: always()
+        working-directory: benches/api/docker
+        run: docker compose -f compose.ci.yaml down -v || true
+
+  # =============================================================================
+  # PR Benchmark Comparison + Comment
+  # =============================================================================
+  benchmark-compare:
+    name: PR Benchmark Compare
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs:
+      - benchmark-baseline
+      - benchmark-pr
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          clean: false
+
+      - name: Download baseline artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: benchmark-baseline-${{ github.sha }}
+          path: artifacts
+
+      - name: Download PR artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: benchmark-pr-${{ github.sha }}
+          path: artifacts
+
+      - name: Compare results
+        id: compare
+        working-directory: benches/api/benchmarks
+        run: |
+          chmod +x compare_results.sh
+          BASELINE_DIR="${GITHUB_WORKSPACE}/artifacts/baseline_results"
+          PR_DIR="${GITHUB_WORKSPACE}/artifacts/pr_results"
+          if [ -d "${BASELINE_DIR}" ] && [ -d "${PR_DIR}" ]; then
+            # Check if baseline has new format (meta.json in subdirectories)
+            # Old format (main branch without --scenario) has .txt files directly in the directory
+            if find "${BASELINE_DIR}" -name "meta.json" -type f | head -1 | grep -q .; then
+              # Run comparison with threshold checking
+              # Exit code 3 = regression detected, which should fail the job
+              ./compare_results.sh "${BASELINE_DIR}" "${PR_DIR}" --threshold thresholds.yaml --json > compare_output.json
+              cat compare_output.json
+            else
+              echo "Skipping comparison: baseline uses old format (no meta.json)"
+              echo "This is expected when main branch doesn't have --scenario support yet"
+            fi
+          else
+            echo "Skipping comparison: baseline or PR results not available"
+          fi
+
+      - name: Post PR comment
+        # Run on same-repo PRs (not forks), and always run even if compare step fails
+        # This ensures regression results are posted to PR even when thresholds are exceeded
+        if: always() && github.event.pull_request.head.repo.full_name == github.repository
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+
+            // Helper function to find all meta.json files in script subdirectories
+            function findAllMetaJson(scenarioDir) {
+              const results = [];
+              if (!fs.existsSync(scenarioDir)) return results;
+              const entries = fs.readdirSync(scenarioDir, { withFileTypes: true });
+              for (const entry of entries) {
+                if (entry.isDirectory()) {
+                  const metaPath = path.join(scenarioDir, entry.name, 'meta.json');
+                  if (fs.existsSync(metaPath)) {
+                    results.push({ script: entry.name, path: metaPath });
+                  }
+                }
+              }
+              return results;
+            }
+
+            // Parse latency value with unit normalization to milliseconds
+            function parseLatencyMs(value) {
+              if (!value) return 0;
+              const str = String(value).trim();
+              const match = str.match(/^([\d.]+)\s*(us|ms|s)?$/i);
+              if (!match) return parseFloat(str) || 0;
+
+              const num = parseFloat(match[1]);
+              const unit = (match[2] || 'ms').toLowerCase();
+
+              switch (unit) {
+                case 'us': return num / 1000;
+                case 'ms': return num;
+                case 's': return num * 1000;
+                default: return num;
+              }
+            }
+
+            // Format latency value in appropriate unit
+            function formatLatency(ms) {
+              if (ms < 1) return (ms * 1000).toFixed(0) + 'us';
+              if (ms >= 1000) return (ms / 1000).toFixed(2) + 's';
+              return ms.toFixed(2) + 'ms';
+            }
+
+            // Aggregate metrics from multiple scripts
+            function aggregateMetrics(metaFiles) {
+              if (metaFiles.length === 0) return { aggregated: {}, perScript: [] };
+
+              const perScript = [];
+              let totalRps = 0;
+              let totalRequests = 0;
+              let maxP50 = 0, maxP95 = 0, maxP99 = 0;
+              let totalErrors = 0;
+
+              for (const { script, path: metaPath } of metaFiles) {
+                const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+                const results = meta.results || {};
+                perScript.push({ script, metrics: results });
+
+                // Sum RPS and requests
+                totalRps += parseFloat(results.rps) || 0;
+                totalRequests += parseFloat(results.total_requests) || 0;
+
+                // Track max latencies (worst case) - normalize to ms
+                const p50 = parseLatencyMs(results.p50);
+                const p95 = parseLatencyMs(results.p95);
+                const p99 = parseLatencyMs(results.p99);
+                maxP50 = Math.max(maxP50, p50);
+                maxP95 = Math.max(maxP95, p95);
+                maxP99 = Math.max(maxP99, p99);
+
+                // Sum errors for rate calculation
+                totalErrors += (parseFloat(results.error_rate) || 0) * (parseFloat(results.total_requests) || 0);
+              }
+
+              const aggregated = {
+                rps: totalRps,
+                p50: formatLatency(maxP50),
+                p50_ms: maxP50,
+                p95: formatLatency(maxP95),
+                p95_ms: maxP95,
+                p99: formatLatency(maxP99),
+                p99_ms: maxP99,
+                error_rate: totalRequests > 0 ? totalErrors / totalRequests : 0,
+                scripts_count: metaFiles.length
+              };
+
+              return { aggregated, perScript };
+            }
+
+            const workspace = process.env.GITHUB_WORKSPACE || process.cwd();
+            const prResultsDir = path.join(workspace, 'artifacts', 'pr_results');
+            const baselineResultsDir = path.join(workspace, 'artifacts', 'baseline_results');
+
+            // Find and aggregate all meta.json files
+            const prMetaFiles = findAllMetaJson(prResultsDir);
+            const { aggregated: metrics, perScript: prScripts } = aggregateMetrics(prMetaFiles);
+
+            // Read baseline if available
+            const baselineMetaFiles = findAllMetaJson(baselineResultsDir);
+            const { aggregated: baselineMetrics, perScript: baselineScripts } = aggregateMetrics(baselineMetaFiles);
+
+            // Build comparison table
+            function formatChange(base, current, higherIsBetter = true) {
+              // Handle missing values (undefined, null, NaN)
+              const baseNum = parseFloat(base);
+              const currNum = parseFloat(current);
+              const baseValid = base !== undefined && base !== null && !isNaN(baseNum);
+              const currValid = current !== undefined && current !== null && !isNaN(currNum);
+
+              if (!baseValid && !currValid) return '-';
+              if (!baseValid) return `new: ${currNum}`;
+              if (!currValid) return 'removed';
+
+              // Handle zero baseline (avoid division by zero)
+              if (baseNum === 0) {
+                if (currNum === 0) return '0%';
+                // Non-zero current from zero base: show absolute value with warning
+                const arrow = (higherIsBetter ? currNum > 0 : currNum < 0) ? ':arrow_up:' : ':arrow_down:';
+                return `0→${currNum} ${arrow}`;
+              }
+
+              const diff = ((currNum - baseNum) / baseNum) * 100;
+              // Handle Infinity/NaN from calculation
+              if (!isFinite(diff)) return '-';
+              const sign = diff >= 0 ? '+' : '';
+              const arrow = (higherIsBetter ? diff >= 0 : diff <= 0) ? ':arrow_up:' : ':arrow_down:';
+              return `${sign}${diff.toFixed(1)}% ${arrow}`;
+            }
+
+            // Aggregated summary table
+            let table = '### Aggregated Results\n';
+            table += `Scripts: ${metrics.scripts_count || 0} (base: ${baselineMetrics.scripts_count || 0})\n\n`;
+            table += '| Metric | Base (main) | PR | Change |\n';
+            table += '|--------|-------------|----|---------|\n';
+            // Use normalized _ms values for comparison (lower latency is better)
+            table += `| p50 (max) | ${baselineMetrics.p50 || '-'} | ${metrics.p50 || '-'} | ${formatChange(baselineMetrics.p50_ms, metrics.p50_ms, false)} |\n`;
+            table += `| p95 (max) | ${baselineMetrics.p95 || '-'} | ${metrics.p95 || '-'} | ${formatChange(baselineMetrics.p95_ms, metrics.p95_ms, false)} |\n`;
+            table += `| p99 (max) | ${baselineMetrics.p99 || '-'} | ${metrics.p99 || '-'} | ${formatChange(baselineMetrics.p99_ms, metrics.p99_ms, false)} |\n`;
+            table += `| RPS (total) | ${baselineMetrics.rps || '-'} | ${metrics.rps || '-'} | ${formatChange(baselineMetrics.rps, metrics.rps, true)} |\n`;
+            table += `| Error Rate | ${baselineMetrics.error_rate || '-'} | ${metrics.error_rate || '-'} | ${formatChange(baselineMetrics.error_rate, metrics.error_rate, false)} |\n`;
+
+            // Per-script details (collapsed)
+            if (prScripts.length > 0) {
+              table += '\n<details>\n<summary>Per-Script Details</summary>\n\n';
+              for (const { script, metrics: m } of prScripts) {
+                const baseScript = baselineScripts.find(s => s.script === script);
+                const baseM = baseScript ? baseScript.metrics : {};
+                table += `#### ${script}\n`;
+                table += '| Metric | Base | PR | Change |\n';
+                table += '|--------|------|----|---------|\n';
+                // Use parseLatencyMs for normalized comparison
+                table += `| p50 | ${baseM.p50 || '-'} | ${m.p50 || '-'} | ${formatChange(parseLatencyMs(baseM.p50), parseLatencyMs(m.p50), false)} |\n`;
+                table += `| p95 | ${baseM.p95 || '-'} | ${m.p95 || '-'} | ${formatChange(parseLatencyMs(baseM.p95), parseLatencyMs(m.p95), false)} |\n`;
+                table += `| RPS | ${baseM.rps || '-'} | ${m.rps || '-'} | ${formatChange(baseM.rps, m.rps, true)} |\n\n`;
+              }
+              table += '</details>\n';
+            }
+
+            const body = [
+              '## :rocket: API Benchmark Results',
+              '',
+              table,
+              '',
+              '<details>',
+              '<summary>Configuration</summary>',
+              '',
+              '- **Scenario**: in_memory_read_heavy_warm.yaml',
+              '- **Mode**: Quick (5s)',
+              '- **Storage**: in_memory',
+              '- **Cache**: redis',
+              '',
+              '</details>',
+              '',
+              `> Benchmark run at: ${new Date().toISOString()}`
+            ].join('\n');
+
+            // Find or create comment
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const botComment = comments.find(c =>
+              c.user.type === 'Bot' &&
+              c.body.includes('## :rocket: API Benchmark Results')
+            );
+
+            if (botComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: body
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: body
+              });
+            }
+
+  # =============================================================================
+  # Main Branch Benchmark (representative scenarios)
+  # =============================================================================
+  benchmark-main:
+    name: Main Benchmark (${{ matrix.scenario }})
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario:
+          - postgres_redis_read_heavy_warm.yaml
+          - postgres_write_heavy.yaml
+          - mixed_workload_burst.yaml
+
+    steps:
+      - name: Install dependencies
+        run: |
+          # Remove problematic Azure CLI repository that may return 403
+          sudo rm -f /etc/apt/sources.list.d/azure-cli.list || true
+          sudo apt-get update || true
+          sudo apt-get install -y build-essential libssl-dev git linux-tools-common linux-tools-generic linux-tools-$(uname -r) || true
+          # Install yq (Mike Farah's YAML processor)
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+          # Build wrk2 from source (REQUIRED for rate control)
+          git clone --depth 1 https://github.com/giltene/wrk2.git /tmp/wrk2
+          cd /tmp/wrk2 && make -j$(nproc) && sudo cp wrk /usr/local/bin/wrk2
+          # Create wrk symlink for backward compatibility
+          sudo ln -sf /usr/local/bin/wrk2 /usr/local/bin/wrk
+          # Verify wrk2 installation
+          command -v wrk2 && wrk2 -v 2>&1 | head -1 || (echo "ERROR: wrk2 installation failed" && exit 1)
+          # Install FlameGraph tools
+          git clone --depth 1 https://github.com/brendangregg/FlameGraph /tmp/FlameGraph
+          sudo ln -sf /tmp/FlameGraph/stackcollapse-perf.pl /usr/local/bin/
+          sudo ln -sf /tmp/FlameGraph/flamegraph.pl /usr/local/bin/
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run benchmark
+        working-directory: benches/api/benchmarks
+        env:
+          PROFILE: true
+        run: |
+          chmod +x run_benchmark.sh setup_test_data.sh
+          # Start services
+          cd ../docker && docker compose -f compose.ci.yaml up -d --build --wait
+          cd ../benchmarks
+          # Setup data
+          ./setup_test_data.sh --scale medium
+          # Run benchmark
+          ./run_benchmark.sh --scenario scenarios/${{ matrix.scenario }}
+          # Cleanup
+          cd ../docker && docker compose -f compose.ci.yaml down -v
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: benchmark-main-${{ matrix.scenario }}-${{ github.sha }}
+          path: |
+            benches/api/benchmarks/results/
           retention-days: 30
 
       - name: Cleanup
         if: always()
         working-directory: benches/api/docker
-        run: docker compose -f compose.ci.yaml down -v
+        run: docker compose -f compose.ci.yaml down -v || true
+
+  # =============================================================================
+  # Manual Benchmark (single scenario via workflow_dispatch)
+  # =============================================================================
+  benchmark-manual:
+    name: Manual Benchmark (${{ github.event.inputs.scenario }})
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.scenario != 'all'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Install dependencies
+        run: |
+          # Remove problematic Azure CLI repository that may return 403
+          sudo rm -f /etc/apt/sources.list.d/azure-cli.list || true
+          sudo apt-get update || true
+          sudo apt-get install -y build-essential libssl-dev git linux-tools-common linux-tools-generic linux-tools-$(uname -r) || true
+          # Install yq (Mike Farah's YAML processor)
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+          # Build wrk2 from source (REQUIRED for rate control)
+          git clone --depth 1 https://github.com/giltene/wrk2.git /tmp/wrk2
+          cd /tmp/wrk2 && make -j$(nproc) && sudo cp wrk /usr/local/bin/wrk2
+          # Create wrk symlink for backward compatibility
+          sudo ln -sf /usr/local/bin/wrk2 /usr/local/bin/wrk
+          # Verify wrk2 installation
+          command -v wrk2 && wrk2 -v 2>&1 | head -1 || (echo "ERROR: wrk2 installation failed" && exit 1)
+          # Install FlameGraph tools
+          git clone --depth 1 https://github.com/brendangregg/FlameGraph /tmp/FlameGraph
+          sudo ln -sf /tmp/FlameGraph/stackcollapse-perf.pl /usr/local/bin/
+          sudo ln -sf /tmp/FlameGraph/flamegraph.pl /usr/local/bin/
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run benchmark
+        working-directory: benches/api/benchmarks
+        env:
+          PROFILE: true
+        run: |
+          chmod +x run_benchmark.sh setup_test_data.sh
+          # Start services
+          cd ../docker && docker compose -f compose.ci.yaml up -d --build --wait
+          cd ../benchmarks
+          # Setup data
+          ./setup_test_data.sh --scale medium
+          # Run benchmark with specified scenario
+          ./run_benchmark.sh --scenario "scenarios/${{ github.event.inputs.scenario }}"
+          # Cleanup
+          cd ../docker && docker compose -f compose.ci.yaml down -v
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: benchmark-manual-${{ github.event.inputs.scenario }}-${{ github.run_id }}
+          path: |
+            benches/api/benchmarks/results/
+          retention-days: 30
+
+      - name: Cleanup
+        if: always()
+        working-directory: benches/api/docker
+        run: docker compose -f compose.ci.yaml down -v || true
+
+  # =============================================================================
+  # Nightly Benchmark (full coverage)
+  # =============================================================================
+  benchmark-nightly:
+    name: Nightly Benchmark
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.event.inputs.scenario == 'all')
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: write
+      actions: write
+
+    steps:
+      - name: Install dependencies
+        run: |
+          # Remove problematic Azure CLI repository that may return 403
+          sudo rm -f /etc/apt/sources.list.d/azure-cli.list || true
+          sudo apt-get update || true
+          sudo apt-get install -y build-essential libssl-dev git linux-tools-common linux-tools-generic linux-tools-$(uname -r) || true
+          # Build wrk2 from source (REQUIRED for rate control)
+          git clone --depth 1 https://github.com/giltene/wrk2.git /tmp/wrk2
+          cd /tmp/wrk2 && make -j$(nproc) && sudo cp wrk /usr/local/bin/wrk2
+          # Create wrk symlink for backward compatibility
+          sudo ln -sf /usr/local/bin/wrk2 /usr/local/bin/wrk
+          # Verify wrk2 installation
+          command -v wrk2 && wrk2 -v 2>&1 | head -1 || (echo "ERROR: wrk2 installation failed" && exit 1)
+          # Install yq (Mike Farah's YAML processor)
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+          # Install FlameGraph tools
+          git clone --depth 1 https://github.com/brendangregg/FlameGraph /tmp/FlameGraph
+          sudo ln -sf /tmp/FlameGraph/stackcollapse-perf.pl /usr/local/bin/
+          sudo ln -sf /tmp/FlameGraph/flamegraph.pl /usr/local/bin/
+          # Install Python jsonschema for meta.json validation
+          pip install jsonschema
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run nightly benchmarks
+        working-directory: benches/api/benchmarks
+        env:
+          PROFILE: true
+        run: |
+          chmod +x run_benchmark.sh setup_test_data.sh
+
+          # Read scenarios from nightly_config.yaml (single source of truth)
+          if [[ ! -f "nightly_config.yaml" ]]; then
+            echo "Error: nightly_config.yaml not found"
+            exit 1
+          fi
+
+          # Extract scenarios array from config
+          readarray -t SCENARIOS < <(yq '.nightly_scenarios[]' nightly_config.yaml)
+          if [[ ${#SCENARIOS[@]} -eq 0 ]]; then
+            echo "Error: No scenarios defined in nightly_config.yaml"
+            exit 1
+          fi
+
+          # Extract variants from config and convert to env var format
+          # Config format: { hit_rate: 0, fail_injection: 0, payload: small }
+          # Output format: "HIT_RATE=0 FAIL_RATE=0 PAYLOAD=small"
+          readarray -t VARIANTS < <(yq -o=json '.nightly_variants[]' nightly_config.yaml | while read -r variant; do
+            hit_rate=$(echo "${variant}" | jq -r '.hit_rate')
+            fail_rate=$(echo "${variant}" | jq -r '.fail_injection')
+            payload=$(echo "${variant}" | jq -r '.payload')
+            echo "HIT_RATE=${hit_rate} FAIL_RATE=${fail_rate} PAYLOAD=${payload}"
+          done)
+
+          echo "Loaded ${#SCENARIOS[@]} scenarios and ${#VARIANTS[@]} variants from nightly_config.yaml"
+
+          for scenario in "${SCENARIOS[@]}"; do
+            echo "=== Running scenario: ${scenario} ==="
+
+            # Start services
+            cd ../docker && docker compose -f compose.ci.yaml up -d --build --wait
+            cd ../benchmarks
+
+            # Setup data
+            ./setup_test_data.sh --scale medium
+
+            # Run baseline with default environment (reset any previous variant settings)
+            unset HIT_RATE FAIL_RATE PAYLOAD
+            ./run_benchmark.sh --scenario "scenarios/${scenario}"
+
+            # Run variants in subshells to isolate environment changes
+            for variant in "${VARIANTS[@]}"; do
+              echo "--- Variant: ${variant} ---"
+              (
+                # Run in subshell to prevent environment pollution
+                export ${variant}
+                ./run_benchmark.sh --scenario "scenarios/${scenario}"
+              )
+            done
+
+            # Cleanup
+            cd ../docker && docker compose -f compose.ci.yaml down -v
+          done
+
+      - name: Validate meta.json schema
+        working-directory: benches/api/benchmarks
+        run: |
+          chmod +x validate_meta_schema.sh
+          ./validate_meta_schema.sh --all results/
+
+      - name: Validate meta_extended.json schema
+        working-directory: benches/api/benchmarks
+        run: |
+          ./validate_meta_schema.sh --all --extended results/
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: benchmark-nightly-${{ github.run_id }}
+          path: |
+            benches/api/benchmarks/results/
+            benches/api/benchmarks/results/**/rps_verification.log
+            benches/api/benchmarks/results/**/resolved_params.log
+          # Short retention for immediate access; long-term storage via GitHub Release
+          retention-days: 14
+
+      - name: Verify coverage document sync
+        working-directory: benches/api/benchmarks
+        run: |
+          echo "Verifying nightly_config.yaml matches coverage document..."
+
+          # Check if nightly_config.yaml exists
+          if [[ ! -f "nightly_config.yaml" ]]; then
+            echo "Error: nightly_config.yaml not found"
+            exit 1
+          fi
+
+          # Extract scenarios from nightly_config.yaml
+          yq '.nightly_scenarios[]' nightly_config.yaml | sort > /tmp/nightly_scenarios.txt
+
+          # Check if coverage document exists
+          COVERAGE_DOC="../../../docs/internal/analysis/20260122_2011_api_benchmark_coverage.yaml"
+          if [[ ! -f "${COVERAGE_DOC}" ]]; then
+            echo "Warning: Coverage document not found at ${COVERAGE_DOC}"
+            echo "This is expected for new repositories. Skipping sync verification."
+            exit 0
+          fi
+
+          # Extract representative scenarios from coverage document
+          # The coverage doc should define backend-matrix scenarios
+          yq '.requirements[] | select(.id == "backend-matrix") | .methods[].signature // empty' "${COVERAGE_DOC}" 2>/dev/null | sort > /tmp/coverage_scenarios.txt || true
+
+          # Log scenarios for visibility
+          echo "=== Nightly config scenarios ==="
+          cat /tmp/nightly_scenarios.txt
+
+          echo ""
+          echo "=== Coverage document scenarios (backend-matrix) ==="
+          cat /tmp/coverage_scenarios.txt 2>/dev/null || echo "(none found)"
+
+          # Verify nightly scenarios exist in scenarios directory
+          echo ""
+          echo "=== Verifying scenario files exist ==="
+          MISSING_FILES=0
+          while read -r scenario; do
+            if [[ ! -f "scenarios/${scenario}" ]]; then
+              echo "Error: Missing scenario file: scenarios/${scenario}"
+              MISSING_FILES=1
+            else
+              echo "OK: scenarios/${scenario}"
+            fi
+          done < /tmp/nightly_scenarios.txt
+
+          if [[ ${MISSING_FILES} -eq 1 ]]; then
+            echo ""
+            echo "Error: Some nightly scenarios are missing. Please update nightly_config.yaml."
+            exit 1
+          fi
+
+          # Compare nightly_config scenarios with coverage document
+          # Note: coverage document uses different format, so we check for scenario keywords
+          echo ""
+          echo "=== Comparing with coverage document ==="
+
+          # Check if coverage document defines any scenarios we're missing
+          if [[ -s /tmp/coverage_scenarios.txt ]]; then
+            # Extract scenario names from coverage doc (format: "storage_mode: {in_memory, postgres}, cache_mode: ...")
+            # Convert to comparable format
+            COVERAGE_KEYWORDS=$(cat /tmp/coverage_scenarios.txt | tr ',' '\n' | grep -oE '(in_memory|postgres|redis|read_heavy|write_heavy|mixed)' | sort -u)
+
+            # Check that nightly scenarios cover the main keywords
+            NIGHTLY_CONTENT=$(cat /tmp/nightly_scenarios.txt | tr '\n' ' ')
+            MISSING_COVERAGE=""
+
+            for keyword in ${COVERAGE_KEYWORDS}; do
+              if ! echo "${NIGHTLY_CONTENT}" | grep -qi "${keyword}"; then
+                MISSING_COVERAGE="${MISSING_COVERAGE} ${keyword}"
+              fi
+            done
+
+            if [[ -n "${MISSING_COVERAGE}" ]]; then
+              echo "Error: nightly_config is missing coverage for:${MISSING_COVERAGE}"
+              echo "Please update nightly_config.yaml to cover all required scenarios from coverage document."
+              exit 1
+            else
+              echo "Nightly scenarios appear to cover all coverage document requirements."
+            fi
+          else
+            echo "No specific scenario requirements found in coverage document."
+          fi
+
+          echo ""
+          echo "Coverage sync verification passed."
+
+      - name: Prepare baseline archive
+        if: success()
+        id: baseline
+        working-directory: benches/api/benchmarks
+        run: |
+          # Generate date tag matching nightly_config.yaml pattern
+          DATE_TAG=$(date +%Y%m%d)
+          echo "date_tag=${DATE_TAG}" >> $GITHUB_OUTPUT
+
+          # Create compressed archive of results (minimize storage)
+          tar -czf "baseline-${DATE_TAG}.tar.gz" results/
+
+          # Generate summary JSON with key metrics from all meta.json files
+          # Collect all scenario metrics into an array
+          SCENARIO_METRICS="[]"
+          # Use find for recursive meta.json discovery (globstar may not be enabled)
+          while IFS= read -r meta; do
+            if [[ -f "${meta}" ]]; then
+              # Directory structure: results/<ts>/<scenario>/<script>/meta.json
+              # Extract scenario name (2 levels up from meta.json)
+              scenario=$(basename "$(dirname "$(dirname "${meta}")")")
+              script=$(basename "$(dirname "${meta}")")
+              # Extract key metrics only and add to array (include script for disambiguation)
+              METRIC=$(jq --arg s "${scenario}" --arg sc "${script}" '{scenario: $s, script: $sc, rps: .results.rps, p95: .results.p95, p99: .results.p99, error_rate: .results.error_rate}' "${meta}" 2>/dev/null || echo '{}')
+              if [[ "${METRIC}" != "{}" ]]; then
+                SCENARIO_METRICS=$(echo "${SCENARIO_METRICS}" | jq --argjson m "${METRIC}" '. + [$m]')
+              fi
+            fi
+          done < <(find results -name meta.json 2>/dev/null)
+
+          # Create final summary JSON with proper structure
+          jq -n \
+            --arg date "${DATE_TAG}" \
+            --arg commit "${{ github.sha }}" \
+            --argjson scenarios "${SCENARIO_METRICS}" \
+            '{date: $date, commit: $commit, scenarios: $scenarios}' > baseline-summary.json
+
+          echo "Generated baseline-summary.json with $(echo ${SCENARIO_METRICS} | jq 'length') scenarios"
+
+          # Read scenarios and variants from config for release notes
+          SCENARIOS=$(yq '.nightly_scenarios | join(", ")' nightly_config.yaml)
+          echo "scenarios=${SCENARIOS}" >> $GITHUB_OUTPUT
+
+          VARIANTS=$(yq '.nightly_variants | length' nightly_config.yaml)
+          echo "variant_count=${VARIANTS}" >> $GITHUB_OUTPUT
+
+      - name: Create baseline release
+        if: success()
+        uses: softprops/action-gh-release@v2
+        with:
+          # Use date-based tag per nightly_config.yaml baseline.release_tag_pattern
+          tag_name: benchmark-baseline-${{ steps.baseline.outputs.date_tag }}
+          name: "Benchmark Baseline ${{ steps.baseline.outputs.date_tag }}"
+          body: |
+            Nightly benchmark baseline results.
+
+            **Date**: ${{ steps.baseline.outputs.date_tag }}
+            **Commit**: ${{ github.sha }}
+
+            ## Configuration
+            Scenarios and variants loaded from `nightly_config.yaml`.
+
+            **Scenarios**: ${{ steps.baseline.outputs.scenarios }}
+            **Variant combinations**: ${{ steps.baseline.outputs.variant_count }}
+
+            ## Files
+            - `baseline-*.tar.gz`: Compressed benchmark results
+            - `baseline-summary.json`: Key metrics summary
+
+            For detailed results, download and extract the archive.
+          files: |
+            benches/api/benchmarks/baseline-*.tar.gz
+            benches/api/benchmarks/baseline-summary.json
+          draft: false
+          prerelease: true
+
+      - name: Cleanup
+        if: always()
+        working-directory: benches/api/docker
+        run: docker compose -f compose.ci.yaml down -v || true

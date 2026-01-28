@@ -144,6 +144,39 @@
 //! | `let x = expr;` | None | Pure computations |
 //! | `x <~ AsyncIO::pure(expr);` | ~30x per bind | Avoid - use let instead |
 //! | `x <~ async_operation();` | Inherent | Actual async operations |
+//!
+//! # Implementation Details
+//!
+//! ## Code Generation
+//!
+//! The `for_async!` macro generates a static async block wrapped in `AsyncIO::new()`.
+//! The control flow (loops, guards, let bindings) is compiled into the async state
+//! machine statically.
+//!
+//! ## Allocation Characteristics
+//!
+//! - **Outer wrapper**: One `Box<dyn Future>` allocation for the `AsyncIO::new()` call
+//! - **Collection binds (`<=`)**: Standard `for` loops within the async block, no
+//!   per-iteration allocation
+//! - **Let bindings (`let`)**: Zero overhead, pure local variables
+//!
+//! ## Async Bind Behavior (`<~`)
+//!
+//! The `<~` operator calls `.run_async().await` on the `AsyncIO` expression.
+//!
+//! **Note**: Each `<~` invocation incurs `Box::pin` allocation overhead because
+//! `run_async()` internally uses `Box::pin` to create a pinned future, regardless
+//! of the `AsyncIO` variant. Even `AsyncIO::pure(value)` incurs this boxing
+//! overhead when awaited via `run_async()`.
+//!
+//! This is why using `let` bindings for pure computations is strongly recommended
+//! over `<~ AsyncIO::pure(expr)` - the latter adds unnecessary boxing overhead.
+//!
+//! ## Performance Recommendations
+//!
+//! - Use `let` bindings for pure computations (zero overhead)
+//! - Reserve `<~` for actual async operations that require deferred execution
+//! - Avoid `x <~ AsyncIO::pure(expr)`; use `let x = expr;` instead
 
 #![forbid(unsafe_code)]
 

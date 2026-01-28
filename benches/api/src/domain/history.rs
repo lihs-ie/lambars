@@ -8,7 +8,7 @@ use lambars::persistent::PersistentList;
 use serde::{Deserialize, Serialize};
 
 use super::project::ProjectId;
-use super::task::{Priority, SubTaskId, Tag, TaskId, TaskStatus, Timestamp};
+use super::task::{Priority, SubTaskId, Tag, Task, TaskId, TaskStatus, Timestamp};
 
 // =============================================================================
 // Event ID
@@ -66,6 +66,7 @@ pub struct TaskCreated {
     pub title: String,
     pub description: Option<String>,
     pub priority: Priority,
+    pub status: TaskStatus,
 }
 
 /// Payload for a task title update event.
@@ -368,6 +369,249 @@ where
 }
 
 // =============================================================================
+// Event Generation Pure Functions
+// =============================================================================
+
+/// Creates a task created event (pure function).
+///
+/// This function generates the event payload from a `Task` reference.
+/// The event ID, timestamp, and version are provided as parameters to
+/// ensure purity - they should be generated within an I/O boundary.
+///
+/// # Arguments
+///
+/// * `task` - The task that was created
+/// * `event_id` - Unique identifier for this event (generated in I/O boundary)
+/// * `timestamp` - When the event occurred (generated in I/O boundary)
+/// * `version` - This event's version (`expected_version` + 1, i.e., 1 for initial creation)
+///
+/// # Version Semantics
+///
+/// The `version` parameter represents the resulting version after this event is applied:
+/// - For the first event: `expected_version = 0`, so `version = 1`
+/// - For subsequent events: `version = current_version + 1`
+///
+/// This matches the `EventStore`'s optimistic locking semantics where `append(event, expected_version)`
+/// verifies that `event.version == expected_version + 1`.
+///
+/// # Example
+///
+/// ```ignore
+/// let event = create_task_created_event(
+///     &task,
+///     EventId::generate_v7(),  // Generated in I/O boundary
+///     Timestamp::now(),        // Generated in I/O boundary
+///     1,                       // First event for this task (expected_version=0 + 1)
+/// );
+/// ```
+#[must_use]
+pub fn create_task_created_event(
+    task: &Task,
+    event_id: EventId,
+    timestamp: Timestamp,
+    version: u64,
+) -> TaskEvent {
+    TaskEvent::new(
+        event_id,
+        task.task_id.clone(),
+        timestamp,
+        version,
+        TaskEventKind::Created(TaskCreated {
+            title: task.title.clone(),
+            description: task.description.clone(),
+            priority: task.priority,
+            status: task.status,
+        }),
+    )
+}
+
+/// Creates a status changed event (pure function).
+///
+/// This function generates the event payload for a status change.
+/// Use this when a task's status is being updated.
+///
+/// # Arguments
+///
+/// * `task_id` - The ID of the task whose status changed
+/// * `old_status` - The previous status
+/// * `new_status` - The new status
+/// * `event_id` - Unique identifier for this event (generated in I/O boundary)
+/// * `timestamp` - When the event occurred (generated in I/O boundary)
+/// * `version` - This event's version (`current_version` + 1)
+///
+/// # Version Semantics
+///
+/// The `version` parameter represents the resulting version after this event is applied:
+/// `version = current_version + 1` where `current_version` is obtained from
+/// `EventStore::get_current_version()`.
+///
+/// # Example
+///
+/// ```ignore
+/// let current_version = event_store.get_current_version(&task_id).await?;
+/// let event = create_status_changed_event(
+///     &task_id,
+///     TaskStatus::Pending,
+///     TaskStatus::InProgress,
+///     EventId::generate_v7(),
+///     Timestamp::now(),
+///     current_version + 1,  // This event's version
+/// );
+/// event_store.append(&event, current_version).await?;  // expected_version = current_version
+/// ```
+#[must_use]
+pub fn create_status_changed_event(
+    task_id: &TaskId,
+    old_status: TaskStatus,
+    new_status: TaskStatus,
+    event_id: EventId,
+    timestamp: Timestamp,
+    version: u64,
+) -> TaskEvent {
+    TaskEvent::new(
+        event_id,
+        task_id.clone(),
+        timestamp,
+        version,
+        TaskEventKind::StatusChanged(StatusChanged {
+            old_status,
+            new_status,
+        }),
+    )
+}
+
+/// Creates a priority changed event (pure function).
+///
+/// This function generates the event payload for a priority change.
+/// Use this when a task's priority is being updated.
+///
+/// # Arguments
+///
+/// * `task_id` - The ID of the task whose priority changed
+/// * `old_priority` - The previous priority
+/// * `new_priority` - The new priority
+/// * `event_id` - Unique identifier for this event (generated in I/O boundary)
+/// * `timestamp` - When the event occurred (generated in I/O boundary)
+/// * `version` - This event's version (`current_version` + 1)
+#[must_use]
+pub fn create_priority_changed_event(
+    task_id: &TaskId,
+    old_priority: Priority,
+    new_priority: Priority,
+    event_id: EventId,
+    timestamp: Timestamp,
+    version: u64,
+) -> TaskEvent {
+    TaskEvent::new(
+        event_id,
+        task_id.clone(),
+        timestamp,
+        version,
+        TaskEventKind::PriorityChanged(PriorityChanged {
+            old_priority,
+            new_priority,
+        }),
+    )
+}
+
+/// Creates a title updated event (pure function).
+///
+/// This function generates the event payload for a title change.
+/// Use this when a task's title is being updated.
+///
+/// # Arguments
+///
+/// * `task_id` - The ID of the task whose title changed
+/// * `old_title` - The previous title
+/// * `new_title` - The new title
+/// * `event_id` - Unique identifier for this event (generated in I/O boundary)
+/// * `timestamp` - When the event occurred (generated in I/O boundary)
+/// * `version` - This event's version (`current_version` + 1)
+#[must_use]
+pub fn create_title_updated_event(
+    task_id: &TaskId,
+    old_title: &str,
+    new_title: &str,
+    event_id: EventId,
+    timestamp: Timestamp,
+    version: u64,
+) -> TaskEvent {
+    TaskEvent::new(
+        event_id,
+        task_id.clone(),
+        timestamp,
+        version,
+        TaskEventKind::TitleUpdated(TaskTitleUpdated {
+            old_title: old_title.to_string(),
+            new_title: new_title.to_string(),
+        }),
+    )
+}
+
+/// Creates a description updated event (pure function).
+///
+/// This function generates the event payload for a description change.
+/// Use this when a task's description is being updated.
+///
+/// # Arguments
+///
+/// * `task_id` - The ID of the task whose description changed
+/// * `old_description` - The previous description (None if not set)
+/// * `new_description` - The new description (None to clear)
+/// * `event_id` - Unique identifier for this event (generated in I/O boundary)
+/// * `timestamp` - When the event occurred (generated in I/O boundary)
+/// * `version` - This event's version (`current_version` + 1)
+#[must_use]
+pub fn create_description_updated_event(
+    task_id: &TaskId,
+    old_description: Option<&str>,
+    new_description: Option<&str>,
+    event_id: EventId,
+    timestamp: Timestamp,
+    version: u64,
+) -> TaskEvent {
+    TaskEvent::new(
+        event_id,
+        task_id.clone(),
+        timestamp,
+        version,
+        TaskEventKind::DescriptionUpdated(TaskDescriptionUpdated {
+            old_description: old_description.map(String::from),
+            new_description: new_description.map(String::from),
+        }),
+    )
+}
+
+/// Creates a tag added event (pure function).
+///
+/// This function generates the event payload for adding a tag.
+/// Use this when a tag is being added to a task.
+///
+/// # Arguments
+///
+/// * `task_id` - The ID of the task to which the tag was added
+/// * `tag` - The tag that was added
+/// * `event_id` - Unique identifier for this event (generated in I/O boundary)
+/// * `timestamp` - When the event occurred (generated in I/O boundary)
+/// * `version` - This event's version (`current_version` + 1)
+#[must_use]
+pub fn create_tag_added_event(
+    task_id: &TaskId,
+    tag: &Tag,
+    event_id: EventId,
+    timestamp: Timestamp,
+    version: u64,
+) -> TaskEvent {
+    TaskEvent::new(
+        event_id,
+        task_id.clone(),
+        timestamp,
+        version,
+        TaskEventKind::TagAdded(TagAdded { tag: tag.clone() }),
+    )
+}
+
+// =============================================================================
 // Tests
 // =============================================================================
 
@@ -396,6 +640,7 @@ mod tests {
                 title: "Test Task".to_string(),
                 description: None,
                 priority: Priority::Low,
+                status: TaskStatus::Pending,
             }),
             version,
         )
@@ -651,5 +896,175 @@ mod tests {
         } else {
             panic!("Expected TagAdded event");
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // Event Generation Pure Function Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn test_create_task_created_event_generates_correct_payload() {
+        let task_id = TaskId::generate();
+        let timestamp = Timestamp::now();
+        let task = Task::new(task_id.clone(), "Test Task", timestamp.clone())
+            .with_description("Test description")
+            .with_priority(Priority::High);
+
+        // Initial event version is 1 (expected_version=0 + 1)
+        let event = create_task_created_event(
+            &task,
+            EventId::generate_v7(),
+            timestamp,
+            1, // Initial event version (expected_version=0 + 1)
+        );
+
+        // Verify event metadata
+        assert_eq!(event.task_id, task_id);
+        assert_eq!(event.version, 1);
+
+        // Verify payload
+        if let TaskEventKind::Created(payload) = &event.kind {
+            assert_eq!(payload.title, "Test Task");
+            assert_eq!(payload.description, Some("Test description".to_string()));
+            assert_eq!(payload.priority, Priority::High);
+            assert_eq!(payload.status, TaskStatus::Pending);
+        } else {
+            panic!("Expected Created event");
+        }
+    }
+
+    #[rstest]
+    fn test_create_task_created_event_with_different_status() {
+        let task = Task::new(TaskId::generate(), "Task", Timestamp::now())
+            .with_status(TaskStatus::InProgress);
+
+        // Initial event version is 1 (expected_version=0 + 1)
+        let event = create_task_created_event(&task, EventId::generate_v7(), Timestamp::now(), 1);
+
+        if let TaskEventKind::Created(payload) = &event.kind {
+            assert_eq!(payload.status, TaskStatus::InProgress);
+        } else {
+            panic!("Expected Created event");
+        }
+    }
+
+    #[rstest]
+    fn test_create_status_changed_event_generates_correct_payload() {
+        let task_id = TaskId::generate();
+        let event = create_status_changed_event(
+            &task_id,
+            TaskStatus::Pending,
+            TaskStatus::InProgress,
+            EventId::generate_v7(),
+            Timestamp::now(),
+            5, // Current version
+        );
+
+        // Verify event metadata
+        assert_eq!(event.task_id, task_id);
+        assert_eq!(event.version, 5);
+
+        // Verify payload
+        if let TaskEventKind::StatusChanged(payload) = &event.kind {
+            assert_eq!(payload.old_status, TaskStatus::Pending);
+            assert_eq!(payload.new_status, TaskStatus::InProgress);
+        } else {
+            panic!("Expected StatusChanged event");
+        }
+    }
+
+    #[rstest]
+    fn test_create_title_updated_event_generates_correct_payload() {
+        let task_id = TaskId::generate();
+        let event = create_title_updated_event(
+            &task_id,
+            "Old Title",
+            "New Title",
+            EventId::generate_v7(),
+            Timestamp::now(),
+            3,
+        );
+
+        assert_eq!(event.task_id, task_id);
+        assert_eq!(event.version, 3);
+
+        if let TaskEventKind::TitleUpdated(payload) = &event.kind {
+            assert_eq!(payload.old_title, "Old Title");
+            assert_eq!(payload.new_title, "New Title");
+        } else {
+            panic!("Expected TitleUpdated event");
+        }
+    }
+
+    #[rstest]
+    fn test_create_priority_changed_event_generates_correct_payload() {
+        let task_id = TaskId::generate();
+        let event = create_priority_changed_event(
+            &task_id,
+            Priority::Low,
+            Priority::Critical,
+            EventId::generate_v7(),
+            Timestamp::now(),
+            4,
+        );
+
+        assert_eq!(event.task_id, task_id);
+        assert_eq!(event.version, 4);
+
+        if let TaskEventKind::PriorityChanged(payload) = &event.kind {
+            assert_eq!(payload.old_priority, Priority::Low);
+            assert_eq!(payload.new_priority, Priority::Critical);
+        } else {
+            panic!("Expected PriorityChanged event");
+        }
+    }
+
+    #[rstest]
+    fn test_create_tag_added_event_generates_correct_payload() {
+        let task_id = TaskId::generate();
+        let tag = Tag::new("important");
+        let event =
+            create_tag_added_event(&task_id, &tag, EventId::generate_v7(), Timestamp::now(), 2);
+
+        assert_eq!(event.task_id, task_id);
+        assert_eq!(event.version, 2);
+
+        if let TaskEventKind::TagAdded(payload) = &event.kind {
+            assert_eq!(payload.tag.as_str(), "important");
+        } else {
+            panic!("Expected TagAdded event");
+        }
+    }
+
+    #[rstest]
+    fn test_event_generation_functions_are_pure() {
+        // Test that same inputs produce same output structure
+        // (except for the event_id which is provided as input)
+        let task_id = TaskId::generate();
+        let event_id = EventId::generate_v7();
+        let timestamp = Timestamp::now();
+
+        let event1 = create_status_changed_event(
+            &task_id,
+            TaskStatus::Pending,
+            TaskStatus::Completed,
+            event_id.clone(),
+            timestamp.clone(),
+            10,
+        );
+
+        let event2 = create_status_changed_event(
+            &task_id,
+            TaskStatus::Pending,
+            TaskStatus::Completed,
+            event_id,
+            timestamp,
+            10,
+        );
+
+        // Same inputs should produce same output
+        assert_eq!(event1.task_id, event2.task_id);
+        assert_eq!(event1.version, event2.version);
+        assert_eq!(event1.kind, event2.kind);
     }
 }

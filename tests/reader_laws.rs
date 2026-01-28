@@ -274,7 +274,10 @@ mod unit_tests {
         let local_identity = Reader::local(|r| r, Reader::new(|environment: i32| environment * 2));
 
         for environment in [-100, -1, 0, 1, 100] {
-            assert_eq!(reader.run(environment), local_identity.run(environment));
+            assert_eq!(
+                reader.run_cloned(environment),
+                local_identity.run_cloned(environment)
+            );
         }
     }
 
@@ -284,7 +287,10 @@ mod unit_tests {
         let identity: Reader<i32, i32> = Reader::new(|environment| environment);
 
         for environment in [-100, -1, 0, 1, 100] {
-            assert_eq!(ask.run(environment), identity.run(environment));
+            assert_eq!(
+                ask.run_cloned(environment),
+                identity.run_cloned(environment)
+            );
         }
     }
 }

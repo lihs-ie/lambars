@@ -1,0 +1,822 @@
+name: Profiling Analysis
+
+on:
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'benches/**'
+      - 'lambars-derive/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+  workflow_dispatch:
+    inputs:
+      profile_type:
+        description: 'Profile type to run'
+        required: false
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - criterion
+          - iai
+          - api
+
+concurrency:
+  group: profiling-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ==========================================================================
+  # Criterion Build
+  # ==========================================================================
+  criterion-profiling-build:
+    name: Criterion Build
+    runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.profile_type == 'all' || github.event.inputs.profile_type == 'criterion' || github.event_name == 'pull_request' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-profiling-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build benchmarks and tools
+        run: |
+          set -euo pipefail
+          cargo install inferno
+          cargo build --release --benches
+
+          mkdir -p criterion-profiling-tools/bin
+          mkdir -p criterion-profiling-tools/benches
+
+          # Copy benchmark binaries
+          for bench in effect_bench for_macro_bench control_bench; do
+            BENCH_BIN=$(find target/release/deps -name "${bench}-*" -type f -executable | head -1)
+            if [ -n "$BENCH_BIN" ]; then
+              cp "$BENCH_BIN" "criterion-profiling-tools/benches/${bench}"
+              chmod +x "criterion-profiling-tools/benches/${bench}"
+              echo "Copied ${bench}"
+            else
+              echo "WARNING: Benchmark binary not found for ${bench}"
+            fi
+          done
+
+          # Copy inferno tools
+          cp ~/.cargo/bin/inferno-collapse-perf ~/.cargo/bin/inferno-flamegraph criterion-profiling-tools/bin/
+          chmod +x criterion-profiling-tools/bin/*
+
+          ls -la criterion-profiling-tools/bin/
+          ls -la criterion-profiling-tools/benches/
+
+      - name: Upload profiling tools
+        uses: actions/upload-artifact@v4
+        with:
+          name: criterion-profiling-tools-${{ github.sha }}
+          path: criterion-profiling-tools
+          retention-days: 7
+          if-no-files-found: error
+
+  # ==========================================================================
+  # Criterion Benchmarks with Flamegraph (Parallel)
+  # ==========================================================================
+  criterion-profiling:
+    name: Criterion (${{ matrix.bench }})
+    runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.profile_type == 'all' || github.event.inputs.profile_type == 'criterion' || github.event_name == 'pull_request' }}
+    needs: [criterion-profiling-build]
+    strategy:
+      fail-fast: false
+      matrix:
+        bench: [effect_bench, for_macro_bench, control_bench]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install perf tools
+        run: |
+          # Remove problematic Azure CLI repository that may return 403
+          sudo rm -f /etc/apt/sources.list.d/azure-cli.list || true
+          sudo apt-get update || true
+          sudo apt-get install -y linux-tools-common linux-tools-generic linux-tools-$(uname -r) gawk || true
+          echo '1' | sudo tee /proc/sys/kernel/perf_event_paranoid
+          echo '0' | sudo tee /proc/sys/kernel/kptr_restrict
+
+      - name: Download profiling tools
+        uses: actions/download-artifact@v4
+        with:
+          name: criterion-profiling-tools-${{ github.sha }}
+          path: criterion-profiling-tools
+
+      - name: Ensure tools executable
+        run: |
+          chmod +x criterion-profiling-tools/bin/* criterion-profiling-tools/benches/* || true
+          ls -la criterion-profiling-tools/bin/
+          ls -la criterion-profiling-tools/benches/
+
+      - name: Run profiling for ${{ matrix.bench }}
+        run: |
+          set -euo pipefail
+
+          export PATH="${GITHUB_WORKSPACE}/criterion-profiling-tools/bin:${PATH}"
+          BENCH_BIN="${GITHUB_WORKSPACE}/criterion-profiling-tools/benches/${{ matrix.bench }}"
+          RESULTS_DIR="${GITHUB_WORKSPACE}/profiling-results/criterion/${{ matrix.bench }}"
+
+          mkdir -p "${RESULTS_DIR}"
+
+          if [[ ! -f "${BENCH_BIN}" ]]; then
+            echo "ERROR: Benchmark binary not found: ${BENCH_BIN}"
+            exit 1
+          fi
+
+          echo "=== Profiling ${{ matrix.bench }} ==="
+
+          # Run with perf to collect profile data
+          # Use cpu-clock software event for VM compatibility
+          sudo perf record -e cpu-clock -F 997 -g -o "${RESULTS_DIR}/perf.data" \
+            "${BENCH_BIN}" --bench --profile-time 5 2>&1 | tee "${RESULTS_DIR}/benchmark.log" || true
+
+          if [[ -f "${RESULTS_DIR}/perf.data" ]]; then
+            echo "=== Processing perf data ==="
+            ls -la "${RESULTS_DIR}/perf.data"
+
+            # Generate folded stacks
+            sudo perf script -i "${RESULTS_DIR}/perf.data" 2>&1 | \
+              inferno-collapse-perf > "${RESULTS_DIR}/stacks.folded" 2>&1 || true
+
+            if [[ -s "${RESULTS_DIR}/stacks.folded" ]]; then
+              echo "folded lines: $(wc -l < "${RESULTS_DIR}/stacks.folded")"
+
+              # Generate flamegraph
+              inferno-flamegraph < "${RESULTS_DIR}/stacks.folded" > "${RESULTS_DIR}/flamegraph.svg" 2>&1 || true
+              inferno-flamegraph --reverse < "${RESULTS_DIR}/stacks.folded" > "${RESULTS_DIR}/flamegraph-reverse.svg" 2>&1 || true
+
+              # Generate top functions
+              gawk -F';' '{
+                n=split($NF, parts, " ")
+                fname=parts[1]
+                for(i=2; i<n; i++) fname=fname" "parts[i]
+                samples=parts[n]
+                sum[fname]+=samples
+              } END {
+                for(f in sum) printf "%d %s\n", sum[f], f
+              }' "${RESULTS_DIR}/stacks.folded" | sort -rn | head -50 > "${RESULTS_DIR}/top_functions.txt" || true
+
+              echo "top_functions entries: $(wc -l < "${RESULTS_DIR}/top_functions.txt")"
+            else
+              echo "WARNING: stacks.folded is empty"
+            fi
+
+            # Cleanup large files
+            sudo rm -f "${RESULTS_DIR}/perf.data" 2>/dev/null || true
+          fi
+
+      - name: Upload profiling artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: criterion-profiling-${{ github.sha }}-${{ matrix.bench }}
+          path: profiling-results/criterion/${{ matrix.bench }}/
+          retention-days: 30
+          if-no-files-found: warn
+
+  # ==========================================================================
+  # iai-callgrind with Detailed Analysis
+  # ==========================================================================
+  iai-profiling:
+    name: iai-callgrind Analysis
+    runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.profile_type == 'all' || github.event.inputs.profile_type == 'iai' || github.event_name == 'pull_request' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Valgrind
+        run: |
+          # Remove problematic Azure CLI repository that may return 403
+          sudo rm -f /etc/apt/sources.list.d/azure-cli.list || true
+          sudo apt-get update || true
+          sudo apt-get install -y valgrind
+
+      - name: Install iai-callgrind-runner
+        run: |
+          # Get iai-callgrind version from Cargo.lock to ensure version match
+          IAI_VERSION=$(grep -A1 'name = "iai-callgrind"' Cargo.lock | grep version | head -1 | sed 's/.*"\(.*\)"/\1/')
+          echo "Installing iai-callgrind-runner version $IAI_VERSION"
+          cargo install iai-callgrind-runner --version "$IAI_VERSION"
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-iai-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run iai-callgrind benchmarks
+        run: |
+          mkdir -p profiling-results/iai
+
+          # Run iai benchmarks
+          for bench in persistent_vector_iai effect_iai scenario_iai; do
+            echo "=== Running $bench ==="
+            cargo bench --bench $bench 2>&1 | tee profiling-results/iai/${bench}.log || true
+          done
+
+          # Copy callgrind output files
+          find target -name "callgrind.out.*" -exec cp {} profiling-results/iai/ \; 2>/dev/null || true
+
+      - name: Generate iai-callgrind annotations
+        run: |
+          cd profiling-results/iai
+          for callgrind_file in callgrind.out.*; do
+            if [ -f "$callgrind_file" ]; then
+              echo "=== Annotating $callgrind_file ==="
+              callgrind_annotate --auto=yes "$callgrind_file" > "${callgrind_file}.annotated.txt" 2>/dev/null || true
+            fi
+          done
+
+      - name: Parse iai results for summary
+        id: iai_summary
+        run: |
+          echo "# iai-callgrind Results" > profiling-results/iai/README.md
+          echo "" >> profiling-results/iai/README.md
+
+          # Extract key metrics from logs
+          for log in profiling-results/iai/*.log; do
+            if [ -f "$log" ]; then
+              name=$(basename "$log" .log)
+              echo "## $name" >> profiling-results/iai/README.md
+              echo '```' >> profiling-results/iai/README.md
+              # Extract instruction counts and cache metrics
+              grep -E "(Instructions|L1|LL|RAM)" "$log" | head -50 >> profiling-results/iai/README.md || echo "No metrics found" >> profiling-results/iai/README.md
+              echo '```' >> profiling-results/iai/README.md
+              echo "" >> profiling-results/iai/README.md
+            fi
+          done
+
+      - name: Upload iai-callgrind artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: iai-profiling-${{ github.sha }}
+          path: profiling-results/iai/
+          retention-days: 30
+
+  # ==========================================================================
+  # API Profiling Matrix
+  # ==========================================================================
+  api-profiling-matrix:
+    name: API Profiling Matrix
+    runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.profile_type == 'all' || github.event.inputs.profile_type == 'api' || github.event_name == 'pull_request' }}
+    outputs:
+      scenarios: ${{ steps.matrix.outputs.scenarios }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build scenario matrix
+        id: matrix
+        run: |
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import glob
+          import json
+          import os
+
+          scenarios = []
+          for path in sorted(glob.glob("benches/api/benchmarks/scenarios/*.yaml")):
+              if os.path.basename(path) == "matrix.yaml":
+                  continue
+              scenarios.append(os.path.basename(path))
+
+          print("scenarios=" + json.dumps(scenarios))
+          PY
+
+  # ==========================================================================
+  # API Profiling Build
+  # ==========================================================================
+  api-profiling-build:
+    name: API Profiling Build
+    runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.profile_type == 'all' || github.event.inputs.profile_type == 'api' || github.event_name == 'pull_request' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build API server and tools
+        run: |
+          set -euo pipefail
+          cargo install inferno
+          cd benches/api
+          CARGO_PROFILE_RELEASE_DEBUG=true cargo build --release --bin task-management-benchmark-api
+          cd ../..
+          mkdir -p api-profiling-tools/bin
+          cp benches/api/target/release/task-management-benchmark-api api-profiling-tools/bin/
+          cp ~/.cargo/bin/inferno-collapse-perf ~/.cargo/bin/inferno-flamegraph api-profiling-tools/bin/
+          chmod +x api-profiling-tools/bin/*
+
+      - name: Upload profiling tools
+        uses: actions/upload-artifact@v4
+        with:
+          name: api-profiling-tools-${{ github.sha }}
+          path: api-profiling-tools/bin
+          retention-days: 7
+          if-no-files-found: warn
+
+  # ==========================================================================
+  # API Server Profiling during Benchmark
+  # ==========================================================================
+  api-profiling:
+    name: API Server Profiling (${{ matrix.scenario }})
+    runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.profile_type == 'all' || github.event.inputs.profile_type == 'api' || github.event_name == 'pull_request' }}
+    needs: [api-profiling-matrix, api-profiling-build]
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: ${{ fromJSON(needs.api-profiling-matrix.outputs.scenarios) }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          # Remove problematic Azure CLI repository that may return 403
+          sudo rm -f /etc/apt/sources.list.d/azure-cli.list || true
+          sudo apt-get update || true
+          sudo apt-get install -y build-essential libssl-dev git yq linux-tools-common linux-tools-generic linux-tools-$(uname -r) gawk || true
+          # Build wrk2 from source (REQUIRED for rate control)
+          git clone --depth 1 https://github.com/giltene/wrk2.git /tmp/wrk2
+          cd /tmp/wrk2 && make -j$(nproc) && sudo cp wrk /usr/local/bin/wrk2
+          # Create wrk symlink for backward compatibility
+          sudo ln -sf /usr/local/bin/wrk2 /usr/local/bin/wrk
+          # Verify wrk2 installation
+          command -v wrk2 && wrk2 -v 2>&1 | head -1 || (echo "ERROR: wrk2 installation failed" && exit 1)
+          # Allow perf for non-root users
+          echo '1' | sudo tee /proc/sys/kernel/perf_event_paranoid
+          echo '0' | sudo tee /proc/sys/kernel/kptr_restrict
+
+      - name: Download profiling tools
+        uses: actions/download-artifact@v4
+        with:
+          name: api-profiling-tools-${{ github.sha }}
+          path: api-profiling-tools/bin
+
+      - name: Ensure profiling tools executable
+        run: |
+          chmod +x api-profiling-tools/bin/* || true
+          ls -la api-profiling-tools/bin
+
+      - name: Resolve scenario name
+        id: scenario
+        run: |
+          scenario="${{ matrix.scenario }}"
+          echo "name=${scenario%.yaml}" >> "$GITHUB_OUTPUT"
+
+      - name: Start API server and profile
+        working-directory: benches/api
+        env:
+          MIXED_SCRIPT: recursive
+        run: |
+          set -euo pipefail
+
+          export PATH="${GITHUB_WORKSPACE}/api-profiling-tools/bin:${PATH}"
+          API_BIN="${GITHUB_WORKSPACE}/api-profiling-tools/bin/task-management-benchmark-api"
+          SCENARIO_FILE="${GITHUB_WORKSPACE}/benches/api/benchmarks/scenarios/${{ matrix.scenario }}"
+          SCENARIO_NAME="${{ steps.scenario.outputs.name }}"
+          RESULTS_DIR="${GITHUB_WORKSPACE}/profiling-results/api/${SCENARIO_NAME}"
+
+          PERF_PID=""
+          SERVER_PID=""
+
+          cleanup() {
+            if [[ -n "${PERF_PID}" ]]; then
+              sudo kill -INT "${PERF_PID}" 2>/dev/null || true
+              sleep 2
+            fi
+            if [[ -n "${SERVER_PID}" ]]; then
+              kill "${SERVER_PID}" 2>/dev/null || true
+            fi
+          }
+          trap cleanup EXIT
+
+          echo "=== Tool versions ==="
+          perf --version || true
+          wrk --version || true
+          yq --version || true
+          inferno-collapse-perf --version || true
+
+          mkdir -p "${RESULTS_DIR}"
+
+          # Allow perf
+          echo '1' | sudo tee /proc/sys/kernel/perf_event_paranoid || true
+          echo '0' | sudo tee /proc/sys/kernel/kptr_restrict || true
+
+          if [[ ! -f "${API_BIN}" ]]; then
+            echo "ERROR: API binary not found at ${API_BIN}"
+            exit 1
+          fi
+          chmod +x "${API_BIN}"
+
+          # Start server in background with in-memory mode (no external dependencies)
+          # Enable bulk optimization for tasks_bulk benchmark
+          USE_BULK_OPTIMIZATION=true \
+          BULK_CHUNK_SIZE=50 \
+          BULK_CONCURRENCY_LIMIT=4 \
+          STORAGE_MODE=in_memory CACHE_MODE=in_memory RUST_LOG=info "${API_BIN}" &
+          SERVER_PID=$!
+
+          # Wait for server to be ready (health check loop)
+          echo "Waiting for API server to start..."
+          for i in {1..30}; do
+            if curl -sf http://localhost:3000/health > /dev/null 2>&1; then
+              echo "API server is ready (attempt $i)"
+              break
+            fi
+            if [ $i -eq 30 ]; then
+              echo "ERROR: API server failed to start within 30 seconds"
+              kill $SERVER_PID 2>/dev/null || true
+              exit 1
+            fi
+            echo "  Attempt $i/30: waiting..."
+            sleep 1
+          done
+
+          # Setup test data
+          cd benchmarks
+          chmod +x setup_test_data.sh run_benchmark.sh
+          API_URL=http://localhost:3000 ./setup_test_data.sh || true
+
+          # Run perf record during benchmark
+          # Use cpu-clock software event for VM compatibility and higher sampling rate
+          echo "=== Starting perf profiling ==="
+          sudo perf record -e cpu-clock -F 997 -p $SERVER_PID -g -o "${RESULTS_DIR}/perf.data" &
+          PERF_PID=$!
+
+          # Run benchmark for a single scenario (mixed runs a single script)
+          API_URL=http://localhost:3000 ./run_benchmark.sh --scenario "${SCENARIO_FILE}"
+
+          # Capture benchmark outputs for aggregation
+          BENCH_RESULTS_ROOT="$(pwd)/results"
+          LATEST_SCENARIO_DIR=$(ls -td "${BENCH_RESULTS_ROOT}"/*/"${SCENARIO_NAME}" 2>/dev/null | head -1 || true)
+          if [[ -n "${LATEST_SCENARIO_DIR}" ]]; then
+            mkdir -p "${RESULTS_DIR}/benchmark/meta" "${RESULTS_DIR}/benchmark/wrk"
+            if [[ -f "${LATEST_SCENARIO_DIR}/summary.txt" ]]; then
+              cp "${LATEST_SCENARIO_DIR}/summary.txt" "${RESULTS_DIR}/benchmark/summary.txt"
+            fi
+            while IFS= read -r -d '' meta_file; do
+              script_name=$(basename "$(dirname "${meta_file}")")
+              cp "${meta_file}" "${RESULTS_DIR}/benchmark/meta/${script_name}.json"
+              wrk_file="$(dirname "${meta_file}")/wrk.txt"
+              if [[ -f "${wrk_file}" ]]; then
+                cp "${wrk_file}" "${RESULTS_DIR}/benchmark/wrk/${script_name}.txt"
+              fi
+            done < <(find "${LATEST_SCENARIO_DIR}" -name meta.json -print0)
+          else
+            echo "WARNING: benchmark results directory not found for ${SCENARIO_NAME}"
+          fi
+
+          # Stop perf and show statistics
+          sudo kill -INT $PERF_PID 2>/dev/null || true
+          PERF_PID=""
+          sleep 2
+
+          # Show perf record stats
+          echo "=== perf record statistics ==="
+          ls -la "${RESULTS_DIR}/perf.data" 2>/dev/null || echo "perf.data not found"
+
+          # Generate flamegraph
+          echo "=== Running perf script ==="
+          sudo perf script -i "${RESULTS_DIR}/perf.data" > "${RESULTS_DIR}/perf.script" 2>&1 || echo "perf script returned non-zero"
+
+          if [ -s "${RESULTS_DIR}/perf.script" ]; then
+            echo "=== Generating folded stacks ==="
+            inferno-collapse-perf < "${RESULTS_DIR}/perf.script" > "${RESULTS_DIR}/stacks.folded" 2>&1 || echo "inferno-collapse-perf returned non-zero"
+
+            if [ -s "${RESULTS_DIR}/stacks.folded" ]; then
+              echo "=== Generating flamegraph ==="
+              inferno-flamegraph < "${RESULTS_DIR}/stacks.folded" > "${RESULTS_DIR}/flamegraph.svg" 2>&1 || echo "inferno-flamegraph returned non-zero"
+            else
+              echo "WARNING: stacks.folded is empty"
+            fi
+          else
+            echo "WARNING: perf.script is empty - perf may not have captured data"
+          fi
+
+          # Clean up perf artifacts to avoid permission issues during upload
+          sudo rm -f "${RESULTS_DIR}/perf.data" "${RESULTS_DIR}/perf.script" 2>/dev/null || true
+
+      - name: Upload API profiling artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: api-profiling-${{ github.sha }}-${{ steps.scenario.outputs.name }}
+          path: profiling-results/api/${{ steps.scenario.outputs.name }}/
+          retention-days: 30
+          if-no-files-found: warn
+
+  # ==========================================================================
+  # Aggregate Results and Post PR Comment
+  # ==========================================================================
+  summarize-profiling:
+    name: Summarize Profiling Results
+    runs-on: ubuntu-latest
+    needs: [criterion-profiling, iai-profiling, api-profiling]
+    if: always() && github.event_name == 'pull_request'
+    permissions:
+      actions: write
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: profiling-artifacts
+
+      - name: Generate API profiling summary file
+        run: |
+          node <<'NODE'
+          const fs = require('fs');
+          const path = require('path');
+
+          const root = path.join(process.cwd(), 'profiling-artifacts');
+          const sha = process.env.GITHUB_SHA || '';
+          const prefix = `api-profiling-${sha}-`;
+          const summary = { generated_at: new Date().toISOString(), scenarios: [] };
+
+          if (fs.existsSync(root)) {
+            const entries = fs.readdirSync(root, { withFileTypes: true });
+            const apiDirs = entries.filter(e => e.isDirectory() && e.name.startsWith(prefix)).map(e => e.name);
+
+            for (const dirName of apiDirs) {
+              const scenario = dirName.slice(prefix.length);
+              const dirPath = path.join(root, dirName);
+              const flamegraphPath = path.join(dirPath, 'flamegraph.svg');
+              const scripts = [];
+              const metaDir = path.join(dirPath, 'benchmark', 'meta');
+
+              if (fs.existsSync(metaDir)) {
+                const metaFiles = fs.readdirSync(metaDir).filter(f => f.endsWith('.json'));
+                for (const file of metaFiles) {
+                  const filePath = path.join(metaDir, file);
+                  try {
+                    const meta = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+                    const results = meta.results || {};
+                    scripts.push({
+                      script: path.basename(file, '.json'),
+                      rps: results.rps ?? null,
+                      p50: results.p50 ?? null,
+                      p95: results.p95 ?? null,
+                      p99: results.p99 ?? null,
+                      error_rate: results.error_rate ?? null
+                    });
+                  } catch (err) {
+                    scripts.push({ script: path.basename(file, '.json'), error: String(err) });
+                  }
+                }
+              }
+
+              summary.scenarios.push({
+                scenario,
+                artifact: dirName,
+                flamegraph: fs.existsSync(flamegraphPath),
+                scripts
+              });
+            }
+          }
+
+          fs.writeFileSync(
+            path.join(root, 'api-profiling-summary.json'),
+            JSON.stringify(summary, null, 2)
+          );
+          console.log(`summary scenarios: ${summary.scenarios.length}`);
+          NODE
+
+      - name: Assemble Criterion profiling artifact
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          root="profiling-artifacts"
+          prefix="criterion-profiling-${GITHUB_SHA}"
+          out="criterion-profiling-all"
+          rm -rf "${out}"
+          mkdir -p "${out}"
+
+          for dir in "${root}"/${prefix}*; do
+            if [[ -d "${dir}" ]]; then
+              artifact="${dir##*/}"
+              mkdir -p "${out}/${artifact}"
+              cp -R "${dir}/." "${out}/${artifact}/"
+            fi
+          done
+          shopt -u nullglob
+
+      - name: Assemble API profiling artifact
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          root="profiling-artifacts"
+          prefix="api-profiling-${GITHUB_SHA}-"
+          out="api-profiling-all"
+          rm -rf "${out}"
+          mkdir -p "${out}"
+
+          if [[ -f "${root}/api-profiling-summary.json" ]]; then
+            cp "${root}/api-profiling-summary.json" "${out}/"
+          fi
+
+          for dir in "${root}"/${prefix}*; do
+            if [[ -d "${dir}" ]]; then
+              scenario="${dir##*/}"
+              scenario="${scenario#${prefix}}"
+              mkdir -p "${out}/${scenario}"
+              cp -R "${dir}/." "${out}/${scenario}/"
+            fi
+          done
+          shopt -u nullglob
+
+      - name: Post profiling summary to PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+
+            let body = '## :microscope: Profiling Analysis Results\n\n';
+            body += `Commit: \`${context.sha.substring(0, 7)}\`\n\n`;
+
+            const artifactsRoot = 'profiling-artifacts';
+
+            // Check for Criterion results (multiple artifacts)
+            const criterionPrefix = 'criterion-profiling-' + context.sha + '-';
+            const criterionArtifacts = fs.existsSync(artifactsRoot)
+              ? fs.readdirSync(artifactsRoot).filter(name => name.startsWith(criterionPrefix))
+              : [];
+
+            if (criterionArtifacts.length > 0) {
+              body += '### :chart_with_upwards_trend: Criterion Flamegraphs\n\n';
+              body += '| Benchmark | Flamegraph |\n|-----------|------------|\n';
+
+              for (const dirName of criterionArtifacts) {
+                const bench = dirName.slice(criterionPrefix.length);
+                const dirPath = path.join(artifactsRoot, dirName);
+                const hasFlamegraph = fs.existsSync(path.join(dirPath, 'flamegraph.svg'));
+                body += `| ${bench} | ${hasFlamegraph ? ':white_check_mark:' : ':x:'} |\n`;
+              }
+              body += '\n';
+            }
+
+            // Check for iai results
+            const iaiDir = 'profiling-artifacts/iai-profiling-' + context.sha;
+            if (fs.existsSync(iaiDir)) {
+              body += '### :bar_chart: iai-callgrind Analysis\n\n';
+              const logFiles = fs.readdirSync(iaiDir).filter(f => f.endsWith('.log'));
+
+              if (logFiles.length > 0) {
+                body += `Analyzed ${logFiles.length} benchmark(s). Download artifacts for detailed reports.\n\n`;
+              } else {
+                body += 'iai-callgrind analysis completed. Download artifacts for detailed reports.\n\n';
+              }
+            }
+
+            // Check for API results (multiple artifacts)
+            const apiPrefix = 'api-profiling-' + context.sha;
+            const apiArtifacts = fs.existsSync(artifactsRoot)
+              ? fs.readdirSync(artifactsRoot).filter(name => name.startsWith(apiPrefix))
+              : [];
+
+            function findFiles(dir, fileName, results = []) {
+              if (!fs.existsSync(dir)) return results;
+              const entries = fs.readdirSync(dir, { withFileTypes: true });
+              for (const entry of entries) {
+                const fullPath = path.join(dir, entry.name);
+                if (entry.isDirectory()) {
+                  findFiles(fullPath, fileName, results);
+                } else if (entry.isFile() && entry.name === fileName) {
+                  results.push(fullPath);
+                }
+              }
+              return results;
+            }
+
+            if (apiArtifacts.length > 0) {
+              let flamegraphs = 0;
+              for (const dirName of apiArtifacts) {
+                const dirPath = path.join(artifactsRoot, dirName);
+                flamegraphs += findFiles(dirPath, 'flamegraph.svg').length;
+              }
+
+              body += '### :fire: API Server Flamegraphs\n\n';
+              body += `Artifacts: ${apiArtifacts.length}, Flamegraphs: ${flamegraphs}\n\n`;
+              body += 'Summary: `api-profiling-summary.json`\n\n';
+              if (flamegraphs > 0) {
+                body += ':white_check_mark: Flamegraphs generated successfully. Download artifacts to view.\n\n';
+              } else {
+                body += ':warning: Flamegraph generation may have failed. Check workflow logs.\n\n';
+              }
+            }
+
+            body += '<details>\n<summary>:package: Download Artifacts</summary>\n\n';
+            body += `Download profiling artifacts from the [Actions run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}):\n`;
+            body += '- `criterion-profiling-all-*` - Criterion benchmark flamegraphs\n';
+            body += '- `iai-profiling-*` - iai-callgrind detailed analysis\n';
+            body += '- `api-profiling-all-*` - API server flamegraphs (all scenarios)\n\n';
+            body += '</details>\n\n';
+
+            body += `> :clock1: Profiling completed at: ${new Date().toISOString()}`;
+
+            // Find or create comment
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const botComment = comments.find(comment =>
+              comment.user.type === 'Bot' &&
+              comment.body.includes('## :microscope: Profiling Analysis Results')
+            );
+
+            if (botComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: body
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: body
+              });
+            }
+
+      - name: Upload Criterion profiling aggregate
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: criterion-profiling-all-${{ github.sha }}
+          path: criterion-profiling-all/
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Upload API profiling aggregate
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: api-profiling-all-${{ github.sha }}
+          path: api-profiling-all/
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Delete per-scenario profiling artifacts
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const runId = context.runId;
+            const prefixes = [
+              `api-profiling-${context.sha}-`,
+              `criterion-profiling-${context.sha}`,
+            ];
+
+            const { data } = await github.rest.actions.listWorkflowRunArtifacts({
+              owner,
+              repo,
+              run_id: runId,
+              per_page: 100,
+            });
+
+            const targets = data.artifacts.filter(artifact =>
+              prefixes.some(prefix => artifact.name.startsWith(prefix))
+            );
+            for (const artifact of targets) {
+              await github.rest.actions.deleteArtifact({
+                owner,
+                repo,
+                artifact_id: artifact.id,
+              });
+            }

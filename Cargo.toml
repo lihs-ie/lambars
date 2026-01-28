@@ -1,3 +1,8 @@
+[workspace]
+members = [".", "lambars-derive", "xtask"]
+exclude = ["benches/api"]
+resolver = "3"
+
 [package]
 name = "lambars"
 version = "0.1.0"
@@ -14,8 +19,19 @@ categories = ["data-structures", "rust-patterns"]
 lambars-derive = { path = "lambars-derive", optional = true }
 tokio = { version = "^1.49", features = ["rt", "rt-multi-thread", "time", "sync", "macros"], optional = true }
 futures = { version = "^0.3", optional = true }
+num_cpus = { version = "1.16", optional = true }
 serde = { version = "1.0", features = ["derive"], optional = true }
 rayon = { version = "1.10", optional = true }
+pin-project-lite = { version = "0.2", optional = true }
+smallvec = { version = "1.13", optional = true, features = ["const_generics"] }
+
+arrayvec = { version = "0.7", optional = true }
+
+rustc-hash = { version = "2.1", optional = true }
+ahash = { version = "0.8", optional = true }
+
+loom = { version = "0.7", optional = true }
+
 paste = "1.0"
 static_assertions = "1.1"
 
@@ -24,29 +40,33 @@ rstest = "^0.26"
 proptest = "1.5"
 lambars-derive = { path = "lambars-derive" }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "sync", "macros", "test-util"] }
-criterion = { version = "0.8", features = ["html_reports"] }
+criterion = { version = "0.8", features = ["html_reports", "async_tokio"] }
 iai-callgrind = "0.16"
 serde_json = "1.0"
 trybuild = "1.0"
+loom = "0.7"
 
 [features]
 default = ["typeclass", "compose", "control", "persistent", "optics", "derive", "effect", "async"]
 
 full = ["typeclass", "compose", "control", "persistent", "optics", "derive", "effect", "async", "serde"]
 typeclass = []
-compose = ["typeclass", "dep:lambars-derive"]
-control = ["typeclass"]
-persistent = ["typeclass", "control"]
+compose = ["typeclass", "dep:lambars-derive", "dep:smallvec"]
+control = ["typeclass", "dep:smallvec"]
+persistent = ["typeclass", "control", "dep:smallvec", "dep:arrayvec"]
 optics = ["typeclass", "persistent"]
 derive = ["optics", "dep:lambars-derive"]
 effect = ["typeclass", "control"]
-async = ["effect", "dep:tokio", "dep:futures"]
+async = ["effect", "dep:tokio", "dep:futures", "dep:num_cpus", "dep:pin-project-lite"]
 arc = []
 rayon = ["arc", "dep:rayon"]
 serde = ["dep:serde"]
+fxhash = ["dep:rustc-hash"]
+ahash = ["dep:ahash"]
+loom = ["dep:loom"]
 
 [lints.rust]
-unsafe_code = "forbid"
+unsafe_code = "deny"
 
 [lints.clippy]
 
@@ -117,6 +137,16 @@ name = "alternative_bench"
 harness = false
 required-features = ["typeclass"]
 
+[[bench]]
+name = "eff_async_macro_bench"
+harness = false
+required-features = ["async"]
+
+[[bench]]
+name = "async_io_runtime_bench"
+harness = false
+required-features = ["async"]
+
 # Iai-Callgrind benchmarks
 [[bench]]
 name = "persistent_vector_iai"
@@ -139,5 +169,11 @@ name = "iai_benchmark_validation"
 path = "tests/iai_benchmark_validation.rs"
 required-features = ["typeclass", "control", "persistent", "optics", "effect", "compose"]
 
+[profile.release]
+lto = "fat"
+codegen-units = 1
+opt-level = 3
+
 [profile.bench]
+inherits = "release"
 debug = true  # Required for Iai-Callgrind

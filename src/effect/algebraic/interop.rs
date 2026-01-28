@@ -122,7 +122,7 @@ pub trait FromEff<E: Effect, A>: Sized {
 
 // Reader Monad Interop
 
-impl<R: Clone + 'static, A: 'static> IntoEff<ReaderEffect<R>> for Reader<R, A> {
+impl<R: Clone + 'static, A: Clone + 'static> IntoEff<ReaderEffect<R>> for Reader<R, A> {
     type Value = A;
 
     /// Converts a Reader monad into an Eff computation.

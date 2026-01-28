@@ -1,0 +1,166 @@
+# for マクロ パフォーマンス最適化 要件定義
+#
+# 概要:
+#   for マクロ（内包表記）の展開をイテレータ融合と事前容量確保に刷新し、malloc/realloc をトップフレームから排除する。
+#
+# 設計方針:
+#   1. マクロ展開を中間 Vec なしの map/filter/flat_map パイプラインへ完全融合させる。
+#   2. size_hint 合成に基づき SmallVec/Vec の事前確保を必須化し、再配置を 0-1 回に抑える。
+#   3. プロファイル・ベンチでの再配置/警告ゼロを CI で機械検証する。
+#
+# 参照:
+#   - docs/internal/issues/20260120_1605_for_macro_perf.yaml
+#   - profiling-results/criterion-profiling-*/for_macro_bench.folded
+#   - benchmark_results_after.txt
+
+version: "1.0.0"
+name: "for_macro_perf"
+description: |
+  for マクロ（内包表記）の生成コードを、イテレータ融合 + 事前容量確保 + SmallVec 最適化に改修する。
+  すべてのネスト・ガード・パターン束縛において中間 Vec 生成を禁止し、FlatMap 連鎖は fused 版で再配置ゼロを保証する。
+  ベンチ・プロファイルを更新し、realloc/malloc がトップフレームに現れないことを CI で検証する。
+
+# 背景・動機
+background:
+  problem: |
+    for マクロ展開が各バインドで Vec 収集を行い、size_hint を活かさないため FlatMap::next 配下で malloc/realloc が多発。
+    concat/PersistentVector_naive/100000 が ~1.04ms かつ警告を出し、深い flat_map ネストで同様の退行。
+  motivation: |
+    再配置と中間 Vec を排除し、100k 規模の内包表記で 2-4x の高速化と警告除去を達成する。
+    フレームグラフから malloc/realloc/RawVec::finish_grow を消し、メモリ帯域・キャッシュ負荷を削減する。
+  prior_art:
+    - name: "itertools::process_results / fuse"
+      description: "イテレータ融合のパターンと size_hint 合成の参考"
+    - name: "SmallVec/ArrayVec"
+      description: "小規模バッファをスタック内に確保して realloc を回避する手法"
+
+# 要件一覧
+requirements:
+  # ======================================================================
+  # 1. マクロ展開の融合戦略
+  # ======================================================================
+  - id: for_macro_fusion_pipeline
+    name: "中間 Vec 禁止の融合展開"
+    description: |
+      for マクロ（内包表記）の展開は map/filter/flat_map などのイテレータチェーンのみで構成し、中間 Vec の生成を禁止する。
+      guard/let/pattern 束縛はインラインクロージャ内の match / filter_map で表現し、tuple 一時オブジェクトのアロケーションも避ける。
+      生成されるクロージャには #[inline(always)] を付与し、LLVM 最適化による融合を促進する。
+    methods:
+      - name: "expand_for_macro"
+        signature: "fn expand_for_macro(ast: ForComprehension) -> TokenStream"
+        description: |
+          AST から map/filter/flat_map チェーンを生成し、bind ごとに Iterator トレイトのメソッドを選択。
+          ガードは filter、パターン失敗は filter_map で表現し、中間収集を行わない。
+        examples:
+          - description: "二重ループ + ガード"
+            code: |
+              for [x <- xs, y <- ys, x + y > 0] => x + y
+              // 展開イメージ（簡略）
+              xs.into_iter()
+                .flat_map(|x| ys.iter().filter(move |y| x + *y > 0).map(move |y| x + *y))
+    implementations:
+      - type: "lambars-derive::for_macro"
+        description: |
+          TokenStream 生成時に中間 Vec を生成する既存コードを全廃し、Iterator チェーンのみで構成する。
+
+  # ======================================================================
+  # 2. size_hint 合成と事前確保
+  # ======================================================================
+  - id: for_macro_size_hint
+    name: "size_hint 合成による容量前取り"
+    description: |
+      すべての内包表記で最終 collect 前に size_hint を合成し、Vec::with_capacity または SmallVec を必ず事前確保する。
+      size_hint の下限は外側と内側の積、上限は min を用いてオーバーフローを防ぐ。
+      合成結果が閾値以下なら SmallVec<[T; N]>、それ以上は Vec::with_capacity で一度だけ確保する。
+    methods:
+      - name: "compute_fused_size_hint"
+        signature: "fn compute_fused_size_hint(binds: &[Bind]) -> (usize, Option<usize>)"
+        description: |
+          各バインドの size_hint (lower, upper) を合成し、(lower_product, upper_min_product) を返す。
+          上限不明(None)が含まれる場合は下限のみ使用し、上限は None とする。
+      - name: "select_buffer"
+        signature: "fn select_buffer<T>(hint: usize) -> BufferKind<T>"
+        description: |
+          ヒントに応じて SmallVec または Vec を選択する。しきい値はベンチで決定した定数 (e.g., 128) を用いる。
+    implementations:
+      - type: "lambars-derive::for_macro"
+        description: |
+          collect 相当の末端で capacity を設定し、push 時に realloc が発生しないことを保証する。
+
+  # ======================================================================
+  # 3. SmallVec/Vec バッファ戦略
+  # ======================================================================
+  - id: for_macro_smallvec_strategy
+    name: "SmallVec しきい値最適化"
+    description: |
+      収集先は SmallVec<[T; N]> を優先し、N はベンチで決定した固定値を使用（初期値 128 を推奨）。
+      N 超過時は一度だけヒープに移行し、それ以上の realloc を禁止する。
+    methods:
+      - name: "choose_smallvec_capacity"
+        signature: "const SMALLVEC_THRESHOLD: usize"
+        description: |
+          ベンチ結果に基づき決定したしきい値を定数で保持し、CI で変更時の回帰を検知する。
+    implementations:
+      - type: "lambars-derive::for_macro"
+        description: |
+          生成コードで SmallVec を用いるパスと Vec を用いるパスを分岐させ、realloc を 0-1 回に抑える。
+
+  # ======================================================================
+  # 4. ベンチマークとプロファイル検証
+  # ======================================================================
+  - id: for_macro_benchmarks
+    name: "深いネスト・大量要素ベンチの追加"
+    description: |
+      for_macro_bench.rs を更新し、少なくとも以下のシナリオを追加する。
+      - 二重/三重ネスト + guard + pattern の内包表記（10^5 要素規模）
+      - concat/PersistentVector_naive/100000 相当のパス
+      - map/filter/flat_map の深い連鎖
+      criterion の p95 を収集し、警告なしで完走することを必須とする。
+    methods:
+      - name: "bench_for_macro_nested"
+        signature: "fn bench_for_macro_nested(c: &mut Criterion)"
+        description: |
+          2/3 レベルのネストと guard を含む内包表記を 1e5 要素で評価し、p95 を計測する。
+      - name: "bench_for_macro_concat"
+        signature: "fn bench_for_macro_concat(c: &mut Criterion)"
+        description: |
+          concat 相当のシナリオで collect を計測し、realloc が 0-1 回であることを検証する。
+    implementations:
+      - type: "benches/for_macro_bench.rs"
+        description: |
+          既存ベンチを拡充し、p95 とアロケーション回数をレポートする。警告発生時は CI で失敗させる。
+
+  # ======================================================================
+  # 5. プロファイル・回帰チェック
+  # ======================================================================
+  - id: for_macro_profiling
+    name: "フレームグラフとアロケーション検証"
+    description: |
+      profiling-results/criterion-profiling-* に for_macro_bench.folded を生成し、トップ 10 に malloc/realloc/RawVec::finish_grow/OnceLock が入らないことを必須とする。
+      flamegraph と folded を CI アーティファクト化し、閾値超過で CI を失敗させる。
+    methods:
+      - name: "profile_for_macro"
+        signature: "pnpm profile:for-macro"
+        description: |
+          for_macro_bench を criterion-profiling で実行し、folded と flamegraph を生成する CI ジョブ。
+    implementations:
+      - type: "CI (GitHub Actions)"
+        description: |
+          ベンチ/プロファイルを nightly/Release で実行し、malloc/realloc/RawVec::finish_grow/OnceLock 比率のしきい値を検証する。
+
+# 非機能要件
+non_functional_requirements:
+  performance:
+    - "for_macro_bench 深いネスト p95 <= 400µs (x86_64 release, 100k 要素、警告なし)"
+    - "concat/PersistentVector_naive/100000 のアロケーション回数: realloc <= 1, malloc 比率トップ10外"
+    - "for_macro_bench.folded で malloc/realloc/RawVec::finish_grow/OnceLock がトップ10に入らない"
+  compatibility:
+    - "外部 API/マクロシグネチャ互換性を維持（生成コードのみ変更）"
+    - "SmallVec 依存追加時は feature flag でオプトイン/デフォルト有効を明示"
+  testing:
+    - "benches/for_macro_bench.rs の新シナリオを CI で実行し、閾値で判定する"
+    - "プロファイル生成ジョブで folded/flamegraph を保存し、差分監視を行う"
+    - "プロパティベース: 生成コードが元の for マクロと同値であることを比較テスト（同入力 -> 同出力）"
+
+# 将来の拡張
+future_extensions: []

@@ -133,7 +133,7 @@ pub use io::IO;
 // =============================================================================
 
 #[cfg(feature = "async")]
-mod async_io;
+pub mod async_io;
 
 #[cfg(feature = "async")]
 pub use async_io::AsyncIO;
@@ -146,6 +146,9 @@ pub use async_io::Pure;
 
 #[cfg(feature = "async")]
 pub use async_io::TimeoutError;
+
+#[cfg(feature = "async")]
+pub use async_io::BatchError;
 
 // =============================================================================
 // Do-Notation Macros

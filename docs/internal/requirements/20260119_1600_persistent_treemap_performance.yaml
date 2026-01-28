@@ -1,0 +1,1312 @@
+# PersistentTreeMap パフォーマンス最適化 要件定義
+#
+# 概要:
+#   B-Tree ベースの PersistentTreeMap のパフォーマンスを最適化する。
+#   現在の実装は BTreeMap の 2,100 倍遅く、実用に耐えない状況である。
+#   不変性・参照透過性を維持しながら、50-100倍以内を目標とする。
+#
+# 設計方針:
+#   1. 不変性の維持 - 全ての操作で新しいノードを返す
+#   2. 参照透過性 - 同じ入力に対して常に同じ出力
+#   3. 副作用なし - I/O、状態変更を含まない純粋関数
+#   4. 既存 API との完全互換性
+#   5. unsafe コード禁止（プロジェクトポリシー）
+#   6. CoW 適用範囲の制限 - self を消費する場合のみ
+#
+# 参照:
+#   - Issue #163: PersistentTreeMap パフォーマンス改善
+#   - docs/internal/issues/20260115_1400_persistent_treemap_performance.yaml
+#   - 現在の実装: src/persistent/treemap.rs
+
+version: "1.0.0"
+name: "persistent_treemap_performance_optimization"
+description: |
+  PersistentTreeMap のパフォーマンスを最適化し、
+  BTreeMap の 2,100 倍遅い状態から 50-100 倍以内を目指す。
+
+  現在の B-Tree 実装には以下の問題がある:
+  1. 過度な clone - insert/remove 時に子ノード全体をクローン（45箇所以上）
+  2. Vec によるヒープアロケーション - エントリ配列が常にヒープに配置
+  3. 構造的な非効率性 - BRANCHING_FACTOR=16 が最適でない可能性
+
+  関数型プログラミングの原則を維持しながら、以下の最適化を行う:
+  - Copy-on-Write (CoW) パターンによる遅延クローン
+  - SmallVec によるスモールバッファ最適化
+  - 分岐係数の調整とツリー高さの低減
+
+# =============================================================================
+# 背景・動機
+# =============================================================================
+background:
+  problem: |
+    現在の PersistentTreeMap (B-Tree ベース) には深刻なパフォーマンス問題がある。
+
+    **測定結果 (10,000 件):**
+    - insert: 約 1.02 秒（BTreeMap: 約 465us、約 2,100 倍遅い）
+    - get: 約 74ms
+    - サイズ増加に対して性能が指数的に劣化
+
+    **根本原因の分析:**
+
+    1. **過度な clone (推定影響: 40-60%)**
+       ```rust
+       // 行 176: insert 時の子ノードクローン
+       let child = (*children[index]).clone();
+
+       // 行 333, 394 等: remove 時の子ノードクローン
+       let child = (*children[index]).clone();
+       let child = (**child_ref).clone();
+
+       // 行 488, 550, 612 等: underflow 処理時のクローン
+       let left = (*children[index - 1]).clone();
+       let current = (*children[index]).clone();
+       ```
+
+       これらのクローンはノード全体（Vec<(K, V)> と Vec<ReferenceCounter<Self>>）を
+       複製するため、大きなオーバーヘッドが発生している。
+
+    2. **Vec によるヒープアロケーション (推定影響: 20-30%)**
+       ```rust
+       enum BTreeNode<K, V> {
+           Leaf {
+               entries: Vec<(K, V)>,  // 常にヒープ
+           },
+           Internal {
+               entries: Vec<(K, V)>,  // 常にヒープ
+               children: Vec<ReferenceCounter<Self>>,  // 常にヒープ
+           },
+       }
+       ```
+
+       MAX_KEYS = 31 なので、多くのノードは 31 要素以下。
+       SmallVec を使えばスタック上に配置可能。
+
+    3. **構造的非効率性 (推定影響: 10-20%)**
+       - BRANCHING_FACTOR = 16 が永続構造に最適でない可能性
+       - より大きな分岐係数でツリー高さを低減可能
+
+  motivation: |
+    関数型プログラミングの永続データ構造として、PersistentTreeMap は
+    以下の要件を満たす必要がある:
+
+    1. **不変性**: 全ての操作が元のデータを変更しない
+    2. **効率性**: 構造共有により、更新コストを最小化
+    3. **実用性**: 実務で使用可能なパフォーマンス
+
+    現在の実装は 1 と 2 を満たしているが、3 が大幅に不足している。
+    2,100 倍のオーバーヘッドは実用に耐えない。
+
+    **目標:**
+    - insert 10,000 件: 1.02 秒 → 20-50ms（20-50 倍改善）
+    - get 10,000 件: 74ms → 5-15ms（5-15 倍改善）
+    - BTreeMap との比率: 2,100 倍 → 50-100 倍以内
+
+  prior_art:
+    - name: "Clojure PersistentTreeMap"
+      description: |
+        Red-Black Tree ベース。JVM の GC があるため clone コストが
+        Rust とは異なる。参考にはなるが直接適用は困難。
+
+    - name: "Scala immutable.TreeMap"
+      description: |
+        Red-Black Tree ベース。同様に GC 前提の設計。
+
+    - name: "im-rs PersistentTreeMap (Rust)"
+      description: |
+        Rust の永続データ構造ライブラリ。B-Tree を採用し、
+        Arc::make_mut による CoW パターンを実装。参考にすべき。
+
+    - name: "smallvec クレート"
+      description: |
+        スモールバッファ最適化を提供。小さな配列はスタック上に、
+        大きな配列はヒープに配置。広く使われている標準的な最適化。
+
+# =============================================================================
+# 制約条件
+# =============================================================================
+constraints:
+  - id: CON-001
+    name: "unsafe コード禁止"
+    description: |
+      プロジェクト全体で unsafe_code = "forbid" が設定されている。
+      unsafe ブロックの使用は禁止。
+    rationale: |
+      メモリ安全性の保証。Rust の安全性保証を維持する。
+
+  - id: CON-002
+    name: "公開 API 維持"
+    description: |
+      既存の全ての公開 API を変更しない。
+      - new(), singleton(), len(), is_empty()
+      - get(), contains_key(), insert(), remove()
+      - min(), max()
+      - iter(), keys(), values(), entries(), range()
+      - map_values(), map_keys(), filter_map()
+      - merge(), merge_with(), delete_if(), keep_if(), partition()
+      - Clone, Default, FromIterator, IntoIterator
+      - PartialEq, Eq, Hash, Debug, Display
+      - TypeConstructor, Foldable
+      - Serialize, Deserialize (feature = serde)
+      - IntoParallelIterator, par_iter (feature = rayon)
+    rationale: |
+      後方互換性の維持。既存のユーザーコードを壊さない。
+
+  - id: CON-003
+    name: "関数型プログラミング原則維持"
+    description: |
+      以下の原則を維持する:
+      - 不変性: 全ての操作で元のデータを変更しない
+      - 参照透過性: 同じ入力に対して常に同じ出力
+      - 純粋性: 副作用（I/O、状態変更）を含まない
+    rationale: |
+      関数型プログラミングライブラリとしての本質的な性質。
+
+  - id: CON-004
+    name: "外部依存の最小化"
+    description: |
+      必要最小限の依存のみ追加する。
+      SmallVec は広く使われている標準的なクレートであり、
+      許容される依存として追加可能。
+    rationale: |
+      依存関係の肥大化を防ぎ、ビルド時間とバイナリサイズを抑制。
+
+# =============================================================================
+# 要件一覧
+# =============================================================================
+requirements:
+  # ---------------------------------------------------------------------------
+  # Phase 1: Copy-on-Write パターンの導入
+  # ---------------------------------------------------------------------------
+  - id: REQ-TREEMAP-PERF-001
+    name: "Copy-on-Write パターンの導入"
+    priority: critical
+    phase: 1
+    expected_improvement: "2-5倍"
+    description: |
+      ReferenceCounter (Rc/Arc) の参照カウントを活用し、
+      本当に必要な場合のみクローンを行う CoW パターンを導入する。
+
+      **重要: CoW の適用範囲**
+      CoW パターンは `self` を消費するメソッドでのみ適用する。
+      Persistent API（`&self` を取るメソッド）では常に新規ノードを生成し、
+      元のマップが変更される危険を排除する。
+
+      **適用可否の判断基準:**
+      - `fn insert(self, key: K, value: V) -> Self` → CoW 適用可（self を消費）
+      - `fn remove(self, key: &K) -> Self` → CoW 適用可（self を消費）
+      - `fn get(&self, key: &K) -> Option<&V>` → CoW 不要（読み取り専用）
+      - 内部の再帰処理で `ReferenceCounter::try_unwrap` が成功する場合のみ
+        所有権を取得し、失敗時は常にクローン
+
+      **現在の問題:**
+      ```rust
+      // 毎回無条件にクローン
+      let child = (*children[index]).clone();
+      match child.insert(key, value) { ... }
+      ```
+
+      **改善後（self を消費する場合のみ）:**
+      ```rust
+      // 参照カウント == 1 なら所有権を取得、そうでなければクローン
+      // 重要: この関数は children の所有権を持つコンテキストでのみ呼び出す
+      fn take_or_clone_child(
+          children: &mut ChildArray<K, V>,
+          index: usize,
+      ) -> Self {
+          // 配列から取り出し（所有権を移動）
+          let reference = std::mem::replace(
+              &mut children[index],
+              ReferenceCounter::new(Self::empty_placeholder()),
+          );
+
+          // try_unwrap で所有権取得を試みる
+          match ReferenceCounter::try_unwrap(reference) {
+              Ok(node) => {
+                  // 唯一の参照だったので所有権を取得
+                  node
+              }
+              Err(reference_counter) => {
+                  // 他に参照があるのでクローン
+                  let cloned = (*reference_counter).clone();
+                  // 元の参照を戻す
+                  children[index] = reference_counter;
+                  cloned
+              }
+          }
+      }
+      ```
+
+      **関数型プログラミングとの整合性:**
+      - CoW は「self を消費する」場合の最適化
+      - 呼び出し元が self を消費しているため、元のマップへの参照は存在しない
+      - 外部から見ると不変性が維持される
+      - 参照透過性も維持される（同じ入力 → 同じ出力）
+
+    implementation: |
+      ```rust
+      impl<K: Clone + Ord, V: Clone> BTreeNode<K, V> {
+          /// プレースホルダー用の空ノード
+          fn empty_placeholder() -> Self {
+              Self::Leaf { entries: SmallVec::new() }
+          }
+
+          /// CoW パターンで子ノードを取得
+          /// 重要: この関数は self を消費するメソッド内でのみ使用
+          /// - insert(self, ...) → OK
+          /// - remove(self, ...) → OK
+          /// - get(&self, ...) → 使用禁止
+          ///
+          /// 参照カウント == 1 なら所有権を取得、そうでなければクローン
+          fn take_or_clone_child(
+              children: &mut ChildArray<K, V>,
+              index: usize,
+          ) -> Self {
+              // 配列から取り出し（所有権を移動）
+              // 一時的に空のプレースホルダーを入れる
+              let reference = std::mem::replace(
+                  &mut children[index],
+                  ReferenceCounter::new(Self::empty_placeholder()),
+              );
+
+              // try_unwrap で所有権取得を試みる
+              match ReferenceCounter::try_unwrap(reference) {
+                  Ok(node) => {
+                      // 唯一の参照だったので所有権を取得
+                      // 処理後に新しいノードが children[index] に入る
+                      node
+                  }
+                  Err(reference_counter) => {
+                      // 他に参照があるのでクローン
+                      let cloned = (*reference_counter).clone();
+                      // 元の参照を戻す（構造共有を維持）
+                      children[index] = reference_counter;
+                      cloned
+                  }
+              }
+          }
+
+          /// insert の内部実装（self を消費）
+          fn insert_internal(self, key: K, value: V) -> InsertResult<K, V> {
+              match self {
+                  Self::Internal { mut entries, mut children } => {
+                      let index = entries.binary_search_by(|(k, _)| k.cmp(&key))
+                          .unwrap_or_else(|i| i);
+
+                      // self を消費しているので CoW 適用可
+                      let child = Self::take_or_clone_child(&mut children, index);
+                      // ... 処理続行
+                  }
+                  // ...
+              }
+          }
+      }
+      ```
+
+      **変更箇所:**
+      - insert メソッド内の子ノード取得（行 176）
+      - remove メソッド内の子ノード取得（行 333, 394）
+      - borrow/merge 処理内の兄弟ノード取得（行 488, 550, 612 等）
+      - remove_max_from_child 内の処理（行 394, 404, 450）
+
+      **適用しない箇所（読み取り専用）:**
+      - get メソッド
+      - contains_key メソッド
+      - iter/keys/values/entries メソッド
+      - range メソッド
+
+    functional_programming_compliance:
+      immutability: |
+        - Persistent API（`&self`）では常に新規ノード生成
+        - CoW は `self` 消費時の内部最適化
+        - 外部から見た動作は不変
+        - 観測可能な結果は同一
+      referential_transparency: |
+        - 同じ入力に対して同じ出力を返す
+        - 内部状態の最適化は透過的
+        - 元のマップへの参照がないため安全
+      purity: |
+        - 副作用なし
+        - 参照カウントの操作は純粋な計算
+
+    tests:
+      - name: "CoW 正当性テスト"
+        description: |
+          CoW 適用後も insert/remove の結果が正しいことを検証。
+          既存の全テストがパスすること。
+      - name: "構造共有テスト"
+        description: |
+          insert/remove 後に元のマップが変更されていないことを検証。
+          ```rust
+          let map1 = PersistentTreeMap::new().insert(1, "a").insert(2, "b");
+          let map1_clone = map1.clone();  // 構造共有
+          let map2 = map1.insert(3, "c"); // map1 を消費
+
+          // map1_clone は変更されていない
+          assert_eq!(map1_clone.len(), 2);
+          assert_eq!(map1_clone.get(&3), None);
+          ```
+      - name: "パフォーマンステスト（cargo bench）"
+        description: |
+          10,000 件 insert でのパフォーマンス改善を確認。
+          ベンチマーク専用テストで測定。
+
+  # ---------------------------------------------------------------------------
+  # Phase 2: SmallVec の導入
+  # ---------------------------------------------------------------------------
+  - id: REQ-TREEMAP-PERF-002
+    name: "SmallVec によるスモールバッファ最適化"
+    priority: high
+    phase: 2
+    expected_improvement: "20-30%"
+    description: |
+      Vec を SmallVec に置き換え、小さなノードのヒープアロケーションを削減する。
+
+      **現在の問題:**
+      ```rust
+      // 全てのノードでヒープアロケーション
+      entries: Vec<(K, V)>,  // MAX_KEYS = 31 でも常にヒープ
+      children: Vec<ReferenceCounter<Self>>,
+      ```
+
+      **改善後:**
+      ```rust
+      use smallvec::SmallVec;
+
+      // スタック上に収まる場合はヒープアロケーションなし
+      type EntryArray<K, V> = SmallVec<[(K, V); 32]>;  // MAX_KEYS + 1
+      type ChildArray<K, V> = SmallVec<[ReferenceCounter<BTreeNode<K, V>>; 33]>;
+
+      enum BTreeNode<K, V> {
+          Leaf {
+              entries: EntryArray<K, V>,
+          },
+          Internal {
+              entries: EntryArray<K, V>,
+              children: ChildArray<K, V>,
+          },
+      }
+      ```
+
+    implementation: |
+      **Cargo.toml への依存追加:**
+      ```toml
+      [dependencies]
+      smallvec = { version = "1.13", optional = true }
+
+      [features]
+      persistent = ["typeclass", "control", "dep:smallvec"]
+      ```
+
+      **型定義の変更:**
+      ```rust
+      use smallvec::SmallVec;
+
+      /// エントリ配列の型
+      /// MAX_KEYS + 1 = 32 要素までスタック上に配置
+      type EntryArray<K, V> = SmallVec<[(K, V); 32]>;
+
+      /// 子ノード配列の型
+      /// MAX_KEYS + 2 = 33 要素までスタック上に配置
+      type ChildArray<K, V> = SmallVec<[ReferenceCounter<BTreeNode<K, V>>; 33]>;
+      ```
+
+      **Vec<(K, V)> の使用箇所（全て EntryArray<K, V> に置換）:**
+      1. BTreeNode::Leaf.entries フィールド定義
+      2. BTreeNode::Internal.entries フィールド定義
+      3. split_leaf 内の Vec 操作
+      4. split_internal 内の Vec 操作
+      5. merge 処理内の Vec 操作
+      6. from_iter での一時バッファ
+
+      **Vec<ReferenceCounter<_>> の使用箇所（全て ChildArray<K, V> に置換）:**
+      1. BTreeNode::Internal.children フィールド定義
+      2. split_internal 内の children 分割
+      3. merge 処理内の children 結合
+      4. borrow_from_left/right 内の children 操作
+
+      **API 対応が必要な箇所:**
+      - `split_off(index)`: SmallVec でもサポートされている
+      - `drain(..)`: SmallVec でもサポートされている
+      - `extend`: SmallVec でもサポートされている
+      - `with_capacity`: `SmallVec::with_capacity` に置換
+      - `vec![]`: `smallvec![]` に置換
+      - `Vec::new()`: `SmallVec::new()` に置換
+      - `.into_vec()`: `.into_vec()` は SmallVec でもサポート
+
+      **注意が必要な操作:**
+      - `truncate`: サポートされている
+      - `insert`: サポートされている
+      - `remove`: サポートされている
+      - `pop`: サポートされている
+      - `push`: サポートされている
+
+    functional_programming_compliance:
+      immutability: |
+        - SmallVec は Vec と同じ API を提供
+        - 不変性の性質は変わらない
+      referential_transparency: |
+        - 内部表現の変更のみ
+        - 外部から見た動作は同一
+      purity: |
+        - 副作用なし
+
+    tests:
+      - name: "SmallVec 互換性テスト"
+        description: |
+          SmallVec 導入後も全ての既存テストがパスすること。
+      - name: "大量データテスト"
+        description: |
+          32 要素を超えるノードが正しく動作することを検証。
+      - name: "メモリ効率テスト"
+        description: |
+          小さなマップでのメモリ使用量が減少していることを確認。
+
+  # ---------------------------------------------------------------------------
+  # Phase 3: 分岐係数の調整
+  # ---------------------------------------------------------------------------
+  - id: REQ-TREEMAP-PERF-003
+    name: "分岐係数の最適化検証"
+    priority: medium
+    phase: 3
+    expected_improvement: "10-20%"
+    description: |
+      BRANCHING_FACTOR の現在値（16）が永続構造に適切かを検証する。
+
+      **現在の設定（維持）:**
+      ```rust
+      const BRANCHING_FACTOR: usize = 16;
+      const MIN_KEYS: usize = BRANCHING_FACTOR - 1;  // 15
+      const MAX_KEYS: usize = 2 * BRANCHING_FACTOR - 1;  // 31
+      ```
+
+      **検討する値:**
+      - BRANCHING_FACTOR = 32: MAX_KEYS = 63, ツリー高さ低減
+      - BRANCHING_FACTOR = 8: MAX_KEYS = 15, クローンコスト低減
+
+      **トレードオフ:**
+      - 大きい分岐係数: ツリー高さ低、ノードサイズ大、クローンコスト高
+      - 小さい分岐係数: ツリー高さ高、ノードサイズ小、クローンコスト低
+
+      永続構造ではクローンコストが重要なため、
+      ベンチマークで最適値を検証する。
+
+      **現時点での決定:**
+      - 分岐係数は **16 のまま固定**
+      - feature による切り替えは将来の拡張として検討
+      - ベンチマーク結果に基づいて、将来変更が必要と判断された場合に再検討
+
+    implementation: |
+      **現在の実装（変更なし）:**
+      ```rust
+      const BRANCHING_FACTOR: usize = 16;
+      const MIN_KEYS: usize = BRANCHING_FACTOR - 1;  // 15
+      const MAX_KEYS: usize = 2 * BRANCHING_FACTOR - 1;  // 31
+      ```
+
+      **将来の拡張案（今回は実装しない）:**
+      ```rust
+      // 将来的に feature による切り替えを検討
+      // #[cfg(feature = "treemap_b8")]
+      // const BRANCHING_FACTOR: usize = 8;
+      //
+      // #[cfg(feature = "treemap_b32")]
+      // const BRANCHING_FACTOR: usize = 32;
+      ```
+
+    benchmark_plan: |
+      現在の分岐係数（16）で以下を測定し、
+      目標値を達成できない場合に他の値を検討:
+      1. insert 10,000 件
+      2. get 10,000 件
+      3. remove 5,000 件
+      4. range query 50%
+      5. メモリ使用量
+
+    functional_programming_compliance:
+      immutability: |
+        - 分岐係数は定数であり、動作に影響なし
+      referential_transparency: |
+        - 外部から見た動作は同一
+      purity: |
+        - 副作用なし
+
+    tests:
+      - name: "現在の分岐係数でのテスト"
+        description: |
+          分岐係数 16 で全テストがパスすることを検証。
+      - name: "ベンチマーク測定"
+        description: |
+          分岐係数 16 でのパフォーマンスを測定。
+
+    future_work: |
+      分岐係数の feature による切り替えは、以下の条件を満たす場合に実装:
+      1. 現在の分岐係数でパフォーマンス目標を達成できない
+      2. 異なる分岐係数で有意な改善が見られる
+      3. feature 切り替えによるメンテナンスコストが許容範囲内
+
+  # ---------------------------------------------------------------------------
+  # Phase 4: insert 最適化
+  # ---------------------------------------------------------------------------
+  - id: REQ-TREEMAP-PERF-004
+    name: "insert 操作の最適化"
+    priority: high
+    phase: 4
+    expected_improvement: "5-10%"
+    description: |
+      insert 操作の細かな最適化を行う。
+
+      **最適化項目:**
+      1. 二分探索のインライン化
+      2. Split 処理の効率化
+      3. パス上のノードのみを更新（既に実装済みだが検証）
+
+    implementation: |
+      ```rust
+      impl<K: Clone + Ord, V: Clone> BTreeNode<K, V> {
+          #[inline(always)]
+          fn insert(self, key: K, value: V) -> InsertResult<K, V> {
+              match self {
+                  Self::Leaf { mut entries } => {
+                      // 二分探索をインライン展開
+                      match entries.binary_search_by(|(k, _)| k.cmp(&key)) {
+                          Ok(index) => {
+                              // 既存キーの更新 - clone 不要で直接置換
+                              entries[index] = (key, value);
+                              InsertResult::Done {
+                                  node: Self::Leaf { entries },
+                                  added: false,
+                              }
+                          }
+                          Err(index) => {
+                              entries.insert(index, (key, value));
+                              if entries.len() <= MAX_KEYS {
+                                  InsertResult::Done {
+                                      node: Self::Leaf { entries },
+                                      added: true,
+                                  }
+                              } else {
+                                  Self::split_leaf(entries)
+                              }
+                          }
+                      }
+                  }
+                  Self::Internal { mut entries, mut children } => {
+                      // CoW パターンを適用した子ノード取得
+                      // ...
+                  }
+              }
+          }
+      }
+      ```
+
+    functional_programming_compliance:
+      immutability: |
+        - self を消費して新しいノードを返す
+        - 元のデータは変更されない
+      referential_transparency: |
+        - 同じ入力に対して同じ出力
+      purity: |
+        - 副作用なし
+
+    tests:
+      - name: "insert 正当性テスト"
+        description: |
+          最適化後も insert が正しく動作することを検証。
+      - name: "insert パフォーマンステスト"
+        description: |
+          10,000 件 insert でのパフォーマンスを測定。
+
+  # ---------------------------------------------------------------------------
+  # Phase 5: remove 最適化
+  # ---------------------------------------------------------------------------
+  - id: REQ-TREEMAP-PERF-005
+    name: "remove 操作の最適化"
+    priority: high
+    phase: 5
+    expected_improvement: "5-10%"
+    description: |
+      remove 操作の細かな最適化を行う。
+
+      **最適化項目:**
+      1. borrow/merge 処理での不要なクローン削減
+      2. underflow ハンドリングの効率化
+      3. remove_max_from_child の最適化
+
+    implementation: |
+      ```rust
+      impl<K: Clone + Ord, V: Clone> BTreeNode<K, V> {
+          /// borrow_from_left の最適化版
+          /// CoW パターンを適用し、必要な場合のみクローン
+          fn borrow_from_left_optimized(
+              mut entries: EntryArray<K, V>,
+              mut children: ChildArray<K, V>,
+              index: usize,
+              removed_value: V,
+          ) -> RemoveResult<K, V> {
+              // CoW で兄弟ノードを取得
+              let left = Self::cow_child(&mut children, index - 1);
+              let current = Self::cow_child(&mut children, index);
+
+              match (left, current) {
+                  (
+                      Self::Leaf { entries: mut left_entries },
+                      Self::Leaf { entries: mut current_entries },
+                  ) => {
+                      let borrowed = left_entries.pop().unwrap();
+                      let separator = std::mem::replace(&mut entries[index - 1], borrowed);
+                      current_entries.insert(0, separator);
+
+                      children[index - 1] = ReferenceCounter::new(Self::Leaf {
+                          entries: left_entries,
+                      });
+                      children[index] = ReferenceCounter::new(Self::Leaf {
+                          entries: current_entries,
+                      });
+
+                      RemoveResult::Done {
+                          node: Some(Self::Internal { entries, children }),
+                          removed_value,
+                      }
+                  }
+                  // ... Internal ケース
+              }
+          }
+      }
+      ```
+
+    functional_programming_compliance:
+      immutability: |
+        - 元のデータは変更されない
+        - 新しいマップを返す
+      referential_transparency: |
+        - 同じ入力に対して同じ出力
+      purity: |
+        - 副作用なし
+
+    tests:
+      - name: "remove 正当性テスト"
+        description: |
+          最適化後も remove が正しく動作することを検証。
+      - name: "borrow/merge テスト"
+        description: |
+          underflow 処理が正しく動作することを検証。
+      - name: "remove パフォーマンステスト"
+        description: |
+          5,000 件 remove でのパフォーマンスを測定。
+
+  # ---------------------------------------------------------------------------
+  # Phase 6: イテレータ最適化
+  # ---------------------------------------------------------------------------
+  - id: REQ-TREEMAP-PERF-006
+    name: "イテレータの最適化"
+    priority: medium
+    phase: 6
+    expected_improvement: "10-15%"
+    description: |
+      イテレータの効率を改善する。
+
+      **最適化項目:**
+      1. スタックのプリアロケーション
+      2. IntoIterator でのクローン削減
+
+    implementation: |
+      ```rust
+      impl<'a, K, V> PersistentTreeMapIterator<'a, K, V> {
+          fn new(root: Option<&'a ReferenceCounter<BTreeNode<K, V>>>, length: usize) -> Self {
+              // ツリー高さに基づいてスタックをプリアロケート
+              // log_B(N) でおおよその高さを推定
+              let estimated_height = if length > 0 {
+                  ((length as f64).log2() / (BRANCHING_FACTOR as f64).log2()).ceil() as usize + 1
+              } else {
+                  0
+              };
+
+              let mut iter = Self {
+                  stack: Vec::with_capacity(estimated_height),
+                  remaining: length,
+              };
+              if let Some(root) = root {
+                  iter.push_leftmost(root.as_ref());
+              }
+              iter
+          }
+      }
+      ```
+
+    functional_programming_compliance:
+      immutability: |
+        - イテレータは元のデータを変更しない
+      referential_transparency: |
+        - 同じマップから同じ順序のイテレータ
+      purity: |
+        - 読み取り専用
+
+    tests:
+      - name: "イテレータ正当性テスト"
+        description: |
+          最適化後もイテレータが正しく動作することを検証。
+      - name: "イテレータパフォーマンステスト"
+        description: |
+          10,000 件イテレーションでのパフォーマンスを測定。
+
+  # ---------------------------------------------------------------------------
+  # Phase 7: FromIterator の bulk insert 最適化
+  # ---------------------------------------------------------------------------
+  - id: REQ-TREEMAP-PERF-007
+    name: "FromIterator の bulk insert 最適化"
+    priority: medium
+    phase: 7
+    expected_improvement: "30-50% (FromIterator のみ、ソート済み入力時)"
+    description: |
+      FromIterator でソート済みデータを効率的に構築する。
+
+      **現在の問題:**
+      ```rust
+      impl<K: Clone + Ord, V: Clone> FromIterator<(K, V)> for PersistentTreeMap<K, V> {
+          fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
+              // 1 件ずつ insert - O(N log N)
+              iter.into_iter()
+                  .fold(Self::new(), |map, (k, v)| map.insert(k, v))
+          }
+      }
+      ```
+
+      **改善後:**
+      ソート済みデータからボトムアップでツリーを構築
+
+      **計算量:**
+      - ソート済み入力: O(N)
+      - 未ソート入力: O(N log N)（ソートのコスト）
+
+      **重要: 重複キーのセマンティクス**
+      現行の実装は「後勝ち」（同一キーの後の値が採用される）。
+      この最適化でもそのセマンティクスを維持する。
+
+    implementation: |
+      ```rust
+      impl<K: Clone + Ord, V: Clone> FromIterator<(K, V)> for PersistentTreeMap<K, V> {
+          fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
+              // (key, value, original_index) のタプルに変換
+              // original_index は重複キー時に「後勝ち」を実現するため
+              let mut entries_with_index: Vec<(K, V, usize)> = iter
+                  .into_iter()
+                  .enumerate()
+                  .map(|(index, (key, value))| (key, value, index))
+                  .collect();
+
+              if entries_with_index.is_empty() {
+                  return Self::new();
+              }
+
+              // キーでソート（安定ソートなので同一キーは元の順序を保持）
+              entries_with_index.sort_by(|(a, _, _), (b, _, _)| a.cmp(b));
+
+              // 重複を除去：同一キーは最大 index を持つものを残す（後勝ち）
+              // 隣接する同一キーをグループ化し、最大 index のものを選択
+              let mut deduplicated: Vec<(K, V)> = Vec::with_capacity(entries_with_index.len());
+              let mut iter = entries_with_index.into_iter().peekable();
+
+              while let Some((key, value, index)) = iter.next() {
+                  let mut best_value = value;
+                  let mut best_index = index;
+
+                  // 同一キーの次の要素をチェック
+                  while let Some((next_key, _, _)) = iter.peek() {
+                      if next_key == &key {
+                          let (_, next_value, next_index) = iter.next().unwrap();
+                          if next_index > best_index {
+                              best_value = next_value;
+                              best_index = next_index;
+                          }
+                      } else {
+                          break;
+                      }
+                  }
+
+                  deduplicated.push((key, best_value));
+              }
+
+              // ボトムアップでツリーを構築
+              Self::build_from_sorted(deduplicated)
+          }
+      }
+
+      impl<K: Clone + Ord, V: Clone> PersistentTreeMap<K, V> {
+          /// ソート済み配列からボトムアップでツリーを構築
+          ///
+          /// B-Tree の不変条件を満たすようにノードを作成:
+          /// - 各葉ノードは MIN_KEYS <= n <= MAX_KEYS を満たす
+          /// - ルートノードは例外で 1 <= n <= MAX_KEYS
+          fn build_from_sorted(entries: Vec<(K, V)>) -> Self {
+              if entries.is_empty() {
+                  return Self::new();
+              }
+
+              let length = entries.len();
+
+              // 1 件の場合
+              if length == 1 {
+                  let (key, value) = entries.into_iter().next().unwrap();
+                  return Self::singleton(key, value);
+              }
+
+              // 葉ノードを作成（B-Tree 不変条件を維持）
+              let nodes = Self::create_leaf_nodes(entries);
+
+              // ボトムアップで内部ノードを構築
+              let root = Self::build_tree_bottom_up(nodes);
+
+              Self {
+                  root: Some(root),
+                  length,
+              }
+          }
+
+          /// 葉ノードを作成（B-Tree 不変条件を維持）
+          ///
+          /// 単純に chunks(MAX_KEYS) で分割すると、末尾のチャンクが
+          /// MIN_KEYS を満たさない可能性がある。
+          ///
+          /// 例: 100 要素、MAX_KEYS=31、MIN_KEYS=15 の場合
+          /// - 単純分割: [31, 31, 31, 7] → 最後が MIN_KEYS=15 を満たさない
+          /// - 調整後: [31, 31, 19, 19] → 全て MIN_KEYS を満たす
+          fn create_leaf_nodes(entries: Vec<(K, V)>) -> Vec<ReferenceCounter<BTreeNode<K, V>>> {
+              let total = entries.len();
+
+              // MIN_KEYS 以下なら単一ノード（ルートは MIN_KEYS の制約なし）
+              if total <= MAX_KEYS {
+                  return vec![ReferenceCounter::new(BTreeNode::Leaf {
+                      entries: entries.into(),
+                  })];
+              }
+
+              // 必要なノード数を計算
+              // 各ノードが MIN_KEYS 以上を持つように調整
+              let node_count = (total + MAX_KEYS - 1) / MAX_KEYS; // 切り上げ
+              let base_size = total / node_count;
+              let remainder = total % node_count;
+
+              let mut nodes = Vec::with_capacity(node_count);
+              let mut entries_iter = entries.into_iter();
+              let mut remaining_extra = remainder;
+
+              for i in 0..node_count {
+                  // 余りを前から分配（より均等にするため）
+                  let current_size = if remaining_extra > 0 {
+                      remaining_extra -= 1;
+                      base_size + 1
+                  } else {
+                      base_size
+                  };
+
+                  // current_size が MIN_KEYS を満たすことを保証
+                  // (total > MAX_KEYS の場合、base_size >= MIN_KEYS)
+                  debug_assert!(
+                      current_size >= MIN_KEYS || node_count == 1,
+                      "Leaf node has fewer than MIN_KEYS entries: {} < {}",
+                      current_size,
+                      MIN_KEYS
+                  );
+
+                  let chunk: Vec<(K, V)> = entries_iter.by_ref().take(current_size).collect();
+                  nodes.push(ReferenceCounter::new(BTreeNode::Leaf {
+                      entries: chunk.into(),
+                  }));
+              }
+
+              nodes
+          }
+
+          /// ボトムアップで内部ノードを構築
+          fn build_tree_bottom_up(
+              mut nodes: Vec<ReferenceCounter<BTreeNode<K, V>>>,
+          ) -> ReferenceCounter<BTreeNode<K, V>> {
+              while nodes.len() > 1 {
+                  nodes = Self::build_parent_level(nodes);
+              }
+              nodes.pop().unwrap()
+          }
+
+          /// 子ノードから親レベルを構築
+          /// B-Tree の不変条件を維持するため、内部ノードも
+          /// MIN_KEYS <= n <= MAX_KEYS の制約を満たすように調整
+          fn build_parent_level(
+              children: Vec<ReferenceCounter<BTreeNode<K, V>>>,
+          ) -> Vec<ReferenceCounter<BTreeNode<K, V>>> {
+              // 各内部ノードは MAX_KEYS + 1 個の子を持てる
+              let max_children_per_node = MAX_KEYS + 1;
+              let min_children_per_node = MIN_KEYS + 1;
+
+              let total_children = children.len();
+
+              // 必要な親ノード数を計算
+              let parent_count = (total_children + max_children_per_node - 1) / max_children_per_node;
+
+              let base_children = total_children / parent_count;
+              let remainder = total_children % parent_count;
+
+              let mut parents = Vec::with_capacity(parent_count);
+              let mut children_iter = children.into_iter();
+              let mut remaining_extra = remainder;
+
+              for _ in 0..parent_count {
+                  let current_child_count = if remaining_extra > 0 {
+                      remaining_extra -= 1;
+                      base_children + 1
+                  } else {
+                      base_children
+                  };
+
+                  // MIN_KEYS + 1 以上の子を持つことを保証（ルート以外）
+                  debug_assert!(
+                      current_child_count >= min_children_per_node || parent_count == 1,
+                      "Internal node has fewer than MIN_KEYS+1 children: {} < {}",
+                      current_child_count,
+                      min_children_per_node
+                  );
+
+                  let chunk_children: Vec<_> = children_iter
+                      .by_ref()
+                      .take(current_child_count)
+                      .collect();
+
+                  // 子ノードから最大キーを抽出してエントリを作成
+                  // entries.len() = children.len() - 1
+                  let entries: Vec<(K, V)> = chunk_children
+                      .iter()
+                      .take(chunk_children.len() - 1)
+                      .map(|child| {
+                          // 各子の最大キーをエントリとして使用
+                          Self::extract_max_entry(child)
+                      })
+                      .collect();
+
+                  parents.push(ReferenceCounter::new(BTreeNode::Internal {
+                      entries: entries.into(),
+                      children: chunk_children.into(),
+                  }));
+              }
+
+              parents
+          }
+
+          /// ノードから最大エントリを抽出（クローン）
+          fn extract_max_entry(node: &ReferenceCounter<BTreeNode<K, V>>) -> (K, V) {
+              match node.as_ref() {
+                  BTreeNode::Leaf { entries } => {
+                      entries.last().unwrap().clone()
+                  }
+                  BTreeNode::Internal { entries, children } => {
+                      // 内部ノードの場合、最右の子の最大値を取得
+                      Self::extract_max_entry(children.last().unwrap())
+                  }
+              }
+          }
+      }
+      ```
+
+    functional_programming_compliance:
+      immutability: |
+        - 新しいマップを作成
+        - 元のイテレータを消費
+      referential_transparency: |
+        - 同じイテレータから同じマップ
+        - 重複キーは「後勝ち」（元の順序で後のものが採用）
+      purity: |
+        - 副作用なし
+
+    tests:
+      - name: "FromIterator 正当性テスト"
+        description: |
+          bulk insert 後のマップが正しいことを検証。
+      - name: "重複キーテスト（後勝ち）"
+        description: |
+          重複キーが「後勝ち」で処理されることを検証。
+          ```rust
+          let map: PersistentTreeMap<i32, &str> = vec![
+              (1, "first"),
+              (2, "a"),
+              (1, "second"),  // 後の値
+              (3, "b"),
+              (1, "third"),   // さらに後の値
+          ].into_iter().collect();
+
+          assert_eq!(map.get(&1), Some(&"third")); // 後勝ち
+          assert_eq!(map.get(&2), Some(&"a"));
+          assert_eq!(map.get(&3), Some(&"b"));
+          ```
+      - name: "B-Tree 不変条件テスト"
+        description: |
+          生成されたツリーが B-Tree の不変条件を満たすことを検証。
+          - 各葉ノードは MIN_KEYS <= n <= MAX_KEYS
+          - 各内部ノードは MIN_KEYS <= n <= MAX_KEYS
+          - ルートは例外で 1 <= n <= MAX_KEYS
+      - name: "FromIterator パフォーマンステスト（cargo bench）"
+        description: |
+          10,000 件 collect でのパフォーマンスを測定。
+          ベンチマーク専用テストで測定。
+
+# =============================================================================
+# 非機能要件
+# =============================================================================
+non_functional_requirements:
+  # ---------------------------------------------------------------------------
+  # パフォーマンス要件
+  # ---------------------------------------------------------------------------
+  performance:
+    - id: NFR-PERF-001
+      name: "insert パフォーマンス"
+      description: |
+        10,000 件 insert のパフォーマンスを改善する。
+      metrics:
+        - operation: "insert (10,000 件)"
+          current: "約 1.02 秒"
+          target: "50ms 以下"
+          improvement: "20 倍以上"
+          comparison: "BTreeMap: 約 465us（目標の 100 倍以内）"
+
+    - id: NFR-PERF-002
+      name: "get パフォーマンス"
+      description: |
+        10,000 件 get のパフォーマンスを改善する。
+      metrics:
+        - operation: "get (10,000 件)"
+          current: "約 74ms"
+          target: "10ms 以下"
+          improvement: "7 倍以上"
+
+    - id: NFR-PERF-003
+      name: "remove パフォーマンス"
+      description: |
+        5,000 件 remove のパフォーマンスを改善する。
+      metrics:
+        - operation: "remove (5,000 件)"
+          current: "未測定"
+          target: "insert と同程度"
+
+    - id: NFR-PERF-004
+      name: "総合パフォーマンス目標"
+      description: |
+        BTreeMap との比較で 50-100 倍以内を達成する。
+      metrics:
+        - current: "2,100 倍遅い"
+          target: "50-100 倍以内"
+          improvement: "20-40 倍改善"
+
+  # ---------------------------------------------------------------------------
+  # テスト要件
+  # ---------------------------------------------------------------------------
+  testing:
+    - id: NFR-TEST-001
+      name: "既存テスト維持"
+      description: |
+        既存の全てのテストがパスすること。
+      verification: |
+        cargo test --features persistent
+
+    - id: NFR-TEST-002
+      name: "B-Tree 不変条件テスト"
+      description: |
+        B-Tree の不変条件（MIN_KEYS <= n <= MAX_KEYS）が維持されることを検証。
+      verification: |
+        プロパティベーステストで検証
+
+    - id: NFR-TEST-003
+      name: "永続性テスト"
+      description: |
+        insert/remove 後に元のマップが変更されていないことを検証。
+        clone() した後に操作しても、clone 元が変更されないことを確認。
+      verification: |
+        構造共有テストで検証
+        ```rust
+        let map1 = PersistentTreeMap::new().insert(1, "a").insert(2, "b");
+        let map1_clone = map1.clone();
+        let map2 = map1.insert(3, "c");  // map1 を消費
+
+        // map1_clone は変更されていないことを検証
+        assert_eq!(map1_clone.len(), 2);
+        assert_eq!(map1_clone.get(&3), None);
+        ```
+
+    - id: NFR-TEST-004
+      name: "パフォーマンス検証"
+      description: |
+        パフォーマンス測定は cargo bench に限定する。
+        ユニットテストでは機能の正確性のみを検証する。
+      verification: |
+        cargo bench --bench persistent_treemap_bench
+      note: |
+        以下は cargo bench でのみ検証:
+        - CoW による参照カウント最適化の効果
+        - SmallVec によるアロケーション削減効果
+        - 各操作の所要時間
+
+    - id: NFR-TEST-005
+      name: "テスト分類"
+      description: |
+        テストの分類と検証方法を明確化する。
+      categories:
+        unit_tests:
+          location: "src/persistent/treemap.rs 内の #[cfg(test)]"
+          scope: |
+            - 機能の正確性
+            - B-Tree 不変条件
+            - 永続性（構造共有）
+            - エッジケース
+          note: "パフォーマンス測定は含まない"
+
+        property_tests:
+          location: "tests/persistent_treemap_laws.rs"
+          scope: |
+            - 任意入力に対する不変条件維持
+            - insert/remove の可逆性
+            - ソート順序の維持
+
+        benchmark_tests:
+          location: "benches/persistent_treemap_bench.rs"
+          scope: |
+            - 各操作のパフォーマンス測定
+            - BTreeMap との比較
+            - CoW 最適化効果の確認（参照カウント検証含む）
+          note: "参照カウント検証はベンチマーク専用"
+
+# =============================================================================
+# 実装計画
+# =============================================================================
+implementation_plan:
+  phases:
+    - phase: 1
+      name: "Copy-on-Write パターンの導入"
+      duration: "2 日"
+      tasks:
+        - "take_or_clone_child ヘルパー関数の実装"
+        - "insert での CoW 適用（self 消費時のみ）"
+        - "remove での CoW 適用（self 消費時のみ）"
+        - "borrow/merge での CoW 適用"
+        - "テスト実行"
+        - "ベンチマーク測定"
+
+    - phase: 2
+      name: "SmallVec の導入"
+      duration: "1 日"
+      tasks:
+        - "Cargo.toml への依存追加"
+        - "BTreeNode の型定義変更"
+        - "Vec → SmallVec への置換"
+        - "テスト実行"
+        - "ベンチマーク測定"
+
+    - phase: 3
+      name: "分岐係数の検証"
+      duration: "0.5 日"
+      tasks:
+        - "現在の分岐係数（16）でベンチマーク測定"
+        - "目標値を達成できるか確認"
+        - "必要に応じて将来の拡張として issue 化"
+
+    - phase: 4
+      name: "insert 最適化"
+      duration: "1 日"
+      tasks:
+        - "インライン化の追加"
+        - "Split 処理の効率化"
+        - "テスト実行"
+        - "ベンチマーク測定"
+
+    - phase: 5
+      name: "remove 最適化"
+      duration: "1 日"
+      tasks:
+        - "borrow/merge の効率化"
+        - "remove_max_from_child の最適化"
+        - "テスト実行"
+        - "ベンチマーク測定"
+
+    - phase: 6
+      name: "イテレータ最適化"
+      duration: "0.5 日"
+      tasks:
+        - "スタックのプリアロケーション"
+        - "テスト実行"
+        - "ベンチマーク測定"
+
+    - phase: 7
+      name: "FromIterator の bulk insert 最適化"
+      duration: "1 日"
+      tasks:
+        - "build_from_sorted の実装"
+        - "FromIterator の更新"
+        - "テスト実行"
+        - "ベンチマーク測定"
+
+  total_duration: "6.5-7.5 日"
+
+# =============================================================================
+# リスクと対策
+# =============================================================================
+risks:
+  - risk: "パフォーマンス目標未達"
+    probability: "中"
+    impact: "高"
+    mitigation: |
+      - 各 Phase でベンチマークを測定
+      - 効果が薄い Phase は見直し
+      - 追加の最適化手法を検討
+
+  - risk: "既存テストの失敗"
+    probability: "低"
+    impact: "高"
+    mitigation: |
+      - 各 Phase 完了後にテストを実行
+      - 失敗したらロールバック
+      - 段階的な実装
+
+  - risk: "SmallVec 導入による問題"
+    probability: "低"
+    impact: "中"
+    mitigation: |
+      - SmallVec は広く使われているクレート
+      - 十分なテストカバレッジ
+      - 問題があれば Vec に戻す
+
+  - risk: "CoW パターンの複雑性"
+    probability: "中"
+    impact: "中"
+    mitigation: |
+      - 明確なドキュメント
+      - エッジケースのテスト
+      - コードレビュー
+
+  - risk: "CoW による不変性違反"
+    probability: "低"
+    impact: "致命的"
+    mitigation: |
+      - CoW は self を消費するメソッドでのみ適用
+      - Persistent API（&self を取るメソッド）では CoW を使用しない
+      - 構造共有テストで不変性を検証
+      - clone() 後の操作で元のマップが変更されないことを確認
+      - take_or_clone_child は内部実装でのみ使用し、公開 API では使用しない
+
+# =============================================================================
+# 成功基準
+# =============================================================================
+success_criteria:
+  - id: SC-001
+    name: "パフォーマンス改善"
+    description: |
+      BTreeMap との比較で 50-100 倍以内を達成
+
+  - id: SC-002
+    name: "API 互換性"
+    description: |
+      既存の全ての公開 API に変更なし
+
+  - id: SC-003
+    name: "テストパス"
+    description: |
+      既存の全てのテストがパス
+
+  - id: SC-004
+    name: "関数型原則維持"
+    description: |
+      不変性・参照透過性・純粋性が維持されている

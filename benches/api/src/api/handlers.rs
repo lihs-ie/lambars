@@ -16,15 +16,31 @@
 //! 3. Converting `Task` to `TaskResponse` (which is `Send`) before returning
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use axum::{Json, extract::State, http::StatusCode};
+use arc_swap::ArcSwap;
+use axum::{
+    Json,
+    extract::{Path, State},
+    http::{HeaderMap, HeaderValue, StatusCode},
+};
+use lambars::control::Either;
+use lambars::persistent::PersistentVector;
+use uuid::Uuid;
 
+use super::bulk::BulkConfig;
+use super::cache_header::{CacheHeaderExtension, CacheSource};
+use super::consistency::save_task_with_event;
 use super::dto::{
     CreateTaskRequest, TaskResponse, validate_description, validate_tags, validate_title,
 };
 use super::error::ApiErrorResponse;
-use crate::domain::{Priority, Tag, Task, TaskId, Timestamp};
-use crate::infrastructure::{EventStore, ProjectRepository, Repositories, TaskRepository};
+use super::query::{SearchCache, SearchIndex, TaskChange};
+use crate::domain::{EventId, Priority, Tag, Task, TaskId, Timestamp, create_task_created_event};
+use crate::infrastructure::{
+    CacheStatus, EventStore, ExternalDataSource, ExternalSources, Pagination, ProjectRepository,
+    Repositories, RepositoryError, RngProvider, TaskRepository,
+};
 
 // =============================================================================
 // Application Configuration
@@ -47,6 +63,48 @@ pub struct AppConfig {
     pub default_page_size: u32,
 }
 
+/// Applied configuration values at runtime (ENV-REQ-030).
+///
+/// This struct stores the *actual* values applied at startup, not raw environment
+/// variable strings. This ensures `/debug/config` returns accurate values that
+/// reflect caps, defaults, and validation.
+///
+/// # Fields
+///
+/// - `worker_threads`: The actual worker thread count used by Tokio runtime
+///   (after validation, caps, and defaults applied)
+/// - `database_pool_size`: The actual database pool size (`None` means library default)
+/// - `redis_pool_size`: The actual Redis pool size (`None` means library default)
+/// - `storage_mode`: Storage backend mode (`in_memory` or `postgres`)
+/// - `cache_mode`: Cache backend mode (`in_memory` or `redis`)
+#[derive(Clone, Debug)]
+pub struct AppliedConfig {
+    /// Actual Tokio worker threads count (after caps/defaults).
+    pub worker_threads: Option<usize>,
+    /// Actual database pool size (`None` = library default).
+    pub database_pool_size: Option<u32>,
+    /// Actual Redis pool size (`None` = library default).
+    pub redis_pool_size: Option<u32>,
+    /// Storage mode as env-compatible string (`in_memory`, `postgres`).
+    pub storage_mode: String,
+    /// Cache mode as env-compatible string (`in_memory`, `redis`).
+    pub cache_mode: String,
+}
+
+impl Default for AppliedConfig {
+    fn default() -> Self {
+        Self {
+            worker_threads: std::thread::available_parallelism()
+                .map(std::num::NonZero::get)
+                .ok(),
+            database_pool_size: None,
+            redis_pool_size: None,
+            storage_mode: "in_memory".to_string(),
+            cache_mode: "in_memory".to_string(),
+        }
+    }
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -65,7 +123,21 @@ impl Default for AppConfig {
 /// Uses trait objects (`dyn`) instead of generics to work seamlessly with
 /// the `RepositoryFactory` which returns trait objects. This design allows
 /// runtime selection of repository backends (in-memory, `PostgreSQL`, Redis).
-#[derive(Clone)]
+///
+/// # Search Index
+///
+/// The `search_index` field holds an immutable `SearchIndex` wrapped in `ArcSwap`.
+/// This allows lock-free reads during search operations while supporting
+/// atomic updates when tasks are created/updated/deleted.
+///
+/// - **Read**: `state.search_index.load()` returns a `Guard<Arc<SearchIndex>>`
+/// - **Write**: `state.search_index.store(Arc::new(new_index))` atomically replaces the index
+///
+/// # Bulk Configuration
+///
+/// The `bulk_config` field holds configuration for bulk operations. This is loaded
+/// from environment variables at application startup to ensure referential transparency
+/// in handlers (I/O is isolated at the application boundary).
 pub struct AppState {
     /// Task repository for persistence.
     pub task_repository: Arc<dyn TaskRepository + Send + Sync>,
@@ -75,6 +147,69 @@ pub struct AppState {
     pub event_store: Arc<dyn EventStore + Send + Sync>,
     /// Application configuration.
     pub config: AppConfig,
+    /// Bulk operation configuration (chunk size, concurrency, feature flags).
+    ///
+    /// Loaded from environment variables at startup to isolate I/O at application boundary.
+    pub bulk_config: BulkConfig,
+    /// Search index for task search (lock-free reads via `ArcSwap`).
+    ///
+    /// This index is built once at startup and updated incrementally
+    /// when tasks are created, updated, or deleted.
+    pub search_index: Arc<ArcSwap<SearchIndex>>,
+    /// Search result cache (TTL 5s, LRU 2000 entries).
+    ///
+    /// Caches search results to improve performance for repeated queries.
+    /// The cache key is `(normalized_query, scope, limit, offset)`.
+    pub search_cache: Arc<SearchCache>,
+    /// Secondary data source (Redis) for Alternative patterns.
+    ///
+    /// Used by `aggregate_sources` and `search_fallback` handlers.
+    pub secondary_source: Arc<dyn ExternalDataSource + Send + Sync>,
+    /// External data source (HTTP) for Alternative patterns.
+    ///
+    /// Used by `aggregate_sources` and `search_fallback` handlers.
+    pub external_source: Arc<dyn ExternalDataSource + Send + Sync>,
+    /// RNG provider for fail injection.
+    ///
+    /// Enables deterministic behavior for testing/benchmarks when seeded.
+    pub rng_provider: Arc<RngProvider>,
+    /// Cache hit counter (CACHE-REQ-021).
+    pub cache_hits: Arc<AtomicU64>,
+    /// Cache miss counter (CACHE-REQ-021).
+    pub cache_misses: Arc<AtomicU64>,
+    /// Cache error counter (CACHE-REQ-021, fail-open).
+    pub cache_errors: Arc<AtomicU64>,
+    /// Cache strategy name (CACHE-REQ-021).
+    pub cache_strategy: String,
+    /// Cache TTL in seconds (CACHE-REQ-021).
+    pub cache_ttl_seconds: u64,
+    /// Applied configuration values (ENV-REQ-030).
+    ///
+    /// Stores actual runtime configuration for `/debug/config` endpoint.
+    pub applied_config: AppliedConfig,
+}
+
+impl Clone for AppState {
+    fn clone(&self) -> Self {
+        Self {
+            task_repository: Arc::clone(&self.task_repository),
+            project_repository: Arc::clone(&self.project_repository),
+            event_store: Arc::clone(&self.event_store),
+            config: self.config.clone(),
+            bulk_config: self.bulk_config,
+            search_index: Arc::clone(&self.search_index),
+            search_cache: Arc::clone(&self.search_cache),
+            secondary_source: Arc::clone(&self.secondary_source),
+            external_source: Arc::clone(&self.external_source),
+            rng_provider: Arc::clone(&self.rng_provider),
+            cache_hits: Arc::clone(&self.cache_hits),
+            cache_misses: Arc::clone(&self.cache_misses),
+            cache_errors: Arc::clone(&self.cache_errors),
+            cache_strategy: self.cache_strategy.clone(),
+            cache_ttl_seconds: self.cache_ttl_seconds,
+            applied_config: self.applied_config.clone(),
+        }
+    }
 }
 
 impl AppState {
@@ -82,26 +217,322 @@ impl AppState {
     ///
     /// This constructor takes ownership of the `Repositories` struct returned
     /// by `RepositoryFactory::create()`.
-    #[must_use]
-    pub fn from_repositories(repositories: Repositories) -> Self {
-        Self {
-            task_repository: repositories.task_repository,
-            project_repository: repositories.project_repository,
-            event_store: repositories.event_store,
-            config: AppConfig::default(),
-        }
+    ///
+    /// Uses stub external sources and default `AppliedConfig` for backward compatibility.
+    ///
+    /// # Note
+    ///
+    /// This is an async function because it needs to fetch all tasks from the
+    /// repository to build the initial search index. The index is built once
+    /// at startup and updated incrementally thereafter.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the task repository fails to list tasks.
+    pub async fn from_repositories(
+        repositories: Repositories,
+    ) -> Result<Self, crate::infrastructure::RepositoryError> {
+        Self::with_config(repositories, AppConfig::default()).await
+    }
+
+    /// Creates a new `AppState` from repositories and external sources.
+    ///
+    /// This constructor is intended for production use where real external
+    /// data sources (Redis, HTTP) are configured.
+    ///
+    /// # Arguments
+    ///
+    /// * `repositories` - Initialized repositories from `RepositoryFactory`
+    /// * `external_sources` - External data sources (Redis, HTTP)
+    /// * `applied_config` - Applied configuration values for `/debug/config` endpoint
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the task repository fails to list tasks.
+    pub async fn with_external_sources(
+        repositories: Repositories,
+        external_sources: ExternalSources,
+        applied_config: AppliedConfig,
+    ) -> Result<Self, crate::infrastructure::RepositoryError> {
+        Self::with_full_config(
+            repositories,
+            AppConfig::default(),
+            BulkConfig::from_env(),
+            external_sources,
+            applied_config,
+        )
+        .await
     }
 
     /// Creates a new `AppState` from repositories and custom configuration.
-    #[must_use]
-    pub fn with_config(repositories: Repositories, config: AppConfig) -> Self {
-        Self {
+    ///
+    /// Uses stub external sources for backward compatibility.
+    /// Uses default `AppliedConfig` (for tests that don't care about applied config).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the task repository fails to list tasks.
+    pub async fn with_config(
+        repositories: Repositories,
+        config: AppConfig,
+    ) -> Result<Self, crate::infrastructure::RepositoryError> {
+        let external_sources = create_stub_external_sources();
+        Self::with_full_config(
+            repositories,
+            config,
+            BulkConfig::from_env(),
+            external_sources,
+            AppliedConfig::default(),
+        )
+        .await
+    }
+
+    /// Creates a new `AppState` from repositories and all configurations.
+    ///
+    /// This method allows explicit injection of `BulkConfig` and `ExternalSources`
+    /// for testing purposes.
+    ///
+    /// # Backfill Processing
+    ///
+    /// On startup, this method performs backfill processing for existing tasks
+    /// that do not have any events in the event store. For each such task, a
+    /// `TaskCreated` event is generated and stored.
+    ///
+    /// Backfill behavior is controlled by the `SKIP_BACKFILL` environment variable:
+    /// - `SKIP_BACKFILL=true` or `SKIP_BACKFILL=1`: Skip backfill (for development/debugging)
+    /// - Otherwise: Perform backfill (default behavior)
+    ///
+    /// # Idempotency
+    ///
+    /// The backfill process is idempotent:
+    /// - Only tasks with `get_current_version() == 0` are backfilled
+    /// - Optimistic locking (`expected_version=0`) prevents duplicate writes on concurrent startup
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the task repository fails to list tasks.
+    pub async fn with_full_config(
+        repositories: Repositories,
+        config: AppConfig,
+        bulk_config: BulkConfig,
+        external_sources: ExternalSources,
+        applied_config: AppliedConfig,
+    ) -> Result<Self, RepositoryError> {
+        // Fetch all tasks to build the initial search index
+        let all_tasks = repositories
+            .task_repository
+            .list(Pagination::all())
+            .run_async()
+            .await?;
+
+        // Build the search index from all tasks (pure function)
+        let tasks: PersistentVector<Task> = all_tasks.items.clone().into_iter().collect();
+        let search_index = SearchIndex::build(&tasks);
+
+        // Perform backfill processing (unless SKIP_BACKFILL=true)
+        let skip_backfill = std::env::var("SKIP_BACKFILL")
+            .map(|value| matches!(value.to_lowercase().as_str(), "true" | "1" | "yes"))
+            .unwrap_or(false);
+
+        if skip_backfill {
+            tracing::info!("Skipping backfill (SKIP_BACKFILL=true)");
+        } else {
+            let backfill_result =
+                backfill_existing_tasks(&all_tasks.items, repositories.event_store.as_ref()).await;
+
+            match backfill_result {
+                Ok((backfilled, skipped)) => {
+                    if backfilled > 0 || skipped > 0 {
+                        tracing::info!(
+                            backfilled = backfilled,
+                            skipped = skipped,
+                            "Backfill complete"
+                        );
+                    }
+                }
+                Err(error) => {
+                    tracing::error!(%error, "Backfill failed");
+                    return Err(error);
+                }
+            }
+        }
+
+        // Create RNG provider from environment (I/O boundary)
+        let rng_provider = Arc::new(RngProvider::from_env().unwrap_or_else(|error| {
+            tracing::warn!(%error, "Failed to create RNG provider from env, using random");
+            RngProvider::new_random()
+        }));
+
+        // Load cache configuration for metadata (CACHE-REQ-021)
+        let cache_config = crate::infrastructure::CacheConfig::from_env();
+
+        Ok(Self {
             task_repository: repositories.task_repository,
             project_repository: repositories.project_repository,
             event_store: repositories.event_store,
             config,
+            bulk_config,
+            search_index: Arc::new(ArcSwap::from_pointee(search_index)),
+            search_cache: Arc::new(SearchCache::with_default_config()),
+            secondary_source: external_sources.secondary_source,
+            external_source: external_sources.external_source,
+            rng_provider,
+            cache_hits: Arc::new(AtomicU64::new(0)),
+            cache_misses: Arc::new(AtomicU64::new(0)),
+            cache_errors: Arc::new(AtomicU64::new(0)),
+            cache_strategy: cache_config.strategy.to_string(),
+            cache_ttl_seconds: cache_config.ttl_seconds,
+            applied_config,
+        })
+    }
+
+    /// Updates the search index with a task change.
+    ///
+    /// This method atomically replaces the search index with a new version
+    /// that reflects the given change using Read-Copy-Update (RCU) pattern.
+    /// The RCU pattern ensures that concurrent updates are handled correctly
+    /// through CAS (Compare-And-Swap) retry, preventing lost updates.
+    ///
+    /// # Arguments
+    ///
+    /// * `change` - The task change to apply (Add, Update, or Remove).
+    ///   Takes ownership because `rcu` may retry the closure multiple times,
+    ///   requiring the change to be cloned on each retry.
+    ///
+    /// # Concurrency
+    ///
+    /// The `rcu` method provides atomic updates:
+    /// 1. Read current value
+    /// 2. Apply transformation (copy with modification)
+    /// 3. Attempt CAS to replace the old value
+    /// 4. If CAS fails (another thread updated), retry from step 1
+    ///
+    /// This ensures no updates are lost even under concurrent modifications.
+    #[allow(clippy::needless_pass_by_value)] // Ownership needed for rcu retry via clone
+    pub fn update_search_index(&self, change: TaskChange) {
+        self.search_index.rcu(|current| {
+            let updated = current.apply_change(change.clone());
+            Arc::new(updated)
+        });
+    }
+
+    /// Increments cache counter based on status (CACHE-REQ-021). Bypass does not increment.
+    pub fn record_cache_status(&self, status: CacheStatus) {
+        match status {
+            CacheStatus::Hit => self.cache_hits.fetch_add(1, Ordering::Relaxed),
+            CacheStatus::Miss => self.cache_misses.fetch_add(1, Ordering::Relaxed),
+            CacheStatus::Error => self.cache_errors.fetch_add(1, Ordering::Relaxed),
+            CacheStatus::Bypass => 0, // No counter for bypass
+        };
+    }
+}
+
+// =============================================================================
+// External Sources Helper
+// =============================================================================
+
+use crate::infrastructure::StubExternalDataSource;
+
+/// Creates stub external sources for testing and backward compatibility.
+///
+/// The stub sources return `Ok(None)` for all fetch operations, simulating
+/// external sources that always report "not found".
+#[must_use]
+pub fn create_stub_external_sources() -> ExternalSources {
+    ExternalSources {
+        secondary_source: Arc::new(StubExternalDataSource::not_found("secondary")),
+        external_source: Arc::new(StubExternalDataSource::not_found("external")),
+    }
+}
+
+// =============================================================================
+// Backfill Processing
+// =============================================================================
+
+/// Backfills existing tasks with `TaskCreated` events.
+///
+/// This function is called at startup to ensure all existing tasks have at least
+/// one event in the event store. This is necessary for the event sourcing model
+/// to work correctly.
+///
+/// # Idempotency
+///
+/// The backfill process is idempotent:
+/// - Only tasks with `get_current_version() == 0` are backfilled
+/// - Optimistic locking (`expected_version=0`) prevents duplicate writes on concurrent startup
+///
+/// # Concurrent Startup Handling
+///
+/// When multiple instances start concurrently:
+/// 1. Each instance checks `get_current_version()` - returns 0 for tasks without events
+/// 2. Instance attempts `append(event, expected_version=0)`
+/// 3. First instance succeeds, others get `VersionConflict` error (expected: 0, found: 1)
+/// 4. `VersionConflict` is treated as "already backfilled" and skipped
+///
+/// # Arguments
+///
+/// * `tasks` - Slice of tasks to potentially backfill
+/// * `event_store` - The event store to write events to
+///
+/// # Returns
+///
+/// Returns `Ok((backfilled_count, skipped_count))` on success, or an error if
+/// a non-recoverable error occurs.
+async fn backfill_existing_tasks(
+    tasks: &[Task],
+    event_store: &dyn EventStore,
+) -> Result<(u64, u64), RepositoryError> {
+    let mut backfilled_count = 0u64;
+    let mut skipped_count = 0u64;
+
+    for task in tasks {
+        // Idempotency check: skip tasks that already have events
+        let current_version = event_store
+            .get_current_version(&task.task_id)
+            .run_async()
+            .await?;
+
+        if current_version > 0 {
+            skipped_count += 1;
+            continue;
+        }
+
+        // Create the TaskCreated event (pure function)
+        // Version semantics: event.version = expected_version + 1
+        // For initial creation: expected_version = 0, so event.version = 1
+        let event = create_task_created_event(
+            task,
+            EventId::generate_v7(),  // I/O boundary: generate event ID
+            task.created_at.clone(), // Use task's creation timestamp for event
+            1,                       // First event version (expected_version=0 + 1)
+        );
+
+        // Attempt to append with optimistic locking (expected_version=0)
+        match event_store.append(&event, 0).run_async().await {
+            Ok(()) => {
+                backfilled_count += 1;
+                tracing::debug!(task_id = %task.task_id, "Backfilled task");
+            }
+            Err(RepositoryError::VersionConflict {
+                expected: 0,
+                found: _,
+            }) => {
+                // Only skip VersionConflict when expected_version=0 (concurrent startup case)
+                // Other version conflicts should be propagated as errors
+                tracing::debug!(
+                    task_id = %task.task_id,
+                    "Task already backfilled by another process"
+                );
+                skipped_count += 1;
+            }
+            Err(error) => {
+                // Non-recoverable error (including non-zero VersionConflict)
+                return Err(error);
+            }
         }
     }
+
+    Ok((backfilled_count, skipped_count))
 }
 
 // =============================================================================
@@ -146,6 +577,12 @@ impl AppState {
 /// 1. Creating the task synchronously
 /// 2. Converting to `TaskResponse` before the async boundary
 /// 3. Executing the repository save in a separate async block
+///
+/// # Event Sourcing
+///
+/// This handler writes a `TaskCreated` event to the event store alongside
+/// the task persistence. Event write failures are treated as warnings
+/// (best-effort consistency) rather than errors.
 #[allow(clippy::future_not_send)]
 pub async fn create_task(
     State(state): State<AppState>,
@@ -156,21 +593,34 @@ pub async fn create_task(
 
     // Step 2: Create task synchronously (Task is not Send)
     // Generate IDs and timestamp within this block (impure operations)
-    let (task, response) = {
+    let (task, mut response, event) = {
         let ids = generate_task_ids();
         let task = build_task(ids, validated);
         let response = TaskResponse::from(&task);
-        (task, response)
+
+        // Generate event ID and create the task created event (pure function)
+        // Version semantics: event.version = expected_version + 1
+        // For initial creation: expected_version = 0, so event.version = 1
+        let event = create_task_created_event(
+            &task,
+            EventId::generate_v7(), // I/O boundary: generate event ID
+            Timestamp::now(),       // I/O boundary: current timestamp
+            1,                      // First event version (expected_version=0 + 1)
+        );
+
+        (task, response, event)
     };
 
-    // Step 3: Save to repository using AsyncIO
-    // The task reference is consumed here before the await
-    state
-        .task_repository
-        .save(&task)
-        .run_async()
-        .await
-        .map_err(ApiErrorResponse::from)?;
+    // Step 3: Save task and write event using best-effort consistency
+    let save_result = save_task_with_event(&state, &task, event, 0).await?;
+
+    // Step 4: Add consistency warning to response if event write failed
+    if let Some(warning) = &save_result.consistency_warning {
+        response.warnings.push(warning.client_message());
+    }
+
+    // Step 5: Update search index with the new task (lock-free write)
+    state.update_search_index(TaskChange::Add(task));
 
     Ok((StatusCode::CREATED, Json(response)))
 }
@@ -257,6 +707,202 @@ fn build_task(ids: TaskIds, validated: ValidatedCreateTask) -> Task {
 }
 
 // =============================================================================
+// GET /tasks/{id} Handler
+// =============================================================================
+
+/// Gets a task by its ID.
+///
+/// This handler demonstrates the use of:
+/// - **Either**: Lifting `Option<Task>` to `Either<ApiErrorResponse, Task>`
+/// - **Pattern matching**: Functional error handling without exceptions
+/// - **`AsyncIO`**: Encapsulating repository side effects
+///
+/// # Path Parameters
+///
+/// * `id` - The UUID of the task to retrieve
+///
+/// # Response
+///
+/// - **200 OK**: Task found and returned
+/// - **404 Not Found**: Task with the given ID does not exist
+/// - **500 Internal Server Error**: Database error
+///
+/// # Errors
+///
+/// Returns [`ApiErrorResponse`] in the following cases:
+/// - Not found error (404 Not Found): Task does not exist
+/// - Database error (500 Internal Server Error): Repository operation failed
+///
+/// # lambars Features
+///
+/// The handler uses `Either<ApiErrorResponse, Task>` to represent the result
+/// of the lookup operation. `Option<Task>` from `find_by_id` is lifted to
+/// `Either` using pattern matching:
+/// - `Some(task)` becomes `Either::Right(task)` (success)
+/// - `None` becomes `Either::Left(ApiErrorResponse::not_found(...))` (failure)
+#[allow(clippy::future_not_send)]
+pub async fn get_task(
+    State(state): State<AppState>,
+    Path(task_id): Path<Uuid>,
+) -> Result<(HeaderMap, Json<TaskResponse>), ApiErrorResponse> {
+    // Step 1: Convert Uuid to TaskId (pure)
+    let task_id = TaskId::from_uuid(task_id);
+
+    // Step 2: Fetch task from repository with cache status using AsyncIO
+    let cache_result = state
+        .task_repository
+        .find_by_id_with_status(&task_id)
+        .run_async()
+        .await
+        .map_err(ApiErrorResponse::from)?;
+
+    // Step 3: Extract cache status and value, record metrics
+    let cache_status = cache_result.cache_status;
+    let maybe_task = cache_result.value;
+
+    // Record cache metrics (CACHE-REQ-021)
+    state.record_cache_status(cache_status);
+
+    // Step 4: Lift Option<Task> to Either<ApiErrorResponse, Task>
+    // This demonstrates functional error handling using Either
+    let task_result: Either<ApiErrorResponse, Task> = lift_option_to_either(maybe_task, || {
+        ApiErrorResponse::not_found(format!("Task not found: {task_id}"))
+    });
+
+    // Step 5: Convert Either to Result and map to response
+    // Task is not Send, so we convert to TaskResponse (which is Send) immediately
+    let result: Result<Task, ApiErrorResponse> = task_result.into();
+    let task = result?;
+    let response = TaskResponse::from(&task);
+
+    // Step 6: Build cache headers (pure transformation)
+    let headers = build_cache_headers(cache_status, CacheSource::Redis);
+
+    Ok((headers, Json(response)))
+}
+
+/// Builds HTTP headers for cache status (X-Cache, X-Cache-Status, X-Cache-Source).
+///
+/// For `Bypass` status, source is overridden to `None` because no cache was consulted.
+pub fn build_cache_headers(cache_status: CacheStatus, cache_source: CacheSource) -> HeaderMap {
+    let effective_source = match cache_status {
+        CacheStatus::Bypass => CacheSource::None,
+        CacheStatus::Hit | CacheStatus::Miss | CacheStatus::Error => cache_source,
+    };
+
+    let extension = CacheHeaderExtension::new(cache_status, effective_source);
+    let mut headers = HeaderMap::new();
+
+    headers.insert(
+        "X-Cache",
+        HeaderValue::from_static(extension.x_cache_value()),
+    );
+    headers.insert(
+        "X-Cache-Status",
+        HeaderValue::from_static(extension.x_cache_status_value()),
+    );
+    headers.insert(
+        "X-Cache-Source",
+        HeaderValue::from_static(extension.x_cache_source_value()),
+    );
+
+    headers
+}
+
+/// Lifts an `Option<T>` to `Either<L, T>`.
+///
+/// This is a pure function that converts `Option` to `Either`:
+/// - `Some(value)` becomes `Either::Right(value)`
+/// - `None` becomes `Either::Left(left_value())` where `left_value` is lazily evaluated
+///
+/// # Type Parameters
+///
+/// * `L` - The type for the Left case (typically an error type)
+/// * `T` - The type for the Right case (the success value)
+/// * `F` - A function that produces the Left value when None is encountered
+///
+/// # Examples
+///
+/// ```ignore
+/// let some_value = Some(42);
+/// let result = lift_option_to_either(some_value, || "not found");
+/// assert_eq!(result, Either::Right(42));
+///
+/// let none_value: Option<i32> = None;
+/// let result = lift_option_to_either(none_value, || "not found");
+/// assert_eq!(result, Either::Left("not found"));
+/// ```
+fn lift_option_to_either<L, T, F>(option: Option<T>, left_value: F) -> Either<L, T>
+where
+    F: FnOnce() -> L,
+{
+    option.map_or_else(|| Either::Left(left_value()), Either::Right)
+}
+
+// =============================================================================
+// DELETE /tasks/{id} Handler
+// =============================================================================
+
+/// Deletes a task by its ID.
+///
+/// This handler demonstrates the use of:
+/// - **Either**: Lifting `Option<Task>` to `Either<ApiErrorResponse, Task>`
+/// - **Pattern matching**: Functional error handling without exceptions
+/// - **`AsyncIO`**: Encapsulating repository side effects
+/// - **Search index update**: Incremental index maintenance via RCU
+///
+/// # Path Parameters
+///
+/// * `id` - The UUID of the task to delete
+///
+/// # Response
+///
+/// - **204 No Content**: Task deleted successfully
+/// - **404 Not Found**: Task with the given ID does not exist
+/// - **500 Internal Server Error**: Database error
+///
+/// # Errors
+///
+/// Returns [`ApiErrorResponse`] in the following cases:
+/// - Not found error (404 Not Found): Task does not exist
+/// - Database error (500 Internal Server Error): Repository operation failed
+///
+/// # Search Index
+///
+/// On successful deletion, the search index is updated atomically using the
+/// RCU (Read-Copy-Update) pattern to remove the deleted task. This ensures
+/// that search results are consistent with the actual data store.
+#[allow(clippy::future_not_send)]
+pub async fn delete_task(
+    State(state): State<AppState>,
+    Path(task_id): Path<Uuid>,
+) -> Result<StatusCode, ApiErrorResponse> {
+    // Step 1: Convert Uuid to TaskId (pure)
+    let task_id = TaskId::from_uuid(task_id);
+
+    // Step 2: Delete from repository using AsyncIO
+    // The delete operation returns true if the task was found and deleted
+    let deleted = state
+        .task_repository
+        .delete(&task_id)
+        .run_async()
+        .await
+        .map_err(ApiErrorResponse::from)?;
+
+    // Step 3: Check if deletion was successful
+    if !deleted {
+        return Err(ApiErrorResponse::not_found(format!(
+            "Task not found: {task_id}"
+        )));
+    }
+
+    // Step 4: Update search index to remove the deleted task (lock-free write via RCU)
+    state.update_search_index(TaskChange::Remove(task_id));
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// =============================================================================
 // GET /health Handler
 // =============================================================================
 
@@ -300,6 +946,321 @@ pub async fn health_check() -> Json<HealthResponse> {
 mod tests {
     use super::*;
     use rstest::rstest;
+
+    use lambars::effect::AsyncIO;
+
+    use crate::domain::{Priority, TaskStatus};
+    use crate::infrastructure::{
+        InMemoryEventStore, InMemoryProjectRepository, InMemoryTaskRepository, RepositoryError,
+        SearchScope,
+    };
+
+    // -------------------------------------------------------------------------
+    // Mock TaskRepository for Error Simulation
+    // -------------------------------------------------------------------------
+
+    /// A mock `TaskRepository` that can be configured to return errors.
+    ///
+    /// This mock is used to test error handling paths in handlers.
+    struct MockTaskRepository {
+        /// The error to return from `find_by_id`, if any.
+        find_by_id_error: Option<RepositoryError>,
+        /// The task to return from `find_by_id`, if no error is configured.
+        find_by_id_result: Option<Task>,
+    }
+
+    impl MockTaskRepository {
+        /// Creates a mock that returns `Some(task)` from `find_by_id`.
+        fn with_task(task: Task) -> Self {
+            Self {
+                find_by_id_error: None,
+                find_by_id_result: Some(task),
+            }
+        }
+
+        /// Creates a mock that returns `None` from `find_by_id`.
+        fn not_found() -> Self {
+            Self {
+                find_by_id_error: None,
+                find_by_id_result: None,
+            }
+        }
+
+        /// Creates a mock that returns an error from `find_by_id`.
+        fn with_error(error: RepositoryError) -> Self {
+            Self {
+                find_by_id_error: Some(error),
+                find_by_id_result: None,
+            }
+        }
+    }
+
+    impl TaskRepository for MockTaskRepository {
+        fn find_by_id(&self, _id: &TaskId) -> AsyncIO<Result<Option<Task>, RepositoryError>> {
+            let error = self.find_by_id_error.clone();
+            let result = self.find_by_id_result.clone();
+            AsyncIO::new(move || async move { error.map_or_else(|| Ok(result), Err) })
+        }
+
+        fn save(&self, _task: &Task) -> AsyncIO<Result<(), RepositoryError>> {
+            AsyncIO::new(|| async { Ok(()) })
+        }
+
+        fn save_bulk(&self, tasks: &[Task]) -> AsyncIO<Vec<Result<(), RepositoryError>>> {
+            let count = tasks.len();
+            AsyncIO::new(move || async move { vec![Ok(()); count] })
+        }
+
+        fn delete(&self, _id: &TaskId) -> AsyncIO<Result<bool, RepositoryError>> {
+            AsyncIO::new(|| async { Ok(false) })
+        }
+
+        fn list(
+            &self,
+            pagination: crate::infrastructure::Pagination,
+        ) -> AsyncIO<Result<crate::infrastructure::PaginatedResult<Task>, RepositoryError>>
+        {
+            AsyncIO::new(move || async move {
+                Ok(crate::infrastructure::PaginatedResult::new(
+                    vec![],
+                    0,
+                    pagination.page,
+                    pagination.page_size,
+                ))
+            })
+        }
+
+        fn list_filtered(
+            &self,
+            _status: Option<TaskStatus>,
+            _priority: Option<Priority>,
+            pagination: crate::infrastructure::Pagination,
+        ) -> AsyncIO<Result<crate::infrastructure::PaginatedResult<Task>, RepositoryError>>
+        {
+            AsyncIO::new(move || async move {
+                Ok(crate::infrastructure::PaginatedResult::new(
+                    vec![],
+                    0,
+                    pagination.page,
+                    pagination.page_size,
+                ))
+            })
+        }
+
+        fn search(
+            &self,
+            _query: &str,
+            _scope: SearchScope,
+            _limit: u32,
+            _offset: u32,
+        ) -> AsyncIO<Result<Vec<Task>, RepositoryError>> {
+            AsyncIO::new(|| async { Ok(vec![]) })
+        }
+
+        fn count(&self) -> AsyncIO<Result<u64, RepositoryError>> {
+            AsyncIO::new(|| async { Ok(0) })
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Helper Functions for AppState Creation
+    // -------------------------------------------------------------------------
+
+    /// Creates an `AppState` with the given mock task repository.
+    fn create_app_state_with_mock_task_repository(
+        task_repository: impl TaskRepository + 'static,
+    ) -> AppState {
+        use crate::api::bulk::BulkConfig;
+        use crate::api::query::{SearchCache, SearchIndex};
+        use crate::infrastructure::RngProvider;
+        use arc_swap::ArcSwap;
+        use lambars::persistent::PersistentVector;
+        use std::sync::atomic::AtomicU64;
+
+        let external_sources = super::create_stub_external_sources();
+
+        AppState {
+            task_repository: Arc::new(task_repository),
+            project_repository: Arc::new(InMemoryProjectRepository::new()),
+            event_store: Arc::new(InMemoryEventStore::new()),
+            config: AppConfig::default(),
+            bulk_config: BulkConfig::default(),
+            search_index: Arc::new(ArcSwap::from_pointee(SearchIndex::build(
+                &PersistentVector::new(),
+            ))),
+            search_cache: Arc::new(SearchCache::with_default_config()),
+            secondary_source: external_sources.secondary_source,
+            external_source: external_sources.external_source,
+            rng_provider: Arc::new(RngProvider::new_random()),
+            cache_hits: Arc::new(AtomicU64::new(0)),
+            cache_misses: Arc::new(AtomicU64::new(0)),
+            cache_errors: Arc::new(AtomicU64::new(0)),
+            cache_strategy: "read-through".to_string(),
+            cache_ttl_seconds: 60,
+            applied_config: AppliedConfig::default(),
+        }
+    }
+
+    /// Creates an `AppState` with the default in-memory repositories.
+    fn create_default_app_state() -> AppState {
+        use crate::api::bulk::BulkConfig;
+        use crate::api::query::{SearchCache, SearchIndex};
+        use crate::infrastructure::RngProvider;
+        use arc_swap::ArcSwap;
+        use lambars::persistent::PersistentVector;
+        use std::sync::atomic::AtomicU64;
+
+        let external_sources = super::create_stub_external_sources();
+
+        AppState {
+            task_repository: Arc::new(InMemoryTaskRepository::new()),
+            project_repository: Arc::new(InMemoryProjectRepository::new()),
+            event_store: Arc::new(InMemoryEventStore::new()),
+            config: AppConfig::default(),
+            bulk_config: BulkConfig::default(),
+            search_index: Arc::new(ArcSwap::from_pointee(SearchIndex::build(
+                &PersistentVector::new(),
+            ))),
+            search_cache: Arc::new(SearchCache::with_default_config()),
+            secondary_source: external_sources.secondary_source,
+            external_source: external_sources.external_source,
+            rng_provider: Arc::new(RngProvider::new_random()),
+            cache_hits: Arc::new(AtomicU64::new(0)),
+            cache_misses: Arc::new(AtomicU64::new(0)),
+            cache_errors: Arc::new(AtomicU64::new(0)),
+            cache_strategy: "read-through".to_string(),
+            cache_ttl_seconds: 60,
+            applied_config: AppliedConfig::default(),
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // get_task Handler Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_get_task_returns_200_when_task_found() {
+        // Arrange
+        let task_id = TaskId::generate();
+        let task = Task::new(task_id.clone(), "Test Task", Timestamp::now())
+            .with_description("Test description")
+            .with_priority(Priority::High);
+        let state = create_app_state_with_mock_task_repository(MockTaskRepository::with_task(task));
+
+        // Act
+        let result = get_task(State(state), Path(*task_id.as_uuid())).await;
+
+        // Assert
+        assert!(result.is_ok());
+        let (headers, Json(response)) = result.unwrap();
+        assert_eq!(response.title, "Test Task");
+        assert_eq!(response.description, Some("Test description".to_string()));
+        assert_eq!(response.priority, super::super::dto::PriorityDto::High);
+
+        // Verify cache headers are present with correct values
+        assert!(headers.contains_key("X-Cache"));
+        assert!(headers.contains_key("X-Cache-Status"));
+        assert!(headers.contains_key("X-Cache-Source"));
+
+        // Verify header values (mock returns CacheStatus::Bypass since no Redis layer)
+        assert_eq!(headers.get("X-Cache").unwrap(), "MISS");
+        assert_eq!(headers.get("X-Cache-Status").unwrap(), "bypass");
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_get_task_returns_404_when_task_not_found() {
+        // Arrange
+        let task_id = TaskId::generate();
+        let state = create_app_state_with_mock_task_repository(MockTaskRepository::not_found());
+
+        // Act
+        let result = get_task(State(state), Path(*task_id.as_uuid())).await;
+
+        // Assert
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert_eq!(error.status, StatusCode::NOT_FOUND);
+        assert_eq!(error.error.code, "NOT_FOUND");
+        assert!(error.error.message.contains("Task not found"));
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_get_task_returns_500_when_repository_error() {
+        // Arrange
+        let task_id = TaskId::generate();
+        let state = create_app_state_with_mock_task_repository(MockTaskRepository::with_error(
+            RepositoryError::DatabaseError("Connection failed".to_string()),
+        ));
+
+        // Act
+        let result = get_task(State(state), Path(*task_id.as_uuid())).await;
+
+        // Assert
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert_eq!(error.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(error.error.code, "INTERNAL_ERROR");
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_get_task_converts_task_to_task_response_correctly() {
+        // Arrange
+        let task_id = TaskId::generate();
+        let timestamp = Timestamp::now();
+        let task = Task::new(task_id.clone(), "Complete Task", timestamp)
+            .with_description("Detailed description")
+            .with_priority(Priority::Critical)
+            .add_tag(Tag::new("urgent"))
+            .add_tag(Tag::new("backend"));
+        let state = create_app_state_with_mock_task_repository(MockTaskRepository::with_task(task));
+
+        // Act
+        let result = get_task(State(state), Path(*task_id.as_uuid())).await;
+
+        // Assert
+        assert!(result.is_ok());
+        let (_headers, Json(response)) = result.unwrap();
+        assert_eq!(response.id, task_id.to_string());
+        assert_eq!(response.title, "Complete Task");
+        assert_eq!(
+            response.description,
+            Some("Detailed description".to_string())
+        );
+        assert_eq!(response.priority, super::super::dto::PriorityDto::Critical);
+        assert_eq!(response.tags.len(), 2);
+        assert!(response.tags.contains(&"urgent".to_string()));
+        assert!(response.tags.contains(&"backend".to_string()));
+        assert_eq!(response.version, 1);
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_get_task_with_real_repository_integration() {
+        // Arrange
+        let state = create_default_app_state();
+        let task_id = TaskId::generate();
+        let task = Task::new(task_id.clone(), "Integration Test Task", Timestamp::now());
+
+        // Save the task first
+        state
+            .task_repository
+            .save(&task)
+            .run_async()
+            .await
+            .expect("Failed to save task");
+
+        // Act
+        let result = get_task(State(state), Path(*task_id.as_uuid())).await;
+
+        // Assert
+        assert!(result.is_ok());
+        let (_headers, Json(response)) = result.unwrap();
+        assert_eq!(response.title, "Integration Test Task");
+    }
 
     // -------------------------------------------------------------------------
     // Validation Tests
@@ -410,5 +1371,340 @@ mod tests {
         let ids2 = generate_task_ids();
 
         assert_ne!(ids1.task_id, ids2.task_id);
+    }
+
+    // -------------------------------------------------------------------------
+    // lift_option_to_either Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn test_lift_option_to_either_some_returns_right() {
+        let some_value: Option<i32> = Some(42);
+        let result = lift_option_to_either(some_value, || "error");
+
+        assert!(result.is_right());
+        assert_eq!(result.unwrap_right(), 42);
+    }
+
+    #[rstest]
+    fn test_lift_option_to_either_none_returns_left() {
+        let none_value: Option<i32> = None;
+        let result = lift_option_to_either(none_value, || "not found");
+
+        assert!(result.is_left());
+        assert_eq!(result.unwrap_left(), "not found");
+    }
+
+    #[rstest]
+    fn test_lift_option_to_either_left_value_is_lazy() {
+        use std::cell::Cell;
+
+        let call_count = Cell::new(0);
+        let some_value: Option<i32> = Some(42);
+
+        let _result = lift_option_to_either(some_value, || {
+            call_count.set(call_count.get() + 1);
+            "error"
+        });
+
+        // Left value function should not be called for Some case
+        assert_eq!(call_count.get(), 0);
+    }
+
+    #[rstest]
+    fn test_lift_option_to_either_with_api_error_response() {
+        let none_value: Option<Task> = None;
+        let task_id = TaskId::generate();
+
+        let result: Either<ApiErrorResponse, Task> = lift_option_to_either(none_value, || {
+            ApiErrorResponse::not_found(format!("Task not found: {task_id}"))
+        });
+
+        assert!(result.is_left());
+        let error = result.unwrap_left();
+        assert_eq!(error.status, StatusCode::NOT_FOUND);
+        assert_eq!(error.error.code, "NOT_FOUND");
+    }
+
+    #[rstest]
+    fn test_lift_option_to_either_with_task() {
+        let task = Task::new(TaskId::generate(), "Test Task", Timestamp::now());
+        let some_task: Option<Task> = Some(task);
+
+        let result: Either<ApiErrorResponse, Task> =
+            lift_option_to_either(some_task, || ApiErrorResponse::not_found("Not found"));
+
+        assert!(result.is_right());
+        let returned_task = result.unwrap_right();
+        assert_eq!(returned_task.title, "Test Task");
+    }
+
+    // -------------------------------------------------------------------------
+    // record_cache_status Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn test_record_cache_status_hit() {
+        let state = create_default_app_state();
+
+        state.record_cache_status(CacheStatus::Hit);
+        state.record_cache_status(CacheStatus::Hit);
+
+        assert_eq!(
+            state.cache_hits.load(std::sync::atomic::Ordering::Relaxed),
+            2
+        );
+        assert_eq!(
+            state
+                .cache_misses
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        assert_eq!(
+            state
+                .cache_errors
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+    }
+
+    #[rstest]
+    fn test_record_cache_status_miss() {
+        let state = create_default_app_state();
+
+        state.record_cache_status(CacheStatus::Miss);
+
+        assert_eq!(
+            state.cache_hits.load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        assert_eq!(
+            state
+                .cache_misses
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            state
+                .cache_errors
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+    }
+
+    #[rstest]
+    fn test_record_cache_status_error() {
+        let state = create_default_app_state();
+
+        state.record_cache_status(CacheStatus::Error);
+
+        assert_eq!(
+            state.cache_hits.load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        assert_eq!(
+            state
+                .cache_misses
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        assert_eq!(
+            state
+                .cache_errors
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+    }
+
+    #[rstest]
+    fn test_record_cache_status_bypass_does_not_increment() {
+        let state = create_default_app_state();
+
+        state.record_cache_status(CacheStatus::Bypass);
+
+        // Bypass should not increment any counter
+        assert_eq!(
+            state.cache_hits.load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        assert_eq!(
+            state
+                .cache_misses
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        assert_eq!(
+            state
+                .cache_errors
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Backfill Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_backfill_existing_tasks_backfills_tasks_without_events() {
+        // Arrange
+        let event_store = InMemoryEventStore::new();
+        let task1 = Task::new(TaskId::generate(), "Task 1", Timestamp::now());
+        let task2 = Task::new(TaskId::generate(), "Task 2", Timestamp::now());
+        let tasks = vec![task1.clone(), task2.clone()];
+
+        // Act
+        let result = super::backfill_existing_tasks(&tasks, &event_store).await;
+
+        // Assert
+        assert!(result.is_ok());
+        let (backfilled, skipped) = result.unwrap();
+        assert_eq!(backfilled, 2);
+        assert_eq!(skipped, 0);
+
+        // Verify events were created
+        let version1 = event_store
+            .get_current_version(&task1.task_id)
+            .run_async()
+            .await
+            .unwrap();
+        let version2 = event_store
+            .get_current_version(&task2.task_id)
+            .run_async()
+            .await
+            .unwrap();
+        assert_eq!(version1, 1);
+        assert_eq!(version2, 1);
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_backfill_existing_tasks_skips_tasks_with_events() {
+        // Arrange
+        let event_store = InMemoryEventStore::new();
+        let task1 = Task::new(TaskId::generate(), "Task 1", Timestamp::now());
+        let task2 = Task::new(TaskId::generate(), "Task 2", Timestamp::now());
+
+        // Pre-create an event for task1
+        let event = crate::domain::create_task_created_event(
+            &task1,
+            crate::domain::EventId::generate_v7(),
+            Timestamp::now(),
+            1,
+        );
+        event_store.append(&event, 0).run_async().await.unwrap();
+
+        let tasks = vec![task1.clone(), task2.clone()];
+
+        // Act
+        let result = super::backfill_existing_tasks(&tasks, &event_store).await;
+
+        // Assert
+        assert!(result.is_ok());
+        let (backfilled, skipped) = result.unwrap();
+        assert_eq!(backfilled, 1); // Only task2 was backfilled
+        assert_eq!(skipped, 1); // task1 was skipped
+
+        // Verify task1 still has only 1 event (not duplicated)
+        let version1 = event_store
+            .get_current_version(&task1.task_id)
+            .run_async()
+            .await
+            .unwrap();
+        assert_eq!(version1, 1);
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_backfill_existing_tasks_empty_list() {
+        // Arrange
+        let event_store = InMemoryEventStore::new();
+        let tasks: Vec<Task> = vec![];
+
+        // Act
+        let result = super::backfill_existing_tasks(&tasks, &event_store).await;
+
+        // Assert
+        assert!(result.is_ok());
+        let (backfilled, skipped) = result.unwrap();
+        assert_eq!(backfilled, 0);
+        assert_eq!(skipped, 0);
+    }
+
+    // -------------------------------------------------------------------------
+    // delete_task Handler Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_delete_task_returns_204_when_task_exists() {
+        // Arrange
+        let state = create_default_app_state();
+        let task_id = TaskId::generate();
+        let task = Task::new(task_id.clone(), "Task to Delete", Timestamp::now());
+
+        // Save the task first
+        state
+            .task_repository
+            .save(&task)
+            .run_async()
+            .await
+            .expect("Failed to save task");
+
+        // Act
+        let result = delete_task(State(state), Path(*task_id.as_uuid())).await;
+
+        // Assert
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), StatusCode::NO_CONTENT);
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_delete_task_returns_404_when_task_not_found() {
+        // Arrange
+        let state = create_default_app_state();
+        let nonexistent_task_id = TaskId::generate();
+
+        // Act
+        let result = delete_task(State(state), Path(*nonexistent_task_id.as_uuid())).await;
+
+        // Assert
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert_eq!(error.status, StatusCode::NOT_FOUND);
+        assert_eq!(error.error.code, "NOT_FOUND");
+        assert!(error.error.message.contains("Task not found"));
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_delete_task_removes_from_repository() {
+        // Arrange
+        let state = create_default_app_state();
+        let task_id = TaskId::generate();
+        let task = Task::new(task_id.clone(), "Task to Delete", Timestamp::now());
+
+        // Save the task first
+        state
+            .task_repository
+            .save(&task)
+            .run_async()
+            .await
+            .expect("Failed to save task");
+
+        // Act
+        let result = delete_task(State(state.clone()), Path(*task_id.as_uuid())).await;
+        assert!(result.is_ok());
+
+        // Assert: Task should no longer exist in repository
+        let find_result = state
+            .task_repository
+            .find_by_id(&task_id)
+            .run_async()
+            .await
+            .expect("Failed to find task");
+        assert!(find_result.is_none());
     }
 }

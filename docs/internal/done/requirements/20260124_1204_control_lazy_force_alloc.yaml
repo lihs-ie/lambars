@@ -1,0 +1,136 @@
+# Lazy/ConcurrentLazy force 割当削減 要件定義
+#
+# 概要:
+#   Lazy/ConcurrentLazy の force 時に発生する割当とスレッド生成を排除する。
+#
+# 設計方針:
+#   1. force は once-only に限定し、再評価/再割当を禁止する
+#   2. 状態遷移は atomic で表現し、ロック粒度を最小化する
+#   3. スレッド生成は禁止し、既存スレッドで評価する
+#
+# 参照:
+#   - docs/internal/analysis/20260124_lambars_perf_bottlenecks.yaml
+#   - criterion profiling control_bench top_functions
+
+version: "1.0.0"
+name: "control_lazy_force_alloc"
+description: |
+  Lazy/ConcurrentLazy の force における malloc/cfree と pthread_create が
+  上位に出る問題を解消する。force は once-only の評価とし、
+  状態遷移は atomic で管理する。スレッド生成は一切行わない。
+
+background:
+  problem: |
+    control_bench で ConcurrentLazy::force が割当とスレッド生成を伴い、
+    高頻度の force で性能が大きく劣化している。
+  motivation: |
+    遅延評価の利点を維持しつつ、force のオーバーヘッドを最小化する。
+  prior_art:
+    - name: "criterion-profiling control_bench"
+      description: "ConcurrentLazy::force が hot spot であることを示す結果。"
+
+requirements:
+  # ======================================================================
+  # 1. 状態遷移モデル
+  # ======================================================================
+  - id: "REQ-LAZY-STATE-001"
+    name: "Lazy の状態を atomic な enum で表現する"
+    description: |
+      - 状態は Uninit/Computing/Ready の3値で表現する。
+      - 状態遷移は CAS で行い、ロックを取得しない。
+      - Computing で他スレッドが待つ場合は backoff を使う。
+    laws:
+      - name: "force_once"
+        description: "force は初回のみ評価し、その後は同一値を返す。"
+        equation: "force(force(x)) = force(x)"
+        property_test: |
+          #[test]
+          fn force_is_idempotent() {
+              let v1 = lazy.force();
+              let v2 = lazy.force();
+              assert_eq!(v1, v2);
+          }
+    methods:
+      - name: "LazyState"
+        signature: "enum LazyState { Uninit, Computing, Ready(T) }"
+        description: |
+          状態遷移を CAS で管理する。
+        examples:
+          - description: "状態遷移の例"
+            code: |
+              match state.load() {
+                  Uninit => try_cas_to_computing(),
+                  Computing => spin_wait(),
+                  Ready(v) => return v,
+              }
+    implementations:
+      - type: "Lazy/ConcurrentLazy"
+        description: |
+          - force は CAS で Computing へ遷移し、評価後 Ready へ遷移。
+          - 競合時は busy-wait ではなく backoff を用いる。
+
+  # ======================================================================
+  # 2. スレッド生成禁止
+  # ======================================================================
+  - id: "REQ-LAZY-THREAD-001"
+    name: "force におけるスレッド生成を禁止する"
+    description: |
+      - force は呼び出しスレッド内で評価する。
+      - pthread_create を伴う設計は削除する。
+      - 既存 API を変えずに内部で評価する。
+    implementations:
+      - type: "ConcurrentLazy"
+        description: |
+          - force は実行元スレッドで評価し、別スレッドの生成は禁止。
+          - 既存の API シグネチャは維持する。
+
+  # ======================================================================
+  # 3. 割当のゼロ化
+  # ======================================================================
+  - id: "REQ-LAZY-ALLOC-001"
+    name: "force 時の割当をゼロ化する"
+    description: |
+      - force は一切の heap allocation を行わない。
+      - 評価結果は事前に確保されたスロットへ格納する。
+      - Drop 時の解放は 1 回のみ実行する。
+    implementations:
+      - type: "LazyStorage"
+        description: |
+          - MaybeUninit<T> を使い、評価結果をインプレースで格納する。
+          - OnceLock/OnceCell の内部設計を参考にする。
+
+  # ======================================================================
+  # 4. ベンチマーク/テスト
+  # ======================================================================
+  - id: "REQ-LAZY-BENCH-001"
+    name: "force の割当削減をベンチで証明する"
+    description: |
+      - control_bench の top_functions から malloc/pthread_create が消えること。
+      - force の p50 時間を 50% 以上改善する。
+      - 既存ベンチと同条件で比較可能にする。
+    methods:
+      - name: "control_bench"
+        signature: "criterion bench"
+        description: |
+          Lazy/ConcurrentLazy を同一条件で評価する。
+        examples:
+          - description: "ベンチ概要"
+            code: |
+              group.bench_function(\"lazy_force\", |b| {
+                  b.iter(|| lazy.force());
+              });
+    implementations:
+      - type: "benches"
+        description: |
+          - control_bench の結果を perf script で確認し、割当削減を検証する。
+
+non_functional_requirements:
+  performance:
+    - "force の malloc/cfree 回数を 0 にする"
+    - "control_bench の p50 実行時間を 50% 以上改善"
+  compatibility:
+    - "Lazy/ConcurrentLazy の public API を変更しない"
+  testing:
+    - "force の冪等性とスレッド競合を単体テストで検証する"
+
+future_extensions: []

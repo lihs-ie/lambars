@@ -1,0 +1,357 @@
+# Lazy/ConcurrentLazy ロックレス化 要件定義
+#
+# 概要:
+#   Lazy/ConcurrentLazy の force/cached パスをロックレス化し、allocator/OnceLock 依存を除去する。
+#
+# 設計方針:
+#   1. Atomic 状態機械 + ジェネリクス F 直接保持で fast-path をゼロアロケにする。
+#   2. ConcurrentLazy は読み取りロックレス・初期化のみスピンロックで競合を最小化する。
+#   3. ポイズン伝搬と API 互換性を保ちつつベンチ・プロファイルで退行を検知する。
+#   4. Functor/Monad 法則を満たし、関数型プログラミングの原則に従う。
+#
+# 参照:
+#   - docs/internal/issues/20260120_1604_lazy_concurrent_lazy.yaml
+#   - benchmark_results_after.txt
+#   - profiling-results/criterion-profiling-*/control_bench.folded
+
+version: "1.2.0"
+name: "lazy_concurrent_lazy_lockfree"
+description: |
+  Lazy/ConcurrentLazy の force/cached パスをロックレス状態機械に刷新し、OnceLock/Mutex と Box/Arc 由来の
+  アロケーションとシステムロックを排除する。クロージャはジェネリクス F をそのまま保持し（型消去・Box 化なし）、
+  キャッシュヒット時はゼロアロケ・ロックレスで値を返す。ConcurrentLazy は読取ロックレス化しつつ、
+  初期化時のみスピンベースの短時間ロックで競合を最小化する。
+
+  関数型プログラミングライブラリとして、Functor/Monad 法則を満たし、純粋関数的なエラーハンドリング API
+  (try_force, try_map) を提供する。
+
+# 実装ノート (v1.2.0):
+#   - クロージャ格納: Option<F> を直接保持（Inline バッファ不使用）
+#     - 理由: unsafe を最小化し型安全性を維持。コンパイラがサイズに応じて最適配置を決定
+#   - 返却型: &T を直接返却（Ref<'_, T> や Arc<T> ではなく）
+#     - 理由: AtomicU8 状態機械では RefCell が不要。Arc は内部で保持しない設計
+#   - Lazy の STATE_COMPUTING 時: 再入検知として panic（スピン待機ではない）
+#     - 理由: Lazy はシングルスレッド用(!Sync)なので、待機は不要
+#   - try_force の STATE_COMPUTING 時:
+#     - Lazy: 即座に Err を返す（再入検知）
+#     - ConcurrentLazy: 一定時間スピン待機後に Err を返す（正常な初期化を待つがタイムアウト）
+#     - 理由: try_force は純粋関数的 API として panic を避ける設計
+#   - ポイズン時の panic: 固定メッセージを使用（元の panic を resume_unwind しない）
+#     - 理由: panic payload の保存は複雑さを増し、エラーの予測可能性を低下させる
+#     - is_poisoned() で事前チェック可能なので、実用上問題なし
+#   - loom テスト: 標準スレッドによる並行性テストを使用
+#     - 理由: loom の UnsafeCell API は std と非互換。完全な loom 統合は将来課題
+
+# 背景・動機
+background:
+  problem: |
+    control_bench のフレームグラフで malloc/cfree と OnceLock::initialize が上位を占有し、concurrent_lazy* ベンチは
+    5s 警告が出るほど遅延。force/cached ヒットでも Mutex/OnceLock 取得と Arc ドロップが発生し CPU/メモリ帯域を浪費。
+  motivation: |
+    force/cached のロックレス化によりコンテンションを解消し、キャッシュヒットを数 ns オーダーまで短縮する。
+    OnceLock/Arc/Box の排除でアロケーション回数をゼロまたは 1 回に抑え、プロファイル上から malloc/cfree/OnceLock を消す。
+  prior_art:
+    - name: "once_cell::race::OnceBox"
+      description: "Atomic 状態と MaybeUninit による lock-free 初期化の参考実装"
+    - name: "spin::Once"
+      description: "軽量スピンロックによる初期化のパターン"
+    - name: "parking_lot::Mutex/RwLock"
+      description: "低オーバーヘッドロック。初期化時のみ短期取得する案"
+
+# 要件一覧
+requirements:
+  # ======================================================================
+  # 1. 状態機械とストレージ
+  # ======================================================================
+  - id: lazy_state_machine
+    name: "Atomic 状態機械によるロックレス Lazy"
+    description: |
+      Lazy を AtomicU8 状態 (Empty=0, Computing=1, Ready=2, Poison=3) + MaybeUninit<T> で実装し、
+      force/cached ヒット時はロックレスで値を返す。initializer は Option<F> として保持し、compare_exchange で
+      Empty→Computing を奪取したスレッドのみ実行する。panic 発生時は Poison に遷移させ後続 force は panic 復元。
+
+    laws:
+      - name: "Single evaluation"
+        description: |
+          どのスレッドも force を 1 回だけ実行し、以降は常に同じ参照を返す。
+        equation: "force(lazy) == force(lazy) == v"
+        property_test: |
+          proptest! {
+            #[test]
+            fn force_runs_once(x in any::<u64>()) {
+              let calls = Arc::new(AtomicUsize::new(0));
+              let c = calls.clone();
+              let lazy = Lazy::new(move || { c.fetch_add(1, SeqCst); x });
+              let handles: Vec<_> = (0..8).map(|_| {
+                let l = lazy.clone();
+                std::thread::spawn(move || *l.force())
+              }).collect();
+              for h in handles { assert_eq!(h.join().unwrap(), x); }
+              assert_eq!(calls.load(SeqCst), 1);
+            }
+          }
+
+      - name: "Functor identity law"
+        description: |
+          map に恒等関数を渡すと、元の Lazy と同じ値を返す。
+        equation: "lazy.map(|x| x) == lazy"
+        property_test: |
+          proptest! {
+            #[test]
+            fn functor_identity(x in any::<i64>()) {
+              let lazy = Lazy::new(|| x);
+              let mapped = Lazy::new(|| x).map(|v| v);
+              assert_eq!(*lazy.force(), *mapped.force());
+            }
+          }
+
+      - name: "Functor composition law"
+        description: |
+          map の合成は、合成関数の map と等価。
+        equation: "lazy.map(f).map(g) == lazy.map(|x| g(f(x)))"
+        property_test: |
+          proptest! {
+            #[test]
+            fn functor_composition(x in any::<i32>()) {
+              let f = |v: i32| v + 1;
+              let g = |v: i32| v * 2;
+              let lazy1 = Lazy::new(|| x).map(f).map(g);
+              let lazy2 = Lazy::new(|| x).map(|v| g(f(v)));
+              assert_eq!(*lazy1.force(), *lazy2.force());
+            }
+          }
+
+      - name: "Monad left identity"
+        description: |
+          pure(a).flat_map(f) == f(a)
+        equation: "Lazy::pure(a).flat_map(f) == f(a)"
+        property_test: |
+          proptest! {
+            #[test]
+            fn monad_left_identity(x in any::<i32>()) {
+              let f = |v: i32| Lazy::new(move || v * 2);
+              let lazy1 = Lazy::pure(x).flat_map(f);
+              let lazy2 = f(x);
+              assert_eq!(*lazy1.force(), *lazy2.force());
+            }
+          }
+
+      - name: "Monad right identity"
+        description: |
+          m.flat_map(pure) == m
+        equation: "lazy.flat_map(Lazy::pure) == lazy"
+        property_test: |
+          proptest! {
+            #[test]
+            fn monad_right_identity(x in any::<i32>()) {
+              let lazy1 = Lazy::new(|| x);
+              let lazy2 = Lazy::new(|| x).flat_map(|v| Lazy::pure(v));
+              assert_eq!(*lazy1.force(), *lazy2.force());
+            }
+          }
+
+      - name: "Monad associativity"
+        description: |
+          (m.flat_map(f)).flat_map(g) == m.flat_map(|x| f(x).flat_map(g))
+        equation: "(m.flat_map(f)).flat_map(g) == m.flat_map(|x| f(x).flat_map(g))"
+        property_test: |
+          proptest! {
+            #[test]
+            fn monad_associativity(x in any::<i32>()) {
+              let f = |v: i32| Lazy::new(move || v + 1);
+              let g = |v: i32| Lazy::new(move || v * 2);
+              let lazy1 = Lazy::new(|| x).flat_map(f).flat_map(g);
+              let lazy2 = Lazy::new(|| x).flat_map(|v| f(v).flat_map(g));
+              assert_eq!(*lazy1.force(), *lazy2.force());
+            }
+          }
+
+    methods:
+      - name: "force"
+        signature: "fn force(&self) -> &T"
+        description: |
+          Empty→Computing は compare_exchange で奪取。Ready なら即座に参照を返す。
+          Lazy はシングルスレッド用(!Sync)のため、Computing 状態での遭遇は再入を意味し panic する。
+          Poison は panic を再発生させる。
+        examples:
+          - description: "基本的な使用例"
+            code: |
+              let lazy = Lazy::new(|| 42);
+              assert_eq!(*lazy.force(), 42);
+      - name: "try_force"
+        signature: "fn try_force(&self) -> Result<&T, LazyPoisonedError>"
+        description: |
+          純粋関数的エラーハンドリング API。Poisoned 状態を panic ではなく Result で返す。
+          初期化関数のパニックは捕捉せず再スローする。
+        examples:
+          - description: "ポイズン状態のハンドリング"
+            code: |
+              let lazy = Lazy::new(|| 42);
+              assert!(lazy.try_force().is_ok());
+
+    implementations:
+      - type: "Lazy<T, F>"
+        description: |
+          RefCell/Mutex/OnceLock を排し、AtomicU8 + UnsafeCell<MaybeUninit<T>> + Option<F> で構成する。
+
+  # ======================================================================
+  # 2. クロージャ格納最適化
+  # ======================================================================
+  - id: lazy_closure_inline
+    name: "クロージャのジェネリクス直接保持"
+    description: |
+      初期化クロージャはジェネリクス F をそのまま Option<F> で保持する。型消去や Box 化を行わず、
+      コンパイラが F のサイズに応じて最適な配置（スタック/インライン/ヒープ）を決定する。
+      force 実行時に Option から take しスタック上で実行、実行後は None に置換しドロップを省略する。
+
+      # 設計判断:
+      # Inline バッファ ([u8; N]) を使用しない理由:
+      #   1. unsafe なメモリ操作 (transmute 相当) が必要になる
+      #   2. 型消去を行うと dyn FnOnce() への Box 化が必要
+      #   3. ジェネリクス F 直接保持でコンパイラ最適化に委ねる方が安全かつ効率的
+    methods:
+      - name: "new"
+        signature: "pub const fn new(initializer: F) -> Self"
+        description: |
+          const fn として初期化子を受け取り、Lazy を構築する。
+        examples:
+          - description: "基本的な Lazy 構築"
+            code: |
+              let lazy = Lazy::new(|| 1u32);
+      - name: "map"
+        signature: "pub fn map<U, G>(self, f: G) -> Lazy<U, impl FnOnce() -> U>"
+        description: |
+          クロージャ合成を行い、新しい Lazy を生成する。Box/Arc を使用しない。
+      - name: "try_map"
+        signature: "pub fn try_map<U, G>(self, f: G) -> Lazy<Result<U, LazyPoisonedError>, impl FnOnce() -> Result<U, LazyPoisonedError>>"
+        description: |
+          純粋関数的エラーハンドリング版の map。Poisoned 状態を Result で伝搬する。
+
+    implementations:
+      - type: "Lazy<T, F>"
+        description: |
+          Option<F> でクロージャを保持し、force 実行後は None へ置換しドロップを省略する。
+
+  # ======================================================================
+  # 3. ConcurrentLazy のロック戦略
+  # ======================================================================
+  - id: concurrent_lazy_lock_strategy
+    name: "ConcurrentLazy 読取ロックレス・初期化スピン待機"
+    description: |
+      ConcurrentLazy は Lazy と同じ Atomic 状態機械を共有し、Ready ならロックレスで即座に &T を返す。
+      Empty→Computing の奪取に失敗したスレッドはスピン＋指数バックオフで待機。
+      Atomic 操作の Acquire/Release オーダリングによりメモリ可視化を保証し、
+      OnceLock/Arc/Mutex ベースの同期を全廃する。
+
+      デッドロック検知のため、スピン回数に上限 (MAX_SPIN_ITERATIONS) を設け、
+      超過時は panic して再入やデッドロックを検知する。
+    methods:
+      - name: "force"
+        signature: "pub fn force(&self) -> &T"
+        description: |
+          Ready なら state を読むだけで即座に &T を返す。Arc は内部で保持しない。
+          Computing 状態ではスピン＋指数バックオフで Ready/Poisoned を待機する。
+        examples:
+          - description: "コンテンション下での並行アクセス"
+            code: |
+              let lazy = Arc::new(ConcurrentLazy::new(|| 42));
+              let handles: Vec<_> = (0..32).map(|_| {
+                let l = lazy.clone();
+                std::thread::spawn(move || *l.force())
+              }).collect();
+              for h in handles { assert_eq!(h.join().unwrap(), 42); }
+      - name: "try_force"
+        signature: "pub fn try_force(&self) -> Result<&T, ConcurrentLazyPoisonedError>"
+        description: |
+          純粋関数的エラーハンドリング API。Poisoned 状態を panic ではなく Result で返す。
+      - name: "try_map"
+        signature: "pub fn try_map<U, G>(self, f: G) -> ConcurrentLazy<Result<U, ConcurrentLazyPoisonedError>, ...>"
+        description: |
+          純粋関数的エラーハンドリング版の map。Poisoned 状態を Result で伝搬する。
+
+    implementations:
+      - type: "ConcurrentLazy<T, F>"
+        description: |
+          AtomicU8 状態 + UnsafeCell<MaybeUninit<T>> を中心に、Acquire/Release オーダリングで publish。
+          Arc/Mutex/OnceLock の多重アロケーションを禁止し、OnceLock を完全に排除する。
+
+  # ======================================================================
+  # 4. ポイズン伝搬とデバッグ表現
+  # ======================================================================
+  - id: lazy_poison_and_debug
+    name: "ポイズン処理と状態表示"
+    description: |
+      初期化パニック時は必ず Poison に遷移し、以降の force/cached は固定メッセージの panic を発生させる。
+      try_force/try_map を使用すれば panic なしに Err で検出可能。
+      is_poisoned() で事前チェックも可能。
+
+      Debug/Display は状態に応じて適切な表示を行う:
+        - Ready: 値の Debug/Display 表示を行う (T の実装に依存)
+        - Empty/Computing: "<uninit>" の定数文字列
+        - Poisoned: "<poisoned>" の定数文字列
+    methods:
+      - name: "into_inner"
+        signature: "pub fn into_inner(self) -> Result<T, LazyPoisonedError>"
+        description: |
+          Poison なら Err を返し、Ready なら値をムーブ。Empty なら初期化を実行。
+          初期化中に panic した場合は Poison に遷移後、panic を再スローする。
+      - name: "is_poisoned"
+        signature: "pub fn is_poisoned(&self) -> bool"
+        description: |
+          ポイズン状態かどうかを判定する。force() を呼ぶ前に事前チェック可能。
+      - name: "Display"
+        signature: "impl fmt::Display for Lazy<T: Display, F> / ConcurrentLazy<T: Display, F>"
+        description: |
+          Ready なら値を表示、それ以外は状態に応じた定数文字列を表示する。
+    implementations:
+      - type: "Lazy/ConcurrentLazy"
+        description: |
+          Poison ビットを Atomic 状態 (STATE_POISONED = 3) に含める。
+          ポイズン後の force() は固定メッセージで panic する。
+
+  # ======================================================================
+  # 5. ベンチマーク・プロファイル・回帰防止
+  # ======================================================================
+  - id: lazy_benchmarks
+    name: "ベンチ・プロファイルと回帰チェック"
+    description: |
+      control_bench の concurrent_lazy_* シナリオを更新し、警告なしに完走することを必須とする。criterion/iai-callgrind の
+      新ベンチを追加し、force(cached) ヒットの p95 レイテンシ、初期化時のアロケーション回数を計測し CI で閾値チェックする。
+    methods:
+      - name: "bench_force_cached"
+        signature: "fn bench_force_cached(c: &mut Criterion)"
+        description: |
+          Lazy/ConcurrentLazy それぞれ 1e7 回 force (初期化済) を計測し、p95 を報告。
+      - name: "bench_concurrent_contention"
+        signature: "fn bench_concurrent_contention(c: &mut Criterion)"
+        description: |
+          16/32 スレッドで初期化競合させ、スループットと警告有無を記録。OnceLock/Mutex がフレームグラフから消えていることを確認。
+    implementations:
+      - type: "benches/control_bench.rs"
+        description: |
+          既存ベンチを更新し、警告が出たシナリオを必ずカバー。profiling-results への folded flamegraph を残す。
+
+# 非機能要件
+non_functional_requirements:
+  performance:
+    - "Lazy::force (cached) p95 < 20ns (x86_64 release, L3 ヒット前提、criterion 計測)"
+    - "ConcurrentLazy 初期化競合 (16 threads) を 2.5s 未満、警告なしで完走"
+    - "force/cached ヒット時のヒープアロケーション 0 回、初回 force でも最大 1 回に制限"
+    - "control_bench.folded における malloc/cfree/OnceLock 計測比率 < 5%"
+  compatibility:
+    - "Public API: new/force/try_force/map/try_map/flat_map/into_inner/Display/Debug を提供"
+    - "Send/Sync 境界: Lazy は Send のみ、ConcurrentLazy は Send + Sync"
+    - "Unsafe を用いる箇所は Safety コメントを必須とし、未定義動作が無いことを証明する"
+  testing:
+    - "マルチスレッドによる並行性テスト (force 競合・poison 伝搬)"
+    - "proptest による Functor/Monad 法則、single evaluation プロパティ"
+    - "miri での未初期化アクセス/データ競合検査 (CI で実行)"
+    - "ベンチ (criterion) を control_bench に追加し性能を計測"
+
+    # loom について:
+    # loom の UnsafeCell は std と非互換な API を持つため、完全な統合には
+    # 条件付きコンパイルによる型の切り替えが必要。現時点では標準スレッドによる
+    # 並行性テストで代替し、loom 完全統合は将来課題とする。
+
+# 将来の拡張
+future_extensions: []

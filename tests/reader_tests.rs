@@ -52,8 +52,8 @@ fn reader_new_and_run_with_struct_environment() {
 #[rstest]
 fn reader_pure_creates_constant_reader() {
     let reader: Reader<i32, &str> = Reader::pure("constant");
-    assert_eq!(reader.run(42), "constant");
-    assert_eq!(reader.run(0), "constant");
+    assert_eq!(reader.run_cloned(42), "constant");
+    assert_eq!(reader.run_cloned(0), "constant");
 }
 
 #[rstest]

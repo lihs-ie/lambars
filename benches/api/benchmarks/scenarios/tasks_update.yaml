@@ -1,0 +1,99 @@
+# Tasks Update Endpoint Benchmark
+#
+# Tests PUT /tasks/{id} endpoint using Lens/Prism/Optional/Bifunctor
+#
+# Target API features:
+#   - Lens for focused updates
+#   - Prism for optional fields
+#   - Optional for nullable handling
+#   - Bifunctor for error transformation
+
+name: "tasks_update"
+description: "Benchmark PUT /tasks/{id} endpoint with Lens, Prism, Optional, and Bifunctor"
+
+# Backend configuration (maps to STORAGE_MODE, CACHE_MODE)
+storage_mode: postgres
+cache_mode: redis
+
+# Workload configuration
+load_pattern: mixed
+cache_state: warm
+# data_scale: maps to DATA_SCALE (small=1e2, medium=1e4, large=1e6)
+data_scale: medium
+# payload_variant: maps to PAYLOAD (minimal=small, standard=medium, complex/heavy=large)
+payload_variant: complex
+# rps_profile: constant=steady, ramp_up_down=ramp, burst=burst
+rps_profile: constant
+
+# Load generation (maps to DURATION, THREADS, CONNECTIONS)
+duration_seconds: 30
+connections: 50
+threads: 4
+target_rps: 800
+warmup_seconds: 5
+
+# Contention level
+contention_level: medium
+
+# Target endpoint (first element maps to ENDPOINT)
+endpoints:
+  - "/tasks/{id}"
+
+http_methods:
+  - "PUT"
+
+# Concurrency settings (maps to POOL_SIZES, WORKERS)
+concurrency:
+  worker_threads: 4
+  database_pool_size: 20
+  redis_pool_size: 10
+  max_connections: 100
+
+# Cache metrics (expected_hit_rate maps to HIT_RATE)
+cache_metrics:
+  enabled: true
+  per_endpoint: true
+  track_latency: true
+  warmup_requests: 200
+  expected_hit_rate: 0.7
+
+# Error handling (inject_error_rate maps to FAIL_RATE, max_retries>0 maps to RETRY)
+error_config:
+  timeout_ms: 5000
+  connect_timeout_ms: 1000
+  max_retries: 2
+  retry_delay_ms: 100
+  expected_error_rate: 0.02
+  fail_on_error_threshold: true
+
+# Performance thresholds
+thresholds:
+  max_error_rate: 0.03
+  p99_latency_ms: 100
+  min_rps_achieved: 500
+
+# Extended metadata for workflow integration
+# Keys here map to environment variables:
+#   cache_strategy -> CACHE_STRATEGY (read-through|write-through|write-behind)
+#   hit_rate -> HIT_RATE override (0|50|90)
+#   fail_injection -> FAIL_RATE override (0|0.1|0.5)
+#   retry -> RETRY override (true|false)
+#   profile -> PROFILE (true|false)
+metadata:
+  test_type: "endpoint_benchmark"
+  endpoint: "PUT /tasks/{id}"
+  payload: "large"
+  cache_strategy: "write-through"
+  hit_rate: 50
+  fail_injection: 0
+  retry: true
+  profile: false
+  api_features:
+    - Lens
+    - Prism
+    - Optional
+    - Bifunctor
+  tags:
+    - tasks
+    - update
+    - optics

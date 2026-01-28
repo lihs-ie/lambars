@@ -80,7 +80,8 @@ pub fn curry_impl(input: TokenStream) -> TokenStream {
     let expanded = match parse_curry_input(input) {
         Ok(CurryInput::Closure(closure)) => generate_curry_from_closure(&closure),
         Ok(CurryInput::FunctionWithArity { function, arity }) => {
-            generate_nested_closures(arity, quote! { #function })
+            let function_expression = quote! { #function };
+            generate_nested_closures(arity, &function_expression)
         }
         Err(error) => error.to_compile_error(),
     };
@@ -172,12 +173,13 @@ fn generate_curry_from_closure(closure: &ExprClosure) -> TokenStream2 {
         .to_compile_error();
     }
 
-    generate_nested_closures(argument_count, quote! { #closure })
+    let closure_expression = quote! { #closure };
+    generate_nested_closures(argument_count, &closure_expression)
 }
 
 fn generate_nested_closures(
     argument_count: usize,
-    function_expression: TokenStream2,
+    function_expression: &TokenStream2,
 ) -> TokenStream2 {
     let argument_identifiers: Vec<_> = (0..argument_count)
         .map(|index| quote::format_ident!("__lambars_argument_{}", index))

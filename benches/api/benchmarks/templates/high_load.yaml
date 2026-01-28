@@ -1,0 +1,22 @@
+name: "high_load"
+description: "Template for high load scenarios"
+
+storage_mode: postgres
+cache_mode: redis
+load_pattern: mixed
+cache_state: warm
+data_scale: large
+contention_level: high
+
+duration_seconds: 120
+connections: 100
+threads: 16
+target_rps: 5000
+
+error_config:
+  timeout_ms: 10000
+  connect_timeout_ms: 2000
+  max_retries: 1
+  retry_delay_ms: 500
+  expected_error_rate: 0.05
+  fail_on_error_threshold: true

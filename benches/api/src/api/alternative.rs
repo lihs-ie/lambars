@@ -27,8 +27,8 @@ use lambars::typeclass::Alternative;
 use super::dto::{PriorityDto, TaskResponse};
 use super::error::{ApiErrorResponse, FieldError};
 use super::handlers::AppState;
-use crate::domain::{Priority, Task, TaskId, TaskStatus};
-use crate::infrastructure::Pagination;
+use crate::domain::{Priority, Tag, Task, TaskId, TaskStatus};
+use crate::infrastructure::{ExternalError, ExternalTaskData, Pagination, RepositoryError};
 
 // =============================================================================
 // DTOs
@@ -178,18 +178,81 @@ pub struct FirstAvailableResponse {
 // =============================================================================
 
 /// Error type for source data fetching.
+///
+/// Separates client-safe message from internal details for security.
+/// - `client_message`: Safe to expose to API clients (no internal details)
+/// - `internal_details`: Full error details for logging/debugging (not exposed)
 #[derive(Debug, Clone)]
 pub struct SourceError {
+    /// Source name (e.g., "primary", "secondary", "external").
     pub source: String,
-    pub reason: String,
+    /// Client-safe error message (no internal details).
+    pub client_message: String,
+    /// Internal error details for logging (not exposed to clients).
+    /// Reserved for future observability/tracing integration.
+    #[allow(dead_code)]
+    pub(crate) internal_details: String,
 }
 
 impl SourceError {
-    fn new(source: impl Into<String>, reason: impl Into<String>) -> Self {
+    /// Creates a new `SourceError` with explicit client message and internal details.
+    fn new(
+        source: impl Into<String>,
+        client_message: impl Into<String>,
+        internal_details: impl Into<String>,
+    ) -> Self {
         Self {
             source: source.into(),
-            reason: reason.into(),
+            client_message: client_message.into(),
+            internal_details: internal_details.into(),
         }
+    }
+
+    /// Creates a `SourceError` from a `RepositoryError`.
+    ///
+    /// Converts the internal error to a client-safe message while
+    /// preserving the full error details for logging.
+    fn from_repository_error(source: &str, error: &RepositoryError) -> Self {
+        let client_message = match &error {
+            RepositoryError::NotFound(_) => "Resource not found".to_string(),
+            RepositoryError::VersionConflict { .. } => "Version conflict".to_string(),
+            RepositoryError::DatabaseError(_) => "Database error".to_string(),
+            RepositoryError::SerializationError(_) => "Data processing error".to_string(),
+            RepositoryError::CacheError(_) => "Cache error".to_string(),
+        };
+
+        let internal_details = error.to_string();
+
+        tracing::warn!(
+            source = source,
+            error = %error,
+            "Repository source fetch failed"
+        );
+
+        Self::new(source, client_message, internal_details)
+    }
+
+    /// Creates a `SourceError` from an `ExternalError`.
+    ///
+    /// Converts the internal error to a client-safe message while
+    /// preserving the full error details for logging.
+    fn from_external_error(source: &str, error: &ExternalError) -> Self {
+        let client_message = match &error {
+            ExternalError::ConnectionFailed(_) => "Connection failed".to_string(),
+            ExternalError::Timeout(ms) => format!("Timeout after {ms}ms"),
+            ExternalError::ServiceUnavailable(_) => "Service unavailable".to_string(),
+            ExternalError::InjectedFailure(_) => "Operation failed".to_string(),
+        };
+
+        let internal_details = error.to_string();
+
+        tracing::warn!(
+            source = source,
+            error = %error,
+            "External source fetch failed"
+        );
+
+        Self::new(source, client_message, internal_details)
     }
 }
 
@@ -351,7 +414,6 @@ pub async fn search_fallback(
     }
 
     // Build search chain using alt
-    let repository = Arc::clone(&state.task_repository);
     let search_query = query.query.trim().to_lowercase();
 
     // Search in each source and use alt for fallback
@@ -364,13 +426,18 @@ pub async fn search_fallback(
 
         let found = match source.as_str() {
             "cache" => {
-                // Simulate cache lookup (uses same repository but marks as cache)
-                search_in_source(&repository, &search_query, "cache").await
+                // Cache lookup: uses search cache for quick results
+                search_in_cache(&state, &search_query)
             }
-            "database" => search_in_source(&repository, &search_query, "database").await,
+            "database" => {
+                // Database: uses primary repository
+                search_in_database(&state.task_repository, &search_query).await
+            }
             "external" => {
-                // Simulate external API (always returns None for demo)
-                None
+                // External API: uses real ExternalDataSource (HTTP)
+                // Note: External search requires a task ID, so we search by title in database first
+                // then fetch additional data from external source
+                search_in_external(&state, &search_query).await
             }
             _ => None,
         };
@@ -391,21 +458,125 @@ pub async fn search_fallback(
     }
 }
 
-/// Searches for a task in a specific source.
-async fn search_in_source(
+/// Searches for a task in the search cache.
+///
+/// Uses the in-memory search index for fast lookups.
+fn search_in_cache(state: &AppState, query: &str) -> Option<(Task, String)> {
+    // Use the search index for cache lookups
+    let search_index = state.search_index.load();
+
+    // Search by title in the index
+    let search_result = search_index.search_by_title(query)?;
+
+    // Get the first matching task
+    search_result
+        .tasks()
+        .iter()
+        .next()
+        .cloned()
+        .map(|task| (task, "cache".to_string()))
+}
+
+/// Searches for a task in the database.
+///
+/// Uses the primary repository for database lookups.
+async fn search_in_database(
     repository: &Arc<dyn crate::infrastructure::TaskRepository + Send + Sync>,
     query: &str,
-    source: &str,
 ) -> Option<(Task, String)> {
-    // Get tasks with large pagination (simplified for demo)
-    let pagination = Pagination::new(0, 1000);
+    // Get tasks with pagination (simplified search)
+    let pagination = Pagination::new(0, 100);
     let result = repository.list(pagination).run_async().await.ok()?;
 
     result
         .items
         .into_iter()
         .find(|task| task.title.to_lowercase().contains(query))
-        .map(|task| (task, source.to_string()))
+        .map(|task| (task, "database".to_string()))
+}
+
+/// Searches for a task using external data source.
+///
+/// This demonstrates real I/O with the external HTTP source.
+/// Since external sources typically require a task ID, we first search
+/// in the database to find matching tasks, then enrich with external data.
+async fn search_in_external(state: &AppState, query: &str) -> Option<(Task, String)> {
+    // First, find a task by title in the database
+    let pagination = Pagination::new(0, 100);
+    let result = state
+        .task_repository
+        .list(pagination)
+        .run_async()
+        .await
+        .ok()?;
+
+    let matching_task = result
+        .items
+        .into_iter()
+        .find(|task| task.title.to_lowercase().contains(query))?;
+
+    // Try to fetch additional data from external source
+    // This demonstrates real I/O via ExternalDataSource
+    let external_result = state
+        .external_source
+        .fetch_task_data(&matching_task.task_id)
+        .run_async()
+        .await;
+
+    match external_result {
+        Ok(Some(external_data)) => {
+            // Merge external data with local task
+            let enriched_task = enrich_task_with_external_data(&matching_task, &external_data);
+            Some((enriched_task, "external".to_string()))
+        }
+        Ok(None) => {
+            // External source returned no data, return local task
+            Some((matching_task, "external".to_string()))
+        }
+        Err(error) => {
+            // External source failed, log and return None
+            tracing::warn!(
+                task_id = %matching_task.task_id,
+                error = %error,
+                "External source fetch failed in search_fallback"
+            );
+            None
+        }
+    }
+}
+
+/// Enriches a task with data from an external source (pure function).
+fn enrich_task_with_external_data(task: &Task, external: &ExternalTaskData) -> Task {
+    let mut enriched = task.clone();
+
+    // Override fields if external data is present
+    if let Some(description) = &external.description {
+        enriched.description = Some(description.clone());
+    }
+    if let Some(priority) = external.priority {
+        enriched.priority = priority;
+    }
+    if let Some(status) = external.status {
+        enriched.status = status;
+    }
+    if !external.tags.is_empty() {
+        // Merge tags from both sources using functional style
+        // Convert existing tags to a set of strings for deduplication
+        let existing_tag_strings: std::collections::HashSet<String> = enriched
+            .tags
+            .iter()
+            .map(|tag| tag.as_str().to_string())
+            .collect();
+
+        // Add new tags that don't already exist
+        for tag_string in &external.tags {
+            if !existing_tag_strings.contains(tag_string) {
+                enriched.tags = enriched.tags.insert(Tag::new(tag_string));
+            }
+        }
+    }
+
+    enriched
 }
 
 // =============================================================================
@@ -729,15 +900,13 @@ pub async fn aggregate_sources(
     }
 
     // Fetch from each source using optional pattern
-    let repository = Arc::clone(&state.task_repository);
     let mut sources_used = Vec::new();
     let mut sources_failed = Vec::new();
     let mut aggregated_data = SourceData::empty();
 
     for source in &request.sources {
         // fetch_from_source returns Result<SourceData, SourceError>
-        let source_result =
-            fetch_from_source(&repository, &task_id, source, &request.task_id).await;
+        let source_result = fetch_from_source(&state, &task_id, source).await;
 
         // Use optional: convert Err to Some(None), Ok to Some(Some)
         // This demonstrates Alternative::optional which tolerates failures
@@ -781,66 +950,95 @@ pub async fn aggregate_sources(
 
 /// Fetches data from a specific source.
 ///
+/// This function uses real I/O adapters for secondary and external sources.
+/// The sources are configured via `AppState` and may include fail injection.
+///
 /// Returns `Result<SourceData, SourceError>` to properly demonstrate `Alternative::optional`.
 /// - `Ok(data)` when the source successfully provides data
 /// - `Err(error)` when the source fails (timeout, unavailable, not found)
 async fn fetch_from_source(
-    repository: &Arc<dyn crate::infrastructure::TaskRepository + Send + Sync>,
+    state: &AppState,
     task_id: &TaskId,
     source: &str,
-    task_id_str: &str,
 ) -> Result<SourceData, SourceError> {
     match source {
         "primary" => {
             // Primary source: actual repository
-            let task = repository
-                .find_by_id(task_id)
-                .run_async()
-                .await
-                .map_err(|e| SourceError::new("primary", format!("Repository error: {e}")))?
-                .ok_or_else(|| SourceError::new("primary", "Task not found"))?;
-            Ok(SourceData {
-                title: Some(task.title.clone()),
-                description: task.description.clone(),
-                priority: Some(task.priority),
-                status: Some(task.status),
-                tags: task.tags.iter().map(ToString::to_string).collect(),
-            })
+            fetch_from_primary(&state.task_repository, task_id).await
         }
         "secondary" => {
-            // Secondary source: simulated (provides partial data based on task ID hash)
-            let hash = task_id_str.as_bytes().first().map_or(0, |b| *b);
-            if hash.is_multiple_of(3) {
-                Err(SourceError::new(
-                    "secondary",
-                    "Service temporarily unavailable",
-                ))
-            } else {
-                Ok(SourceData {
-                    title: None,
-                    description: Some("Data from secondary source".to_string()),
-                    priority: None,
-                    status: None,
-                    tags: vec!["secondary".to_string()],
-                })
-            }
+            // Secondary source: Redis via ExternalDataSource
+            fetch_from_external_source(&state.secondary_source, task_id, "secondary").await
         }
         "external" => {
-            // External source: simulated (often unavailable)
-            let hash = task_id_str.as_bytes().first().map_or(0, |b| *b);
-            if hash.is_multiple_of(2) {
-                Err(SourceError::new("external", "Connection timeout"))
-            } else {
-                Ok(SourceData {
-                    title: None,
-                    description: None,
-                    priority: Some(Priority::High),
-                    status: None,
-                    tags: vec!["external".to_string()],
-                })
-            }
+            // External source: HTTP via ExternalDataSource
+            fetch_from_external_source(&state.external_source, task_id, "external").await
         }
-        _ => Err(SourceError::new(source, "Unknown source")),
+        _ => Err(SourceError::new(
+            source,
+            "Unknown source",
+            format!("Unknown source: {source}"),
+        )),
+    }
+}
+
+/// Fetches data from the primary repository.
+async fn fetch_from_primary(
+    repository: &Arc<dyn crate::infrastructure::TaskRepository + Send + Sync>,
+    task_id: &TaskId,
+) -> Result<SourceData, SourceError> {
+    let task = repository
+        .find_by_id(task_id)
+        .run_async()
+        .await
+        .map_err(|error| SourceError::from_repository_error("primary", &error))?
+        .ok_or_else(|| {
+            SourceError::new(
+                "primary",
+                "Task not found",
+                format!("Task not found: {task_id}"),
+            )
+        })?;
+
+    Ok(SourceData {
+        title: Some(task.title.clone()),
+        description: task.description.clone(),
+        priority: Some(task.priority),
+        status: Some(task.status),
+        tags: task.tags.iter().map(ToString::to_string).collect(),
+    })
+}
+
+/// Fetches data from an external source (secondary or external).
+async fn fetch_from_external_source(
+    source: &Arc<dyn crate::infrastructure::ExternalDataSource + Send + Sync>,
+    task_id: &TaskId,
+    source_name: &str,
+) -> Result<SourceData, SourceError> {
+    let external_data = source
+        .fetch_task_data(task_id)
+        .run_async()
+        .await
+        .map_err(|error| SourceError::from_external_error(source_name, &error))?
+        .ok_or_else(|| {
+            SourceError::new(
+                source_name,
+                "Task not found in external source",
+                format!("Task not found in {source_name}: {task_id}"),
+            )
+        })?;
+
+    Ok(convert_external_task_data_to_source_data(external_data))
+}
+
+/// Converts `ExternalTaskData` to `SourceData` (pure function).
+fn convert_external_task_data_to_source_data(external: ExternalTaskData) -> SourceData {
+    SourceData {
+        title: external.title,
+        description: external.description,
+        priority: external.priority,
+        status: external.status,
+        tags: external.tags,
     }
 }
 

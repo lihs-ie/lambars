@@ -23,9 +23,9 @@ use redis::AsyncCommands;
 
 use lambars::effect::AsyncIO;
 
-use crate::domain::{Project, ProjectId, Task, TaskId, Timestamp};
+use crate::domain::{Priority, Project, ProjectId, Task, TaskId, TaskStatus, Timestamp};
 use crate::infrastructure::{
-    PaginatedResult, Pagination, ProjectRepository, RepositoryError, TaskRepository,
+    PaginatedResult, Pagination, ProjectRepository, RepositoryError, SearchScope, TaskRepository,
 };
 
 // =============================================================================
@@ -239,6 +239,122 @@ impl TaskRepository for RedisTaskRepository {
     }
 
     #[allow(clippy::future_not_send)]
+    fn save_bulk(&self, tasks: &[Task]) -> AsyncIO<Vec<Result<(), RepositoryError>>> {
+        let pool = self.pool.clone();
+        let tasks_to_save: Vec<Task> = tasks.to_vec();
+
+        AsyncIO::new(move || async move {
+            if tasks_to_save.is_empty() {
+                return Vec::new();
+            }
+
+            let mut connection = match pool.get().await {
+                Ok(connection) => connection,
+                Err(error) => {
+                    let error = RepositoryError::CacheError(error.to_string());
+                    return tasks_to_save.iter().map(|_| Err(error.clone())).collect();
+                }
+            };
+
+            // Use Lua script for atomic version checking and update
+            let script = redis::Script::new(
+                r"
+                local key = KEYS[1]
+                local index_key = KEYS[2]
+                local new_json = ARGV[1]
+                local new_version = tonumber(ARGV[2])
+                local entity_id = ARGV[3]
+                local score = tonumber(ARGV[4])
+
+                local existing = redis.call('GET', key)
+                if existing then
+                    -- Update case: version must be existing + 1
+                    local ok, data = pcall(cjson.decode, existing)
+                    if not ok then
+                        return {2}
+                    end
+                    local existing_version = tonumber(data.version)
+                    if existing_version == nil then
+                        return {2}
+                    end
+                    if new_version ~= existing_version + 1 then
+                        return {1, existing_version + 1, new_version}
+                    end
+                else
+                    -- New entity case: version must be 1
+                    if new_version ~= 1 then
+                        return {1, 1, new_version}
+                    end
+                end
+
+                redis.call('SET', key, new_json)
+                redis.call('ZADD', index_key, score, entity_id)
+                return {0}
+                ",
+            );
+
+            let mut results = Vec::with_capacity(tasks_to_save.len());
+
+            for task in tasks_to_save {
+                let key = task_key(&task.task_id);
+                let task_id_string = task.task_id.to_string();
+                let score = timestamp_to_score(&task.created_at);
+
+                // Serialize the task
+                let json = match serde_json::to_string(&task) {
+                    Ok(json) => json,
+                    Err(error) => {
+                        results.push(Err(RepositoryError::SerializationError(error.to_string())));
+                        continue;
+                    }
+                };
+
+                #[allow(clippy::cast_sign_loss)]
+                let result: Result<Vec<i64>, _> = script
+                    .key(&key)
+                    .key(TASK_INDEX_KEY)
+                    .arg(&json)
+                    .arg(task.version)
+                    .arg(&task_id_string)
+                    .arg(score)
+                    .invoke_async(&mut *connection)
+                    .await;
+
+                let result = match result {
+                    Ok(result) => result,
+                    Err(error) => {
+                        results.push(Err(RepositoryError::CacheError(error.to_string())));
+                        continue;
+                    }
+                };
+
+                let save_result = match result[0] {
+                    0 => Ok(()),
+                    1 =>
+                    {
+                        #[allow(clippy::cast_sign_loss)]
+                        Err(RepositoryError::VersionConflict {
+                            expected: result[1] as u64,
+                            found: result[2] as u64,
+                        })
+                    }
+                    2 => Err(RepositoryError::SerializationError(
+                        "Corrupted data in Redis: invalid JSON or missing version field"
+                            .to_string(),
+                    )),
+                    _ => Err(RepositoryError::CacheError(
+                        "Unexpected Lua script result".to_string(),
+                    )),
+                };
+
+                results.push(save_result);
+            }
+
+            results
+        })
+    }
+
+    #[allow(clippy::future_not_send)]
     fn delete(&self, id: &TaskId) -> AsyncIO<Result<bool, RepositoryError>> {
         let pool = self.pool.clone();
         let key = task_key(id);
@@ -352,6 +468,145 @@ impl TaskRepository for RedisTaskRepository {
                 pagination.page,
                 pagination.page_size,
             ))
+        })
+    }
+
+    #[allow(clippy::future_not_send)]
+    fn list_filtered(
+        &self,
+        status: Option<TaskStatus>,
+        priority: Option<Priority>,
+        pagination: Pagination,
+    ) -> AsyncIO<Result<PaginatedResult<Task>, RepositoryError>> {
+        let pool = self.pool.clone();
+
+        // Redis does not have native filtering on JSONB fields, so we need to
+        // fetch all tasks and filter in memory. This is acceptable for caching
+        // scenarios where the data set is relatively small.
+        AsyncIO::new(move || async move {
+            let mut connection = pool
+                .get()
+                .await
+                .map_err(|error| RepositoryError::CacheError(error.to_string()))?;
+
+            // Get all task IDs from the index
+            let all_task_ids: Vec<String> = connection
+                .zrange(TASK_INDEX_KEY, 0, -1)
+                .await
+                .map_err(|error| RepositoryError::CacheError(error.to_string()))?;
+
+            if all_task_ids.is_empty() {
+                return Ok(PaginatedResult::new(
+                    vec![],
+                    0,
+                    pagination.page,
+                    pagination.page_size,
+                ));
+            }
+
+            // Get all tasks in a single MGET
+            let keys: Vec<String> = all_task_ids
+                .iter()
+                .map(|id| format!("{TASK_KEY_PREFIX}{id}"))
+                .collect();
+
+            let task_jsons: Vec<Option<String>> = connection
+                .mget(&keys)
+                .await
+                .map_err(|error| RepositoryError::CacheError(error.to_string()))?;
+
+            // Deserialize and filter tasks (pure function)
+            let filtered: Vec<Task> = task_jsons
+                .into_iter()
+                .flatten()
+                .filter_map(|json| serde_json::from_str::<Task>(&json).ok())
+                .filter(|task| {
+                    status.is_none_or(|s| task.status == s)
+                        && priority.is_none_or(|p| task.priority == p)
+                })
+                .collect();
+
+            let total = filtered.len() as u64;
+            #[allow(clippy::cast_possible_truncation)]
+            let offset = pagination.offset() as usize;
+            let limit = pagination.limit() as usize;
+
+            // Apply pagination
+            let items: Vec<Task> = filtered.into_iter().skip(offset).take(limit).collect();
+
+            Ok(PaginatedResult::new(
+                items,
+                total,
+                pagination.page,
+                pagination.page_size,
+            ))
+        })
+    }
+
+    #[allow(clippy::future_not_send)]
+    fn search(
+        &self,
+        query: &str,
+        scope: SearchScope,
+        limit: u32,
+        offset: u32,
+    ) -> AsyncIO<Result<Vec<Task>, RepositoryError>> {
+        let pool = self.pool.clone();
+        let query_lower = query.to_lowercase();
+
+        // Redis does not have native text search, so we need to
+        // fetch all tasks and filter in memory.
+        AsyncIO::new(move || async move {
+            let mut connection = pool
+                .get()
+                .await
+                .map_err(|error| RepositoryError::CacheError(error.to_string()))?;
+
+            // Get all task IDs from the index
+            let all_task_ids: Vec<String> = connection
+                .zrange(TASK_INDEX_KEY, 0, -1)
+                .await
+                .map_err(|error| RepositoryError::CacheError(error.to_string()))?;
+
+            if all_task_ids.is_empty() {
+                return Ok(vec![]);
+            }
+
+            // Get all tasks in a single MGET
+            let keys: Vec<String> = all_task_ids
+                .iter()
+                .map(|id| format!("{TASK_KEY_PREFIX}{id}"))
+                .collect();
+
+            let task_jsons: Vec<Option<String>> = connection
+                .mget(&keys)
+                .await
+                .map_err(|error| RepositoryError::CacheError(error.to_string()))?;
+
+            // Deserialize and search tasks (pure function)
+            let matching: Vec<Task> = task_jsons
+                .into_iter()
+                .flatten()
+                .filter_map(|json| serde_json::from_str::<Task>(&json).ok())
+                .filter(|task| match scope {
+                    SearchScope::Title => task.title.to_lowercase().contains(&query_lower),
+                    SearchScope::Tags => task
+                        .tags
+                        .iter()
+                        .any(|tag| tag.as_str().eq_ignore_ascii_case(&query_lower)),
+                    SearchScope::All => {
+                        task.title.to_lowercase().contains(&query_lower)
+                            || task
+                                .tags
+                                .iter()
+                                .any(|tag| tag.as_str().eq_ignore_ascii_case(&query_lower))
+                    }
+                })
+                .skip(offset as usize)
+                .take(limit as usize)
+                .collect();
+
+            Ok(matching)
         })
     }
 

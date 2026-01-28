@@ -11,6 +11,10 @@
 
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
+-- pg_trgm extension for trigram-based text search
+-- Enables efficient ILIKE/LIKE queries using GIN indexes
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+
 -- =============================================================================
 -- Tasks Table
 -- =============================================================================
@@ -31,6 +35,18 @@ CREATE INDEX IF NOT EXISTS idx_tasks_created_at ON tasks(created_at);
 
 -- GIN index for JSONB queries (if needed for searching)
 CREATE INDEX IF NOT EXISTS idx_tasks_data ON tasks USING GIN(data);
+
+-- GIN index for title search using trigrams (REQ-SEARCH-DB-001)
+-- Enables efficient ILIKE/LIKE queries on JSONB title field
+-- NOTE: Queries using this index MUST include LIMIT/OFFSET to prevent full table scans
+CREATE INDEX IF NOT EXISTS idx_tasks_title_trgm
+    ON tasks USING GIN (lower((data->>'title')) gin_trgm_ops);
+
+-- GIN index for tags search using trigrams (REQ-SEARCH-DB-001)
+-- Enables efficient ILIKE/LIKE queries on JSONB tags field
+-- NOTE: Queries using this index MUST include LIMIT/OFFSET to prevent full table scans
+CREATE INDEX IF NOT EXISTS idx_tasks_tags_trgm
+    ON tasks USING GIN ((lower((data->>'tags')::text)) gin_trgm_ops);
 
 -- =============================================================================
 -- Projects Table

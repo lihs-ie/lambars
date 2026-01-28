@@ -159,18 +159,33 @@ proptest! {
 
 proptest! {
     /// Three-level nesting should be equivalent to triple flat_map.
+    ///
+    /// Note: For nested iterations with pure iterator chains, inner collections
+    /// must be cloned within each iteration using `let` bindings to avoid
+    /// ownership conflicts with FnMut closures.
+    ///
+    /// The key is to clone collections at the right level:
+    /// - Collections used in inner levels must be cloned BEFORE the iteration that uses them
+    /// - Each clone must be done within the closure that will pass it to the inner closure
     #[test]
     fn prop_three_level_nesting(
         xs in prop::collection::vec(any::<i8>(), 0..5),
         ys in prop::collection::vec(any::<i8>(), 0..5),
         zs in prop::collection::vec(any::<i8>(), 0..5)
     ) {
+        // Clone for for_! macro usage
         let ys_for = ys.clone();
         let zs_for = zs.clone();
+
         let for_result = for_! {
             x <= xs.clone();
-            y <= ys_for.clone();
-            z <= zs_for.clone();
+            // Clone ys for this x iteration, and clone zs for passing to y iteration
+            let ys_inner = ys_for.clone();
+            let zs_for_y = zs_for.clone();
+            y <= ys_inner;
+            // Clone zs for this y iteration
+            let zs_inner = zs_for_y.clone();
+            z <= zs_inner;
             yield (x, y, z)
         };
 
@@ -279,5 +294,318 @@ proptest! {
 
         prop_assert_eq!(result.len(), expected_length);
         prop_assert!(result.iter().all(|&x| x == 42));
+    }
+}
+
+// =============================================================================
+// Law 11: Guard is equivalent to filter
+// =============================================================================
+
+proptest! {
+    /// Guard expression in for_! should be equivalent to filter.
+    ///
+    /// for_! { x <= xs; if cond(x); yield x }
+    /// ==
+    /// xs.into_iter().filter(cond).collect()
+    #[test]
+    fn prop_guard_equals_filter(
+        elements in prop::collection::vec(any::<i32>(), 0..500)
+    ) {
+        let for_result = for_! {
+            x <= elements.clone();
+            if x > 0;
+            yield x.wrapping_mul(2)
+        };
+
+        let filter_result: Vec<i32> = elements.into_iter()
+            .filter(|&x| x > 0)
+            .map(|x| x.wrapping_mul(2))
+            .collect();
+
+        prop_assert_eq!(for_result, filter_result);
+    }
+}
+
+// =============================================================================
+// Law 12: Pattern guard is equivalent to filter_map
+// =============================================================================
+
+proptest! {
+    /// Pattern guard in for_! should be equivalent to filter_map.
+    ///
+    /// for_! { x <= xs; if let Some(y) = f(x); yield y }
+    /// ==
+    /// xs.into_iter().filter_map(f).collect()
+    #[test]
+    fn prop_pattern_guard_equals_filter_map(
+        elements in prop::collection::vec(any::<i32>(), 0..500)
+    ) {
+        fn maybe_double(x: i32) -> Option<i32> {
+            if x > 0 { Some(x.wrapping_mul(2)) } else { None }
+        }
+
+        let for_result = for_! {
+            x <= elements.clone();
+            if let Some(doubled) = maybe_double(x);
+            yield doubled
+        };
+
+        let filter_map_result: Vec<i32> = elements.into_iter()
+            .filter_map(maybe_double)
+            .collect();
+
+        prop_assert_eq!(for_result, filter_map_result);
+    }
+}
+
+// =============================================================================
+// Law 13: Nested iteration with guard
+// =============================================================================
+
+proptest! {
+    /// Nested iteration with guard should be equivalent to
+    /// flat_map with filter.
+    #[test]
+    fn prop_nested_with_guard_equivalence(
+        xs in prop::collection::vec(any::<i32>(), 0..50),
+        ys in prop::collection::vec(any::<i32>(), 0..20)
+    ) {
+        let ys_clone = ys.clone();
+        let for_result = for_! {
+            x <= xs.clone();
+            y <= ys_clone.clone();
+            if (x.wrapping_add(y)) % 2 == 0;
+            yield x.wrapping_add(y)
+        };
+
+        let expected: Vec<i32> = xs.into_iter()
+            .flat_map(|x| {
+                ys.clone().into_iter()
+                    .filter(move |&y| (x.wrapping_add(y)) % 2 == 0)
+                    .map(move |y| x.wrapping_add(y))
+            })
+            .collect();
+
+        prop_assert_eq!(for_result, expected);
+    }
+}
+
+// =============================================================================
+// Law 14: concat (flatten) operation
+// =============================================================================
+
+proptest! {
+    /// for_! with identity yield should be equivalent to flatten.
+    ///
+    /// for_! { inner <= nested; x <= inner; yield x }
+    /// ==
+    /// nested.into_iter().flatten().collect()
+    #[test]
+    fn prop_concat_equivalence(
+        nested in prop::collection::vec(
+            prop::collection::vec(any::<i32>(), 0..20),
+            0..50
+        )
+    ) {
+        let for_result = for_! {
+            inner <= nested.clone();
+            x <= inner;
+            yield x
+        };
+
+        let flatten_result: Vec<i32> = nested.into_iter()
+            .flatten()
+            .collect();
+
+        prop_assert_eq!(for_result, flatten_result);
+    }
+}
+
+// =============================================================================
+// Law 15: Let binding equivalence
+// =============================================================================
+
+proptest! {
+    /// Let binding followed by yield should be equivalent to
+    /// computing the value inline.
+    #[test]
+    fn prop_let_binding_equivalence(
+        elements in prop::collection::vec(any::<i32>(), 0..500)
+    ) {
+        let for_result = for_! {
+            x <= elements.clone();
+            let doubled = x.wrapping_mul(2);
+            let squared = doubled.wrapping_mul(doubled);
+            yield squared
+        };
+
+        let expected: Vec<i32> = elements.into_iter()
+            .map(|x| {
+                let doubled = x.wrapping_mul(2);
+                doubled.wrapping_mul(doubled)
+            })
+            .collect();
+
+        prop_assert_eq!(for_result, expected);
+    }
+}
+
+// =============================================================================
+// Result Identical Tests (Phase 5)
+// =============================================================================
+// These property-based tests verify that the for_! macro produces results
+// identical to manual iterator operations for arbitrary inputs.
+
+proptest! {
+    /// Single iteration result should be identical to map + collect.
+    /// Uses saturating_mul to avoid overflow.
+    #[test]
+    fn prop_result_identical_single(xs in prop::collection::vec(any::<i32>(), 0..100)) {
+        let for_result = for_! { x <= xs.clone(); yield x.saturating_mul(2) };
+        let manual_result: Vec<_> = xs.into_iter().map(|x| x.saturating_mul(2)).collect();
+        prop_assert_eq!(for_result, manual_result);
+    }
+
+    /// Nested iteration result should be identical to flat_map + collect.
+    /// Uses saturating_add to avoid overflow.
+    #[test]
+    fn prop_result_identical_nested(
+        xs in prop::collection::vec(any::<i32>(), 0..20),
+        ys in prop::collection::vec(any::<i32>(), 0..20)
+    ) {
+        // Clone for for_! macro usage
+        let ys_for = ys.clone();
+        let for_result = for_! {
+            x <= xs.clone();
+            y <= ys_for.clone();
+            yield x.saturating_add(y)
+        };
+        let manual_result: Vec<_> = xs.into_iter()
+            .flat_map(|x| ys.clone().into_iter().map(move |y| x.saturating_add(y)))
+            .collect();
+        prop_assert_eq!(for_result, manual_result);
+    }
+
+    /// Result with guard should be identical to filter + map + collect.
+    #[test]
+    fn prop_result_identical_with_guard(
+        xs in prop::collection::vec(any::<i32>(), 0..100)
+    ) {
+        let for_result = for_! {
+            x <= xs.clone();
+            if x % 2 == 0;
+            yield x
+        };
+        let manual_result: Vec<_> = xs.into_iter()
+            .filter(|&x| x % 2 == 0)
+            .collect();
+        prop_assert_eq!(for_result, manual_result);
+    }
+
+    /// Three-level nested iteration should be identical to triple flat_map.
+    /// Uses i8 to avoid overflow with three levels of addition.
+    #[test]
+    fn prop_result_identical_three_level_nesting(
+        xs in prop::collection::vec(any::<i8>(), 0..5),
+        ys in prop::collection::vec(any::<i8>(), 0..5),
+        zs in prop::collection::vec(any::<i8>(), 0..5)
+    ) {
+        // Clone for for_! macro usage
+        let ys_for = ys.clone();
+        let zs_for = zs.clone();
+
+        let for_result = for_! {
+            x <= xs.clone();
+            let ys_inner = ys_for.clone();
+            let zs_for_y = zs_for.clone();
+            y <= ys_inner;
+            let zs_inner = zs_for_y.clone();
+            z <= zs_inner;
+            yield x.saturating_add(y).saturating_add(z)
+        };
+
+        let manual_result: Vec<i8> = xs.into_iter()
+            .flat_map(|x| {
+                let zs_inner = zs.clone();
+                ys.clone().into_iter().flat_map(move |y| {
+                    zs_inner.clone().into_iter().map(move |z| {
+                        x.saturating_add(y).saturating_add(z)
+                    })
+                })
+            })
+            .collect();
+
+        prop_assert_eq!(for_result, manual_result);
+    }
+
+    /// Nested iteration with guard should be identical to flat_map + filter + collect.
+    #[test]
+    fn prop_result_identical_nested_with_guard(
+        xs in prop::collection::vec(any::<i32>(), 0..20),
+        ys in prop::collection::vec(any::<i32>(), 0..20)
+    ) {
+        // Clone for for_! macro usage
+        let ys_for = ys.clone();
+
+        let for_result = for_! {
+            x <= xs.clone();
+            y <= ys_for.clone();
+            if x.saturating_add(y) % 3 == 0;
+            yield x.saturating_add(y)
+        };
+
+        let manual_result: Vec<_> = xs.into_iter()
+            .flat_map(|x| {
+                ys.clone().into_iter()
+                    .filter(move |&y| x.saturating_add(y) % 3 == 0)
+                    .map(move |y| x.saturating_add(y))
+            })
+            .collect();
+
+        prop_assert_eq!(for_result, manual_result);
+    }
+
+    /// With let binding should be identical to inline computation.
+    #[test]
+    fn prop_result_identical_with_let_binding(
+        xs in prop::collection::vec(any::<i32>(), 0..100)
+    ) {
+        let for_result = for_! {
+            x <= xs.clone();
+            let doubled = x.saturating_mul(2);
+            let incremented = doubled.saturating_add(1);
+            yield incremented
+        };
+
+        let manual_result: Vec<_> = xs.into_iter()
+            .map(|x| {
+                let doubled = x.saturating_mul(2);
+                doubled.saturating_add(1)
+            })
+            .collect();
+
+        prop_assert_eq!(for_result, manual_result);
+    }
+
+    /// Pattern guard with Option should be identical to filter_map.
+    #[test]
+    fn prop_result_identical_pattern_guard_option(
+        xs in prop::collection::vec(any::<i32>(), 0..100)
+    ) {
+        fn maybe_double(x: i32) -> Option<i32> {
+            if x > 0 { Some(x.saturating_mul(2)) } else { None }
+        }
+
+        let for_result = for_! {
+            x <= xs.clone();
+            if let Some(doubled) = maybe_double(x);
+            yield doubled
+        };
+
+        let manual_result: Vec<_> = xs.into_iter()
+            .filter_map(maybe_double)
+            .collect();
+
+        prop_assert_eq!(for_result, manual_result);
     }
 }

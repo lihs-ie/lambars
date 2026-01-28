@@ -1,0 +1,23 @@
+# Profiling results - exclude large binary files
+# Keep directory structure and text files
+
+# perf binary data (can be very large)
+perf.data
+perf.data.old
+*.perf.data
+
+# macOS sample output (can be large)
+*.sample
+
+# Collapsed stack files (intermediate format)
+collapsed.txt
+
+# Keep metadata, reports, and visualizations
+!metadata.json
+!summary.json
+!wrk-output.json
+!wrk-raw-output.txt
+!perf-report.txt
+!flamegraph.svg
+!README.md
+!.gitignore

@@ -1,0 +1,58 @@
+# Error Resilience Test Scenario
+#
+# This scenario tests error handling and resilience behavior.
+# Uses shorter timeouts and expects up to 5% error rate.
+
+name: "error_resilience_test"
+description: "Test error handling and resilience with tight timeouts"
+
+# Backend configuration (required)
+storage_mode: postgres
+cache_mode: redis
+
+# Workload configuration (required)
+load_pattern: mixed
+cache_state: warm
+data_scale: medium
+payload_variant: standard
+rps_profile: constant
+
+# Contention level
+contention_level: medium
+
+# Load generation (optional with defaults)
+duration_seconds: 60
+connections: 30
+threads: 4
+
+# Error configuration
+error_config:
+  timeout_ms: 5000
+  connect_timeout_ms: 1000
+  max_retries: 2
+  retry_delay_ms: 500
+  expected_error_rate: 0.05
+  fail_on_error_threshold: true
+
+# Concurrency settings
+concurrency:
+  worker_threads: 4
+  database_pool_size: 16
+  redis_pool_size: 8
+  max_connections: 60
+
+# Extended metadata for workflow integration
+metadata:
+  test_type: "error_benchmark"
+  endpoint: "mixed"
+  payload: "medium"
+  cache_strategy: "read-through"
+  hit_rate: 50
+  fail_injection: 0.05
+  retry: true
+  profile: false
+  tags:
+    - error-handling
+    - resilience
+    - timeout
+    - retry

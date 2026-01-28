@@ -1,0 +1,78 @@
+# Payload Variation Test - Standard
+#
+# Tests system performance with standard payload size (10 tags, 10 subtasks).
+# Represents typical real-world task data.
+#
+# Payload characteristics:
+#   - Tags: 10
+#   - Subtasks: 10
+#   - Description: ~200 characters
+#   - Estimated size: ~2 KB
+
+name: "payload_variation_standard"
+description: "Performance test with standard payload (10 tags, 10 subtasks, ~2 KB)"
+
+# Backend configuration
+storage_mode: postgres
+cache_mode: redis
+
+# Workload configuration
+load_pattern: write_heavy  # Write-heavy to stress payload processing
+cache_state: warm
+data_scale: medium
+payload_variant: standard  # 10 tags, 10 subtasks
+rps_profile: constant
+
+# Load generation parameters
+duration_seconds: 60
+connections: 20
+threads: 4
+warmup_seconds: 5
+target_rps: 400
+
+# Target endpoints (focus on write operations)
+# NOTE: Endpoints are path-only. HTTP method is determined by the benchmark script.
+endpoints:
+  - "/tasks"
+  - "/tasks/{id}"
+
+# HTTP methods used by benchmark script
+http_methods:
+  - POST
+  - PUT
+  - PATCH
+
+# Pool configuration
+pool_sizes:
+  database_pool_size: 15
+  redis_pool_size: 20
+
+# Worker configuration
+worker_config:
+  worker_threads: 4
+
+# Expected metrics thresholds
+thresholds:
+  max_error_rate: 0.01
+  p99_latency_ms: 100       # Moderate latency for standard payload
+  min_rps_achieved: 350
+
+# Metadata for result analysis
+metadata:
+  test_type: "payload_variation"
+  endpoint: "mixed"
+  payload: "medium"
+  cache_strategy: "write-through"
+  hit_rate: 50
+  fail_injection: 0
+  retry: false
+  profile: false
+  payload_variant: "standard"
+  payload_size_bytes: 2000
+  tag_count: 10
+  subtask_count: 10
+  purpose: "typical_workload"
+  tags:
+    - "payload-variation"
+    - "standard"
+    - "typical"

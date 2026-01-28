@@ -15,7 +15,7 @@ use uuid::Uuid;
 /// Unique identifier for a task.
 ///
 /// This is a newtype wrapper around UUID to provide type safety.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct TaskId(Uuid);
 
 impl TaskId {

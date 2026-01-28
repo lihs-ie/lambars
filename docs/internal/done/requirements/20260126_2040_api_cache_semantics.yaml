@@ -1,0 +1,165 @@
+# API キャッシュ語義の再定義 要件定義
+#
+# 概要:
+#   Redis をキャッシュ層として機能させ、実運用に近いキャッシュ効果の測定を可能にする。
+#   併せてベンチ計測がヒット/ミスを正しく観測できるようにする。
+#
+# 設計方針:
+#   1. ストレージとキャッシュを分離し、Redis はキャッシュ層としてのみ使う。
+#   2. 既存 API の意味論を崩さず、キャッシュの有効/無効と戦略を切り替えられるようにする。
+#   3. 計測可能性を優先し、ヒット/ミスを観測できるヘッダとメタデータを提供する。
+#
+# 参照:
+#   - docs/internal/issues/20260126_1040_api_cache_semantics_missing.yaml
+#   - benches/api/src/infrastructure/factory.rs
+#   - benches/api/benchmarks/scripts/result_collector.lua
+#   - benches/api/benchmarks/scenarios/cache_warm_test.yaml
+
+version: "1.0.0"
+name: "api_cache_semantics"
+description: |
+  Redis がキャッシュではなく主リポジトリとして使われているため、
+  実運用に近いキャッシュ効果・ヒット率が評価できない問題を解決する。
+  調査と解決策の導出は以下の手順で行う。
+  1. RepositoryFactory の分岐を確認し、CacheMode=redis がストレージ置換であることを特定する。
+  2. ベンチ計測が `X-Cache` 等のヘッダ依存であることを確認し、API がヘッダを出していないことを特定する。
+  3. シナリオ YAML が cache_state / expected_hit_rate を前提にしていることを確認する。
+  4. キャッシュ層の導入案（read-through/write-through/write-behind）を比較し、
+     互換性と測定性の両立ができる設計を決定する。
+  5. ベンチ結果のメタデータでヒット/ミスが検証できるようにする。
+
+# 背景・動機
+background:
+  problem: |
+    CacheMode=redis が Redis リポジトリを主ストレージとして使っており、
+    Postgres + Redis キャッシュの実運用構成を評価できない。
+    さらにキャッシュヒット率はレスポンスヘッダ依存だが、API がヘッダを付与していない。
+  motivation: |
+    lambars の実用性を検証するには、キャッシュ導入前後のレイテンシ/スループット差分と
+    ヒット率を再現可能に計測できることが必須である。
+  prior_art:
+    - name: "read-through / write-through cache"
+      description: "ストレージとキャッシュを分離した一般的なキャッシュ戦略"
+    - name: "HTTP cache hit headers"
+      description: "X-Cache などを用いたキャッシュヒット可視化"
+
+# 要件一覧
+requirements:
+  # ======================================================================
+  # 1. 現状調査・検証
+  # ======================================================================
+  - id: CACHE-REQ-001
+    name: "キャッシュ語義の現状確認"
+    description: |
+      RepositoryFactory が CacheMode=redis を「キャッシュ層」ではなく
+      「Redis リポジトリ」に割り当てていることを確認し、
+      実運用構成と乖離している点を明文化する。
+
+  - id: CACHE-REQ-002
+    name: "計測経路の現状確認"
+    description: |
+      ベンチ計測が X-Cache 等のレスポンスヘッダに依存していること、
+      そして API が該当ヘッダを出していないことを確認する。
+
+  # ======================================================================
+  # 2. キャッシュ層の実装
+  # ======================================================================
+  - id: CACHE-REQ-010
+    name: "CacheRepository の導入"
+    description: |
+      Postgres/InMemory を主ストレージとし、Redis をキャッシュ層として
+      `TaskRepository` と `ProjectRepository` をラップする CacheRepository を導入する。
+      読み取りは read-through、書き込みは write-through を基本とし、
+      write-behind は明示的に有効化できること。
+    note: |
+      「読み取りは read-through を基本とする」の解釈:
+      - read-through 対象: 単一エンティティ取得 (find_by_id)
+      - read-through 除外: 一覧系 (list, list_filtered, count)
+      - 理由: 一覧系はキャッシュキー設計と無効化が困難であり、
+              キャッシュ効果が限定的なため実用性を優先して除外する
+
+  - id: CACHE-REQ-011
+    name: "キャッシュキーと無効化戦略"
+    description: |
+      キャッシュキーは ID + バージョンを含む形式とし、
+      更新時は古いキーを無効化または TTL 切れとする。
+      同一 ID の更新で古いデータが返らないこと。
+    note: |
+      キャッシュキーの分類:
+      - データキー: `cache:task:{id}:v{version}` (ID + version 形式、要件対象)
+      - 補助キー: `cache:task:{id}:latest` (version ポインタ、要件の「キャッシュキー」には該当しない)
+      補助キーはデータを格納せず、最新バージョン番号のみを保持する。
+
+  - id: CACHE-REQ-012
+    name: "キャッシュ TTL と戦略の設定"
+    description: |
+      TTL、戦略（read-through/write-through/write-behind）、
+      キャッシュ有効/無効を環境変数とシナリオで制御できること。
+      デフォルトは read-through + TTL 60 秒とする。
+    note: |
+      CACHE_ENABLED=false 時の挙動:
+      - 読み取り: Redis アクセスなし (主ストレージ直接参照)
+      - 書き込み: Redis 無効化のみ実施 (古いデータ残留防止のため Redis 接続は維持)
+      - 理由: 再有効化時にデータ整合性を保証するため
+
+  # ======================================================================
+  # 3. 計測性の確保
+  # ======================================================================
+  - id: CACHE-REQ-020
+    name: "キャッシュヒットヘッダの付与"
+    description: |
+      API レスポンスに `X-Cache: HIT|MISS` と `X-Cache-Status` を付与し、
+      ベンチ計測がヒット率を算出できるようにする。
+      ヘッダはキャッシュ対象エンドポイントに統一して付与する。
+
+  - id: CACHE-REQ-021
+    name: "メタデータの収集"
+    description: |
+      ベンチ結果の meta.json にキャッシュヒット率、戦略、TTL を記録する。
+      `cache_warm_test` / `cache_cold_test` の結果が比較可能であること。
+
+  # ======================================================================
+  # 4. 構成と起動
+  # ======================================================================
+  - id: CACHE-REQ-030
+    name: "RepositoryFactory の再構成"
+    description: |
+      CacheMode=redis は Redis リポジトリではなく CacheRepository を構築する。
+      Postgres+Redis の場合、Postgres を主ストレージにし、Redis をキャッシュ層とする。
+      InMemory+Redis の場合も InMemory を主ストレージとする。
+
+  - id: CACHE-REQ-031
+    name: "シナリオ環境変数の反映"
+    description: |
+      CACHE_STRATEGY / CACHE_TTL_SECS / CACHE_ENABLED を
+      API 起動時に読み取れるようにし、シナリオ変更が挙動に反映されること。
+
+  # ======================================================================
+  # 5. ベンチシナリオの整備
+  # ======================================================================
+  - id: CACHE-REQ-040
+    name: "ウォームアップとヒット率検証"
+    description: |
+      cache_warm_test / cache_cold_test で事前ウォームアップを明示し、
+      期待ヒット率 (expected_hit_rate) をベンチ結果で検証できること。
+
+# 非機能要件
+non_functional_requirements:
+  performance:
+    - "キャッシュヒット時の p95 がミス時より低いことを示す"
+    - "キャッシュ導入により read-heavy で RPS が改善する"
+  compatibility:
+    - "既存 API のレスポンスボディやステータスコードを変更しない"
+  testing:
+    - "CacheRepository の read-through/write-through の単体テストを追加する"
+    - "Redis 実行環境での統合テストを追加する（ignore 可）"
+    - "X-Cache ヘッダの有無と値を検証するテストを追加する"
+
+# 将来の拡張
+future_extensions:
+  - id: CACHE-FUT-001
+    name: "write-behind の非同期バッファリング"
+    description: |
+      write-behind のバッファリングとバックプレッシャー制御を導入する。
+    rationale: |
+      実装が複雑になるため、まず read-through/write-through を優先する。

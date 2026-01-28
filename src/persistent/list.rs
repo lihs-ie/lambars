@@ -387,6 +387,7 @@ impl<T> PersistentList<T> {
     pub const fn iter(&self) -> PersistentListIterator<'_, T> {
         PersistentListIterator {
             current: self.head.as_ref(),
+            remaining: self.length,
         }
     }
 
@@ -828,8 +829,9 @@ impl<T: Clone> PersistentList<T> {
     where
         P: Fn(&T) -> bool,
     {
-        let mut pass = Vec::new();
-        let mut fail = Vec::new();
+        let estimated_capacity = self.length / 2 + 1;
+        let mut pass = Vec::with_capacity(estimated_capacity);
+        let mut fail = Vec::with_capacity(estimated_capacity);
 
         for element in self {
             if predicate(element) {
@@ -1097,8 +1099,12 @@ impl<T: Clone> PersistentList<PersistentList<T>> {
 // =============================================================================
 
 /// An iterator over references to elements of a [`PersistentList`].
+///
+/// This iterator provides accurate `size_hint()` and implements `ExactSizeIterator`,
+/// enabling efficient memory allocation when collecting into `Vec` or other containers.
 pub struct PersistentListIterator<'a, T> {
     current: Option<&'a ReferenceCounter<Node<T>>>,
+    remaining: usize,
 }
 
 impl<'a, T> Iterator for PersistentListIterator<'a, T> {
@@ -1107,14 +1113,19 @@ impl<'a, T> Iterator for PersistentListIterator<'a, T> {
     fn next(&mut self) -> Option<Self::Item> {
         self.current.map(|node| {
             self.current = node.next.as_ref();
+            self.remaining = self.remaining.saturating_sub(1);
             &node.element
         })
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        // We cannot efficiently compute the remaining length,
-        // but we know it's at least 0 and at most the original list length
-        (0, None)
+        (self.remaining, Some(self.remaining))
+    }
+}
+
+impl<T> ExactSizeIterator for PersistentListIterator<'_, T> {
+    fn len(&self) -> usize {
+        self.remaining
     }
 }
 
@@ -2461,6 +2472,85 @@ mod tests {
             assert_eq!(lists[1], list3);
             assert_eq!(lists[2], list1);
         }
+    }
+
+    // =========================================================================
+    // PersistentListIterator size_hint Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_iterator_size_hint_initial() {
+        let list: PersistentList<i32> = (1..=100).collect();
+        let iter = list.iter();
+        assert_eq!(iter.size_hint(), (100, Some(100)));
+    }
+
+    #[rstest]
+    fn test_iterator_size_hint_after_iteration() {
+        let list: PersistentList<i32> = (1..=10).collect();
+        let mut iter = list.iter();
+
+        // Consume 3 elements
+        iter.next();
+        iter.next();
+        iter.next();
+
+        // Should now report 7 remaining
+        assert_eq!(iter.size_hint(), (7, Some(7)));
+    }
+
+    #[rstest]
+    fn test_iterator_size_hint_empty_list() {
+        let list: PersistentList<i32> = PersistentList::new();
+        let iter = list.iter();
+        assert_eq!(iter.size_hint(), (0, Some(0)));
+    }
+
+    #[rstest]
+    fn test_iterator_size_hint_after_exhaustion() {
+        let list: PersistentList<i32> = (1..=3).collect();
+        let mut iter = list.iter();
+
+        // Consume all elements
+        iter.next();
+        iter.next();
+        iter.next();
+
+        assert_eq!(iter.size_hint(), (0, Some(0)));
+
+        // Additional next calls should still report 0
+        iter.next();
+        assert_eq!(iter.size_hint(), (0, Some(0)));
+    }
+
+    #[rstest]
+    fn test_iterator_exact_size_iterator_len() {
+        let list: PersistentList<i32> = (1..=50).collect();
+        let iter = list.iter();
+
+        // ExactSizeIterator::len should return exact remaining count
+        assert_eq!(iter.len(), 50);
+    }
+
+    #[rstest]
+    fn test_iterator_exact_size_iterator_len_after_iteration() {
+        let list: PersistentList<i32> = (1..=10).collect();
+        let mut iter = list.iter();
+
+        assert_eq!(iter.len(), 10);
+
+        iter.next();
+        assert_eq!(iter.len(), 9);
+
+        iter.next();
+        iter.next();
+        assert_eq!(iter.len(), 7);
+    }
+
+    #[rstest]
+    fn test_iterator_collect_uses_size_hint() {
+        let list: PersistentList<i32> = (1..=1000).collect();
+        assert_eq!(list.iter().count(), 1000);
     }
 }
 

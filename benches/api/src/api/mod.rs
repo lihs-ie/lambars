@@ -8,6 +8,8 @@ pub mod applicative;
 pub mod async_pipeline;
 pub mod bifunctor;
 pub mod bulk;
+pub mod cache_header;
+pub mod consistency;
 pub mod dto;
 pub mod effects;
 pub mod error;
@@ -23,6 +25,11 @@ pub mod traversable;
 pub mod typeclass;
 pub mod workflow_eff;
 
+// Demo module is conditionally compiled with the `demo` feature flag.
+// This ensures demo endpoints are not included in production builds.
+#[cfg(feature = "demo")]
+pub mod demo;
+
 pub use advanced::{async_pipeline, get_task_history, lazy_compute, transform_task};
 pub use alternative::{
     aggregate_sources, filter_conditional, first_available, resolve_config, search_fallback,
@@ -35,11 +42,21 @@ pub use bifunctor::{
     batch_transform_results, convert_error_domain, enrich_error, process_with_error_transform,
     transform_pair,
 };
-pub use bulk::{bulk_create_tasks, bulk_update_tasks};
+pub use bulk::{
+    BulkConfig, IndexedSaveResult, ItemError, SaveResult, bulk_create_tasks, bulk_update_tasks,
+    chunk_tasks_with_indices, merge_chunked_results, save_chunk, save_tasks_bulk_optimized,
+};
+pub use consistency::{
+    ConsistencyError, ConsistencyErrorBuildError, MultipleEventWriteResult, SaveTaskResult,
+    log_consistency_error, save_task_with_event, save_task_with_events, write_events_sequentially,
+};
 pub use dto::{CreateTaskRequest, TaskResponse, UpdateTaskRequest};
 pub use effects::{execute_state_workflow, execute_workflow, update_with_optics};
 pub use error::{ApiError, ApiErrorResponse, FieldError, ValidationError};
-pub use handlers::{AppConfig, AppState, HealthResponse, create_task, health_check};
+pub use handlers::{
+    AppConfig, AppState, AppliedConfig, HealthResponse, build_cache_headers, create_task,
+    delete_task, get_task, health_check,
+};
 pub use misc::{
     aggregate_numeric, concurrent_lazy, deque_operations, freer_workflow, partial_apply,
 };
@@ -61,3 +78,6 @@ pub use typeclass::{
     flatten_demo, functor_mut_demo, identity_demo, monad_error_demo, monad_transformers,
 };
 pub use workflow_eff::create_task_eff;
+
+// Cache header middleware exports
+pub use cache_header::{CacheHeaderExtension, CacheHeaderLayer, CacheSource};

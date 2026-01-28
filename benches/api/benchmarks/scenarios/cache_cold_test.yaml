@@ -1,0 +1,53 @@
+name: "cache_cold_test"
+description: "Test cache miss behavior with cold cache"
+
+storage_mode: postgres
+cache_mode: redis
+load_pattern: read_heavy
+cache_state: cold
+data_scale: medium
+payload_variant: standard
+rps_profile: constant
+contention_level: low
+
+duration_seconds: 60
+connections: 20
+threads: 4
+warmup_seconds: 0
+
+# Environment variables for cache configuration
+# These are passed to the API server at startup
+environment:
+  CACHE_ENABLED: "true"
+  CACHE_STRATEGY: "read-through"
+  CACHE_TTL_SECS: "60"
+
+cache_metrics:
+  enabled: true
+  per_endpoint: true
+  track_latency: true
+  warmup_requests: 0
+  expected_hit_rate: 0.0
+
+# Concurrency settings
+concurrency:
+  worker_threads: 4
+  database_pool_size: 16
+  redis_pool_size: 8
+  max_connections: 50
+
+# Extended metadata for workflow integration
+metadata:
+  test_type: "cache_benchmark"
+  endpoint: "mixed"
+  payload: "medium"
+  cache_strategy: "read-through"
+  hit_rate: 0
+  fail_injection: 0
+  retry: false
+  profile: false
+  tags:
+    - cache
+    - cold-cache
+    - miss-rate
+    - database-stress

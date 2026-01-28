@@ -12,44 +12,166 @@
 //! - `RUST_LOG`: Logging level (e.g., `debug`, `info`, `task_management_benchmark_api=debug`)
 //! - `HOST`: Server host address (default: `0.0.0.0`)
 //! - `PORT`: Server port (default: `3000`)
+//! - `WORKER_THREADS`: Number of tokio worker threads (default: logical CPU count)
+//! - `ENABLE_DEBUG_ENDPOINTS`: Enable debug endpoints like `/debug/config` (default: `false`)
 
 use std::env;
 use std::net::SocketAddr;
 
+use axum::Json;
 use axum::Router;
+use axum::extract::State;
 use axum::routing::{get, patch, post, put};
+use serde::Serialize;
 use tokio::net::TcpListener;
 use tokio::signal;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+#[cfg(feature = "demo")]
+use task_management_benchmark_api::api::demo::get_task_history_demo;
 use task_management_benchmark_api::api::{
-    AppState, add_subtask, add_tag, aggregate_numeric, aggregate_sources, aggregate_tree,
-    async_pipeline, batch_process_async, batch_transform_results, batch_update_field,
-    build_from_parts, bulk_create_tasks, bulk_update_tasks, collect_optional, compute_parallel,
-    concurrent_lazy, conditional_pipeline, convert_error_domain, count_by_priority,
-    create_project_handler, create_task, create_task_eff, dashboard, deque_operations,
-    enrich_batch, enrich_error, execute_sequential, execute_state_workflow, execute_workflow,
-    fetch_batch, filter_conditional, first_available, flatten_demo, flatten_subtasks,
-    freer_workflow, functor_mut_demo, get_project_handler, get_project_progress_handler,
-    get_project_stats_handler, get_task_history, health_check, identity_demo, lazy_compute,
-    list_tasks, monad_error_demo, monad_transformers, nested_access, partial_apply,
-    process_with_error_transform, projects_leaderboard, resolve_config, resolve_dependencies,
-    search_fallback, search_tasks, tasks_by_deadline, tasks_timeline, transform_async,
-    transform_pair, transform_task, update_filtered, update_metadata_key, update_optional,
-    update_status, update_task, update_with_optics, validate_batch, validate_collect_all,
-    workflow_async,
+    AppState, AppliedConfig, add_subtask, add_tag, aggregate_numeric, aggregate_sources,
+    aggregate_tree, async_pipeline, batch_process_async, batch_transform_results,
+    batch_update_field, build_from_parts, bulk_create_tasks, bulk_update_tasks, collect_optional,
+    compute_parallel, concurrent_lazy, conditional_pipeline, convert_error_domain,
+    count_by_priority, create_project_handler, create_task, create_task_eff, dashboard,
+    delete_task, deque_operations, enrich_batch, enrich_error, execute_sequential,
+    execute_state_workflow, execute_workflow, fetch_batch, filter_conditional, first_available,
+    flatten_demo, flatten_subtasks, freer_workflow, functor_mut_demo, get_project_handler,
+    get_project_progress_handler, get_project_stats_handler, get_task, get_task_history,
+    health_check, identity_demo, lazy_compute, list_tasks, monad_error_demo, monad_transformers,
+    nested_access, partial_apply, process_with_error_transform, projects_leaderboard,
+    resolve_config, resolve_dependencies, search_fallback, search_tasks, tasks_by_deadline,
+    tasks_timeline, transform_async, transform_pair, transform_task, update_filtered,
+    update_metadata_key, update_optional, update_status, update_task, update_with_optics,
+    validate_batch, validate_collect_all, workflow_async,
 };
-use task_management_benchmark_api::infrastructure::{RepositoryConfig, RepositoryFactory};
+use task_management_benchmark_api::infrastructure::{
+    ExternalSources, RepositoryConfig, RepositoryFactory,
+};
 
-#[tokio::main]
-#[allow(clippy::too_many_lines)]
-async fn main() {
-    // Load .env file if present (for development)
+/// Debug configuration response for `/debug/config` endpoint.
+///
+/// Exposes current runtime configuration for benchmark verification.
+/// Sensitive values (`DATABASE_URL`, `REDIS_URL`) are excluded.
+#[derive(Debug, Serialize)]
+struct DebugConfig {
+    worker_threads: Option<usize>,
+    database_pool_size: Option<u32>,
+    redis_pool_size: Option<u32>,
+    storage_mode: String,
+    cache_mode: String,
+}
+
+fn is_env_flag_enabled(key: &str) -> bool {
+    env::var(key)
+        .map(|value| matches!(value.trim().to_lowercase().as_str(), "true" | "1" | "yes"))
+        .unwrap_or(false)
+}
+
+/// Debug config endpoint handler (ENV-REQ-030).
+///
+/// Returns the *actual* applied configuration values, not raw environment variables.
+/// This ensures values reflect caps, defaults, and validation applied at startup.
+async fn debug_config_handler(State(state): State<AppState>) -> Json<DebugConfig> {
+    Json(DebugConfig {
+        worker_threads: state.applied_config.worker_threads,
+        database_pool_size: state.applied_config.database_pool_size,
+        redis_pool_size: state.applied_config.redis_pool_size,
+        storage_mode: state.applied_config.storage_mode,
+        cache_mode: state.applied_config.cache_mode,
+    })
+}
+
+/// Result of parsing `WORKER_THREADS` environment variable.
+struct WorkerThreadsResult {
+    threads: Option<usize>,
+    warning_emitted: bool,
+}
+
+fn parse_worker_threads() -> WorkerThreadsResult {
+    let Ok(value) = std::env::var("WORKER_THREADS") else {
+        return WorkerThreadsResult {
+            threads: None,
+            warning_emitted: false,
+        };
+    };
+
+    let trimmed = value.trim();
+
+    if trimmed.is_empty() {
+        return WorkerThreadsResult {
+            threads: None,
+            warning_emitted: false,
+        };
+    }
+
+    match trimmed.parse::<usize>() {
+        Ok(0) => {
+            eprintln!("Warning: WORKER_THREADS=0 is invalid (must be > 0), using default");
+            WorkerThreadsResult {
+                threads: None,
+                warning_emitted: true,
+            }
+        }
+        Ok(n) => {
+            let max_threads = std::thread::available_parallelism()
+                .map(|parallelism| parallelism.get().saturating_mul(4))
+                .unwrap_or(64);
+            if n > max_threads {
+                eprintln!(
+                    "Warning: WORKER_THREADS={n} exceeds recommended limit ({max_threads}), capping to {max_threads}"
+                );
+                WorkerThreadsResult {
+                    threads: Some(max_threads),
+                    warning_emitted: true,
+                }
+            } else {
+                WorkerThreadsResult {
+                    threads: Some(n),
+                    warning_emitted: false,
+                }
+            }
+        }
+        Err(error) => {
+            eprintln!(
+                "Warning: WORKER_THREADS='{trimmed}' is not a valid number ({error}), using default"
+            );
+            WorkerThreadsResult {
+                threads: None,
+                warning_emitted: true,
+            }
+        }
+    }
+}
+
+fn main() {
     dotenvy::dotenv().ok();
 
-    // Initialize tracing
+    let result = parse_worker_threads();
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all();
+
+    // Store the actual applied worker threads value (after caps/defaults)
+    let applied_worker_threads = result.threads;
+
+    if let Some(threads) = result.threads {
+        builder.worker_threads(threads);
+        if !result.warning_emitted {
+            eprintln!("Tokio worker_threads set to: {threads}");
+        }
+    } else if !result.warning_emitted {
+        eprintln!("Tokio worker_threads: using default (logical CPU count)");
+    }
+
+    let runtime = builder.build().expect("Failed to create tokio runtime");
+    runtime.block_on(async_main(applied_worker_threads));
+}
+
+#[allow(clippy::too_many_lines)]
+async fn async_main(applied_worker_threads: Option<usize>) {
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -75,6 +197,29 @@ async fn main() {
         "Repository configuration loaded"
     );
 
+    // Build AppliedConfig from actual runtime values (ENV-REQ-030)
+    // This captures the *applied* values after validation/caps/defaults,
+    // not raw environment variables.
+    //
+    // For worker_threads: when None (default), tokio uses available_parallelism(),
+    // falling back to 1 on error. We resolve it here to report the actual value.
+    let effective_worker_threads = applied_worker_threads.or_else(|| {
+        Some(
+            std::thread::available_parallelism()
+                .map(std::num::NonZero::get)
+                .unwrap_or(1),
+        )
+    });
+
+    let applied_config = AppliedConfig {
+        worker_threads: effective_worker_threads,
+        database_pool_size: config.database_pool_size,
+        redis_pool_size: config.redis_pool_size,
+        // Use Display format (in_memory, postgres, redis) not Debug (InMemory, Postgres, Redis)
+        storage_mode: config.storage_mode.to_string(),
+        cache_mode: config.cache_mode.to_string(),
+    };
+
     // Create repository factory and initialize repositories
     let factory = RepositoryFactory::new(config);
     let repositories = match factory.create().await {
@@ -88,8 +233,47 @@ async fn main() {
         }
     };
 
-    // Create application state
-    let application_state = AppState::from_repositories(repositories);
+    // Create external sources (Redis, HTTP) from environment
+    let external_sources = match ExternalSources::from_env() {
+        Ok(sources) => {
+            tracing::info!("External sources initialized from environment");
+            sources
+        }
+        Err(error) => {
+            // Determine if this is a critical configuration error (parse failure)
+            // or a recoverable error (missing optional config)
+            let is_parse_error = matches!(
+                &error,
+                task_management_benchmark_api::infrastructure::fail_injection::ConfigError::EnvParseError(_)
+                    | task_management_benchmark_api::infrastructure::fail_injection::ConfigError::InvalidRngSeed { .. }
+                    | task_management_benchmark_api::infrastructure::fail_injection::ConfigError::InvalidFailureRate(_)
+                    | task_management_benchmark_api::infrastructure::fail_injection::ConfigError::InvalidTimeoutRate(_)
+                    | task_management_benchmark_api::infrastructure::fail_injection::ConfigError::InvalidDelayRange { .. }
+            );
+
+            if is_parse_error {
+                tracing::error!(%error, "Critical configuration error in external sources");
+                std::process::exit(1);
+            }
+
+            tracing::warn!(%error, "Failed to create external sources, using stubs");
+            ExternalSources::stub()
+        }
+    };
+
+    // Create application state (async: initializes search index from repository)
+    let application_state =
+        match AppState::with_external_sources(repositories, external_sources, applied_config).await
+        {
+            Ok(state) => {
+                tracing::info!("Application state initialized with search index");
+                state
+            }
+            Err(error) => {
+                tracing::error!("Failed to initialize application state: {}", error);
+                std::process::exit(1);
+            }
+        };
 
     // Configure CORS
     let cors = CorsLayer::new()
@@ -107,7 +291,10 @@ async fn main() {
         .route("/tasks/by-priority", get(count_by_priority))
         // Task mutations
         .route("/tasks-eff", post(create_task_eff))
-        .route("/tasks/{id}", put(update_task))
+        .route(
+            "/tasks/{id}",
+            get(get_task).put(update_task).delete(delete_task),
+        )
         .route("/tasks/{id}/status", patch(update_status))
         .route("/tasks/{id}/subtasks", post(add_subtask))
         .route("/tasks/{id}/tags", post(add_tag))
@@ -192,7 +379,24 @@ async fn main() {
         .route("/tasks/concurrent-lazy", post(concurrent_lazy))
         .route("/tasks/deque-operations", post(deque_operations))
         .route("/tasks/aggregate-numeric", get(aggregate_numeric))
-        .route("/tasks/freer-workflow", post(freer_workflow))
+        .route("/tasks/freer-workflow", post(freer_workflow));
+
+    #[cfg(feature = "demo")]
+    let application = if is_env_flag_enabled("ENABLE_DEMO_ENDPOINTS") {
+        tracing::info!("Demo endpoints enabled");
+        application.route("/demo/tasks/{id}/history", get(get_task_history_demo))
+    } else {
+        application
+    };
+
+    let application = if is_env_flag_enabled("ENABLE_DEBUG_ENDPOINTS") {
+        tracing::info!("Debug endpoints enabled");
+        application.route("/debug/config", get(debug_config_handler))
+    } else {
+        application
+    };
+
+    let application = application
         .layer(TraceLayer::new_for_http())
         .layer(cors)
         .with_state(application_state);

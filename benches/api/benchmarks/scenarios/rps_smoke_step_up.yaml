@@ -1,0 +1,67 @@
+# RPS Smoke Test - Step-Up Profile
+#
+# Verify step_up RPS rate control accuracy using /health endpoint.
+# This test validates that the rate controller correctly increases RPS
+# in discrete steps over time.
+#
+# Load pattern (20s total, 2 steps):
+#   [0-10s]   Step 1: ~125 RPS (50 + 75)
+#   [10-20s]  Step 2: 200 RPS (target)
+#
+# Verification criteria:
+#   - Each phase should maintain RPS within 5% of target
+#   - Smooth transition between steps
+#
+# This scenario is used by CI to validate step_up rate control.
+
+name: "rps_smoke_step_up"
+description: "Verify step_up RPS rate control accuracy"
+
+# Backend configuration (minimal - health endpoint only)
+storage_mode: in_memory
+cache_mode: none
+
+# Workload configuration
+load_pattern: read_heavy
+cache_state: cold
+data_scale: small
+payload_variant: minimal
+rps_profile: step_up
+
+# Load generation parameters
+duration_seconds: 20
+connections: 10
+threads: 2
+warmup_seconds: 2
+target_rps: 200
+
+# Step-up specific parameters
+step_count: 2
+min_rps: 50
+
+# Target endpoints (health check only for rate control verification)
+endpoints:
+  - "/health"
+
+# RPS verification thresholds
+thresholds:
+  rps_deviation_max_percent: 5
+  max_error_rate: 0.01
+
+# Metadata for result analysis
+metadata:
+  test_type: "rps_smoke"
+  endpoint: "/health"
+  payload: "minimal"
+  cache_strategy: "read-through"
+  hit_rate: 0
+  fail_injection: 0
+  retry: false
+  profile: false
+  profile_benchmark: "step_up"
+  purpose: "rate_control_verification"
+  tags:
+    - "smoke-test"
+    - "rate-control"
+    - "step-up"
+    - "ci"

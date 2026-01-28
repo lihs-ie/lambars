@@ -22,7 +22,6 @@ use axum::{
 use lambars::control::{Continuation, Lazy};
 use lambars::effect::AsyncIO;
 use lambars::for_async;
-use lambars::persistent::PersistentList;
 use lambars::{compose, pipe};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -30,7 +29,7 @@ use uuid::Uuid;
 use super::dto::{PriorityDto, TaskResponse, TaskStatusDto};
 use super::error::ApiErrorResponse;
 use super::handlers::AppState;
-use crate::domain::{Priority, Tag, Task, TaskId, TaskStatus, Timestamp};
+use crate::domain::{Priority, Tag, Task, TaskEvent as DomainTaskEvent, TaskEventKind, TaskId};
 
 // =============================================================================
 // Constants
@@ -75,6 +74,48 @@ pub enum TaskEvent {
     },
     /// Tag was added to task.
     TagAdded { timestamp: String, tag: String },
+}
+
+impl TaskEvent {
+    /// Converts a domain `TaskEvent` to an API `TaskEvent`.
+    ///
+    /// This function maps the domain event types to API DTOs for HTTP response.
+    fn from_domain(event: &DomainTaskEvent) -> Option<Self> {
+        let timestamp = event.timestamp.to_string();
+
+        match &event.kind {
+            TaskEventKind::Created(payload) => Some(Self::Created {
+                timestamp,
+                title: payload.title.clone(),
+            }),
+            TaskEventKind::TitleUpdated(payload) => Some(Self::TitleUpdated {
+                timestamp,
+                old_title: payload.old_title.clone(),
+                new_title: payload.new_title.clone(),
+            }),
+            TaskEventKind::StatusChanged(payload) => Some(Self::StatusChanged {
+                timestamp,
+                old_status: TaskStatusDto::from(payload.old_status),
+                new_status: TaskStatusDto::from(payload.new_status),
+            }),
+            TaskEventKind::PriorityChanged(payload) => Some(Self::PriorityChanged {
+                timestamp,
+                old_priority: PriorityDto::from(payload.old_priority),
+                new_priority: PriorityDto::from(payload.new_priority),
+            }),
+            TaskEventKind::TagAdded(payload) => Some(Self::TagAdded {
+                timestamp,
+                tag: payload.tag.as_str().to_string(),
+            }),
+            // These event types are not exposed in the API response
+            TaskEventKind::DescriptionUpdated(_)
+            | TaskEventKind::TagRemoved(_)
+            | TaskEventKind::SubTaskAdded(_)
+            | TaskEventKind::SubTaskCompleted(_)
+            | TaskEventKind::ProjectAssigned(_)
+            | TaskEventKind::ProjectRemoved(_) => None,
+        }
+    }
 }
 
 // =============================================================================
@@ -230,71 +271,6 @@ pub struct LazyComputeResponse {
 // =============================================================================
 // Pure Functions for History
 // =============================================================================
-
-/// Pure: Builds mock event history for a task using `PersistentList`.
-///
-/// This demonstrates efficient prepend operations with `PersistentList`.
-/// Events are generated based on task state to simulate a realistic history.
-fn build_mock_history(task: &Task, base_timestamp: &Timestamp) -> PersistentList<TaskEvent> {
-    let mut events = PersistentList::new();
-    let base_time = base_timestamp.to_string();
-
-    // Created event (always present)
-    events = events.cons(TaskEvent::Created {
-        timestamp: base_time.clone(),
-        title: task.title.clone(),
-    });
-
-    // Status change events based on current status
-    match task.status {
-        TaskStatus::InProgress => {
-            events = events.cons(TaskEvent::StatusChanged {
-                timestamp: base_time.clone(),
-                old_status: TaskStatusDto::Pending,
-                new_status: TaskStatusDto::InProgress,
-            });
-        }
-        TaskStatus::Completed => {
-            events = events.cons(TaskEvent::StatusChanged {
-                timestamp: base_time.clone(),
-                old_status: TaskStatusDto::Pending,
-                new_status: TaskStatusDto::InProgress,
-            });
-            events = events.cons(TaskEvent::StatusChanged {
-                timestamp: base_time.clone(),
-                old_status: TaskStatusDto::InProgress,
-                new_status: TaskStatusDto::Completed,
-            });
-        }
-        TaskStatus::Cancelled => {
-            events = events.cons(TaskEvent::StatusChanged {
-                timestamp: base_time.clone(),
-                old_status: TaskStatusDto::Pending,
-                new_status: TaskStatusDto::Cancelled,
-            });
-        }
-        TaskStatus::Pending => {}
-    }
-
-    // Priority change if not default
-    if task.priority != Priority::Low {
-        events = events.cons(TaskEvent::PriorityChanged {
-            timestamp: base_time.clone(),
-            old_priority: PriorityDto::Low,
-            new_priority: PriorityDto::from(task.priority),
-        });
-    }
-
-    // Tag events
-    for tag in &task.tags {
-        events = events.cons(TaskEvent::TagAdded {
-            timestamp: base_time.clone(),
-            tag: tag.as_str().to_string(),
-        });
-    }
-
-    events
-}
 
 /// Pure: Paginates items using Continuation monad.
 ///
@@ -656,8 +632,8 @@ pub async fn get_task_history(
     // Parse and validate task ID
     let task_id = parse_task_id(&task_id)?;
 
-    // Fetch task from repository
-    let task = state
+    // Verify task exists
+    let _task = state
         .task_repository
         .find_by_id(&task_id)
         .run_async()
@@ -665,30 +641,38 @@ pub async fn get_task_history(
         .map_err(ApiErrorResponse::from)?
         .ok_or_else(|| ApiErrorResponse::not_found("Task not found"))?;
 
+    // Load events from EventStore (real I/O)
+    let history_list = state
+        .event_store
+        .load_events(&task_id)
+        .run_async()
+        .await
+        .map_err(ApiErrorResponse::from)?;
+
     // Compute pagination parameters
+    // Use clamp(1, MAX) to ensure limit is at least 1 (prevents infinite pagination loops)
     let limit = query
         .limit
         .unwrap_or(DEFAULT_HISTORY_LIMIT)
-        .min(MAX_HISTORY_LIMIT);
+        .clamp(1, MAX_HISTORY_LIMIT);
     let cursor = query.cursor.unwrap_or(0);
 
     // Build response synchronously (Continuation/PersistentList are not Send)
     let response = {
-        // Build mock history using PersistentList (demonstrates prepend efficiency)
-        let base_timestamp = task.created_at.clone();
-        let history_list = build_mock_history(&task, &base_timestamp);
-
-        // Convert to Vec for pagination (reverse to get chronological order: oldest first)
-        // PersistentList.cons() prepends, so most recent events are at the front
-        let mut history_vec: Vec<TaskEvent> = history_list.iter().cloned().collect();
-        history_vec.reverse();
+        // Convert domain events to API DTOs (filter out unsupported event types)
+        // PersistentList stores events in reverse chronological order (newest first via cons),
+        // but load_events returns in chronological order (oldest first).
+        let history_vec: Vec<TaskEvent> = history_list
+            .iter()
+            .filter_map(TaskEvent::from_domain)
+            .collect();
 
         // Paginate using Continuation monad
         let paginated =
             paginate_with_continuation(&history_vec, cursor, limit).run(|result| result);
 
         TaskHistoryResponse {
-            task_id: task.task_id.to_string(),
+            task_id: task_id.to_string(),
             events: paginated.items,
             next_cursor: paginated.next_cursor,
             has_more: paginated.has_more,
@@ -1226,56 +1210,94 @@ fn parse_task_id(id: &str) -> Result<TaskId, ApiErrorResponse> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::{TaskStatus, Timestamp};
     use rstest::rstest;
 
     // -------------------------------------------------------------------------
-    // History Tests
+    // TaskEvent::from_domain Tests
     // -------------------------------------------------------------------------
 
     #[rstest]
-    fn test_build_mock_history_basic() {
-        let task = Task::new(
+    fn test_task_event_from_domain_created() {
+        use crate::domain::{EventId, TaskCreated};
+
+        let domain_event = DomainTaskEvent::new(
+            EventId::generate(),
             TaskId::generate(),
-            "Test Task".to_string(),
             Timestamp::now(),
+            1,
+            TaskEventKind::Created(TaskCreated {
+                title: "Test Task".to_string(),
+                description: None,
+                priority: Priority::Low,
+                status: TaskStatus::Pending,
+            }),
         );
-        let base_ts = Timestamp::now();
-        let history = build_mock_history(&task, &base_ts);
 
-        // Should have at least the Created event
-        assert!(!history.is_empty());
+        let api_event = TaskEvent::from_domain(&domain_event);
+        assert!(api_event.is_some());
+
+        if let Some(TaskEvent::Created { title, .. }) = api_event {
+            assert_eq!(title, "Test Task");
+        } else {
+            panic!("Expected Created event");
+        }
     }
 
     #[rstest]
-    fn test_build_mock_history_with_status() {
-        let task = Task::new(
-            TaskId::generate(),
-            "Test Task".to_string(),
-            Timestamp::now(),
-        )
-        .with_status(TaskStatus::Completed);
-        let base_ts = Timestamp::now();
-        let history = build_mock_history(&task, &base_ts);
+    fn test_task_event_from_domain_status_changed() {
+        use crate::domain::{EventId, StatusChanged};
 
-        // Should have Created + status change events
-        assert!(history.len() >= 3); // Created + Pending->InProgress + InProgress->Completed
+        let domain_event = DomainTaskEvent::new(
+            EventId::generate(),
+            TaskId::generate(),
+            Timestamp::now(),
+            2,
+            TaskEventKind::StatusChanged(StatusChanged {
+                old_status: TaskStatus::Pending,
+                new_status: TaskStatus::InProgress,
+            }),
+        );
+
+        let api_event = TaskEvent::from_domain(&domain_event);
+        assert!(api_event.is_some());
+
+        if let Some(TaskEvent::StatusChanged {
+            old_status,
+            new_status,
+            ..
+        }) = api_event
+        {
+            assert_eq!(old_status, TaskStatusDto::Pending);
+            assert_eq!(new_status, TaskStatusDto::InProgress);
+        } else {
+            panic!("Expected StatusChanged event");
+        }
     }
 
     #[rstest]
-    fn test_build_mock_history_with_tags() {
-        let task = Task::new(
-            TaskId::generate(),
-            "Test Task".to_string(),
-            Timestamp::now(),
-        )
-        .add_tag(Tag::new("tag1"))
-        .add_tag(Tag::new("tag2"));
-        let base_ts = Timestamp::now();
-        let history = build_mock_history(&task, &base_ts);
+    fn test_task_event_from_domain_unsupported_event() {
+        use crate::domain::{EventId, TaskDescriptionUpdated};
 
-        // Should have Created + 2 tag events
-        assert!(history.len() >= 3);
+        let domain_event = DomainTaskEvent::new(
+            EventId::generate(),
+            TaskId::generate(),
+            Timestamp::now(),
+            2,
+            TaskEventKind::DescriptionUpdated(TaskDescriptionUpdated {
+                old_description: None,
+                new_description: Some("New description".to_string()),
+            }),
+        );
+
+        // DescriptionUpdated is not exposed in the API
+        let api_event = TaskEvent::from_domain(&domain_event);
+        assert!(api_event.is_none());
     }
+
+    // -------------------------------------------------------------------------
+    // Pagination Tests
+    // -------------------------------------------------------------------------
 
     #[rstest]
     fn test_paginate_items_first_page() {
@@ -1699,5 +1721,160 @@ mod tests {
         let value2 = *lazy.force();
         assert_eq!(value2, 42);
         assert_eq!(call_count.get(), 1);
+    }
+
+    // -------------------------------------------------------------------------
+    // EventStore Integration Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn test_task_event_from_domain_title_updated() {
+        use crate::domain::{EventId, TaskTitleUpdated};
+
+        let domain_event = DomainTaskEvent::new(
+            EventId::generate(),
+            TaskId::generate(),
+            Timestamp::now(),
+            2,
+            TaskEventKind::TitleUpdated(TaskTitleUpdated {
+                old_title: "Old Title".to_string(),
+                new_title: "New Title".to_string(),
+            }),
+        );
+
+        let api_event = TaskEvent::from_domain(&domain_event);
+        assert!(api_event.is_some());
+
+        if let Some(TaskEvent::TitleUpdated {
+            old_title,
+            new_title,
+            ..
+        }) = api_event
+        {
+            assert_eq!(old_title, "Old Title");
+            assert_eq!(new_title, "New Title");
+        } else {
+            panic!("Expected TitleUpdated event");
+        }
+    }
+
+    #[rstest]
+    fn test_task_event_from_domain_priority_changed() {
+        use crate::domain::{EventId, PriorityChanged};
+
+        let domain_event = DomainTaskEvent::new(
+            EventId::generate(),
+            TaskId::generate(),
+            Timestamp::now(),
+            2,
+            TaskEventKind::PriorityChanged(PriorityChanged {
+                old_priority: Priority::Low,
+                new_priority: Priority::High,
+            }),
+        );
+
+        let api_event = TaskEvent::from_domain(&domain_event);
+        assert!(api_event.is_some());
+
+        if let Some(TaskEvent::PriorityChanged {
+            old_priority,
+            new_priority,
+            ..
+        }) = api_event
+        {
+            assert_eq!(old_priority, PriorityDto::Low);
+            assert_eq!(new_priority, PriorityDto::High);
+        } else {
+            panic!("Expected PriorityChanged event");
+        }
+    }
+
+    #[rstest]
+    fn test_task_event_from_domain_tag_added() {
+        use crate::domain::{EventId, Tag, TagAdded};
+
+        let domain_event = DomainTaskEvent::new(
+            EventId::generate(),
+            TaskId::generate(),
+            Timestamp::now(),
+            2,
+            TaskEventKind::TagAdded(TagAdded {
+                tag: Tag::new("important"),
+            }),
+        );
+
+        let api_event = TaskEvent::from_domain(&domain_event);
+        assert!(api_event.is_some());
+
+        if let Some(TaskEvent::TagAdded { tag, .. }) = api_event {
+            assert_eq!(tag, "important");
+        } else {
+            panic!("Expected TagAdded event");
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Pagination Limit Clamping Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn test_get_task_history_limit_zero_clamped_to_one() {
+        // This test verifies that limit=0 is clamped to 1 to prevent infinite pagination loops.
+        // When limit=0, paginate_items would return 0 items but has_more=true if total > 0,
+        // causing next_cursor to never advance and creating an infinite loop.
+
+        let items: Vec<i32> = (1..=10).collect();
+
+        // Simulate the limit calculation logic from get_task_history
+        // Using clamp(1, MAX_HISTORY_LIMIT) ensures limit is at least 1
+        let query_limit: usize = 0;
+        let limit = query_limit.clamp(1, MAX_HISTORY_LIMIT);
+
+        assert_eq!(limit, 1, "limit=0 should be clamped to 1");
+
+        // Verify pagination works correctly with clamped limit
+        let result = paginate_items(&items, 0, limit);
+        assert_eq!(result.items.len(), 1, "Should return exactly 1 item");
+        assert_eq!(result.next_cursor, Some(1), "Cursor should advance to 1");
+        assert!(result.has_more, "Should have more items");
+        assert_eq!(result.total, 10);
+
+        // Continue pagination to verify cursor advances correctly
+        let result2 = paginate_items(&items, 1, limit);
+        assert_eq!(result2.items.len(), 1);
+        assert_eq!(result2.next_cursor, Some(2));
+    }
+
+    #[rstest]
+    fn test_pagination_without_limit_clamp_would_cause_infinite_loop() {
+        // This test demonstrates the problem that the fix addresses.
+        // With limit=0 (without clamping), pagination would get stuck in an infinite loop.
+
+        let items: Vec<i32> = (1..=5).collect();
+
+        // Simulate what happens WITHOUT the clamp fix
+        let unclamped_limit: usize = 0;
+        let result = paginate_items(&items, 0, unclamped_limit);
+
+        // With limit=0: no items returned, but has_more=true and next_cursor=Some(0)
+        // This creates an infinite loop: cursor never advances, but has_more stays true
+        assert!(result.items.is_empty(), "No items returned with limit=0");
+        assert!(
+            result.has_more,
+            "has_more is true because next_offset(0) < total(5)"
+        );
+        assert_eq!(
+            result.next_cursor,
+            Some(0),
+            "next_cursor stays at 0, causing infinite loop"
+        );
+
+        // The infinite loop scenario:
+        // 1. Client requests page with cursor=0, limit=0
+        // 2. Server returns: items=[], has_more=true, next_cursor=Some(0)
+        // 3. Client requests next page with cursor=0, limit=0
+        // 4. Same result - infinite loop!
+        //
+        // The clamp(1, MAX) fix prevents this by ensuring limit >= 1
     }
 }

@@ -1,0 +1,59 @@
+# Large Scale Read Scenario
+#
+# This scenario tests read performance with large datasets (1M records).
+# Measures system behavior under data scale stress.
+
+name: "large_scale_read"
+description: "Read-heavy workload with large dataset (1M records)"
+
+# Backend configuration (required)
+storage_mode: postgres
+cache_mode: redis
+
+# Workload configuration (required)
+load_pattern: read_heavy
+cache_state: warm
+data_scale: large  # 1,000,000 records
+payload_variant: minimal  # Small payloads for scale test
+rps_profile: step_up  # Gradually increasing load
+
+# Load generation (optional with defaults)
+duration_seconds: 180  # Longer duration for scale test
+connections: 30
+threads: 4
+warmup_seconds: 30  # Longer warmup for cache population
+
+# Target endpoints
+endpoints:
+  - "/tasks"
+  - "/tasks/search"
+  - "/projects/{id}/progress"
+
+# Pool configuration
+pool_sizes:
+  database_pool_size: 20
+  redis_pool_size: 40  # Larger Redis pool for caching
+
+# Concurrency settings
+concurrency:
+  worker_threads: 4
+  database_pool_size: 20
+  redis_pool_size: 40
+  max_connections: 80
+
+# Extended metadata for workflow integration
+metadata:
+  test_type: "general_benchmark"
+  endpoint: "mixed"
+  payload: "small"
+  cache_strategy: "read-through"
+  hit_rate: 90
+  fail_injection: 0
+  retry: false
+  profile: false
+  tags:
+    - postgres
+    - redis
+    - large-scale
+    - read-heavy
+    - data-scale-stress

@@ -6,7 +6,10 @@
 use lambars::effect::AsyncIO;
 use thiserror::Error;
 
-use crate::domain::{Project, ProjectId, Task, TaskEvent, TaskHistory, TaskId};
+use crate::domain::{
+    Priority, Project, ProjectId, Task, TaskEvent, TaskHistory, TaskId, TaskStatus,
+};
+use crate::infrastructure::cache::CacheResult;
 
 // =============================================================================
 // Repository Error
@@ -37,6 +40,23 @@ pub enum RepositoryError {
 }
 
 // =============================================================================
+// Search Scope
+// =============================================================================
+
+/// Search scope for task search operations.
+///
+/// Defines where to search for the query string in task data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SearchScope {
+    /// Search only in task titles.
+    Title,
+    /// Search only in task tags.
+    Tags,
+    /// Search in both titles and tags.
+    All,
+}
+
+// =============================================================================
 // Pagination
 // =============================================================================
 
@@ -59,6 +79,28 @@ impl Pagination {
     pub const fn new(page: u32, page_size: u32) -> Self {
         assert!(page_size > 0, "page_size must be greater than 0");
         Self { page, page_size }
+    }
+
+    /// Creates pagination that fetches all records.
+    ///
+    /// This is useful for operations that need to retrieve all items
+    /// without pagination, such as aggregation queries or full exports.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use task_management_benchmark_api::infrastructure::Pagination;
+    ///
+    /// let all_pagination = Pagination::all();
+    /// assert_eq!(all_pagination.page, 0);
+    /// assert_eq!(all_pagination.page_size, u32::MAX);
+    /// ```
+    #[must_use]
+    pub const fn all() -> Self {
+        Self {
+            page: 0,
+            page_size: u32::MAX,
+        }
     }
 
     /// Creates new pagination parameters without validation.
@@ -184,6 +226,39 @@ pub trait TaskRepository: Send + Sync {
     /// The version field is used for optimistic locking.
     fn save(&self, task: &Task) -> AsyncIO<Result<(), RepositoryError>>;
 
+    /// Saves multiple tasks in a batch operation.
+    ///
+    /// This method processes multiple tasks for saving. The current implementation
+    /// varies by backend:
+    /// - **`InMemory`**: Sequential processing with version checking
+    /// - **`PostgreSQL`**: Batch INSERT (UNNEST) for new tasks, sequential UPDATE for existing
+    /// - **`Redis`**: Sequential Lua script execution
+    ///
+    /// # Atomicity
+    ///
+    /// **This operation is NOT atomic as a batch.** Partial success is possible - some tasks
+    /// may be saved successfully while others fail. Each result in the returned
+    /// vector corresponds to the task at the same index in the input slice.
+    /// No rollback of the entire batch is performed on partial failure.
+    ///
+    /// # Version Semantics
+    ///
+    /// Version checking follows the same rules as `save`:
+    /// - For new tasks, version should be 1
+    /// - For updates, version should be exactly `existing_version + 1`
+    ///
+    /// # Arguments
+    ///
+    /// * `tasks` - Slice of tasks to save
+    ///
+    /// # Returns
+    ///
+    /// A vector of results with the same length as input, preserving order.
+    /// Each result is either:
+    /// - `Ok(())` if the task was saved successfully
+    /// - `Err(RepositoryError)` if the save failed (e.g., version conflict)
+    fn save_bulk(&self, tasks: &[Task]) -> AsyncIO<Vec<Result<(), RepositoryError>>>;
+
     /// Deletes a task by its ID.
     ///
     /// Returns `Ok(true)` if the task was deleted, `Ok(false)` if it didn't exist.
@@ -195,8 +270,80 @@ pub trait TaskRepository: Send + Sync {
         pagination: Pagination,
     ) -> AsyncIO<Result<PaginatedResult<Task>, RepositoryError>>;
 
+    /// Lists tasks with optional status and priority filtering (DB-side execution).
+    ///
+    /// This method delegates filtering to the database layer, leveraging indexes
+    /// for efficient queries on large datasets. Use this instead of fetching all
+    /// tasks and filtering in memory.
+    ///
+    /// # Arguments
+    ///
+    /// * `status` - Optional filter by task status
+    /// * `priority` - Optional filter by task priority
+    /// * `pagination` - Pagination parameters
+    ///
+    /// # Returns
+    ///
+    /// A paginated result containing tasks matching the filter criteria.
+    fn list_filtered(
+        &self,
+        status: Option<TaskStatus>,
+        priority: Option<Priority>,
+        pagination: Pagination,
+    ) -> AsyncIO<Result<PaginatedResult<Task>, RepositoryError>>;
+
+    /// Searches tasks by query string in specified scope (DB-side execution).
+    ///
+    /// This method delegates search to the database layer, using appropriate
+    /// indexes (e.g., `pg_trgm` for title, GIN for tags) for efficient searches.
+    ///
+    /// # Arguments
+    ///
+    /// * `query` - The search query string
+    /// * `scope` - Where to search (title, tags, or all)
+    /// * `limit` - Maximum number of results to return
+    /// * `offset` - Number of results to skip (for pagination)
+    ///
+    /// # Returns
+    ///
+    /// A vector of tasks matching the search criteria.
+    fn search(
+        &self,
+        query: &str,
+        scope: SearchScope,
+        limit: u32,
+        offset: u32,
+    ) -> AsyncIO<Result<Vec<Task>, RepositoryError>>;
+
     /// Counts all tasks.
     fn count(&self) -> AsyncIO<Result<u64, RepositoryError>>;
+
+    /// Finds a task by its ID with cache status information.
+    ///
+    /// This method returns a `CacheResult` that includes both the value and
+    /// the cache status (hit/miss/bypass). Use this method when you need to
+    /// know if the result came from cache.
+    ///
+    /// # Default Implementation
+    ///
+    /// The default implementation calls `find_by_id` and wraps the result
+    /// with `CacheStatus::Bypass`, indicating that no caching was used.
+    /// `CachedTaskRepository` overrides this to provide actual cache status.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(CacheResult::hit(Some(task)))` - Cache hit with task
+    /// - `Ok(CacheResult::miss(Some(task)))` - Cache miss, fetched from storage
+    /// - `Ok(CacheResult::bypass(Some(task)))` - Cache bypassed (default)
+    /// - `Ok(CacheResult::*(None))` - Task not found
+    /// - `Err(RepositoryError)` - Operation failed
+    fn find_by_id_with_status(
+        &self,
+        id: &TaskId,
+    ) -> AsyncIO<Result<CacheResult<Option<Task>>, RepositoryError>> {
+        self.find_by_id(id)
+            .fmap(|result| result.map(CacheResult::bypass))
+    }
 }
 
 // =============================================================================
@@ -224,6 +371,25 @@ pub trait ProjectRepository: Send + Sync {
 
     /// Counts all projects.
     fn count(&self) -> AsyncIO<Result<u64, RepositoryError>>;
+
+    /// Finds a project by its ID with cache status information.
+    ///
+    /// This method returns a `CacheResult` that includes both the value and
+    /// the cache status (hit/miss/bypass). Use this method when you need to
+    /// know if the result came from cache.
+    ///
+    /// # Default Implementation
+    ///
+    /// The default implementation calls `find_by_id` and wraps the result
+    /// with `CacheStatus::Bypass`, indicating that no caching was used.
+    /// `CachedProjectRepository` overrides this to provide actual cache status.
+    fn find_by_id_with_status(
+        &self,
+        id: &ProjectId,
+    ) -> AsyncIO<Result<CacheResult<Option<Project>>, RepositoryError>> {
+        self.find_by_id(id)
+            .fmap(|result| result.map(CacheResult::bypass))
+    }
 }
 
 // =============================================================================

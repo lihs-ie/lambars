@@ -98,7 +98,7 @@ fn benchmark_get(criterion: &mut Criterion) {
 fn benchmark_update(criterion: &mut Criterion) {
     let mut group = criterion.benchmark_group("update");
 
-    for size in [100, 1000, 10000] {
+    for size in [100, 1000, 10000, 100000] {
         // Prepare data
         let persistent_vector: PersistentVector<i32> = (0..size).collect();
         let standard_vector: Vec<i32> = (0..size).collect();
@@ -141,6 +141,59 @@ fn benchmark_update(criterion: &mut Criterion) {
                         let index = (size / 2) as usize;
                         mutable_vector[black_box(index)] = black_box(999);
                         black_box(mutable_vector)
+                    },
+                    criterion::BatchSize::SmallInput,
+                );
+            },
+        );
+    }
+
+    group.finish();
+}
+
+// =============================================================================
+// transient_update Benchmark
+// =============================================================================
+
+fn benchmark_transient_update(criterion: &mut Criterion) {
+    let mut group = criterion.benchmark_group("transient_update");
+
+    for size in [1000, 10000, 100000] {
+        let persistent_vector: PersistentVector<i32> = (0..size).collect();
+
+        // TransientVector batch updates (issue #222 target: 100k ≤ 1.0ms)
+        group.bench_with_input(
+            BenchmarkId::new("TransientVector", size),
+            &size,
+            |bencher, &size| {
+                bencher.iter_batched(
+                    || persistent_vector.clone(),
+                    |vector| {
+                        let mut transient = vector.transient();
+                        for index in (0..size as usize).step_by(10) {
+                            transient.update(black_box(index), black_box(999));
+                        }
+                        black_box(transient.persistent())
+                    },
+                    criterion::BatchSize::SmallInput,
+                );
+            },
+        );
+
+        // PersistentVector sequential updates for comparison
+        group.bench_with_input(
+            BenchmarkId::new("PersistentVector", size),
+            &size,
+            |bencher, &size| {
+                bencher.iter_batched(
+                    || persistent_vector.clone(),
+                    |mut vector| {
+                        for index in (0..size as usize).step_by(10) {
+                            if let Some(updated) = vector.update(black_box(index), black_box(999)) {
+                                vector = updated;
+                            }
+                        }
+                        black_box(vector)
                     },
                     criterion::BatchSize::SmallInput,
                 );
@@ -366,6 +419,7 @@ criterion_group!(
     benchmark_push_back,
     benchmark_get,
     benchmark_update,
+    benchmark_transient_update,
     benchmark_iteration,
     benchmark_from_iter,
     benchmark_concat,

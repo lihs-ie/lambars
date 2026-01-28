@@ -38,7 +38,8 @@ RUN mkdir -p benches/iai && \
     for bench in persistent_vector_bench persistent_hashmap_bench persistent_treemap_bench \
                  persistent_list_bench control_bench effect_bench for_macro_bench \
                  for_async_macro_bench algebraic_effect_bench serde_bench transient_bench \
-                 rayon_bench freer_bench bifunctor_bench alternative_bench; do \
+                 rayon_bench freer_bench bifunctor_bench alternative_bench \
+                 eff_async_macro_bench async_io_runtime_bench; do \
         echo "fn main() {}" > benches/$bench.rs; \
     done && \
     for bench in persistent_vector_iai effect_iai scenario_iai; do \
