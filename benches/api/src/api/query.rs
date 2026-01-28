@@ -1269,7 +1269,10 @@ pub fn index_ngrams_streaming(
         }
         previous_ngram = Some(ngram_str);
 
-        index.entry(pool.intern(ngram_str)).or_default().push(task_id.clone());
+        index
+            .entry(pool.intern(ngram_str))
+            .or_default()
+            .push(task_id.clone());
     }
 }
 
@@ -1289,7 +1292,6 @@ pub use index_ngrams_streaming as remove_ngrams_streaming;
 /// `docs/internal/requirements/20260128_1255_search_index_ngram_perf_remediation.yaml`
 #[derive(Debug, Clone, Default)]
 pub struct SearchIndexDelta {
-    // Prefix index deltas (TreeMap-based indices)
     pub title_full_add: MutablePrefixIndex,
     pub title_full_remove: MutablePrefixIndex,
     pub title_word_add: MutablePrefixIndex,
@@ -1297,15 +1299,13 @@ pub struct SearchIndexDelta {
     pub tag_add: MutablePrefixIndex,
     pub tag_remove: MutablePrefixIndex,
 
-    // N-gram index deltas
-    pub title_full_ngram_add: MutableNgramIndex,
-    pub title_full_ngram_remove: MutableNgramIndex,
-    pub title_word_ngram_add: MutableNgramIndex,
-    pub title_word_ngram_remove: MutableNgramIndex,
-    pub tag_ngram_add: MutableNgramIndex,
-    pub tag_ngram_remove: MutableNgramIndex,
+    pub title_full_ngram_add: MutableInternedNgramIndex,
+    pub title_full_ngram_remove: MutableInternedNgramIndex,
+    pub title_word_ngram_add: MutableInternedNgramIndex,
+    pub title_word_ngram_remove: MutableInternedNgramIndex,
+    pub tag_ngram_add: MutableInternedNgramIndex,
+    pub tag_ngram_remove: MutableInternedNgramIndex,
 
-    // All-suffix index deltas (for LegacyAllSuffix mode)
     pub title_full_all_suffix_add: MutablePrefixIndex,
     pub title_full_all_suffix_remove: MutablePrefixIndex,
     pub title_word_all_suffix_add: MutablePrefixIndex,
@@ -1314,25 +1314,14 @@ pub struct SearchIndexDelta {
     pub tag_all_suffix_remove: MutablePrefixIndex,
 }
 
-// REQ-SEARCH-NGRAM-PERF-001 Part 2
 /// Cached normalization result for a task. Tags are sorted for stable ordering.
-///
-/// This struct is `pub(crate)` to allow `SearchIndex::add_task_with_normalized`
-/// to use pre-computed normalized data for single-task additions.
 pub(crate) struct NormalizedTaskData {
     title_key: String,
     title_words: Vec<String>,
     tags: Vec<String>,
 }
 
-// Phase 5.5: Single add_task optimization
 impl NormalizedTaskData {
-    /// Constructs normalized data from a task. Normalization is performed only once.
-    ///
-    /// # Normalization
-    ///
-    /// - Title: Uses `normalize_query()` for consistent normalization
-    /// - Tags: Sorted for stable ordering, normalized via `normalize_query()`
     fn from_task(task: &Task) -> Self {
         let title = normalize_query(&task.title);
         let mut sorted_tags: Vec<_> = task.tags.iter().collect();
@@ -1350,13 +1339,12 @@ impl NormalizedTaskData {
     }
 }
 
-// REQ-SEARCH-NGRAM-PERF-001 Part 2
 impl SearchIndexDelta {
-    /// Constructs a delta from task changes. Each task is normalized only once.
+    /// Constructs a delta from task changes.
     ///
     /// # Panics
     ///
-    /// Panics on forbidden patterns: Remove followed by Add/Update for the same `TaskId`.
+    /// Panics on Remove followed by Add/Update for the same `TaskId`.
     #[must_use]
     pub fn from_changes(
         changes: &[TaskChange],
@@ -1368,6 +1356,7 @@ impl SearchIndexDelta {
             std::collections::HashMap::new();
         let mut removed_task_ids: std::collections::HashSet<TaskId> =
             std::collections::HashSet::new();
+        let mut ngram_pool = NgramKeyPool::new();
 
         for change in changes {
             match change {
@@ -1379,7 +1368,7 @@ impl SearchIndexDelta {
                         task.task_id
                     );
                     let normalized = NormalizedTaskData::from_task(task);
-                    delta.collect_add(&normalized, &task.task_id, config);
+                    delta.collect_add(&normalized, &task.task_id, config, &mut ngram_pool);
                     pending_tasks.insert(task.task_id.clone(), (task.clone(), normalized));
                 }
                 TaskChange::Update { old, new } => {
@@ -1396,16 +1385,17 @@ impl SearchIndexDelta {
                         &new_normalized,
                         &new.task_id,
                         config,
+                        &mut ngram_pool,
                     );
                     pending_tasks.insert(new.task_id.clone(), (new.clone(), new_normalized));
                 }
                 TaskChange::Remove(task_id) => {
                     if let Some((_, normalized)) = pending_tasks.get(task_id) {
-                        delta.collect_remove(normalized, task_id, config);
+                        delta.collect_remove(normalized, task_id, config, &mut ngram_pool);
                         pending_tasks.remove(task_id);
                     } else if let Some(task) = tasks_by_id.get(task_id) {
                         let normalized = NormalizedTaskData::from_task(task);
-                        delta.collect_remove(&normalized, task_id, config);
+                        delta.collect_remove(&normalized, task_id, config, &mut ngram_pool);
                     }
                     removed_task_ids.insert(task_id.clone());
                 }
@@ -1420,6 +1410,7 @@ impl SearchIndexDelta {
         data: &NormalizedTaskData,
         task_id: &TaskId,
         config: &SearchIndexConfig,
+        ngram_pool: &mut NgramKeyPool,
     ) {
         let (word_limit, tag_limit) = Self::compute_token_limits(data, config);
 
@@ -1435,7 +1426,13 @@ impl SearchIndexDelta {
                 .push(task_id.clone());
             match config.infix_mode {
                 InfixMode::Ngram => {
-                    index_ngrams_batch(&mut self.title_word_ngram_add, word, task_id, config);
+                    index_ngrams_streaming(
+                        &mut self.title_word_ngram_add,
+                        word,
+                        task_id,
+                        config,
+                        ngram_pool,
+                    );
                 }
                 InfixMode::LegacyAllSuffix => {
                     index_all_suffixes_batch(&mut self.title_word_all_suffix_add, word, task_id);
@@ -1451,7 +1448,13 @@ impl SearchIndexDelta {
                 .push(task_id.clone());
             match config.infix_mode {
                 InfixMode::Ngram => {
-                    index_ngrams_batch(&mut self.tag_ngram_add, tag, task_id, config);
+                    index_ngrams_streaming(
+                        &mut self.tag_ngram_add,
+                        tag,
+                        task_id,
+                        config,
+                        ngram_pool,
+                    );
                 }
                 InfixMode::LegacyAllSuffix => {
                     index_all_suffixes_batch(&mut self.tag_all_suffix_add, tag, task_id);
@@ -1462,11 +1465,12 @@ impl SearchIndexDelta {
 
         match config.infix_mode {
             InfixMode::Ngram => {
-                index_ngrams_batch(
+                index_ngrams_streaming(
                     &mut self.title_full_ngram_add,
                     &data.title_key,
                     task_id,
                     config,
+                    ngram_pool,
                 );
             }
             InfixMode::LegacyAllSuffix => {
@@ -1486,6 +1490,7 @@ impl SearchIndexDelta {
         data: &NormalizedTaskData,
         task_id: &TaskId,
         config: &SearchIndexConfig,
+        ngram_pool: &mut NgramKeyPool,
     ) {
         self.title_full_remove
             .entry(data.title_key.clone())
@@ -1499,7 +1504,13 @@ impl SearchIndexDelta {
                 .push(task_id.clone());
             match config.infix_mode {
                 InfixMode::Ngram => {
-                    index_ngrams_batch(&mut self.title_word_ngram_remove, word, task_id, config);
+                    remove_ngrams_streaming(
+                        &mut self.title_word_ngram_remove,
+                        word,
+                        task_id,
+                        config,
+                        ngram_pool,
+                    );
                 }
                 InfixMode::LegacyAllSuffix => {
                     index_all_suffixes_batch(&mut self.title_word_all_suffix_remove, word, task_id);
@@ -1515,7 +1526,13 @@ impl SearchIndexDelta {
                 .push(task_id.clone());
             match config.infix_mode {
                 InfixMode::Ngram => {
-                    index_ngrams_batch(&mut self.tag_ngram_remove, tag, task_id, config);
+                    remove_ngrams_streaming(
+                        &mut self.tag_ngram_remove,
+                        tag,
+                        task_id,
+                        config,
+                        ngram_pool,
+                    );
                 }
                 InfixMode::LegacyAllSuffix => {
                     index_all_suffixes_batch(&mut self.tag_all_suffix_remove, tag, task_id);
@@ -1526,11 +1543,12 @@ impl SearchIndexDelta {
 
         match config.infix_mode {
             InfixMode::Ngram => {
-                index_ngrams_batch(
+                remove_ngrams_streaming(
                     &mut self.title_full_ngram_remove,
                     &data.title_key,
                     task_id,
                     config,
+                    ngram_pool,
                 );
             }
             InfixMode::LegacyAllSuffix => {
@@ -1545,9 +1563,6 @@ impl SearchIndexDelta {
     }
 
     /// Tags take priority over words when total exceeds `max_tokens_per_task`.
-    ///
-    /// This method is `pub(crate)` to allow `SearchIndex::add_task_with_normalized`
-    /// to reuse the same token limit calculation logic.
     pub(crate) fn compute_token_limits(
         data: &NormalizedTaskData,
         config: &SearchIndexConfig,
@@ -1577,6 +1592,7 @@ impl SearchIndexDelta {
         new_data: &NormalizedTaskData,
         task_id: &TaskId,
         config: &SearchIndexConfig,
+        ngram_pool: &mut NgramKeyPool,
     ) {
         let (new_word_limit, new_tag_limit) = Self::compute_token_limits(new_data, config);
 
@@ -1592,6 +1608,7 @@ impl SearchIndexDelta {
                         &new_data.title_key,
                         task_id,
                         config,
+                        ngram_pool,
                     );
                 }
                 InfixMode::LegacyAllSuffix => {
@@ -1624,6 +1641,7 @@ impl SearchIndexDelta {
                     new_data.title_words.iter().take(new_word_limit),
                     task_id,
                     config,
+                    ngram_pool,
                 );
             }
             InfixMode::LegacyAllSuffix => {
@@ -1655,6 +1673,7 @@ impl SearchIndexDelta {
                     new_data.tags.iter().take(new_tag_limit),
                     task_id,
                     config,
+                    ngram_pool,
                 );
             }
             InfixMode::LegacyAllSuffix => {
@@ -1695,76 +1714,105 @@ impl SearchIndexDelta {
         }
     }
 
+    fn apply_ngram_diff(
+        remove_index: &mut MutableInternedNgramIndex,
+        add_index: &mut MutableInternedNgramIndex,
+        old_ngrams: &std::collections::HashSet<String>,
+        new_ngrams: &std::collections::HashSet<String>,
+        task_id: &TaskId,
+        ngram_pool: &mut NgramKeyPool,
+    ) {
+        for ngram in old_ngrams.difference(new_ngrams) {
+            remove_index
+                .entry(ngram_pool.intern(ngram))
+                .or_default()
+                .push(task_id.clone());
+        }
+        for ngram in new_ngrams.difference(old_ngrams) {
+            add_index
+                .entry(ngram_pool.intern(ngram))
+                .or_default()
+                .push(task_id.clone());
+        }
+    }
+
     fn collect_ngram_diff(
-        remove_index: &mut MutableNgramIndex,
-        add_index: &mut MutableNgramIndex,
+        remove_index: &mut MutableInternedNgramIndex,
+        add_index: &mut MutableInternedNgramIndex,
         old_key: &str,
         new_key: &str,
         task_id: &TaskId,
         config: &SearchIndexConfig,
+        ngram_pool: &mut NgramKeyPool,
     ) {
-        let old_ngrams: std::collections::HashSet<_> =
-            generate_ngrams(old_key, config.ngram_size, config.max_ngrams_per_token)
-                .into_iter()
-                .collect();
-        let new_ngrams: std::collections::HashSet<_> =
-            generate_ngrams(new_key, config.ngram_size, config.max_ngrams_per_token)
-                .into_iter()
-                .collect();
-
-        for ngram in old_ngrams.difference(&new_ngrams) {
-            remove_index
-                .entry(ngram.clone())
-                .or_default()
-                .push(task_id.clone());
-        }
-        for ngram in new_ngrams.difference(&old_ngrams) {
-            add_index
-                .entry(ngram.clone())
-                .or_default()
-                .push(task_id.clone());
-        }
+        let old_ngrams = generate_ngrams(old_key, config.ngram_size, config.max_ngrams_per_token)
+            .into_iter()
+            .collect();
+        let new_ngrams = generate_ngrams(new_key, config.ngram_size, config.max_ngrams_per_token)
+            .into_iter()
+            .collect();
+        Self::apply_ngram_diff(
+            remove_index,
+            add_index,
+            &old_ngrams,
+            &new_ngrams,
+            task_id,
+            ngram_pool,
+        );
     }
 
     fn collect_tokens_ngram_diff<'a>(
-        remove_index: &mut MutableNgramIndex,
-        add_index: &mut MutableNgramIndex,
+        remove_index: &mut MutableInternedNgramIndex,
+        add_index: &mut MutableInternedNgramIndex,
         old_tokens: impl Iterator<Item = &'a String>,
         new_tokens: impl Iterator<Item = &'a String>,
         task_id: &TaskId,
         config: &SearchIndexConfig,
+        ngram_pool: &mut NgramKeyPool,
     ) {
-        let old_ngrams: std::collections::HashSet<String> = old_tokens
+        let old_ngrams = old_tokens
             .flat_map(|t| generate_ngrams(t, config.ngram_size, config.max_ngrams_per_token))
             .collect();
-        let new_ngrams: std::collections::HashSet<String> = new_tokens
+        let new_ngrams = new_tokens
             .flat_map(|t| generate_ngrams(t, config.ngram_size, config.max_ngrams_per_token))
             .collect();
-
-        for ngram in old_ngrams.difference(&new_ngrams) {
-            remove_index
-                .entry(ngram.clone())
-                .or_default()
-                .push(task_id.clone());
-        }
-        for ngram in new_ngrams.difference(&old_ngrams) {
-            add_index
-                .entry(ngram.clone())
-                .or_default()
-                .push(task_id.clone());
-        }
+        Self::apply_ngram_diff(
+            remove_index,
+            add_index,
+            &old_ngrams,
+            &new_ngrams,
+            task_id,
+            ngram_pool,
+        );
     }
 
-    /// Generates all suffixes from a word.
-    ///
-    /// For `hello`, generates: `["hello", "ello", "llo", "lo", "o"]`
     fn generate_all_suffixes(word: &str) -> Vec<String> {
         word.char_indices()
             .map(|(byte_index, _)| word[byte_index..].to_string())
             .collect()
     }
 
-    /// Collects suffix diff between old and new key.
+    fn apply_suffix_diff(
+        remove_index: &mut MutablePrefixIndex,
+        add_index: &mut MutablePrefixIndex,
+        old_suffixes: &std::collections::HashSet<String>,
+        new_suffixes: &std::collections::HashSet<String>,
+        task_id: &TaskId,
+    ) {
+        for suffix in old_suffixes.difference(new_suffixes) {
+            remove_index
+                .entry(suffix.clone())
+                .or_default()
+                .push(task_id.clone());
+        }
+        for suffix in new_suffixes.difference(old_suffixes) {
+            add_index
+                .entry(suffix.clone())
+                .or_default()
+                .push(task_id.clone());
+        }
+    }
+
     fn collect_all_suffix_diff(
         remove_index: &mut MutablePrefixIndex,
         add_index: &mut MutablePrefixIndex,
@@ -1772,26 +1820,17 @@ impl SearchIndexDelta {
         new_key: &str,
         task_id: &TaskId,
     ) {
-        let old_suffixes: std::collections::HashSet<_> =
-            Self::generate_all_suffixes(old_key).into_iter().collect();
-        let new_suffixes: std::collections::HashSet<_> =
-            Self::generate_all_suffixes(new_key).into_iter().collect();
-
-        for suffix in old_suffixes.difference(&new_suffixes) {
-            remove_index
-                .entry(suffix.clone())
-                .or_default()
-                .push(task_id.clone());
-        }
-        for suffix in new_suffixes.difference(&old_suffixes) {
-            add_index
-                .entry(suffix.clone())
-                .or_default()
-                .push(task_id.clone());
-        }
+        let old_suffixes = Self::generate_all_suffixes(old_key).into_iter().collect();
+        let new_suffixes = Self::generate_all_suffixes(new_key).into_iter().collect();
+        Self::apply_suffix_diff(
+            remove_index,
+            add_index,
+            &old_suffixes,
+            &new_suffixes,
+            task_id,
+        );
     }
 
-    /// Collects suffix diff for multiple tokens (words or tags).
     fn collect_tokens_all_suffix_diff<'a>(
         remove_index: &mut MutablePrefixIndex,
         add_index: &mut MutablePrefixIndex,
@@ -1799,25 +1838,19 @@ impl SearchIndexDelta {
         new_tokens: impl Iterator<Item = &'a String>,
         task_id: &TaskId,
     ) {
-        let old_suffixes: std::collections::HashSet<String> = old_tokens
+        let old_suffixes = old_tokens
             .flat_map(|token| Self::generate_all_suffixes(token))
             .collect();
-        let new_suffixes: std::collections::HashSet<String> = new_tokens
+        let new_suffixes = new_tokens
             .flat_map(|token| Self::generate_all_suffixes(token))
             .collect();
-
-        for suffix in old_suffixes.difference(&new_suffixes) {
-            remove_index
-                .entry(suffix.clone())
-                .or_default()
-                .push(task_id.clone());
-        }
-        for suffix in new_suffixes.difference(&old_suffixes) {
-            add_index
-                .entry(suffix.clone())
-                .or_default()
-                .push(task_id.clone());
-        }
+        Self::apply_suffix_diff(
+            remove_index,
+            add_index,
+            &old_suffixes,
+            &new_suffixes,
+            task_id,
+        );
     }
 }
 
@@ -3792,25 +3825,24 @@ impl SearchIndex {
 
     fn merge_ngram_delta(
         index: &NgramIndex,
-        add: &MutableNgramIndex,
-        remove: &MutableNgramIndex,
+        add: &MutableInternedNgramIndex,
+        remove: &MutableInternedNgramIndex,
     ) -> NgramIndex {
         let all_keys: std::collections::HashSet<_> = add.keys().chain(remove.keys()).collect();
         let mut result = index.clone().transient();
 
         for key in all_keys {
+            let key_str = key.as_str();
             let merged = Self::compute_merged_posting_list(
-                result
-                    .get(key.as_str())
-                    .map(|v| v.iter().cloned().collect()),
+                result.get(key_str).map(|v| v.iter().cloned().collect()),
                 add.get(key),
                 remove.get(key),
             );
 
             if merged.is_empty() {
-                result.remove(key);
+                result.remove(key_str);
             } else {
-                result.insert(key.clone(), merged.into_iter().collect());
+                result.insert(key_str.to_string(), merged.into_iter().collect());
             }
         }
 
@@ -11468,9 +11500,10 @@ mod search_index_delta_tests {
         delta
             .title_full_add
             .insert("test title".to_string(), vec![task_id.clone()]);
+        let ngram_key = NgramKey::new("tes");
         delta
             .tag_ngram_add
-            .insert("tes".to_string(), vec![task_id.clone()]);
+            .insert(ngram_key.clone(), vec![task_id.clone()]);
 
         let cloned = delta.clone();
 
@@ -11480,7 +11513,7 @@ mod search_index_delta_tests {
             cloned.title_full_add.get("test title"),
             Some(&vec![task_id.clone()])
         );
-        assert_eq!(cloned.tag_ngram_add.get("tes"), Some(&vec![task_id]));
+        assert_eq!(cloned.tag_ngram_add.get(&ngram_key), Some(&vec![task_id]));
     }
 
     #[rstest]
@@ -13152,7 +13185,7 @@ mod index_ngrams_streaming_tests {
     use super::*;
     use rstest::rstest;
 
-    /// Creates a default SearchIndexConfig with n-gram mode enabled.
+    /// Creates a default `SearchIndexConfig` with n-gram mode enabled.
     fn default_config() -> SearchIndexConfig {
         SearchIndexConfig::default()
     }
