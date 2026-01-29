@@ -18,7 +18,6 @@
 use std::env;
 use std::net::SocketAddr;
 
-use axum::Json;
 use axum::Router;
 use axum::extract::State;
 use axum::routing::{get, patch, post, put};
@@ -32,12 +31,12 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 #[cfg(feature = "demo")]
 use task_management_benchmark_api::api::demo::get_task_history_demo;
 use task_management_benchmark_api::api::{
-    AppState, AppliedConfig, add_subtask, add_tag, aggregate_numeric, aggregate_sources,
-    aggregate_tree, async_pipeline, batch_process_async, batch_transform_results,
-    batch_update_field, build_from_parts, bulk_create_tasks, bulk_update_tasks, collect_optional,
-    compute_parallel, concurrent_lazy, conditional_pipeline, convert_error_domain,
-    count_by_priority, create_project_handler, create_task, create_task_eff, dashboard,
-    delete_task, deque_operations, enrich_batch, enrich_error, execute_sequential,
+    AppState, AppliedConfig, JsonResponse, add_subtask, add_tag, aggregate_numeric,
+    aggregate_sources, aggregate_tree, async_pipeline, batch_process_async,
+    batch_transform_results, batch_update_field, build_from_parts, bulk_create_tasks,
+    bulk_update_tasks, collect_optional, compute_parallel, concurrent_lazy, conditional_pipeline,
+    convert_error_domain, count_by_priority, create_project_handler, create_task, create_task_eff,
+    dashboard, delete_task, deque_operations, enrich_batch, enrich_error, execute_sequential,
     execute_state_workflow, execute_workflow, fetch_batch, filter_conditional, first_available,
     flatten_demo, flatten_subtasks, freer_workflow, functor_mut_demo, get_project_handler,
     get_project_progress_handler, get_project_stats_handler, get_task, get_task_history,
@@ -75,8 +74,8 @@ fn is_env_flag_enabled(key: &str) -> bool {
 ///
 /// Returns the *actual* applied configuration values, not raw environment variables.
 /// This ensures values reflect caps, defaults, and validation applied at startup.
-async fn debug_config_handler(State(state): State<AppState>) -> Json<DebugConfig> {
-    Json(DebugConfig {
+async fn debug_config_handler(State(state): State<AppState>) -> JsonResponse<DebugConfig> {
+    JsonResponse(DebugConfig {
         worker_threads: state.applied_config.worker_threads,
         database_pool_size: state.applied_config.database_pool_size,
         redis_pool_size: state.applied_config.redis_pool_size,

@@ -26,6 +26,8 @@ use std::collections::HashMap;
 
 use axum::Json;
 use axum::extract::{Path, Query, State};
+
+use super::json_buffer::JsonResponse;
 use lambars::lens;
 use lambars::optics::at::At;
 use lambars::optics::filtered::FilteredTraversal;
@@ -594,7 +596,7 @@ fn parse_task_id(s: &str) -> Result<TaskId, String> {
 pub async fn batch_update_field(
     State(state): State<AppState>,
     Json(request): Json<BatchUpdateFieldRequest>,
-) -> Result<Json<BatchUpdateFieldResponse>, ApiErrorResponse> {
+) -> Result<JsonResponse<BatchUpdateFieldResponse>, ApiErrorResponse> {
     let tasks = state
         .task_repository
         .list(Pagination::new(0, 1000))
@@ -621,7 +623,7 @@ pub async fn batch_update_field(
     let updated_count = updated_tasks.len();
     let field_name = format!("{:?}", request.field).to_lowercase();
 
-    Ok(Json(BatchUpdateFieldResponse {
+    Ok(JsonResponse(BatchUpdateFieldResponse {
         updated_count,
         updated_ids: updated_tasks
             .iter()
@@ -667,7 +669,7 @@ pub async fn update_optional(
     State(state): State<AppState>,
     Path(task_id): Path<String>,
     Json(request): Json<UpdateOptionalRequest>,
-) -> Result<Json<UpdateOptionalResponse>, ApiErrorResponse> {
+) -> Result<JsonResponse<UpdateOptionalResponse>, ApiErrorResponse> {
     let task_id = parse_task_id(&task_id).map_err(|error| {
         ApiErrorResponse::validation_error("Invalid task ID", vec![FieldError::new("id", error)])
     })?;
@@ -694,7 +696,7 @@ pub async fn update_optional(
 
     let action_performed = format!("{:?}", request.action).to_lowercase();
 
-    Ok(Json(UpdateOptionalResponse {
+    Ok(JsonResponse(UpdateOptionalResponse {
         task: TaskResponse::from(&updated_task),
         previous_value,
         new_value,
@@ -732,7 +734,7 @@ pub async fn update_optional(
 pub async fn update_metadata_key(
     Path((project_id, key)): Path<(String, String)>,
     Json(request): Json<UpdateMetadataKeyRequest>,
-) -> Json<UpdateMetadataKeyResponse> {
+) -> JsonResponse<UpdateMetadataKeyResponse> {
     let metadata: HashMap<String, serde_json::Value> = HashMap::new();
 
     let (updated_metadata, previous_value, action) =
@@ -740,7 +742,7 @@ pub async fn update_metadata_key(
 
     let new_value = updated_metadata.get(&key).cloned();
 
-    Json(UpdateMetadataKeyResponse {
+    JsonResponse(UpdateMetadataKeyResponse {
         project_id,
         key,
         previous_value,
@@ -780,7 +782,7 @@ pub async fn update_metadata_key(
 pub async fn update_filtered(
     State(state): State<AppState>,
     Json(request): Json<UpdateFilteredRequest>,
-) -> Result<Json<UpdateFilteredResponse>, ApiErrorResponse> {
+) -> Result<JsonResponse<UpdateFilteredResponse>, ApiErrorResponse> {
     let tasks = state
         .task_repository
         .list(Pagination::new(0, 1000))
@@ -792,7 +794,7 @@ pub async fn update_filtered(
     let (updated_tasks, matched_count, modified_count) =
         update_filtered_tasks(tasks, &request.filter, &request.update);
 
-    Ok(Json(UpdateFilteredResponse {
+    Ok(JsonResponse(UpdateFilteredResponse {
         matched_count,
         modified_count,
         modified_ids: updated_tasks
@@ -832,7 +834,7 @@ pub async fn update_filtered(
 pub async fn nested_access(
     State(state): State<AppState>,
     Query(query): Query<NestedAccessQuery>,
-) -> Result<Json<NestedAccessResponse>, ApiErrorResponse> {
+) -> Result<JsonResponse<NestedAccessResponse>, ApiErrorResponse> {
     let segments = parse_access_path(&query.access_path);
 
     if segments.is_empty() {
@@ -852,7 +854,7 @@ pub async fn nested_access(
 
     let values = execute_nested_access(&tasks, &segments);
 
-    Ok(Json(NestedAccessResponse {
+    Ok(JsonResponse(NestedAccessResponse {
         values: values.clone(),
         count: values.len(),
         path_used: query.access_path,

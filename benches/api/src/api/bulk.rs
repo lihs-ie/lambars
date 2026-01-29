@@ -34,6 +34,8 @@
 use std::sync::Arc;
 
 use axum::{Json, extract::State, http::StatusCode};
+
+use super::json_buffer::JsonResponse;
 use serde::{Deserialize, Serialize};
 
 use super::consistency::{ConsistencyError, log_consistency_error};
@@ -515,7 +517,7 @@ struct ValidatedCreate {
 pub async fn bulk_create_tasks(
     State(state): State<AppState>,
     Json(request): Json<BulkCreateRequest>,
-) -> Result<(StatusCode, Json<BulkResponse>), ApiErrorResponse> {
+) -> Result<(StatusCode, JsonResponse<BulkResponse>), ApiErrorResponse> {
     // Step 1: Check bulk limit (pure)
     check_bulk_limit(request.tasks.len())?;
 
@@ -594,7 +596,7 @@ pub async fn bulk_create_tasks(
     // Step 7: Aggregate results (pure)
     let response = aggregate_create_results(results);
 
-    Ok((StatusCode::MULTI_STATUS, Json(response)))
+    Ok((StatusCode::MULTI_STATUS, JsonResponse(response)))
 }
 
 // =============================================================================
@@ -633,7 +635,7 @@ pub async fn bulk_create_tasks(
 pub async fn bulk_update_tasks(
     State(state): State<AppState>,
     Json(request): Json<BulkUpdateRequest>,
-) -> Result<(StatusCode, Json<BulkResponse>), ApiErrorResponse> {
+) -> Result<(StatusCode, JsonResponse<BulkResponse>), ApiErrorResponse> {
     // Step 1: Check bulk limit (pure)
     check_bulk_limit(request.updates.len())?;
 
@@ -670,7 +672,7 @@ pub async fn bulk_update_tasks(
     // Step 7: Aggregate results (pure)
     let response = aggregate_update_results(merged.results);
 
-    Ok((StatusCode::MULTI_STATUS, Json(response)))
+    Ok((StatusCode::MULTI_STATUS, JsonResponse(response)))
 }
 
 // =============================================================================
@@ -3171,7 +3173,7 @@ mod tests {
             let result = bulk_create_tasks(State(state.clone()), Json(request)).await;
 
             assert!(result.is_ok());
-            let (status, Json(response)) = result.unwrap();
+            let (status, JsonResponse(response)) = result.unwrap();
             assert_eq!(status, StatusCode::MULTI_STATUS);
             assert_eq!(response.summary.total, 2);
             assert_eq!(response.summary.succeeded, 2);
@@ -3213,7 +3215,7 @@ mod tests {
             let result = bulk_create_tasks(State(state.clone()), Json(request)).await;
 
             assert!(result.is_ok());
-            let (status, Json(response)) = result.unwrap();
+            let (status, JsonResponse(response)) = result.unwrap();
             assert_eq!(status, StatusCode::MULTI_STATUS);
             assert_eq!(response.summary.total, 2);
             assert_eq!(response.summary.succeeded, 2);
@@ -3251,7 +3253,7 @@ mod tests {
             let result = bulk_create_tasks(State(state.clone()), Json(request)).await;
 
             assert!(result.is_ok());
-            let (status, Json(response)) = result.unwrap();
+            let (status, JsonResponse(response)) = result.unwrap();
             assert_eq!(status, StatusCode::MULTI_STATUS);
             assert_eq!(response.summary.total, 10);
             assert_eq!(response.summary.succeeded, 10);
@@ -3296,7 +3298,7 @@ mod tests {
                     result.is_ok(),
                     "use_bulk_optimization={use_bulk_optimization}: should not return error"
                 );
-                let (status, Json(response)) = result.unwrap();
+                let (status, JsonResponse(response)) = result.unwrap();
                 assert_eq!(
                     status,
                     StatusCode::MULTI_STATUS,

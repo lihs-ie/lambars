@@ -1,0 +1,105 @@
+# API JSON シリアライズ最適化 要件定義
+#
+# 概要:
+#   JSON シリアライズ/format の割当を削減し、API 全体の CPU 使用率を抑える。
+#
+# 設計方針:
+#   1. 文字列生成を禁止し、to_writer + バッファ再利用で完結させる
+#   2. 参照透過性を維持し、I/O 境界でのみバッファを扱う
+#   3. 既存レスポンス互換を維持し、差分を計測可能にする
+#
+# 参照:
+#   - benches/results/profiling-investigation.yaml
+#   - benches/results/api-profiling-all-*/production_load/stacks.folded
+#   - benches/api/src/api/handlers.rs
+
+version: "1.0.0"
+name: "api_json_serialization_buffer"
+description: |
+  JSON レスポンスの構築を to_string ベースから to_writer ベースへ移行し、
+  バッファの再利用によりヒープ確保を削減する。
+
+background:
+  problem: |
+    format_inner / format_escaped_str / malloc/cfree が API プロファイルの上位を占め、
+    JSON レスポンスのシリアライズが CPU とメモリを支配している。
+  motivation: |
+    低レイテンシと高スループットを維持するため、
+    レスポンス生成の割当を最小化する必要がある。
+  prior_art:
+    - name: "serde_json::to_writer"
+      description: "中間 String を生成しないシリアライザ。"
+
+requirements:
+  # ======================================================================
+  # 1. 再利用可能な JSON バッファ
+  # ======================================================================
+  - id: "REQ-JSON-BUFFER-001"
+    name: "再利用可能な JSON バッファを提供する"
+    description: |
+      - BytesMut を再利用するバッファプールを導入する。
+      - バッファはスレッドローカルで再利用し、グローバルロックを禁止する。
+      - バッファの最大容量は 1MB とし、超過時は新規確保を許可する。
+
+    methods:
+      - name: "JsonBufferPool::with_buffer"
+        signature: "fn with_buffer<F, R>(f: F) -> R where F: FnOnce(&mut BytesMut) -> R"
+        description: |
+          - 使用後に buffer.clear() を必ず実行する。
+        examples:
+          - description: "シリアライズ例"
+            code: |
+              JsonBufferPool::with_buffer(|buf| {
+                  serde_json::to_writer(buf.writer(), &response).unwrap();
+              });
+
+    implementations:
+      - type: "JsonBufferPool"
+        description: |
+          - thread_local! で BytesMut を保持する。
+          - 1 スレッド内でのみ再利用する。
+
+  # ======================================================================
+  # 2. JSON シリアライズ API
+  # ======================================================================
+  - id: "REQ-JSON-BUFFER-002"
+    name: "中間 String を使わないシリアライズ関数を提供する"
+    description: |
+      - `serialize_json_bytes<T: Serialize>` を追加し、Bytes を返す。
+      - serde_json::to_writer を必ず使用し、to_string の使用を禁止する。
+
+    methods:
+      - name: "serialize_json_bytes"
+        signature: "fn serialize_json_bytes<T: Serialize>(value: &T) -> Result<Bytes, ApiErrorResponse>"
+        description: |
+          - JsonBufferPool を使用し、BytesMut -> Bytes へ変換する。
+          - エラー時は API 標準エラーに変換する。
+        examples:
+          - description: "レスポンス生成"
+            code: |
+              let body = serialize_json_bytes(&response)?;
+              Ok((StatusCode::OK, body))
+
+    implementations:
+      - type: "ResponseBuilder"
+        description: |
+          - Body::from(Bytes) を使用し、chunked 送信を避ける。
+
+non_functional_requirements:
+  performance:
+    - "production_load で format_inner の占有率を 50% 以上削減する。"
+    - "JSON 生成時の malloc/cfree を 30% 以上削減する。"
+  compatibility:
+    - "JSON 出力のフィールド順序は serde_json の既存順序を維持する。"
+  testing:
+    - "既存レスポンスとの JSON 文字列一致テストを追加する。"
+    - "バッファ再利用時に残留データが混入しないことをテストする。"
+
+future_extensions:
+  - id: "EXT-JSON-BUFFER-001"
+    name: "高速シリアライザの選択"
+    description: |
+      simd-json/sonic-rs を feature flag で切り替え、
+      ベンチ結果に応じて採用する。
+    rationale: |
+      互換性と依存関係の検証が必要なため、段階的導入とする。

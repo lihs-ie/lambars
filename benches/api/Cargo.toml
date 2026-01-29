@@ -32,6 +32,9 @@ sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "uuid", "chro
 deadpool-redis = { version = "0.18", features = ["rt_tokio_1"] }
 redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
 
+# Buffer management
+bytes = "1.10"
+
 # Utilities
 uuid = { version = "1.11", features = ["v4", "v7", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
@@ -62,6 +65,7 @@ rstest = "0.24"
 proptest = "1.5"
 tokio-test = "0.4"
 tempfile = "3"
+http-body-util = "0.1"
 
 [lib]
 name = "task_management_benchmark_api"

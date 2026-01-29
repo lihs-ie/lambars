@@ -25,6 +25,7 @@ use task_management_benchmark_api::domain::{
 
 use axum::Json;
 use axum::extract::{Path, Query, State};
+use task_management_benchmark_api::api::JsonResponse;
 
 // =============================================================================
 // GET /tasks/{id}/history Tests
@@ -55,7 +56,7 @@ async fn test_get_task_history_uses_event_store() {
 
     // 4. Verify the response
     assert!(result.is_ok(), "get_task_history should succeed");
-    let Json(response) = result.unwrap();
+    let JsonResponse(response) = result.unwrap();
 
     // 5. Verify task_id matches
     assert_eq!(response.task_id, task.task_id.to_string());
@@ -143,7 +144,7 @@ async fn test_get_task_history_pagination() {
     .await;
 
     assert!(result.is_ok());
-    let Json(response) = result.unwrap();
+    let JsonResponse(response) = result.unwrap();
 
     assert_eq!(response.events.len(), 1, "Should return only 1 event");
     assert_eq!(response.total_events, 2, "Total should be 2 events");
@@ -182,7 +183,7 @@ async fn test_search_tasks_uses_repository_search() {
     .await;
 
     assert!(result.is_ok(), "search_tasks should succeed");
-    let Json(response) = result.unwrap();
+    let JsonResponse(response) = result.unwrap();
 
     // Should find 3 tasks with "task" in the title
     assert_eq!(response.len(), 3, "Should find 3 tasks");
@@ -219,7 +220,7 @@ async fn test_search_tasks_no_results() {
     .await;
 
     assert!(result.is_ok());
-    let Json(response) = result.unwrap();
+    let JsonResponse(response) = result.unwrap();
     assert!(response.is_empty(), "Should return empty list");
 }
 
@@ -261,7 +262,7 @@ async fn test_aggregate_sources_handles_failure() {
         result.is_ok(),
         "aggregate_sources should succeed when primary works"
     );
-    let Json(response) = result.unwrap();
+    let JsonResponse(response) = result.unwrap();
 
     // Verify sources_used and sources_failed
     assert!(
@@ -369,7 +370,7 @@ async fn test_list_tasks_filtered_by_status() {
     .await;
 
     assert!(result.is_ok(), "list_tasks should succeed");
-    let Json(response) = result.unwrap();
+    let JsonResponse(response) = result.unwrap();
 
     // Should return only pending tasks
     assert_eq!(response.data.len(), 2, "Should find 2 pending tasks");
@@ -427,7 +428,7 @@ async fn test_list_tasks_filtered_by_priority() {
     .await;
 
     assert!(result.is_ok());
-    let Json(response) = result.unwrap();
+    let JsonResponse(response) = result.unwrap();
 
     // Should return only high priority tasks
     assert_eq!(response.data.len(), 2, "Should find 2 high priority tasks");
@@ -475,7 +476,7 @@ async fn test_list_tasks_combined_filters() {
     .await;
 
     assert!(result.is_ok());
-    let Json(response) = result.unwrap();
+    let JsonResponse(response) = result.unwrap();
 
     // Should return only the task that matches both filters
     assert_eq!(
@@ -507,7 +508,7 @@ async fn test_create_task_writes_to_event_store() {
     let result = create_task(State(state.clone()), Json(request)).await;
 
     assert!(result.is_ok(), "create_task should succeed");
-    let (status, Json(response)) = result.unwrap();
+    let (status, JsonResponse(response)) = result.unwrap();
     assert_eq!(status, axum::http::StatusCode::CREATED);
 
     // Parse the task ID from response

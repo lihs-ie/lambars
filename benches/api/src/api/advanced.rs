@@ -19,6 +19,8 @@ use axum::{
     Json,
     extract::{Path, Query, State},
 };
+
+use super::json_buffer::JsonResponse;
 use lambars::control::{Continuation, Lazy};
 use lambars::effect::AsyncIO;
 use lambars::for_async;
@@ -628,7 +630,7 @@ pub async fn get_task_history(
     State(state): State<AppState>,
     Path(task_id): Path<String>,
     Query(query): Query<HistoryQuery>,
-) -> Result<Json<TaskHistoryResponse>, ApiErrorResponse> {
+) -> Result<JsonResponse<TaskHistoryResponse>, ApiErrorResponse> {
     // Parse and validate task ID
     let task_id = parse_task_id(&task_id)?;
 
@@ -680,7 +682,7 @@ pub async fn get_task_history(
         }
     };
 
-    Ok(Json(response))
+    Ok(JsonResponse(response))
 }
 
 // =============================================================================
@@ -730,7 +732,7 @@ pub async fn get_task_history(
 pub async fn transform_task(
     State(state): State<AppState>,
     Json(request): Json<TransformRequest>,
-) -> Result<Json<TransformResponse>, ApiErrorResponse> {
+) -> Result<JsonResponse<TransformResponse>, ApiErrorResponse> {
     // Parse and validate task ID
     let task_id = parse_task_id(&request.task_id)?;
 
@@ -770,14 +772,14 @@ pub async fn transform_task(
                 .await
                 .map_err(ApiErrorResponse::from)?;
 
-            Ok(Json(TransformResponse {
+            Ok(JsonResponse(TransformResponse {
                 success: true,
                 task: Some(response),
                 applied_transformations: applied,
                 error: None,
             }))
         }
-        Err(error_msg) => Ok(Json(TransformResponse {
+        Err(error_msg) => Ok(JsonResponse(TransformResponse {
             success: false,
             task: None,
             applied_transformations: applied,
@@ -823,7 +825,7 @@ pub async fn transform_task(
 pub async fn async_pipeline(
     State(state): State<AppState>,
     Json(request): Json<AsyncPipelineRequest>,
-) -> Result<Json<AsyncPipelineResponse>, ApiErrorResponse> {
+) -> Result<JsonResponse<AsyncPipelineResponse>, ApiErrorResponse> {
     // Validate batch size
     if request.task_ids.len() > MAX_PIPELINE_BATCH_SIZE {
         return Err(ApiErrorResponse::bad_request(
@@ -928,7 +930,7 @@ pub async fn async_pipeline(
     let successful = results.iter().filter(|r| r.success).count();
     let failed = results.len() - successful;
 
-    Ok(Json(AsyncPipelineResponse {
+    Ok(JsonResponse(AsyncPipelineResponse {
         results,
         total_processed: request.task_ids.len(),
         successful,
@@ -1119,7 +1121,7 @@ fn compute_batch_validation_scores_async(
 pub async fn lazy_compute(
     State(state): State<AppState>,
     Json(request): Json<LazyComputeRequest>,
-) -> Result<Json<LazyComputeResponse>, ApiErrorResponse> {
+) -> Result<JsonResponse<LazyComputeResponse>, ApiErrorResponse> {
     // Parse and validate task ID
     let task_id = parse_task_id(&request.task_id)?;
 
@@ -1184,7 +1186,7 @@ pub async fn lazy_compute(
         }
     };
 
-    Ok(Json(LazyComputeResponse {
+    Ok(JsonResponse(LazyComputeResponse {
         task_id: request.task_id,
         computation_type: request.computation,
         result,

@@ -19,6 +19,8 @@ use axum::{
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
 };
+
+use super::json_buffer::JsonResponse;
 use lambars::control::Trampoline;
 use lambars::effect::Reader;
 use lambars::typeclass::{Foldable, Monoid, Semigroup};
@@ -706,7 +708,7 @@ fn parse_project_id(id: &str) -> Result<ProjectId, ApiErrorResponse> {
 pub async fn create_project_handler(
     State(state): State<AppState>,
     Json(request): Json<CreateProjectRequest>,
-) -> Result<(StatusCode, Json<ProjectResponse>), ApiErrorResponse> {
+) -> Result<(StatusCode, JsonResponse<ProjectResponse>), ApiErrorResponse> {
     // Step 1: Validate using Applicative pattern (accumulates all errors)
     let validated = match validate_create_project(&request) {
         Ok(v) => v,
@@ -735,7 +737,7 @@ pub async fn create_project_handler(
         .await
         .map_err(ApiErrorResponse::from)?;
 
-    Ok((StatusCode::CREATED, Json(response)))
+    Ok((StatusCode::CREATED, JsonResponse(response)))
 }
 
 // =============================================================================
@@ -767,7 +769,7 @@ pub async fn create_project_handler(
 pub async fn get_project_handler(
     State(state): State<AppState>,
     Path(project_id): Path<String>,
-) -> Result<(HeaderMap, Json<ProjectDetailResponse>), ApiErrorResponse> {
+) -> Result<(HeaderMap, JsonResponse<ProjectDetailResponse>), ApiErrorResponse> {
     let project_id = parse_project_id(&project_id)?;
 
     let cache_result = state
@@ -786,7 +788,7 @@ pub async fn get_project_handler(
     let response = build_detail_response(project).run(state.config.clone());
     let headers = build_cache_headers(cache_status, CacheSource::Redis);
 
-    Ok((headers, Json(response)))
+    Ok((headers, JsonResponse(response)))
 }
 
 // =============================================================================
@@ -821,7 +823,7 @@ pub async fn get_project_handler(
 pub async fn get_project_progress_handler(
     State(state): State<AppState>,
     Path(project_id): Path<String>,
-) -> Result<Json<ProjectProgressResponse>, ApiErrorResponse> {
+) -> Result<JsonResponse<ProjectProgressResponse>, ApiErrorResponse> {
     let project_id = parse_project_id(&project_id)?;
 
     let project = state
@@ -843,7 +845,7 @@ pub async fn get_project_progress_handler(
 
     let completion = calculate_completion(&progress);
 
-    Ok(Json(ProjectProgressResponse {
+    Ok(JsonResponse(ProjectProgressResponse {
         project_id: project_id.to_string(),
         total_tasks: progress.total,
         pending_tasks: progress.pending,
@@ -884,7 +886,7 @@ pub async fn get_project_progress_handler(
 pub async fn get_project_stats_handler(
     State(state): State<AppState>,
     Path(project_id): Path<String>,
-) -> Result<Json<ProjectStatsResponse>, ApiErrorResponse> {
+) -> Result<JsonResponse<ProjectStatsResponse>, ApiErrorResponse> {
     let project_id = parse_project_id(&project_id)?;
 
     let project = state
@@ -901,7 +903,7 @@ pub async fn get_project_stats_handler(
         .map(|(_, summary)| task_to_all_stats(summary))
         .fold(ProjectStats::empty(), Semigroup::combine);
 
-    Ok(Json(ProjectStatsResponse {
+    Ok(JsonResponse(ProjectStatsResponse {
         project_id: project_id.to_string(),
         total_tasks: aggregated.status.total,
         status_counts: StatusCountsResponse::from(aggregated.status),
@@ -1726,7 +1728,7 @@ mod handler_tests {
         .await;
 
         assert!(result.is_ok());
-        let (headers, response) = result.unwrap();
+        let (headers, JsonResponse(response)) = result.unwrap();
 
         // Verify response data
         assert_eq!(response.project_id, project.project_id.to_string());

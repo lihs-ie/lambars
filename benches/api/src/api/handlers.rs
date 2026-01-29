@@ -24,6 +24,8 @@ use axum::{
     extract::{Path, State},
     http::{HeaderMap, HeaderValue, StatusCode},
 };
+
+use super::json_buffer::JsonResponse;
 use lambars::control::Either;
 use lambars::persistent::PersistentVector;
 use uuid::Uuid;
@@ -687,7 +689,7 @@ async fn backfill_existing_tasks(
 pub async fn create_task(
     State(state): State<AppState>,
     Json(request): Json<CreateTaskRequest>,
-) -> Result<(StatusCode, Json<TaskResponse>), ApiErrorResponse> {
+) -> Result<(StatusCode, JsonResponse<TaskResponse>), ApiErrorResponse> {
     // Step 1: Validate using Either (demonstrates Monad chaining)
     let validated = validate_create_request(&request)?;
 
@@ -722,7 +724,7 @@ pub async fn create_task(
     // Step 5: Update search index with the new task (lock-free write)
     state.update_search_index(TaskChange::Add(task));
 
-    Ok((StatusCode::CREATED, Json(response)))
+    Ok((StatusCode::CREATED, JsonResponse(response)))
 }
 
 // =============================================================================
@@ -844,7 +846,7 @@ fn build_task(ids: TaskIds, validated: ValidatedCreateTask) -> Task {
 pub async fn get_task(
     State(state): State<AppState>,
     Path(task_id): Path<Uuid>,
-) -> Result<(HeaderMap, Json<TaskResponse>), ApiErrorResponse> {
+) -> Result<(HeaderMap, JsonResponse<TaskResponse>), ApiErrorResponse> {
     // Step 1: Convert Uuid to TaskId (pure)
     let task_id = TaskId::from_uuid(task_id);
 
@@ -878,7 +880,7 @@ pub async fn get_task(
     // Step 6: Build cache headers (pure transformation)
     let headers = build_cache_headers(cache_status, CacheSource::Redis);
 
-    Ok((headers, Json(response)))
+    Ok((headers, JsonResponse(response)))
 }
 
 /// Builds HTTP headers for cache status (X-Cache, X-Cache-Status, X-Cache-Source).
@@ -1031,8 +1033,8 @@ pub struct HealthResponse {
 ///   "version": "0.1.0"
 /// }
 /// ```
-pub async fn health_check() -> Json<HealthResponse> {
-    Json(HealthResponse {
+pub async fn health_check() -> JsonResponse<HealthResponse> {
+    JsonResponse(HealthResponse {
         status: "healthy",
         version: env!("CARGO_PKG_VERSION"),
     })
@@ -1253,7 +1255,7 @@ mod tests {
 
         // Assert
         assert!(result.is_ok());
-        let (headers, Json(response)) = result.unwrap();
+        let (headers, JsonResponse(response)) = result.unwrap();
         assert_eq!(response.title, "Test Task");
         assert_eq!(response.description, Some("Test description".to_string()));
         assert_eq!(response.priority, super::super::dto::PriorityDto::High);
@@ -1323,7 +1325,7 @@ mod tests {
 
         // Assert
         assert!(result.is_ok());
-        let (_headers, Json(response)) = result.unwrap();
+        let (_headers, JsonResponse(response)) = result.unwrap();
         assert_eq!(response.id, task_id.to_string());
         assert_eq!(response.title, "Complete Task");
         assert_eq!(
@@ -1358,7 +1360,7 @@ mod tests {
 
         // Assert
         assert!(result.is_ok());
-        let (_headers, Json(response)) = result.unwrap();
+        let (_headers, JsonResponse(response)) = result.unwrap();
         assert_eq!(response.title, "Integration Test Task");
     }
 
@@ -1956,5 +1958,233 @@ mod tests {
         let tasks = result.tasks();
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks.iter().next().unwrap().task_id, task.task_id);
+    }
+
+    // -------------------------------------------------------------------------
+    // health_check Handler Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_health_check_response() {
+        use axum::http::header;
+        use axum::response::IntoResponse;
+
+        // Act
+        let response = health_check().await.into_response();
+
+        // Assert: Status code should be 200 OK
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Assert: Content-Type should be application/json
+        let content_type = response.headers().get(header::CONTENT_TYPE);
+        assert!(content_type.is_some(), "Content-Type header should be set");
+        assert_eq!(
+            content_type.unwrap().to_str().unwrap(),
+            "application/json",
+            "Content-Type should be application/json"
+        );
+
+        // Assert: Body should be valid JSON with expected fields
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("Failed to read response body");
+        let health: serde_json::Value =
+            serde_json::from_slice(&body).expect("Failed to parse response body as JSON");
+        assert_eq!(health["status"], "healthy");
+        assert_eq!(health["version"], env!("CARGO_PKG_VERSION"));
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_health_check_returns_service_version() {
+        // Act
+        let JsonResponse(response) = health_check().await;
+
+        // Assert
+        assert_eq!(response.version, env!("CARGO_PKG_VERSION"));
+    }
+
+    // -------------------------------------------------------------------------
+    // create_task Handler Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_create_task_returns_201_with_valid_request() {
+        use axum::http::header;
+        use axum::response::IntoResponse;
+
+        // Arrange
+        let state = create_default_app_state();
+        let request = CreateTaskRequest {
+            title: "New Task".to_string(),
+            description: Some("Task description".to_string()),
+            priority: super::super::dto::PriorityDto::High,
+            tags: vec!["backend".to_string(), "urgent".to_string()],
+        };
+
+        // Act
+        let result = create_task(State(state), Json(request)).await;
+
+        // Assert
+        assert!(result.is_ok(), "create_task should succeed");
+        let (status, json_response) = result.unwrap();
+        assert_eq!(status, StatusCode::CREATED);
+
+        // Verify the combined response (StatusCode, JsonResponse) returns 201
+        let response = (status, json_response).into_response();
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        // Verify Content-Type header
+        let content_type = response.headers().get(header::CONTENT_TYPE);
+        assert!(content_type.is_some());
+        assert_eq!(content_type.unwrap().to_str().unwrap(), "application/json");
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_create_task_response_body_contains_expected_fields() {
+        // Arrange
+        let state = create_default_app_state();
+        let request = CreateTaskRequest {
+            title: "Test Task Title".to_string(),
+            description: Some("Test description".to_string()),
+            priority: super::super::dto::PriorityDto::Critical,
+            tags: vec!["tag1".to_string()],
+        };
+
+        // Act
+        let result = create_task(State(state), Json(request)).await;
+
+        // Assert
+        assert!(result.is_ok());
+        let (status, JsonResponse(response)) = result.unwrap();
+        assert_eq!(status, StatusCode::CREATED);
+
+        // Verify response fields
+        assert_eq!(response.title, "Test Task Title");
+        assert_eq!(response.description, Some("Test description".to_string()));
+        assert_eq!(response.priority, super::super::dto::PriorityDto::Critical);
+        assert_eq!(response.tags, vec!["tag1".to_string()]);
+        assert_eq!(response.status, super::super::dto::TaskStatusDto::Pending);
+        assert_eq!(response.version, 1);
+
+        // ID should be a valid UUID
+        assert!(
+            uuid::Uuid::parse_str(&response.id).is_ok(),
+            "Response ID should be a valid UUID"
+        );
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_create_task_adds_task_to_search_index() {
+        // Arrange
+        let state = create_default_app_state();
+        let request = CreateTaskRequest {
+            title: "Searchable Task".to_string(),
+            description: None,
+            priority: super::super::dto::PriorityDto::Medium,
+            tags: vec![],
+        };
+
+        // Act
+        let result = create_task(State(state.clone()), Json(request)).await;
+
+        // Assert
+        assert!(result.is_ok());
+        let (_, JsonResponse(response)) = result.unwrap();
+
+        // Verify task is findable in search index
+        let index = state.search_index.load();
+        let search_result = index.search_by_title("Searchable");
+        assert!(search_result.is_some(), "Task should be in search index");
+
+        let result_ref = search_result.unwrap();
+        let tasks = result_ref.tasks();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(
+            tasks.iter().next().unwrap().task_id.to_string(),
+            response.id
+        );
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_create_task_returns_400_with_empty_title() {
+        // Arrange
+        let state = create_default_app_state();
+        let request = CreateTaskRequest {
+            title: String::new(),
+            description: None,
+            priority: super::super::dto::PriorityDto::Low,
+            tags: vec![],
+        };
+
+        // Act
+        let result = create_task(State(state), Json(request)).await;
+
+        // Assert
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_create_task_returns_400_with_invalid_tag() {
+        // Arrange
+        let state = create_default_app_state();
+        let request = CreateTaskRequest {
+            title: "Valid Title".to_string(),
+            description: None,
+            priority: super::super::dto::PriorityDto::Low,
+            tags: vec![String::new()], // Empty tag is invalid
+        };
+
+        // Act
+        let result = create_task(State(state), Json(request)).await;
+
+        // Assert
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_create_task_saves_to_repository() {
+        // Arrange
+        let state = create_default_app_state();
+        let request = CreateTaskRequest {
+            title: "Persisted Task".to_string(),
+            description: Some("Should be saved".to_string()),
+            priority: super::super::dto::PriorityDto::High,
+            tags: vec![],
+        };
+
+        // Act
+        let result = create_task(State(state.clone()), Json(request)).await;
+
+        // Assert
+        assert!(result.is_ok());
+        let (_, JsonResponse(response)) = result.unwrap();
+
+        // Verify task was saved to repository
+        let task_id = TaskId::from_uuid(
+            uuid::Uuid::parse_str(&response.id).expect("Response ID should be a valid UUID"),
+        );
+        let found_task = state
+            .task_repository
+            .find_by_id(&task_id)
+            .run_async()
+            .await
+            .expect("Repository should not fail")
+            .expect("Task should be found in repository");
+
+        assert_eq!(found_task.title, "Persisted Task");
+        assert_eq!(found_task.description, Some("Should be saved".to_string()));
+        assert_eq!(found_task.priority, Priority::High);
     }
 }

@@ -16,10 +16,9 @@
 //!
 //! - `GET /demo/tasks/{id}/history`: Mock task event history
 
-use axum::{
-    Json,
-    extract::{Path, Query, State},
-};
+use axum::extract::{Path, Query, State};
+
+use super::json_buffer::JsonResponse;
 use lambars::control::Continuation;
 use lambars::persistent::PersistentList;
 
@@ -188,7 +187,7 @@ pub async fn get_task_history_demo(
     State(state): State<AppState>,
     Path(task_id): Path<String>,
     Query(query): Query<HistoryQuery>,
-) -> Result<Json<TaskHistoryResponse>, ApiErrorResponse> {
+) -> Result<JsonResponse<TaskHistoryResponse>, ApiErrorResponse> {
     // Parse and validate task ID
     let task_id = parse_task_id(&task_id)?;
 
@@ -233,7 +232,7 @@ pub async fn get_task_history_demo(
         }
     };
 
-    Ok(Json(response))
+    Ok(JsonResponse(response))
 }
 
 // =============================================================================

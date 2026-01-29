@@ -16,6 +16,8 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::State;
+
+use super::json_buffer::JsonResponse;
 use serde::{Deserialize, Serialize};
 
 use lambars::effect::AsyncIO;
@@ -301,7 +303,7 @@ fn parse_priority(s: &str) -> Result<Priority, String> {
 #[allow(clippy::unused_async)]
 pub async fn validate_batch(
     Json(request): Json<ValidateBatchRequest>,
-) -> Result<Json<ValidateBatchResponse>, ApiErrorResponse> {
+) -> Result<JsonResponse<ValidateBatchResponse>, ApiErrorResponse> {
     // Validate batch size
     if request.tasks.is_empty() {
         return Err(ApiErrorResponse::validation_error(
@@ -339,7 +341,7 @@ pub async fn validate_batch(
         })
         .collect();
 
-    Ok(Json(ValidateBatchResponse {
+    Ok(JsonResponse(ValidateBatchResponse {
         validated_tasks: validated_dtos,
         count,
         traversable_operations: count,
@@ -419,7 +421,7 @@ fn validate_single_task(
 pub async fn fetch_batch(
     State(state): State<AppState>,
     Json(request): Json<FetchBatchRequest>,
-) -> Result<Json<FetchBatchResponse>, ApiErrorResponse> {
+) -> Result<JsonResponse<FetchBatchResponse>, ApiErrorResponse> {
     // Validate batch size
     if request.task_ids.is_empty() {
         return Err(ApiErrorResponse::validation_error(
@@ -471,7 +473,7 @@ pub async fn fetch_batch(
     let count = tasks.len();
     let task_responses: Vec<TaskResponse> = tasks.iter().map(TaskResponse::from).collect();
 
-    Ok(Json(FetchBatchResponse {
+    Ok(JsonResponse(FetchBatchResponse {
         tasks: task_responses,
         count,
         parallel_fetch: true,
@@ -529,7 +531,7 @@ fn build_parallel_fetch_io(
 pub async fn collect_optional(
     State(state): State<AppState>,
     Json(request): Json<CollectOptionalRequest>,
-) -> Result<Json<CollectOptionalResponse>, ApiErrorResponse> {
+) -> Result<JsonResponse<CollectOptionalResponse>, ApiErrorResponse> {
     // Validate batch size
     if request.task_ids.is_empty() {
         return Err(ApiErrorResponse::validation_error(
@@ -592,7 +594,7 @@ pub async fn collect_optional(
     let total_count = tasks.len();
     let (status, values, present_count) = collect_optional_fields(&tasks, &request.field);
 
-    Ok(Json(CollectOptionalResponse {
+    Ok(JsonResponse(CollectOptionalResponse {
         status,
         values,
         present_count,
@@ -655,7 +657,7 @@ fn extract_optional_field(task: &Task, field: &str) -> Option<String> {
 pub async fn execute_sequential(
     State(state): State<AppState>,
     Json(request): Json<ExecuteSequentialRequest>,
-) -> Result<Json<ExecuteSequentialResponse>, ApiErrorResponse> {
+) -> Result<JsonResponse<ExecuteSequentialResponse>, ApiErrorResponse> {
     // Validate batch size
     if request.operations.is_empty() {
         return Err(ApiErrorResponse::validation_error(
@@ -687,7 +689,7 @@ pub async fn execute_sequential(
     let results: Vec<OperationResult> = execution_io.run_async().await;
     let processed_count = results.len();
 
-    Ok(Json(ExecuteSequentialResponse {
+    Ok(JsonResponse(ExecuteSequentialResponse {
         processed_count,
         results,
     }))
@@ -956,7 +958,7 @@ async fn execute_add_tag(
 pub async fn enrich_batch(
     State(state): State<AppState>,
     Json(request): Json<EnrichBatchRequest>,
-) -> Result<Json<EnrichBatchResponse>, ApiErrorResponse> {
+) -> Result<JsonResponse<EnrichBatchResponse>, ApiErrorResponse> {
     // Validate batch size
     if request.task_ids.is_empty() {
         return Err(ApiErrorResponse::validation_error(
@@ -1015,7 +1017,7 @@ pub async fn enrich_batch(
 
     let count = enriched_tasks.len();
 
-    Ok(Json(EnrichBatchResponse {
+    Ok(JsonResponse(EnrichBatchResponse {
         tasks: enriched_tasks,
         count,
     }))

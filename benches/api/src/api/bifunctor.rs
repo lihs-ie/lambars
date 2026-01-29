@@ -18,6 +18,8 @@ use std::time::Instant;
 
 use axum::Json;
 use axum::extract::State;
+
+use super::json_buffer::JsonResponse;
 use serde::{Deserialize, Serialize};
 
 use lambars::typeclass::Bifunctor;
@@ -564,7 +566,7 @@ fn simulate_domain_operation(
 pub async fn process_with_error_transform(
     State(state): State<AppState>,
     Json(request): Json<ProcessWithErrorTransformRequest>,
-) -> Result<Json<ProcessWithErrorTransformResponse>, ApiErrorResponse> {
+) -> Result<JsonResponse<ProcessWithErrorTransformResponse>, ApiErrorResponse> {
     let start = Instant::now();
 
     // Parse task ID
@@ -604,7 +606,7 @@ pub async fn process_with_error_transform(
 
     let processing_time_ms = start.elapsed().as_millis() as u64;
 
-    Ok(Json(ProcessWithErrorTransformResponse {
+    Ok(JsonResponse(ProcessWithErrorTransformResponse {
         result,
         processing_time_ms,
     }))
@@ -634,7 +636,7 @@ pub async fn process_with_error_transform(
 pub async fn transform_pair(
     State(state): State<AppState>,
     Json(request): Json<TransformPairRequest>,
-) -> Result<Json<TransformPairResponse>, ApiErrorResponse> {
+) -> Result<JsonResponse<TransformPairResponse>, ApiErrorResponse> {
     // Parse task ID
     let task_id = parse_task_id(&request.task_id).map_err(|error| {
         ApiErrorResponse::validation_error(
@@ -676,7 +678,7 @@ pub async fn transform_pair(
         }
     };
 
-    Ok(Json(TransformPairResponse {
+    Ok(JsonResponse(TransformPairResponse {
         task: task_response,
         metadata: metadata_response,
         transform_applied: transform_applied.to_string(),
@@ -706,7 +708,7 @@ pub async fn transform_pair(
 pub async fn enrich_error(
     State(state): State<AppState>,
     Json(request): Json<EnrichErrorRequest>,
-) -> Result<Json<EnrichErrorResponse>, ApiErrorResponse> {
+) -> Result<JsonResponse<EnrichErrorResponse>, ApiErrorResponse> {
     // Parse task ID
     let task_id = parse_task_id(&request.task_id).map_err(|error| {
         ApiErrorResponse::validation_error(
@@ -762,7 +764,7 @@ pub async fn enrich_error(
         ),
     };
 
-    Ok(Json(EnrichErrorResponse {
+    Ok(JsonResponse(EnrichErrorResponse {
         result,
         enrichment_applied,
     }))
@@ -791,7 +793,7 @@ pub async fn enrich_error(
 pub async fn convert_error_domain(
     State(_state): State<AppState>,
     Json(request): Json<ConvertErrorDomainRequest>,
-) -> Result<Json<ConvertErrorDomainResponse>, ApiErrorResponse> {
+) -> Result<JsonResponse<ConvertErrorDomainResponse>, ApiErrorResponse> {
     // Get timestamp at system boundary
     let timestamp = Timestamp::now();
 
@@ -826,7 +828,7 @@ pub async fn convert_error_domain(
         Err(api_error) => DomainConvertResult::Failure { error: api_error },
     };
 
-    Ok(Json(ConvertErrorDomainResponse {
+    Ok(JsonResponse(ConvertErrorDomainResponse {
         result,
         original_error_type,
     }))
@@ -854,7 +856,7 @@ pub async fn convert_error_domain(
 pub async fn batch_transform_results(
     State(state): State<AppState>,
     Json(request): Json<BatchTransformResultsRequest>,
-) -> Result<Json<BatchTransformResultsResponse>, ApiErrorResponse> {
+) -> Result<JsonResponse<BatchTransformResultsResponse>, ApiErrorResponse> {
     // Validate request
     if request.task_ids.is_empty() {
         return Err(ApiErrorResponse::validation_error(
@@ -920,7 +922,7 @@ pub async fn batch_transform_results(
         .count();
     let failure_count = results.len() - success_count;
 
-    Ok(Json(BatchTransformResultsResponse {
+    Ok(JsonResponse(BatchTransformResultsResponse {
         results,
         success_count,
         failure_count,
