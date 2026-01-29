@@ -1298,6 +1298,30 @@ format_error_rate_json() {
     }'
 }
 
+# Helper: Validate latency value is valid (non-empty, numeric, positive, non-zero)
+# Returns 0 (success) if valid, 1 (failure) if invalid
+# Per REQ-PROFILE-JSON-002: 0ms latency is invalid (physically impossible)
+is_valid_latency() {
+    local value="$1"
+
+    # Empty or null values are invalid
+    [[ -z "${value}" || "${value}" == "null" ]] && return 1
+
+    # Validate numeric format: optional minus, digits, optional decimal point and digits
+    # Reject non-numeric values like "N/A", "1ms", "nan", "inf"
+    # Note: Rejects exponential notation (1e-3) and plus signs (+1.23) as wrk outputs
+    # standard decimal notation only (e.g., "1.23", "0.45")
+    [[ ! "${value}" =~ ^-?[0-9]*\.?[0-9]+$ ]] && return 1
+
+    # Check if value is 0 (0, 0.0, 0.00, etc.)
+    awk -v val="${value}" 'BEGIN { exit (val + 0 == 0) ? 1 : 0 }' || return 1
+
+    # Check if value is negative
+    awk -v val="${value}" 'BEGIN { exit (val + 0 < 0) ? 1 : 0 }' || return 1
+
+    return 0
+}
+
 # Helper: Format latency value for JSON (number or null)
 # v3: Use null for missing latency values, NOT 0
 # Per REQ-PROFILE-JSON-002: latency of 0 is considered "unavailable" and converted to null.
@@ -1305,34 +1329,14 @@ format_error_rate_json() {
 format_latency_json() {
     local value="$1"
 
-    # Empty values become null
-    if [[ -z "${value}" ]]; then
-        echo "null"
-        return
-    fi
-
-    # Validate numeric format: optional minus, digits, optional decimal point and digits
-    # Reject non-numeric values like "N/A", "1ms", "nan", "inf"
-    if ! [[ "${value}" =~ ^-?[0-9]*\.?[0-9]+$ ]]; then
-        echo "null"
-        return
-    fi
-
-    # Use awk for numeric comparison (handles 0, 0.0, 0.00, 0.0000, etc.)
-    # Per REQ-PROFILE-JSON-002: 0 is NOT allowed for latency, convert to null
-    if awk -v val="${value}" 'BEGIN { exit (val + 0 == 0) ? 0 : 1 }'; then
-        echo "null"
-        return
-    fi
-
-    # Negative latency is physically impossible, convert to null
-    if awk -v val="${value}" 'BEGIN { exit (val + 0 < 0) ? 0 : 1 }'; then
+    # Use is_valid_latency for unified validation logic
+    if ! is_valid_latency "${value}"; then
         echo "null"
         return
     fi
 
     # Normalize the numeric format to ensure valid JSON
-    # Use awk to output with proper formatting (handles .123 -> 0.123, -.123 -> -0.123)
+    # Use awk to output with proper formatting (handles .123 -> 0.123)
     awk -v val="${value}" 'BEGIN { printf "%.6f", val + 0 }'
 }
 
@@ -1570,18 +1574,19 @@ generate_meta_json() {
         return 1
     fi
 
-    # Store validation result to capture missing percentile details
+    # Store validation result to capture missing/invalid percentile details
+    # Check for missing, zero, or invalid values (per REQ-PROFILE-JSON-002)
     local missing_percentiles=()
-    [[ -z "${p50_ms}" || "${p50_ms}" == "null" ]] && missing_percentiles+=("p50")
-    [[ -z "${p95_ms}" || "${p95_ms}" == "null" ]] && missing_percentiles+=("p95")
-    [[ -z "${p99_ms}" || "${p99_ms}" == "null" ]] && missing_percentiles+=("p99")
+    is_valid_latency "${p50_ms}" || missing_percentiles+=("p50")
+    is_valid_latency "${p95_ms}" || missing_percentiles+=("p95")
+    is_valid_latency "${p99_ms}" || missing_percentiles+=("p99")
 
     if ! validate_required_percentiles "${p50_ms}" "${p95_ms}" "${p99_ms}" "${total_requests}"; then
         # Determine failure reason for summary.txt
         if [[ ! "${total_requests}" =~ ^(0|[1-9][0-9]*)$ ]]; then
             echo "Benchmark failed: invalid total_requests value (${total_requests})" >> "${SUMMARY_FILE:-/dev/null}"
         elif [[ ${#missing_percentiles[@]} -gt 0 ]]; then
-            echo "Benchmark failed: percentile data unavailable (missing: ${missing_percentiles[*]})" >> "${SUMMARY_FILE:-/dev/null}"
+            echo "Benchmark failed: percentile data missing/zero/invalid (${missing_percentiles[*]})" >> "${SUMMARY_FILE:-/dev/null}"
         else
             echo "Benchmark failed: percentile validation error" >> "${SUMMARY_FILE:-/dev/null}"
         fi
@@ -1946,13 +1951,16 @@ validate_required_percentiles() {
     fi
 
     local missing=()
-    [[ -z "${p50}" || "${p50}" == "null" ]] && missing+=("p50")
-    [[ -z "${p95}" || "${p95}" == "null" ]] && missing+=("p95")
-    [[ -z "${p99}" || "${p99}" == "null" ]] && missing+=("p99")
+    # Check for missing, zero, or invalid values (per REQ-PROFILE-JSON-002)
+    # Validate: non-empty, numeric, positive, non-zero
+    is_valid_latency "${p50}" || missing+=("p50")
+    is_valid_latency "${p95}" || missing+=("p95")
+    is_valid_latency "${p99}" || missing+=("p99")
 
     if [[ ${#missing[@]} -gt 0 ]]; then
-        echo -e "${RED}ERROR: Required percentiles missing: ${missing[*]}${NC}" >&2
-        echo "  wrk output may not contain latency distribution." >&2
+        echo -e "${RED}ERROR: Required percentiles missing/zero/invalid: ${missing[*]}${NC}" >&2
+        echo "  Percentiles must be non-empty, numeric, positive, and non-zero." >&2
+        echo "  wrk output may not contain latency distribution or values may be invalid." >&2
         echo "  Ensure wrk is configured with --latency flag." >&2
         return 1
     fi
