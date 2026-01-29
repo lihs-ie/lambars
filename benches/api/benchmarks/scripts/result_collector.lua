@@ -24,6 +24,10 @@
 
 local M = {}
 
+-- Sentinel value for null representation in JSON/YAML
+-- Lua tables cannot hold nil values, so we use a unique table as a sentinel
+M.NULL = {}
+
 -- Attempt to load cache_metrics module (optional dependency)
 local cache_metrics_ok, cache_metrics = pcall(require, "cache_metrics")
 if not cache_metrics_ok then
@@ -103,20 +107,20 @@ M.results = {
         stddev_ms = 0,
         -- Percentiles
         percentiles = {
-            p50 = 0,
-            p75 = 0,
-            p90 = 0,
-            p95 = 0,
-            p99 = 0,
-            p99_9 = 0
+            p50 = M.NULL,
+            p75 = M.NULL,
+            p90 = M.NULL,
+            p95 = M.NULL,
+            p99 = M.NULL,
+            p99_9 = M.NULL
         },
         -- Legacy percentile fields
-        p50_ms = 0,
-        p75_ms = 0,
-        p90_ms = 0,
-        p95_ms = 0,
-        p99_ms = 0,
-        p999_ms = 0
+        p50_ms = M.NULL,
+        p75_ms = M.NULL,
+        p90_ms = M.NULL,
+        p95_ms = M.NULL,
+        p99_ms = M.NULL,
+        p999_ms = M.NULL
     },
     -- Throughput metrics
     throughput = {
@@ -456,6 +460,8 @@ function M.finalize(summary, latency, requests)
         M.results.latency.stddev_ms = latency.stdev / 1000
 
         -- Percentiles in microseconds (extended format)
+        -- NOTE: latency:percentile() returns nil if data is insufficient
+        -- Use M.NULL sentinel to ensure keys are present in JSON/YAML output
         local p50 = latency:percentile(50)
         local p75 = latency:percentile(75)
         local p90 = latency:percentile(90)
@@ -464,21 +470,50 @@ function M.finalize(summary, latency, requests)
         local p999 = latency:percentile(99.9)
 
         M.results.latency.percentiles = {
-            p50 = p50,
-            p75 = p75,
-            p90 = p90,
-            p95 = p95,
-            p99 = p99,
-            p99_9 = p999
+            p50 = p50 or M.NULL,
+            p75 = p75 or M.NULL,
+            p90 = p90 or M.NULL,
+            p95 = p95 or M.NULL,
+            p99 = p99 or M.NULL,
+            p99_9 = p999 or M.NULL
         }
 
         -- Percentiles in milliseconds (legacy format)
-        M.results.latency.p50_ms = p50 / 1000
-        M.results.latency.p75_ms = p75 / 1000
-        M.results.latency.p90_ms = p90 / 1000
-        M.results.latency.p95_ms = p95 / 1000
-        M.results.latency.p99_ms = p99 / 1000
-        M.results.latency.p999_ms = p999 / 1000
+        -- Convert to milliseconds only if value is not nil
+        M.results.latency.p50_ms = p50 and (p50 / 1000) or M.NULL
+        M.results.latency.p75_ms = p75 and (p75 / 1000) or M.NULL
+        M.results.latency.p90_ms = p90 and (p90 / 1000) or M.NULL
+        M.results.latency.p95_ms = p95 and (p95 / 1000) or M.NULL
+        M.results.latency.p99_ms = p99 and (p99 / 1000) or M.NULL
+        M.results.latency.p999_ms = p999 and (p999 / 1000) or M.NULL
+    else
+        -- latency object not available, reset all latency metrics to prevent
+        -- data pollution from previous runs in the same Lua VM
+        M.results.latency.min_us = 0
+        M.results.latency.max_us = 0
+        M.results.latency.mean_us = 0
+        M.results.latency.stdev_us = 0
+        M.results.latency.min_ms = 0
+        M.results.latency.max_ms = 0
+        M.results.latency.mean_ms = 0
+        M.results.latency.stddev_ms = 0
+
+        -- Reset percentiles to M.NULL
+        -- This ensures percentile keys remain in output with null values
+        M.results.latency.percentiles = {
+            p50 = M.NULL,
+            p75 = M.NULL,
+            p90 = M.NULL,
+            p95 = M.NULL,
+            p99 = M.NULL,
+            p99_9 = M.NULL
+        }
+        M.results.latency.p50_ms = M.NULL
+        M.results.latency.p75_ms = M.NULL
+        M.results.latency.p90_ms = M.NULL
+        M.results.latency.p95_ms = M.NULL
+        M.results.latency.p99_ms = M.NULL
+        M.results.latency.p999_ms = M.NULL
     end
 
     -- Collect cache metrics if available
@@ -617,6 +652,11 @@ end
 
 -- Helper to encode table as JSON
 function M.encode_table_json(tbl)
+    -- Check for NULL sentinel
+    if tbl == M.NULL then
+        return "null"
+    end
+
     if type(tbl) ~= "table" then
         if type(tbl) == "string" then
             return '"' .. tbl:gsub('\\', '\\\\'):gsub('"', '\\"'):gsub('\n', '\\n') .. '"'
@@ -653,7 +693,10 @@ function M.format_yaml()
 
     local function add_line(indent, key, value)
         local prefix = string.rep("  ", indent)
-        if value == nil then
+        -- Check for NULL sentinel
+        if value == M.NULL then
+            table.insert(lines, string.format("%s%s: null", prefix, key))
+        elseif value == nil then
             table.insert(lines, string.format("%s%s:", prefix, key))
         elseif type(value) == "table" then
             table.insert(lines, string.format("%s%s:", prefix, key))
@@ -696,12 +739,12 @@ function M.format_yaml()
     add_line(1, "max_ms", string.format("%.2f", M.results.latency.max_ms))
     add_line(1, "mean_ms", string.format("%.2f", M.results.latency.mean_ms))
     add_line(1, "stddev_ms", string.format("%.2f", M.results.latency.stddev_ms))
-    add_line(1, "p50_ms", string.format("%.2f", M.results.latency.p50_ms))
-    add_line(1, "p75_ms", string.format("%.2f", M.results.latency.p75_ms))
-    add_line(1, "p90_ms", string.format("%.2f", M.results.latency.p90_ms))
-    add_line(1, "p95_ms", string.format("%.2f", M.results.latency.p95_ms))
-    add_line(1, "p99_ms", string.format("%.2f", M.results.latency.p99_ms))
-    add_line(1, "p999_ms", string.format("%.2f", M.results.latency.p999_ms))
+    add_line(1, "p50_ms", M.results.latency.p50_ms)
+    add_line(1, "p75_ms", M.results.latency.p75_ms)
+    add_line(1, "p90_ms", M.results.latency.p90_ms)
+    add_line(1, "p95_ms", M.results.latency.p95_ms)
+    add_line(1, "p99_ms", M.results.latency.p99_ms)
+    add_line(1, "p999_ms", M.results.latency.p999_ms)
 
     add_line(0, "payload")
     add_line(1, "variant", M.results.payload.variant or "unknown")
@@ -781,12 +824,12 @@ function M.format_text()
     table.insert(lines, string.format("StdDev: %.2f", M.results.latency.stddev_ms))
     table.insert(lines, "")
     table.insert(lines, "Percentiles:")
-    table.insert(lines, string.format("  p50:   %.2f", M.results.latency.p50_ms))
-    table.insert(lines, string.format("  p75:   %.2f", M.results.latency.p75_ms))
-    table.insert(lines, string.format("  p90:   %.2f", M.results.latency.p90_ms))
-    table.insert(lines, string.format("  p95:   %.2f", M.results.latency.p95_ms))
-    table.insert(lines, string.format("  p99:   %.2f", M.results.latency.p99_ms))
-    table.insert(lines, string.format("  p99.9: %.2f", M.results.latency.p999_ms))
+    table.insert(lines, string.format("  p50:   %s", (M.results.latency.p50_ms ~= M.NULL and type(M.results.latency.p50_ms) == "number") and string.format("%.2f", M.results.latency.p50_ms) or "N/A"))
+    table.insert(lines, string.format("  p75:   %s", (M.results.latency.p75_ms ~= M.NULL and type(M.results.latency.p75_ms) == "number") and string.format("%.2f", M.results.latency.p75_ms) or "N/A"))
+    table.insert(lines, string.format("  p90:   %s", (M.results.latency.p90_ms ~= M.NULL and type(M.results.latency.p90_ms) == "number") and string.format("%.2f", M.results.latency.p90_ms) or "N/A"))
+    table.insert(lines, string.format("  p95:   %s", (M.results.latency.p95_ms ~= M.NULL and type(M.results.latency.p95_ms) == "number") and string.format("%.2f", M.results.latency.p95_ms) or "N/A"))
+    table.insert(lines, string.format("  p99:   %s", (M.results.latency.p99_ms ~= M.NULL and type(M.results.latency.p99_ms) == "number") and string.format("%.2f", M.results.latency.p99_ms) or "N/A"))
+    table.insert(lines, string.format("  p99.9: %s", (M.results.latency.p999_ms ~= M.NULL and type(M.results.latency.p999_ms) == "number") and string.format("%.2f", M.results.latency.p999_ms) or "N/A"))
     table.insert(lines, "")
 
     table.insert(lines, "--- Payload ---")
