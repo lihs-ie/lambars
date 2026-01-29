@@ -1,0 +1,139 @@
+# ベンチ出力品質改善 要件定義
+#
+# 概要:
+#   ベンチ出力の JSON 破損と percentile 欠落を修正し、
+#   回帰検知の信頼性を高める。
+#
+# 設計方針:
+#   1. JSON は必ず schema に準拠させ、CI で検証する
+#   2. p50/p95/p99 を必須化し、欠落を許容しない
+#   3. プロファイルの [unknown] を最小化する
+#
+# 参照:
+#   - benches/results/profiling-investigation.yaml
+#   - benches/results/api-profiling-all-*/tasks_update/benchmark/meta/tasks_update.json
+#   - benches/results/api-profiling-all-*/large_scale_read/benchmark/summary.txt
+
+version: "1.0.0"
+name: "profiling_data_quality"
+description: |
+  ベンチ出力における invalid JSON と percentile 欠落を修正し、
+  CI での自動検証を必須化する。
+
+background:
+  problem: |
+    error_rate が ".415222" のように出力され、JSON として無効。
+    summary.txt の P99 が欠落し、性能の判断が不能になっている。
+  motivation: |
+    改善の成果を定量化し、回帰を検知できる状態にする。
+  prior_art:
+    - name: "API benchmark summary"
+      description: "summary.txt / meta.json 生成ロジック"
+
+requirements:
+  # ======================================================================
+  # 1. JSON 出力の正規化
+  # ======================================================================
+  - id: "REQ-PROFILE-JSON-001"
+    name: "meta.json を必ず有効な JSON として出力する"
+    description: |
+      - 小数は必ず 0.x 形式で出力する。
+      - JSON 生成後に schema 検証を行い、失敗時はベンチを失敗させる。
+
+    methods:
+      - name: "generate_meta_json"
+        signature: "fn generate_meta_json(result_file: &str, script_name: &str) -> Result<(), MetaError>"
+        description: |
+          - 手書き文字列連結を禁止し、jq -n もしくは python の json で出力する。
+          - error_rate などの小数は先頭 0 を補完する。
+
+    implementations:
+      - type: "Benchmark metadata writer"
+        description: |
+          - 実装対象: benches/api/benchmarks/run_benchmark.sh の generate_meta_json。
+          - error_rate は数値として扱い、.123 のような無効 JSON を禁止する。
+      - type: "Schema validation"
+        description: |
+          - benches/api/benchmarks/validate_meta_schema.sh をベンチ終了時に必ず実行する。
+          - スキーマ不一致はベンチ失敗扱いとする。
+
+  # ======================================================================
+  # 2. percentile の必須化
+  # ======================================================================
+  - id: "REQ-PROFILE-JSON-002"
+    name: "p50/p95/p99 を必須化する"
+    description: |
+      - wrk 出力から percentile を抽出し、summary.txt に必ず記録する。
+      - 計測不能な場合はベンチ失敗扱いとする。
+      - lua_metrics.json の percentile 欠落は null とし、0 を禁止する。
+
+    methods:
+      - name: "parse_wrk_percentiles"
+        signature: "fn parse_wrk_percentiles(text: &str) -> Result<Percentiles, ParseError>"
+        description: |
+          - 欠落時は Err を返し、summary 生成を中断する。
+
+    implementations:
+      - type: "Summary generator"
+        description: |
+          - 実装対象: benches/api/benchmarks/run_benchmark.sh の summary 出力。
+          - p50/p95/p99 が空なら exit 1 とする。
+      - type: "Lua metrics formatter"
+        description: |
+          - 実装対象: benches/api/benchmarks/scripts/result_collector.lua。
+          - percentiles は欠落時に null を出力し、0 は使わない。
+
+  # ======================================================================
+  # 3. [unknown] シンボルの削減
+  # ======================================================================
+  - id: "REQ-PROFILE-JSON-003"
+    name: "perf の [unknown] を削減する"
+    description: |
+      - release ベンチでも debuginfo を有効化する。
+      - perf record は --call-graph dwarf を使用する。
+
+    methods:
+      - name: "configure_perf"
+        signature: "fn configure_perf() -> PerfConfig"
+        description: |
+          - call-graph と debuginfo の設定を統一する。
+          - run_benchmark.sh と scripts/profile.sh の設定を同一化する。
+
+non_functional_requirements:
+  performance:
+    - "ベンチ出力の検証で 5% 以上のオーバーヘッドを許容しない。"
+  compatibility:
+    - "既存の summary.txt フォーマットは維持し、項目追加のみ許可する。"
+  testing:
+    - "meta.json の JSON schema 検証を CI で必須化する。"
+    - "summary.txt の percentiles 欠落をテストで検出する。"
+
+future_extensions:
+  - id: "EXT-PROFILE-001"
+    name: "ベンチ結果の自動可視化"
+    description: |
+      ベンチ結果を CI で収集し、差分ダッシュボードを生成する。
+    rationale: |
+      まずは出力品質の安定化を優先する。
+
+implementation_plan:
+  - step: "meta.json 生成の正規化"
+    details: |
+      run_benchmark.sh の generate_meta_json を jq -n もしくは python json 出力に統一する。
+      error_rate/p50/p95/p99 の小数は先頭 0 を補完し、無効 JSON を排除する。
+  - step: "summary の percentile 欠落検知"
+    details: |
+      run_benchmark.sh の summary 出力で p50/p95/p99 が欠落した場合は exit 1 とする。
+      欠落時はベンチ失敗扱いで終了する。
+  - step: "lua_metrics の null 対応"
+    details: |
+      result_collector.lua の percentile 初期値を null に変更し、
+      欠落時の 0 出力を禁止する。
+  - step: "perf 設定の統一"
+    details: |
+      run_benchmark.sh と scripts/profile.sh の perf record を --call-graph dwarf に統一する。
+      release プロファイルの debuginfo を明示し、[unknown] を最小化する。
+  - step: "schema 検証の必須化"
+    details: |
+      validate_meta_schema.sh をベンチ終了時に必ず実行し、
+      失敗時はベンチを失敗させる。
