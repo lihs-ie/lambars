@@ -35,7 +35,9 @@ use super::dto::{
     CreateTaskRequest, TaskResponse, validate_description, validate_tags, validate_title,
 };
 use super::error::ApiErrorResponse;
-use super::query::{SearchCache, SearchIndex, TaskChange};
+use super::query::{
+    SearchCache, SearchIndex, SearchIndexConfig, TaskChange, measure_search_index_build,
+};
 use crate::domain::{EventId, Priority, Tag, Task, TaskId, Timestamp, create_task_created_event};
 use crate::infrastructure::{
     CacheStatus, EventStore, ExternalDataSource, ExternalSources, Pagination, ProjectRepository,
@@ -326,8 +328,43 @@ impl AppState {
             .await?;
 
         // Build the search index from all tasks (pure function)
+        // If SEARCH_INDEX_METRICS_PATH is set, measure build performance and output metrics
         let tasks: PersistentVector<Task> = all_tasks.items.clone().into_iter().collect();
-        let search_index = SearchIndex::build(&tasks);
+        let metrics_output_path = std::env::var("SEARCH_INDEX_METRICS_PATH").ok();
+
+        let search_index = metrics_output_path.as_ref().map_or_else(
+            || SearchIndex::build(&tasks),
+            |path| {
+                // Measure build with performance metrics (I/O boundary)
+                let (index, metrics) =
+                    measure_search_index_build(&tasks, SearchIndexConfig::default());
+
+                // Write metrics to JSON file
+                if let Ok(json) = serde_json::to_string_pretty(&metrics) {
+                    let output_path = std::path::Path::new(path);
+                    if let Some(parent) = output_path.parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    if let Err(error) = std::fs::write(output_path, json) {
+                        tracing::warn!(
+                            path = %path,
+                            %error,
+                            "Failed to write SearchIndex build metrics"
+                        );
+                    } else {
+                        tracing::info!(
+                            path = %path,
+                            elapsed_ms = metrics.elapsed_ms,
+                            peak_rss_mb = metrics.peak_rss_mb,
+                            ngram_entries = metrics.ngram_entries,
+                            "SearchIndex build metrics written"
+                        );
+                    }
+                }
+
+                index
+            },
+        );
 
         // Perform backfill processing (unless SKIP_BACKFILL=true)
         let skip_backfill = std::env::var("SKIP_BACKFILL")
@@ -414,6 +451,69 @@ impl AppState {
             let updated = current.apply_change(change.clone());
             Arc::new(updated)
         });
+    }
+
+    /// Updates the search index with multiple task changes in a single RCU operation.
+    ///
+    /// This method atomically applies all changes in a single RCU update, reducing
+    /// CAS (Compare-And-Swap) retries compared to calling `update_search_index`
+    /// individually for each change.
+    ///
+    /// # Arguments
+    ///
+    /// * `changes` - A vector of `TaskChange` items to apply (Add, Update, or Remove).
+    ///   If empty, returns immediately without modifying the index.
+    ///
+    /// # Concurrency
+    ///
+    /// The `rcu` method provides atomic updates:
+    /// 1. Read current value
+    /// 2. Apply all transformations in a single pass (copy with modifications)
+    /// 3. Attempt CAS to replace the old value
+    /// 4. If CAS fails (another thread updated), retry from step 1
+    ///
+    /// By batching changes into a single RCU operation, this method minimizes
+    /// the number of CAS retries during bulk processing.
+    ///
+    /// # Timing Logs
+    ///
+    /// Emits a `tracing::info` log with timing breakdown:
+    /// - `change_count`: Number of changes processed
+    /// - `apply_changes_us`: Time spent in `apply_changes` (microseconds)
+    /// - `total_us`: Total elapsed time (microseconds)
+    /// - `total_ms`: Total elapsed time (milliseconds)
+    ///
+    /// # Performance
+    ///
+    /// Uses `SearchIndex::apply_changes` internally, which computes a
+    /// `SearchIndexDelta` to batch index modifications efficiently.
+    #[allow(clippy::needless_pass_by_value)] // Ownership semantics preferred for API consistency
+    pub fn update_search_index_batch(&self, changes: Vec<TaskChange>) {
+        if changes.is_empty() {
+            return;
+        }
+
+        let change_count = changes.len();
+        let total_start = std::time::Instant::now();
+        let mut apply_changes_us: u128 = 0;
+
+        self.search_index.rcu(|current| {
+            let apply_start = std::time::Instant::now();
+            let updated = current.apply_changes(&changes);
+            apply_changes_us = apply_start.elapsed().as_micros();
+            Arc::new(updated)
+        });
+
+        let total_elapsed = total_start.elapsed();
+
+        tracing::info!(
+            target: "search_index_batch",
+            change_count = change_count,
+            apply_changes_us = apply_changes_us,
+            total_us = total_elapsed.as_micros(),
+            total_ms = total_elapsed.as_millis(),
+            "update_search_index_batch completed"
+        );
     }
 
     /// Increments cache counter based on status (CACHE-REQ-021). Bypass does not increment.
@@ -1706,5 +1806,155 @@ mod tests {
             .await
             .expect("Failed to find task");
         assert!(find_result.is_none());
+    }
+
+    // -------------------------------------------------------------------------
+    // update_search_index_batch Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn test_update_search_index_batch_applies_all_changes() {
+        // Arrange
+        let state = create_default_app_state();
+        let task1 = Task::new(TaskId::generate(), "First Task", Timestamp::now());
+        let task2 = Task::new(TaskId::generate(), "Second Task", Timestamp::now());
+        let task3 = Task::new(TaskId::generate(), "Third Task", Timestamp::now());
+
+        let changes = vec![
+            TaskChange::Add(task1.clone()),
+            TaskChange::Add(task2.clone()),
+            TaskChange::Add(task3.clone()),
+        ];
+
+        // Act
+        state.update_search_index_batch(changes);
+
+        // Assert: Verify that all tasks were added to the search index
+        let index = state.search_index.load();
+
+        // Search for each task by title using search_by_title
+        let results1 = index.search_by_title("First");
+        let results2 = index.search_by_title("Second");
+        let results3 = index.search_by_title("Third");
+
+        // Verify each search returns a result and extract tasks
+        let result1 = results1.expect("First task should be findable");
+        let result2 = results2.expect("Second task should be findable");
+        let result3 = results3.expect("Third task should be findable");
+
+        // Get task references
+        let tasks1 = result1.tasks();
+        let tasks2 = result2.tasks();
+        let tasks3 = result3.tasks();
+
+        assert_eq!(tasks1.len(), 1);
+        assert_eq!(tasks2.len(), 1);
+        assert_eq!(tasks3.len(), 1);
+        assert_eq!(tasks1.iter().next().unwrap().task_id, task1.task_id);
+        assert_eq!(tasks2.iter().next().unwrap().task_id, task2.task_id);
+        assert_eq!(tasks3.iter().next().unwrap().task_id, task3.task_id);
+    }
+
+    #[rstest]
+    fn test_update_search_index_batch_with_empty_changes_returns_immediately() {
+        // Arrange
+        let state = create_default_app_state();
+
+        // Add an initial task to verify index is not modified
+        let initial_task = Task::new(TaskId::generate(), "Initial Task", Timestamp::now());
+        state.update_search_index(TaskChange::Add(initial_task.clone()));
+
+        // Act: Call with empty vector
+        state.update_search_index_batch(vec![]);
+
+        // Assert: Index should still contain the initial task
+        let index_after = state.search_index.load();
+        let results = index_after.search_by_title("Initial");
+
+        let result = results.expect("Initial task should still be findable");
+        let tasks = result.tasks();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks.iter().next().unwrap().task_id, initial_task.task_id);
+    }
+
+    #[rstest]
+    fn test_update_search_index_batch_with_mixed_operations() {
+        // Arrange
+        let state = create_default_app_state();
+
+        // Add initial tasks
+        let task_to_update = Task::new(TaskId::generate(), "Update Me", Timestamp::now());
+        let task_to_remove = Task::new(TaskId::generate(), "Remove Me", Timestamp::now());
+        state.update_search_index(TaskChange::Add(task_to_update.clone()));
+        state.update_search_index(TaskChange::Add(task_to_remove.clone()));
+
+        // Prepare batch with mixed operations
+        let task_to_add = Task::new(TaskId::generate(), "New Task", Timestamp::now());
+        let updated_task = task_to_update
+            .clone()
+            .with_description("Updated description");
+
+        let changes = vec![
+            TaskChange::Add(task_to_add.clone()),
+            TaskChange::Update {
+                old: task_to_update,
+                new: updated_task.clone(),
+            },
+            TaskChange::Remove(task_to_remove.task_id),
+        ];
+
+        // Act
+        state.update_search_index_batch(changes);
+
+        // Assert
+        let index = state.search_index.load();
+
+        // New task should be findable
+        let new_result = index
+            .search_by_title("New")
+            .expect("New task should be findable");
+        let new_tasks = new_result.tasks();
+        assert_eq!(new_tasks.len(), 1);
+        assert_eq!(
+            new_tasks.iter().next().unwrap().task_id,
+            task_to_add.task_id
+        );
+
+        // Updated task should still be findable (title unchanged)
+        let update_result = index
+            .search_by_title("Update")
+            .expect("Updated task should be findable");
+        let update_tasks = update_result.tasks();
+        assert_eq!(update_tasks.len(), 1);
+        assert_eq!(
+            update_tasks.iter().next().unwrap().task_id,
+            updated_task.task_id
+        );
+
+        // Removed task should not be findable
+        let remove_results = index.search_by_title("Remove");
+        assert!(
+            remove_results.is_none(),
+            "Removed task should not be findable"
+        );
+    }
+
+    #[rstest]
+    fn test_update_search_index_batch_single_change() {
+        // Arrange
+        let state = create_default_app_state();
+        let task = Task::new(TaskId::generate(), "Single Task", Timestamp::now());
+
+        // Act
+        state.update_search_index_batch(vec![TaskChange::Add(task.clone())]);
+
+        // Assert
+        let index = state.search_index.load();
+        let result = index
+            .search_by_title("Single")
+            .expect("Single task should be findable");
+        let tasks = result.tasks();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks.iter().next().unwrap().task_id, task.task_id);
     }
 }

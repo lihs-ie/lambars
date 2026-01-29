@@ -45,6 +45,9 @@ futures = "0.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
+# System calls (for memory profiling)
+libc = "0.2"
+
 # Lock-free data structures
 arc-swap = "1.7"
 
@@ -69,7 +72,9 @@ name = "task-management-benchmark-api"
 path = "src/main.rs"
 
 [lints.rust]
-unsafe_code = "forbid"
+# Note: unsafe_code is "deny" instead of "forbid" to allow specific exceptions
+# like libc::getrusage for peak RSS measurement. Exceptions must have SAFETY comments.
+unsafe_code = "deny"
 
 [lints.clippy]
 all = { level = "warn", priority = -1 }
@@ -80,3 +85,13 @@ must_use_candidate = "allow"
 
 # Exclude from parent workspace (required for standalone build in CI)
 [workspace]
+
+# Release profile with debug symbols for profiling (REQ-PROFILE-JSON-003)
+[profile.release]
+lto = "fat"
+codegen-units = 1
+opt-level = 3
+# Line tables only (debug = 1) - required for perf/flamegraph symbol resolution
+# Note: Does not include inline info or full debug info. Consider debug = 2
+# for detailed profiling, but increases binary size (~30-50%) and build time.
+debug = 1

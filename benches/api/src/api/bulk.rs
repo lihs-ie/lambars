@@ -580,12 +580,16 @@ pub async fn bulk_create_tasks(
         }
     }
 
-    // Step 6: Update search index for successfully created tasks (lock-free writes)
-    for result in &results {
-        if let Either::Right(save_result) = result {
-            state.update_search_index(TaskChange::Add(save_result.task.clone()));
-        }
-    }
+    // Step 6: Update search index for successfully created tasks (batch update)
+    let changes: Vec<TaskChange> = results
+        .iter()
+        .filter_map(|result| match result {
+            Either::Right(save_result) => Some(TaskChange::Add(save_result.task.clone())),
+            Either::Left(_) => None,
+        })
+        .collect();
+
+    state.update_search_index_batch(changes);
 
     // Step 7: Aggregate results (pure)
     let response = aggregate_create_results(results);
@@ -651,13 +655,17 @@ pub async fn bulk_update_tasks(
     // Step 5: Merge results with duplicate errors (pure)
     let merged = merge_update_results(&request.updates, unique_results, duplicate_errors);
 
-    // Step 6: Update search index for successfully updated tasks (lock-free writes)
-    for (old_task, new_task) in merged.update_pairs {
-        state.update_search_index(TaskChange::Update {
-            old: old_task,
-            new: new_task,
-        });
-    }
+    // Step 6: Update search index for successfully updated tasks (batch update)
+    let changes: Vec<TaskChange> = merged
+        .update_pairs
+        .iter()
+        .map(|(old_task, new_task)| TaskChange::Update {
+            old: old_task.clone(),
+            new: new_task.clone(),
+        })
+        .collect();
+
+    state.update_search_index_batch(changes);
 
     // Step 7: Aggregate results (pure)
     let response = aggregate_update_results(merged.results);

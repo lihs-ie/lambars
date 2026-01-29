@@ -40,7 +40,7 @@
 #   DATA_SCALE       - 1e2 | 1e4 | 1e6 (maps from small/medium/large) (REQUIRED)
 #   HIT_RATE         - 0-100 (default: 50)
 #   CACHE_STRATEGY   - read-through | write-through | write-behind (default: read-through)
-#   RPS_PROFILE      - constant | ramp_up_down | burst | step_up
+#   RPS_PROFILE      - steady | ramp_up_down | burst | step_up (constant is alias for steady)
 #   THREADS          - wrk threads
 #   CONNECTIONS      - wrk connections
 #   DURATION         - wrk duration
@@ -303,7 +303,7 @@ resolve_scripts_from_scenario() {
 #   cache_mode                        -> CACHE_MODE
 #   data_scale (small/medium/large)   -> DATA_SCALE (1e2/1e4/1e6)
 #   payload_variant or metadata.payload -> PAYLOAD (small/medium/large)
-#   rps_profile (constant/ramp_up_down/burst/step_up) -> RPS_PROFILE, LOAD_PROFILE
+#   rps_profile (steady/ramp_up_down/burst/step_up) -> RPS_PROFILE, LOAD_PROFILE (constant is alias for steady)
 #   threads                           -> THREADS
 #   connections                       -> CONNECTIONS
 #   duration_seconds                  -> DURATION
@@ -401,17 +401,17 @@ load_scenario_env_vars() {
     fi
 
     # RPS profile: Map scenario values to load_profile.lua profile names
-    # Supported profiles: constant, ramp_up_down, burst, step_up
+    # Supported profiles: steady, ramp_up_down, burst, step_up
     local rps_profile
-    rps_profile=$(yq '.rps_profile // "constant"' "${scenario_file}" | tr -d '"')
+    rps_profile=$(yq '.rps_profile // "steady"' "${scenario_file}" | tr -d '"')
     case "${rps_profile}" in
-        "constant")     export RPS_PROFILE="constant" ;;
-        "ramp_up_down") export RPS_PROFILE="ramp_up_down" ;;
-        "burst")        export RPS_PROFILE="burst" ;;
-        "step_up")      export RPS_PROFILE="step_up" ;;
+        "steady"|"constant") export RPS_PROFILE="steady" ;;
+        "ramp_up_down")      export RPS_PROFILE="ramp_up_down" ;;
+        "burst")             export RPS_PROFILE="burst" ;;
+        "step_up")           export RPS_PROFILE="step_up" ;;
         *)
-            echo -e "${YELLOW}WARNING: Unknown rps_profile '${rps_profile}', defaulting to constant${NC}"
-            export RPS_PROFILE="constant"
+            echo -e "${YELLOW}WARNING: Unknown rps_profile '${rps_profile}', defaulting to steady${NC}"
+            export RPS_PROFILE="steady"
             ;;
     esac
     # LOAD_PROFILE is used by Lua scripts (load_profile.lua)
@@ -1189,6 +1189,36 @@ run_warmup
 # Create results directory
 mkdir -p "${RESULTS_DIR}"
 
+# Record benchmark start time for validation overhead calculation (REQ-PROFILE-JSON-001)
+# Use millisecond precision to avoid TOTAL_TIME=0 for short executions
+# Try GNU date first (Linux), fallback to Python for macOS/BSD
+get_timestamp_ms() {
+    # Try GNU date (check if output is numeric milliseconds)
+    local test_output
+    test_output=$(date +%s%3N 2>&1)
+    # Check if output is a valid number (all digits)
+    if [[ "${test_output}" =~ ^[0-9]+$ ]]; then
+        # GNU date (Linux) - output is numeric milliseconds
+        echo "${test_output}"
+    elif command -v python3 >/dev/null 2>&1; then
+        # Python fallback (macOS/BSD) with error handling and validation
+        local python_output
+        python_output=$(python3 -c "import time; print(int(time.time() * 1000))" 2>/dev/null)
+        # Validate python output is numeric
+        if [[ "${python_output}" =~ ^[0-9]+$ ]]; then
+            echo "${python_output}"
+        else
+            # Python failed or returned non-numeric, use seconds * 1000 as fallback
+            echo "$(($(date +%s) * 1000))"
+        fi
+    else
+        # Last resort: seconds * 1000
+        echo "$(($(date +%s) * 1000))"
+    fi
+}
+BENCHMARK_START_TIME=$(get_timestamp_ms)
+BENCHMARK_TIME_UNIT="ms"
+
 # Summary file
 SUMMARY_FILE="${RESULTS_DIR}/summary.txt"
 echo "Benchmark Results - $(date)" > "${SUMMARY_FILE}"
@@ -1226,23 +1256,88 @@ parse_latency_to_ms() {
     esac
 }
 
-# Helper: Format latency value for JSON (number or null)
-# v3: Use null for missing latency values, NOT 0
-format_latency_json() {
+# Helper: Format error_rate value for JSON (number or null)
+# Per JSON schema: error_rate must be in range [0, 1] or null
+# Handles bc output format (.123456 -> 0.123456) and clamps to [0, 1]
+format_error_rate_json() {
     local value="$1"
+    local total_requests="${2:-0}"
 
-    # Empty or non-numeric values become null
+    # Validate total_requests is a positive integer (avoid octal interpretation with 10#)
+    # Pattern: 0 or positive integer without leading zeros (except "0" itself)
+    if ! [[ "${total_requests}" =~ ^(0|[1-9][0-9]*)$ ]]; then
+        echo "null"
+        return
+    fi
+
+    # Use 10# prefix to force decimal interpretation and check > 0
+    if ! ((10#${total_requests} > 0)); then
+        echo "null"
+        return
+    fi
+
+    # Empty value returns null
     if [[ -z "${value}" ]]; then
         echo "null"
         return
     fi
 
-    # Use awk for numeric comparison (handles 0, 0.0, 0.00, 0.0000, etc.)
-    if awk -v val="${value}" 'BEGIN { exit (val + 0 == 0) ? 0 : 1 }'; then
+    # Validate numeric format for value
+    if ! [[ "${value}" =~ ^-?[0-9]*\.?[0-9]+$ ]]; then
         echo "null"
-    else
-        echo "${value}"
+        return
     fi
+
+    # Normalize and clamp to [0, 1] using awk
+    # awk's printf "%.6f" automatically includes leading zero (0.123, not .123)
+    awk -v val="${value}" 'BEGIN {
+        rate = val + 0
+        if (rate < 0) rate = 0
+        if (rate > 1) rate = 1
+        printf "%.6f", rate
+    }'
+}
+
+# Helper: Validate latency value is valid (non-empty, numeric, positive, non-zero)
+# Returns 0 (success) if valid, 1 (failure) if invalid
+# Per REQ-PROFILE-JSON-002: 0ms latency is invalid (physically impossible)
+is_valid_latency() {
+    local value="$1"
+
+    # Empty or null values are invalid
+    [[ -z "${value}" || "${value}" == "null" ]] && return 1
+
+    # Validate numeric format: optional minus, digits, optional decimal point and digits
+    # Reject non-numeric values like "N/A", "1ms", "nan", "inf"
+    # Note: Rejects exponential notation (1e-3) and plus signs (+1.23) as wrk outputs
+    # standard decimal notation only (e.g., "1.23", "0.45")
+    [[ ! "${value}" =~ ^-?[0-9]*\.?[0-9]+$ ]] && return 1
+
+    # Check if value is 0 (0, 0.0, 0.00, etc.)
+    awk -v val="${value}" 'BEGIN { exit (val + 0 == 0) ? 1 : 0 }' || return 1
+
+    # Check if value is negative
+    awk -v val="${value}" 'BEGIN { exit (val + 0 < 0) ? 1 : 0 }' || return 1
+
+    return 0
+}
+
+# Helper: Format latency value for JSON (number or null)
+# v3: Use null for missing latency values, NOT 0
+# Per REQ-PROFILE-JSON-002: latency of 0 is considered "unavailable" and converted to null.
+# This is because a true 0ms latency is physically impossible and indicates measurement failure.
+format_latency_json() {
+    local value="$1"
+
+    # Use is_valid_latency for unified validation logic
+    if ! is_valid_latency "${value}"; then
+        echo "null"
+        return
+    fi
+
+    # Normalize the numeric format to ensure valid JSON
+    # Use awk to output with proper formatting (handles .123 -> 0.123)
+    awk -v val="${value}" 'BEGIN { printf "%.6f", val + 0 }'
 }
 
 generate_meta_json() {
@@ -1254,27 +1349,27 @@ generate_meta_json() {
     # Parse wrk output for metrics
     # Note: Use anchored patterns to avoid matching percentages in other contexts
     # (e.g., "75.99%" in Latency line should not match "99%" pattern)
-    local rps avg_latency_raw p50_raw p95_raw p99_raw total_requests
+    local rps avg_latency_raw p50_raw p90_raw p99_raw total_requests
     rps=$(grep "Requests/sec:" "${result_file}" 2>/dev/null | awk '{print $2}' || echo "0")
     avg_latency_raw=$(grep "Latency" "${result_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
-    p50_raw=$(grep -E "^[[:space:]]+50%" "${result_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
-    p95_raw=$(grep -E "^[[:space:]]+95%" "${result_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
-    p99_raw=$(grep -E "^[[:space:]]+99%" "${result_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
+    p50_raw=$(grep -E "^[[:space:]]+50[.0-9]*%" "${result_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
+    p90_raw=$(grep -E "^[[:space:]]+90[.0-9]*%" "${result_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
+    p99_raw=$(grep -E "^[[:space:]]+99[.0-9]*%" "${result_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
     total_requests=$(grep -m1 "requests in" "${result_file}" 2>/dev/null | awk '{print $1}' || echo "0")
     [[ ! "${total_requests}" =~ ^[0-9]+$ ]] && total_requests=0
 
     # v3: Convert latency strings to milliseconds numbers
-    local avg_latency_ms p50_ms p95_ms p99_ms
+    local avg_latency_ms p50_ms p90_ms p99_ms
     avg_latency_ms=$(parse_latency_to_ms "${avg_latency_raw}")
     p50_ms=$(parse_latency_to_ms "${p50_raw}")
-    p95_ms=$(parse_latency_to_ms "${p95_raw}")
+    p90_ms=$(parse_latency_to_ms "${p90_raw}")
     p99_ms=$(parse_latency_to_ms "${p99_raw}")
 
     # v3: Format for JSON (null for missing values)
-    local avg_latency_json p50_json p95_json p99_json
+    local avg_latency_json p50_json p90_json p99_json
     avg_latency_json=$(format_latency_json "${avg_latency_ms}")
     p50_json=$(format_latency_json "${p50_ms}")
-    p95_json=$(format_latency_json "${p95_ms}")
+    p90_json=$(format_latency_json "${p90_ms}")
     p99_json=$(format_latency_json "${p99_ms}")
 
     # Parse socket errors breakdown
@@ -1322,12 +1417,12 @@ generate_meta_json() {
     # Default cache metrics (will be updated from lua_metrics if available)
     local cache_hit_rate="null" cache_misses="null" cache_hits="null"
 
-    # Check for profiling files
-    local perf_data_path="null" flamegraph_path="null" pprof_path="null"
+    # Check for profiling files (use raw strings, will be converted to JSON via jq)
+    local perf_data_path_raw="" flamegraph_path_raw="" pprof_path_raw=""
     if [[ "${PROFILE_MODE}" == "true" ]]; then
-        [[ -f "${RESULTS_DIR}/perf.data" ]] && perf_data_path="\"perf.data\""
-        [[ -f "${RESULTS_DIR}/flamegraph.svg" ]] && flamegraph_path="\"flamegraph.svg\""
-        [[ -f "${RESULTS_DIR}/pprof.pb.gz" ]] && pprof_path="\"pprof.pb.gz\""
+        [[ -f "${RESULTS_DIR}/perf.data" ]] && perf_data_path_raw="perf.data"
+        [[ -f "${RESULTS_DIR}/flamegraph.svg" ]] && flamegraph_path_raw="flamegraph.svg"
+        [[ -f "${RESULTS_DIR}/pprof.pb.gz" ]] && pprof_path_raw="pprof.pb.gz"
     fi
 
     # Try to read lua_metrics.json if it exists and is valid JSON
@@ -1359,9 +1454,30 @@ generate_meta_json() {
             http_status_json=$(jq -c '.http_status // {}' "${lua_metrics_file}" 2>/dev/null || echo "{}")
         fi
 
-        cache_hit_rate=$(jq -r '.cache.hit_rate // null' "${lua_metrics_file}" 2>/dev/null || echo "null")
-        cache_misses=$(jq -r '.cache.cache_misses // null' "${lua_metrics_file}" 2>/dev/null || echo "null")
-        cache_hits=$(jq -r '.cache.cache_hits // null' "${lua_metrics_file}" 2>/dev/null || echo "null")
+        # Extract cache metrics with type normalization (tonumber? ensures numeric type)
+        local cache_hit_rate_raw cache_misses_raw cache_hits_raw
+        cache_hit_rate_raw=$(jq -r '(.cache.hit_rate | tonumber?) // null' "${lua_metrics_file}" 2>/dev/null || echo "null")
+        cache_misses_raw=$(jq -r '(.cache.cache_misses | tonumber?) // null' "${lua_metrics_file}" 2>/dev/null || echo "null")
+        cache_hits_raw=$(jq -r '(.cache.cache_hits | tonumber?) // null' "${lua_metrics_file}" 2>/dev/null || echo "null")
+
+        # Validate extracted values (handle "nan", "inf", non-numeric strings)
+        if [[ "${cache_hit_rate_raw}" == "null" || "${cache_hit_rate_raw}" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+            cache_hit_rate="${cache_hit_rate_raw}"
+        else
+            cache_hit_rate="null"
+        fi
+
+        if [[ "${cache_misses_raw}" == "null" || "${cache_misses_raw}" =~ ^[0-9]+$ ]]; then
+            cache_misses="${cache_misses_raw}"
+        else
+            cache_misses="null"
+        fi
+
+        if [[ "${cache_hits_raw}" == "null" || "${cache_hits_raw}" =~ ^[0-9]+$ ]]; then
+            cache_hits="${cache_hits_raw}"
+        else
+            cache_hits="null"
+        fi
 
         # v3: Get retries count from lua_metrics
         local retries_raw
@@ -1375,8 +1491,18 @@ generate_meta_json() {
     #   - lua_metrics 4xx+5xx breakdown if available
     #   - wrk's "Non-2xx or 3xx responses" as fallback (also HTTP errors only)
     # Socket errors are reported separately in errors.socket_errors
-    if [[ "${total_requests}" -gt 0 ]]; then
-        error_rate=$(awk -v errors="${http_status_total}" -v total="${total_requests}" 'BEGIN {printf "%.6f", errors / total}')
+    # Use 10# prefix to force decimal interpretation (avoid octal with leading zeros)
+    if ((10#${total_requests:-0} > 0)); then
+        # Calculate error_rate and ensure valid JSON number format
+        # Per JSON schema: error_rate must be in range [0, 1]
+        # Clamp values > 1 to 1.0 (can happen with retry/duplicate counting)
+        # awk's printf "%.6f" automatically includes leading zero (0.123, not .123)
+        error_rate=$(awk -v errors="${http_status_total}" -v total="${total_requests}" 'BEGIN {
+            rate = errors / total
+            if (rate < 0) rate = 0
+            if (rate > 1) rate = 1
+            printf "%.6f", rate
+        }')
     else
         error_rate="null"
     fi
@@ -1398,31 +1524,86 @@ generate_meta_json() {
     fi
 
     # Override metrics with merged values if available (from phased execution)
+    # Track validation status for later use in summary.txt
+    local invalid_total_requests="false"
+
     if [[ -n "${MERGED_RPS:-}" ]]; then
         rps="${MERGED_RPS}"
     fi
     if [[ -n "${MERGED_REQUESTS:-}" ]]; then
-        total_requests="${MERGED_REQUESTS}"
+        # Validate MERGED_REQUESTS is numeric before assignment
+        if [[ "${MERGED_REQUESTS}" =~ ^[0-9]+$ ]]; then
+            total_requests="${MERGED_REQUESTS}"
+        else
+            echo -e "${RED}ERROR: MERGED_REQUESTS is not numeric: ${MERGED_REQUESTS}${NC}" >&2
+            invalid_total_requests="true"
+            total_requests=0
+            # Reset error_rate to null when total_requests is invalid
+            # to maintain data consistency in meta.json
+            error_rate="null"
+        fi
+    fi
+    if [[ -n "${MERGED_P50:-}" ]]; then
+        # MERGED_P50 is already in milliseconds, format for JSON
+        p50_json=$(format_latency_json "${MERGED_P50}")
+        p50_ms="${MERGED_P50}"
+    fi
+    if [[ -n "${MERGED_P90:-}" ]]; then
+        # MERGED_P90 is already in milliseconds, format for JSON
+        p90_json=$(format_latency_json "${MERGED_P90}")
+        p90_ms="${MERGED_P90}"
     fi
     if [[ -n "${MERGED_P99:-}" ]]; then
         # MERGED_P99 is already in milliseconds, format for JSON
         p99_json=$(format_latency_json "${MERGED_P99}")
+        p99_ms="${MERGED_P99}"
     fi
     if [[ -n "${MERGED_ERROR_RATE:-}" ]]; then
-        error_rate="${MERGED_ERROR_RATE}"
+        # Normalize MERGED_ERROR_RATE using format_error_rate_json
+        # This handles bc output format (.123 -> 0.123) and clamps to [0, 1]
+        # Always apply normalized result to maintain consistency with MERGED_REQUESTS
+        # If total_requests is 0/invalid, error_rate becomes null (as expected)
+        error_rate=$(format_error_rate_json "${MERGED_ERROR_RATE}" "${total_requests}")
     fi
 
-    # Prepare phased execution metadata
+    # Validate percentiles (REQ-PROFILE-JSON-002)
+    # Validation is performed after MERGED values are applied to ensure correct values are checked
+    # Check if MERGED_REQUESTS was invalid before validation
+    if [[ "${invalid_total_requests}" == "true" ]]; then
+        echo "Benchmark failed: invalid MERGED_REQUESTS value (not numeric)" >> "${SUMMARY_FILE:-/dev/null}"
+        return 1
+    fi
+
+    # Store validation result to capture missing/invalid percentile details
+    # Check for missing, zero, or invalid values (per REQ-PROFILE-JSON-002)
+    local missing_percentiles=()
+    is_valid_latency "${p50_ms}" || missing_percentiles+=("p50")
+    is_valid_latency "${p90_ms}" || missing_percentiles+=("p90")
+    is_valid_latency "${p99_ms}" || missing_percentiles+=("p99")
+
+    if ! validate_required_percentiles "${p50_ms}" "${p90_ms}" "${p99_ms}" "${total_requests}"; then
+        # Determine failure reason for summary.txt
+        if [[ ! "${total_requests}" =~ ^(0|[1-9][0-9]*)$ ]]; then
+            echo "Benchmark failed: invalid total_requests value (${total_requests})" >> "${SUMMARY_FILE:-/dev/null}"
+        elif [[ ${#missing_percentiles[@]} -gt 0 ]]; then
+            echo "Benchmark failed: percentile data missing/zero/invalid (${missing_percentiles[*]})" >> "${SUMMARY_FILE:-/dev/null}"
+        else
+            echo "Benchmark failed: percentile validation error" >> "${SUMMARY_FILE:-/dev/null}"
+        fi
+        return 1
+    fi
+
+    # Prepare phased execution metadata using jq for safe JSON generation
     local phased_execution_json="null"
     if [[ -n "${MERGED_PHASE_COUNT:-}" && "${MERGED_PHASE_COUNT}" -gt 1 ]]; then
-        phased_execution_json=$(cat << PHASES_EOF
-{
-      "enabled": true,
-      "phase_count": ${MERGED_PHASE_COUNT},
-      "profile": "${RPS_PROFILE:-constant}"
-    }
-PHASES_EOF
-)
+        phased_execution_json=$(jq -n \
+            --argjson phase_count "${MERGED_PHASE_COUNT}" \
+            --arg profile "${RPS_PROFILE:-steady}" \
+            '{
+                "enabled": true,
+                "phase_count": $phase_count,
+                "profile": $profile
+            }')
     fi
 
     # ==========================================================================
@@ -1441,38 +1622,61 @@ PHASES_EOF
     local applied_worker_threads="null" applied_database_pool_size="null" applied_redis_pool_size="null"
     local applied_storage_mode="null" applied_cache_mode="null"
 
-    # Build scenario_requested from current environment variables
-    scenario_requested_json=$(cat << SCENARIO_EOF
-{
-      "worker_threads": ${WORKER_THREADS:-null},
-      "database_pool_size": ${DATABASE_POOL_SIZE:-null},
-      "redis_pool_size": ${REDIS_POOL_SIZE:-null}
-    }
-SCENARIO_EOF
-)
+    # Build scenario_requested from current environment variables using jq
+    # Validate numeric values before passing to --argjson
+    local validated_worker_threads="null"
+    local validated_database_pool_size="null"
+    local validated_redis_pool_size="null"
+
+    if [[ -n "${WORKER_THREADS:-}" && "${WORKER_THREADS}" =~ ^[0-9]+$ ]]; then
+        validated_worker_threads="${WORKER_THREADS}"
+    fi
+    if [[ -n "${DATABASE_POOL_SIZE:-}" && "${DATABASE_POOL_SIZE}" =~ ^[0-9]+$ ]]; then
+        validated_database_pool_size="${DATABASE_POOL_SIZE}"
+    fi
+    if [[ -n "${REDIS_POOL_SIZE:-}" && "${REDIS_POOL_SIZE}" =~ ^[0-9]+$ ]]; then
+        validated_redis_pool_size="${REDIS_POOL_SIZE}"
+    fi
+
+    scenario_requested_json=$(jq -n \
+        --argjson worker_threads "${validated_worker_threads}" \
+        --argjson database_pool_size "${validated_database_pool_size}" \
+        --argjson redis_pool_size "${validated_redis_pool_size}" \
+        '{
+            "worker_threads": $worker_threads,
+            "database_pool_size": $database_pool_size,
+            "redis_pool_size": $redis_pool_size
+        }')
 
     # Try to fetch /debug/config from the API
     local debug_config_response
     if debug_config_response=$(curl -s -f "${API_URL}/debug/config" 2>/dev/null); then
         # Parse the response if jq is available
         if command -v jq &>/dev/null && echo "${debug_config_response}" | jq -e . &>/dev/null; then
-            applied_worker_threads=$(echo "${debug_config_response}" | jq -r '.worker_threads // null')
-            applied_database_pool_size=$(echo "${debug_config_response}" | jq -r '.database_pool_size // null')
-            applied_redis_pool_size=$(echo "${debug_config_response}" | jq -r '.redis_pool_size // null')
-            applied_storage_mode=$(echo "${debug_config_response}" | jq -r '.storage_mode // null')
-            applied_cache_mode=$(echo "${debug_config_response}" | jq -r '.cache_mode // null')
+            # Use jq to normalize types (convert string numbers to numbers, preserve null)
+            # tonumber? converts strings to numbers, or passes through if already a number
+            applied_worker_threads=$(echo "${debug_config_response}" | jq '(.worker_threads | tonumber?) // null')
+            applied_database_pool_size=$(echo "${debug_config_response}" | jq '(.database_pool_size | tonumber?) // null')
+            applied_redis_pool_size=$(echo "${debug_config_response}" | jq '(.redis_pool_size | tonumber?) // null')
+            # For string fields, use -r but handle null specially
+            local storage_mode_raw cache_mode_raw
+            storage_mode_raw=$(echo "${debug_config_response}" | jq -r '.storage_mode // empty')
+            cache_mode_raw=$(echo "${debug_config_response}" | jq -r '.cache_mode // empty')
 
-            # Build applied_env JSON
-            applied_env_json=$(cat << APPLIED_EOF
-{
-      "worker_threads": ${applied_worker_threads},
-      "database_pool_size": ${applied_database_pool_size},
-      "redis_pool_size": ${applied_redis_pool_size},
-      "storage_mode": "${applied_storage_mode}",
-      "cache_mode": "${applied_cache_mode}"
-    }
-APPLIED_EOF
-)
+            # Build applied_env JSON using jq for safe generation
+            applied_env_json=$(jq -n \
+                --argjson worker_threads "${applied_worker_threads}" \
+                --argjson database_pool_size "${applied_database_pool_size}" \
+                --argjson redis_pool_size "${applied_redis_pool_size}" \
+                --arg storage_mode "${storage_mode_raw}" \
+                --arg cache_mode "${cache_mode_raw}" \
+                '{
+                    "worker_threads": $worker_threads,
+                    "database_pool_size": $database_pool_size,
+                    "redis_pool_size": $redis_pool_size,
+                    "storage_mode": (if $storage_mode == "" then null else $storage_mode end),
+                    "cache_mode": (if $cache_mode == "" then null else $cache_mode end)
+                }')
 
             # Detect mismatch between scenario_requested and applied_env
             # Compare only the fields that are in both (worker_threads, database_pool_size, redis_pool_size)
@@ -1507,88 +1711,260 @@ APPLIED_EOF
     fi
 
     # Generate meta.json with schema v3.0
-    cat > "${meta_file}" << EOF
-{
-  "version": "3.0",
+    # Per REQ-PROFILE-JSON-001: Use jq for JSON generation to prevent injection attacks
+    # and ensure valid JSON format (proper escaping of special characters)
+
+    # Prepare timestamp
+    local timestamp
+    timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+    # Prepare lua_metrics file reference (use raw string, will be converted to JSON via jq)
+    local lua_metrics_ref_raw=""
+    if [[ -f "${lua_metrics_file}" ]]; then
+        lua_metrics_ref_raw="lua_metrics.json"
+    fi
+
+    # Validate numeric parameters before passing to --argjson
+    # This prevents jq failures when receiving non-numeric or empty values
+    [[ ! "${THREADS:-}" =~ ^[0-9]+$ ]] && THREADS="2"
+    [[ ! "${CONNECTIONS:-}" =~ ^[0-9]+$ ]] && CONNECTIONS="10"
+    [[ ! "${duration_seconds:-}" =~ ^[0-9]+$ ]] && duration_seconds="30"
+    [[ ! "${total_requests:-}" =~ ^[0-9]+$ ]] && total_requests="0"
+    [[ ! "${cpu_cores:-}" =~ ^[0-9]+$ ]] && cpu_cores="0"
+    [[ ! "${memory_gb:-}" =~ ^[0-9]+$ ]] && memory_gb="0"
+    [[ ! "${retries:-}" =~ ^[0-9]+$ ]] && retries="0"
+    [[ ! "${connect_err:-}" =~ ^[0-9]+$ ]] && connect_err="0"
+    [[ ! "${read_err:-}" =~ ^[0-9]+$ ]] && read_err="0"
+    [[ ! "${write_err:-}" =~ ^[0-9]+$ ]] && write_err="0"
+    [[ ! "${timeout_err:-}" =~ ^[0-9]+$ ]] && timeout_err="0"
+    [[ ! "${socket_errors:-}" =~ ^[0-9]+$ ]] && socket_errors="0"
+    [[ ! "${http_4xx:-}" =~ ^[0-9]+$ ]] && http_4xx="0"
+    [[ ! "${http_5xx:-}" =~ ^[0-9]+$ ]] && http_5xx="0"
+    [[ ! "${http_status_total:-}" =~ ^[0-9]+$ ]] && http_status_total="0"
+
+    # Validate optional numeric parameters (POOL_SIZES, SEED)
+    # These default to null if not set or invalid
+    local validated_pool_sizes="null"
+    local validated_seed="null"
+    if [[ -n "${POOL_SIZES:-}" && "${POOL_SIZES}" =~ ^[0-9]+$ ]]; then
+        validated_pool_sizes="${POOL_SIZES}"
+    fi
+    if [[ -n "${SEED:-}" && "${SEED}" =~ ^[0-9]+$ ]]; then
+        validated_seed="${SEED}"
+    fi
+
+    # Validate floating-point parameters (rps, error_rate)
+    # These can be null, integers, or floats
+    local validated_rps="null"
+    local validated_error_rate="null"
+
+    if [[ -n "${rps:-}" && "${rps}" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+        validated_rps="${rps}"
+    fi
+
+    if [[ -n "${error_rate:-}" && "${error_rate}" != "null" ]]; then
+        if [[ "${error_rate}" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+            validated_error_rate="${error_rate}"
+        fi
+    fi
+
+    # Use jq -n to generate valid JSON with proper escaping
+    # All string values are passed via --arg to ensure proper escaping
+    # Numeric values are passed via --argjson to preserve their type
+    jq -n \
+        --arg version "3.0" \
+        --arg scenario_name "${SCENARIO_NAME:-${script_name}}" \
+        --arg storage_mode "${STORAGE_MODE:-}" \
+        --arg cache_mode "${CACHE_MODE:-}" \
+        --arg data_scale "${DATA_SCALE:-1e4}" \
+        --arg payload_variant "${PAYLOAD:-medium}" \
+        --arg rps_profile "${RPS_PROFILE:-steady}" \
+        --argjson hit_rate "${HIT_RATE:-null}" \
+        --arg cache_strategy "${CACHE_STRATEGY:-read-through}" \
+        --argjson fail_injection "${FAIL_RATE:-null}" \
+        --argjson retry "${RETRY:-false}" \
+        --arg endpoint "${ENDPOINT:-mixed}" \
+        --arg timestamp "${timestamp}" \
+        --argjson threads "${THREADS}" \
+        --argjson connections "${CONNECTIONS}" \
+        --argjson duration_seconds "${duration_seconds}" \
+        --argjson worker_threads "${validated_worker_threads}" \
+        --argjson pool_sizes "${validated_pool_sizes}" \
+        --argjson database_pool_size "${validated_database_pool_size}" \
+        --argjson redis_pool_size "${validated_redis_pool_size}" \
+        --argjson seed "${validated_seed}" \
+        --argjson total_requests "${total_requests:-0}" \
+        --argjson error_rate "${validated_error_rate}" \
+        --argjson rps "${validated_rps}" \
+        --argjson avg_latency "${avg_latency_json}" \
+        --argjson p50 "${p50_json}" \
+        --argjson p90 "${p90_json}" \
+        --argjson p99 "${p99_json}" \
+        --argjson http_status "${http_status_json}" \
+        --argjson retries "${retries}" \
+        --argjson connect_err "${connect_err:-0}" \
+        --argjson read_err "${read_err:-0}" \
+        --argjson write_err "${write_err:-0}" \
+        --argjson timeout_err "${timeout_err:-0}" \
+        --argjson socket_errors "${socket_errors:-0}" \
+        --argjson http_4xx "${http_4xx:-0}" \
+        --argjson http_5xx "${http_5xx:-0}" \
+        --argjson http_status_total "${http_status_total:-0}" \
+        --argjson cache_hit_rate "${cache_hit_rate}" \
+        --argjson cache_misses "${cache_misses}" \
+        --argjson cache_hits "${cache_hits}" \
+        --arg perf_data_path "${perf_data_path_raw}" \
+        --arg flamegraph_path "${flamegraph_path_raw}" \
+        --arg pprof_path "${pprof_path_raw}" \
+        --arg wrk_output_filename "${wrk_output_filename}" \
+        --arg lua_metrics_ref "${lua_metrics_ref_raw}" \
+        --arg api_url "${API_URL}" \
+        --arg rust_version "${rust_version}" \
+        --arg os_name "${os_name}" \
+        --argjson cpu_cores "${cpu_cores}" \
+        --argjson memory_gb "${memory_gb}" \
+        --argjson phased_execution "${phased_execution_json}" \
+        --argjson scenario_requested "${scenario_requested_json}" \
+        --argjson applied_env "${applied_env_json}" \
+        --argjson env_mismatch "${env_mismatch}" \
+        '{
+  "version": $version,
   "scenario": {
-    "name": "${SCENARIO_NAME:-${script_name}}",
-    "storage_mode": "${STORAGE_MODE:-in_memory}",
-    "cache_mode": "${CACHE_MODE:-none}",
-    "data_scale": "${DATA_SCALE:-1e4}",
-    "payload_variant": "${PAYLOAD:-medium}",
-    "rps_profile": "${RPS_PROFILE:-steady}",
-    "hit_rate": ${HIT_RATE:-null},
-    "cache_strategy": "${CACHE_STRATEGY:-read-through}",
-    "fail_injection": ${FAIL_RATE:-null},
-    "retry": ${RETRY:-false},
-    "endpoint": "${ENDPOINT:-mixed}"
+    "name": $scenario_name,
+    "storage_mode": (if $storage_mode == "" then "in_memory" else $storage_mode end),
+    "cache_mode": (if $cache_mode == "" then "none" else $cache_mode end),
+    "data_scale": $data_scale,
+    "payload_variant": $payload_variant,
+    "rps_profile": $rps_profile,
+    "hit_rate": $hit_rate,
+    "cache_strategy": $cache_strategy,
+    "fail_injection": $fail_injection,
+    "retry": $retry,
+    "endpoint": $endpoint
   },
   "execution": {
-    "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-    "threads": ${THREADS},
-    "connections": ${CONNECTIONS},
-    "duration_seconds": ${duration_seconds},
-    "worker_threads": ${WORKER_THREADS:-null},
-    "pool_sizes": ${POOL_SIZES:-null},
-    "database_pool_size": ${DATABASE_POOL_SIZE:-null},
-    "redis_pool_size": ${REDIS_POOL_SIZE:-null},
-    "seed": ${SEED:-null}
+    "timestamp": $timestamp,
+    "threads": $threads,
+    "connections": $connections,
+    "duration_seconds": $duration_seconds,
+    "worker_threads": $worker_threads,
+    "pool_sizes": $pool_sizes,
+    "database_pool_size": $database_pool_size,
+    "redis_pool_size": $redis_pool_size,
+    "seed": $seed
   },
   "results": {
-    "requests": ${total_requests:-0},
-    "duration_seconds": ${duration_seconds},
-    "error_rate": ${error_rate},
-    "rps": ${rps:-null},
+    "requests": $total_requests,
+    "duration_seconds": $duration_seconds,
+    "error_rate": $error_rate,
+    "rps": $rps,
     "latency_ms": {
-      "avg": ${avg_latency_json},
-      "p50": ${p50_json},
-      "p95": ${p95_json},
-      "p99": ${p99_json}
+      "avg": $avg_latency,
+      "p50": $p50,
+      "p90": $p90,
+      "p99": $p99
     },
-    "http_status": ${http_status_json},
-    "retries": ${retries}
+    "http_status": $http_status,
+    "retries": $retries
   },
   "errors": {
     "socket_errors": {
-      "connect": ${connect_err:-0},
-      "read": ${read_err:-0},
-      "write": ${write_err:-0},
-      "timeout": ${timeout_err:-0},
-      "total": ${socket_errors:-0}
+      "connect": $connect_err,
+      "read": $read_err,
+      "write": $write_err,
+      "timeout": $timeout_err,
+      "total": $socket_errors
     },
-    "http_4xx": ${http_4xx:-0},
-    "http_5xx": ${http_5xx:-0},
-    "http_status_total": ${http_status_total:-0}
+    "http_4xx": $http_4xx,
+    "http_5xx": $http_5xx,
+    "http_status_total": $http_status_total
   },
   "cache": {
-    "hit_rate": ${cache_hit_rate},
-    "misses": ${cache_misses},
-    "hits": ${cache_hits}
+    "hit_rate": $cache_hit_rate,
+    "misses": $cache_misses,
+    "hits": $cache_hits
   },
   "profiling": {
-    "perf_data": ${perf_data_path},
-    "flamegraph": ${flamegraph_path},
-    "pprof": ${pprof_path}
+    "perf_data": (if $perf_data_path == "" then null else $perf_data_path end),
+    "flamegraph": (if $flamegraph_path == "" then null else $flamegraph_path end),
+    "pprof": (if $pprof_path == "" then null else $pprof_path end)
   },
   "files": {
-    "wrk_output": "${wrk_output_filename}",
-    "lua_metrics": $(if [[ -f "${lua_metrics_file}" ]]; then echo '"lua_metrics.json"'; else echo 'null'; fi)
+    "wrk_output": $wrk_output_filename,
+    "lua_metrics": (if $lua_metrics_ref == "" then null else $lua_metrics_ref end)
   },
   "environment": {
-    "api_url": "${API_URL}",
-    "rust_version": "${rust_version}",
-    "os": "${os_name}",
-    "cpu_cores": ${cpu_cores},
-    "memory_gb": ${memory_gb}
+    "api_url": $api_url,
+    "rust_version": $rust_version,
+    "os": $os_name,
+    "cpu_cores": $cpu_cores,
+    "memory_gb": $memory_gb
   },
-  "phased_execution": ${phased_execution_json},
-  "scenario_requested": ${scenario_requested_json},
-  "applied_env": ${applied_env_json},
-  "env_mismatch": ${env_mismatch}
-}
-EOF
+  "phased_execution": $phased_execution,
+  "scenario_requested": $scenario_requested,
+  "applied_env": $applied_env,
+  "env_mismatch": $env_mismatch
+}' > "${meta_file}"
 
-    echo -e "${GREEN}meta.json generated (v3.0)${NC}"
+    echo -e "${GREEN}meta.json generated (v3.0) using jq${NC}"
+}
+
+# =============================================================================
+# Validate Required Percentiles (REQ-PROFILE-JSON-002)
+# =============================================================================
+#
+# Validates that required percentile metrics (p50, p90, p99) are available
+# when the benchmark has processed requests.
+#
+# Per REQ-PROFILE-JSON-002:
+# - If total_requests > 0, percentile data MUST be available
+# - If percentiles are missing, the benchmark MUST fail
+# - If total_requests = 0, validation is skipped
+#
+# Parameters:
+#   $1: p50 value (milliseconds or null)
+#   $2: p90 value (milliseconds or null)
+#   $3: p99 value (milliseconds or null)
+#   $4: total_requests count
+#
+# Returns:
+#   0: validation passed or skipped (no requests)
+#   1: validation failed (percentiles missing when requests > 0)
+# =============================================================================
+validate_required_percentiles() {
+    local p50="$1"
+    local p90="$2"
+    local p99="$3"
+    local total_requests="$4"
+
+    # Validate total_requests is numeric (防御的プログラミング)
+    # Use stricter pattern to avoid leading zeros (08/09) causing arithmetic evaluation errors
+    if [[ ! "${total_requests}" =~ ^(0|[1-9][0-9]*)$ ]]; then
+        echo -e "${RED}ERROR: total_requests is not a valid number: ${total_requests}${NC}" >&2
+        return 1
+    fi
+
+    # Skip validation if no requests
+    # Use 10# prefix to force decimal interpretation
+    if [[ "$((10#${total_requests}))" -eq 0 ]]; then
+        return 0
+    fi
+
+    local missing=()
+    # Check for missing, zero, or invalid values (per REQ-PROFILE-JSON-002)
+    # Validate: non-empty, numeric, positive, non-zero
+    is_valid_latency "${p50}" || missing+=("p50")
+    is_valid_latency "${p90}" || missing+=("p90")
+    is_valid_latency "${p99}" || missing+=("p99")
+
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        echo -e "${RED}ERROR: Required percentiles missing/zero/invalid: ${missing[*]}${NC}" >&2
+        echo "  Percentiles must be non-empty, numeric, positive, and non-zero." >&2
+        echo "  wrk output may not contain latency distribution or values may be invalid." >&2
+        echo "  Ensure wrk is configured with --latency flag." >&2
+        return 1
+    fi
+    return 0
 }
 
 # =============================================================================
@@ -1677,9 +2053,9 @@ generate_meta_extended() {
             actual_rps=$(jq -r '.actual_rps // 0' "${phase_dir}/phase_result.json" 2>/dev/null || echo "0")
             duration_seconds=$(jq -r '.duration_seconds // 0' "${phase_dir}/phase_result.json" 2>/dev/null || echo "0")
 
-            # Calculate deviation percent
+            # Calculate deviation percent (avoid division by zero or non-numeric)
             local deviation_percent="0"
-            if [[ "${target_rps}" != "0" ]]; then
+            if [[ "${target_rps}" =~ ^[0-9]+(\.[0-9]+)?$ ]] && awk -v t="${target_rps}" 'BEGIN { exit (t > 0) ? 0 : 1 }'; then
                 deviation_percent=$(awk -v t="${target_rps}" -v a="${actual_rps}" \
                     'BEGIN { printf "%.2f", ((a - t) / t) * 100 }')
             fi
@@ -1814,21 +2190,47 @@ start_profiling() {
     PERF_DATA_FILE="${RESULTS_DIR}/perf.data"
 
     if [[ "$(uname)" == "Linux" ]]; then
-        # Try without sudo first, fallback to sudo
-        if perf record -F 99 -p "${api_pid}" -g -o "${PERF_DATA_FILE}" -- sleep 0 2>/dev/null; then
-            rm -f "${PERF_DATA_FILE}" 2>/dev/null
-            perf record -F 99 -p "${api_pid}" -g -o "${PERF_DATA_FILE}" &
-            export PERF_RECORD_PID=$!
-        elif sudo -n true 2>/dev/null; then
-            sudo perf record -F 99 -p "${api_pid}" -g -o "${PERF_DATA_FILE}" &
-            export PERF_RECORD_PID=$!
-            export PERF_NEEDS_SUDO=true
-        else
-            echo -e "${YELLOW}Warning: Cannot run perf (permission denied). Skipping profiling.${NC}"
-            PROFILE_MODE=false
-            return 0
+        # Determine if sudo is required first
+        local use_sudo=false
+        if ! perf record -F 99 -p "${api_pid}" -g -o "${PERF_DATA_FILE}" -- sleep 0.5 2>/dev/null; then
+            if sudo -n true 2>/dev/null; then
+                use_sudo=true
+            else
+                echo -e "${YELLOW}Warning: Cannot run perf (permission denied). Skipping profiling.${NC}"
+                PROFILE_MODE=false
+                return 0
+            fi
         fi
-        echo "  perf recording started (PID: ${api_pid})"
+        rm -f "${PERF_DATA_FILE}" 2>/dev/null
+
+        # Try with --call-graph dwarf first, fallback to -g (fp) if unsupported
+        # Use larger stack size (16KB) for dwarf to handle deep call stacks
+        local callgraph_method="--call-graph dwarf,16384"
+        local perf_cmd="perf record"
+        if [[ "${use_sudo}" == "true" ]]; then
+            perf_cmd="sudo perf record"
+        fi
+
+        if ! ${perf_cmd} -F 99 -p "${api_pid}" ${callgraph_method} -o "${PERF_DATA_FILE}" -- sleep 0.5 2>/dev/null; then
+            echo -e "${YELLOW}Warning: --call-graph dwarf not supported, falling back to -g (fp)${NC}"
+            callgraph_method="-g"
+            # Re-validate with -g fallback
+            if ! ${perf_cmd} -F 99 -p "${api_pid}" ${callgraph_method} -o "${PERF_DATA_FILE}" -- sleep 0.5 2>/dev/null; then
+                echo -e "${YELLOW}Warning: perf -g also failed. Skipping profiling.${NC}"
+                PROFILE_MODE=false
+                rm -f "${PERF_DATA_FILE}" 2>/dev/null
+                return 0
+            fi
+        fi
+        rm -f "${PERF_DATA_FILE}" 2>/dev/null
+
+        # Execute actual recording
+        ${perf_cmd} -F 99 -p "${api_pid}" ${callgraph_method} -o "${PERF_DATA_FILE}" &
+        export PERF_RECORD_PID=$!
+        if [[ "${use_sudo}" == "true" ]]; then
+            export PERF_NEEDS_SUDO=true
+        fi
+        echo "  perf recording started (PID: ${api_pid}, method: ${callgraph_method}, sudo: ${use_sudo})"
     elif [[ "$(uname)" == "Darwin" ]]; then
         # macOS: use sample command
         local duration_secs="${DURATION%s}"
@@ -1953,54 +2355,48 @@ log_resolved_params() {
     local timestamp
     timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-    cat > "${log_file}" << EOF
-# Resolved Parameters from Scenario YAML
-# Generated at: ${timestamp}
-
-## Source
-scenario_file: ${SCENARIO_FILE}
-
-## Resolved Values
-TARGET_RPS=${TARGET_RPS:-null}
-RPS_PROFILE=${RPS_PROFILE:-constant}
-LOAD_PROFILE=${LOAD_PROFILE:-constant}
-DURATION=${DURATION}
-THREADS=${THREADS}
-CONNECTIONS=${CONNECTIONS}
-
-## Cache Configuration
-CACHE_MODE=${CACHE_MODE:-none}
-CACHE_ENABLED=${CACHE_ENABLED:-true}
-CACHE_STRATEGY=${CACHE_STRATEGY:-read-through}
-CACHE_TTL_SECS=${CACHE_TTL_SECS:-60}
-HIT_RATE=${HIT_RATE:-50}
-
-## Storage Configuration
-STORAGE_MODE=${STORAGE_MODE:-in_memory}
-DATA_SCALE=${DATA_SCALE:-1e4}
-
-## Concurrency
-WORKER_THREADS=${WORKER_THREADS:-4}
-DATABASE_POOL_SIZE=${DATABASE_POOL_SIZE:-16}
-REDIS_POOL_SIZE=${REDIS_POOL_SIZE:-8}
-POOL_SIZES=${POOL_SIZES:-24}
-
-## Error Configuration
-FAIL_RATE=${FAIL_RATE:-0}
-RETRY=${RETRY:-false}
-
-## Multi-Phase Load Profile Parameters
-MIN_RPS=${MIN_RPS:-10}
-STEP_COUNT=${STEP_COUNT:-4}
-RAMP_UP_SECONDS=${RAMP_UP_SECONDS:-10}
-RAMP_DOWN_SECONDS=${RAMP_DOWN_SECONDS:-10}
-BURST_INTERVAL_SECONDS=${BURST_INTERVAL_SECONDS:-20}
-BURST_DURATION_SECONDS=${BURST_DURATION_SECONDS:-5}
-BURST_MULTIPLIER=${BURST_MULTIPLIER:-3}
-
-## wrk2 Execution Command
-${WRK_COMMAND} -t${THREADS} -c${CONNECTIONS} -d${DURATION} ${rate_option} --latency --script=scripts/${script_name}.lua ${API_URL}
-EOF
+    # Generate log file using printf instead of heredoc (REQ-PROFILE-JSON-001 compliance)
+    {
+        printf "# Resolved Parameters from Scenario YAML\n"
+        printf "# Generated at: %s\n\n" "${timestamp}"
+        printf "## Source\n"
+        printf "scenario_file: %s\n\n" "${SCENARIO_FILE}"
+        printf "## Resolved Values\n"
+        printf "TARGET_RPS=%s\n" "${TARGET_RPS:-null}"
+        printf "RPS_PROFILE=%s\n" "${RPS_PROFILE:-steady}"
+        printf "LOAD_PROFILE=%s\n" "${LOAD_PROFILE:-steady}"
+        printf "DURATION=%s\n" "${DURATION}"
+        printf "THREADS=%s\n" "${THREADS}"
+        printf "CONNECTIONS=%s\n\n" "${CONNECTIONS}"
+        printf "## Cache Configuration\n"
+        printf "CACHE_MODE=%s\n" "${CACHE_MODE:-none}"
+        printf "CACHE_ENABLED=%s\n" "${CACHE_ENABLED:-true}"
+        printf "CACHE_STRATEGY=%s\n" "${CACHE_STRATEGY:-read-through}"
+        printf "CACHE_TTL_SECS=%s\n" "${CACHE_TTL_SECS:-60}"
+        printf "HIT_RATE=%s\n\n" "${HIT_RATE:-50}"
+        printf "## Storage Configuration\n"
+        printf "STORAGE_MODE=%s\n" "${STORAGE_MODE:-in_memory}"
+        printf "DATA_SCALE=%s\n\n" "${DATA_SCALE:-1e4}"
+        printf "## Concurrency\n"
+        printf "WORKER_THREADS=%s\n" "${WORKER_THREADS:-4}"
+        printf "DATABASE_POOL_SIZE=%s\n" "${DATABASE_POOL_SIZE:-16}"
+        printf "REDIS_POOL_SIZE=%s\n" "${REDIS_POOL_SIZE:-8}"
+        printf "POOL_SIZES=%s\n\n" "${POOL_SIZES:-24}"
+        printf "## Error Configuration\n"
+        printf "FAIL_RATE=%s\n" "${FAIL_RATE:-0}"
+        printf "RETRY=%s\n\n" "${RETRY:-false}"
+        printf "## Multi-Phase Load Profile Parameters\n"
+        printf "MIN_RPS=%s\n" "${MIN_RPS:-10}"
+        printf "STEP_COUNT=%s\n" "${STEP_COUNT:-4}"
+        printf "RAMP_UP_SECONDS=%s\n" "${RAMP_UP_SECONDS:-10}"
+        printf "RAMP_DOWN_SECONDS=%s\n" "${RAMP_DOWN_SECONDS:-10}"
+        printf "BURST_INTERVAL_SECONDS=%s\n" "${BURST_INTERVAL_SECONDS:-20}"
+        printf "BURST_DURATION_SECONDS=%s\n" "${BURST_DURATION_SECONDS:-5}"
+        printf "BURST_MULTIPLIER=%s\n\n" "${BURST_MULTIPLIER:-3}"
+        printf "## wrk2 Execution Command\n"
+        printf "%s -t%s -c%s -d%s %s --latency --script=scripts/%s.lua %s\n" \
+            "${WRK_COMMAND}" "${THREADS}" "${CONNECTIONS}" "${DURATION}" "${rate_option}" "${script_name}" "${API_URL}"
+    } > "${log_file}"
 
     echo "  Resolved parameters logged to: ${log_file}"
 }
@@ -2010,7 +2406,7 @@ EOF
 # =============================================================================
 #
 # Implements multi-phase benchmark execution for load profiles:
-# - constant: Single phase at TARGET_RPS for DURATION_SECONDS
+# - steady (or constant): Single phase at TARGET_RPS for DURATION_SECONDS
 # - step_up: N steps with progressively increasing RPS
 # - ramp_up_down: Ramp up -> Sustain -> Ramp down phases
 # - burst: Alternating burst/normal cycles
@@ -2173,14 +2569,18 @@ run_single_phase() {
     echo "[${phase_name}] Completed: actual_rps=${actual_rps}" | tee -a "${phase_log}"
 
     # Save phase result as JSON for merge_phase_results
-    cat > "${phase_dir}/phase_result.json" << EOF
-{
-  "phase": "${phase_name}",
-  "target_rps": ${target_rps},
-  "actual_rps": ${actual_rps},
-  "duration_seconds": ${duration}
-}
-EOF
+    # Use jq to ensure safe JSON generation (REQ-PROFILE-JSON-001)
+    jq -n \
+        --arg phase "${phase_name}" \
+        --argjson target_rps "${target_rps}" \
+        --argjson actual_rps "${actual_rps}" \
+        --argjson duration_seconds "${duration}" \
+        '{
+            "phase": $phase,
+            "target_rps": $target_rps,
+            "actual_rps": $actual_rps,
+            "duration_seconds": $duration_seconds
+        }' > "${phase_dir}/phase_result.json"
 
     # Verify RPS accuracy
     if ! verify_rps_accuracy "${target_rps}" "${actual_rps}" "${phase_name}"; then
@@ -2216,7 +2616,8 @@ merge_phase_results() {
     # Initialize latency tracking arrays
     declare -a avg_latencies=()
     declare -a p50_latencies=()
-    declare -a p95_latencies=()
+    declare -a p75_latencies=()
+    declare -a p90_latencies=()
     declare -a p99_latencies=()
 
     for phase_dir in ${phase_dirs}; do
@@ -2262,7 +2663,7 @@ merge_phase_results() {
 
                 # Extract p99 latency and track maximum
                 local p99_raw
-                p99_raw=$(grep -E "^[[:space:]]+99%" "${wrk_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
+                p99_raw=$(grep -E "^[[:space:]]+99[.0-9]*%" "${wrk_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
                 if [[ -n "${p99_raw}" ]]; then
                     local p99_ms
                     p99_ms=$(parse_latency_to_ms "${p99_raw}")
@@ -2276,15 +2677,17 @@ merge_phase_results() {
                 fi
 
                 # Collect latencies for potential averaging
-                local avg_lat p50_lat p95_lat p99_lat
+                local avg_lat p50_lat p75_lat p90_lat p99_lat
                 avg_lat=$(grep "Latency" "${wrk_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
-                p50_lat=$(grep -E "^[[:space:]]+50%" "${wrk_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
-                p95_lat=$(grep -E "^[[:space:]]+95%" "${wrk_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
-                p99_lat=$(grep -E "^[[:space:]]+99%" "${wrk_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
+                p50_lat=$(grep -E "^[[:space:]]+50[.0-9]*%" "${wrk_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
+                p75_lat=$(grep -E "^[[:space:]]+75[.0-9]*%" "${wrk_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
+                p90_lat=$(grep -E "^[[:space:]]+90[.0-9]*%" "${wrk_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
+                p99_lat=$(grep -E "^[[:space:]]+99[.0-9]*%" "${wrk_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
 
                 [[ -n "${avg_lat}" ]] && avg_latencies+=("${avg_lat}")
                 [[ -n "${p50_lat}" ]] && p50_latencies+=("${p50_lat}")
-                [[ -n "${p95_lat}" ]] && p95_latencies+=("${p95_lat}")
+                [[ -n "${p75_lat}" ]] && p75_latencies+=("${p75_lat}")
+                [[ -n "${p90_lat}" ]] && p90_latencies+=("${p90_lat}")
                 [[ -n "${p99_lat}" ]] && p99_latencies+=("${p99_lat}")
             fi
         fi
@@ -2301,22 +2704,24 @@ merge_phase_results() {
 
     # Calculate error rate using HTTP errors only (not socket errors)
     # This is consistent with meta.json which uses HTTP 4xx/5xx for error_rate
-    local error_rate="0"
-    if [[ "${total_requests}" -gt 0 ]]; then
-        error_rate=$(echo "scale=6; ${total_http_errors} / ${total_requests}" | bc 2>/dev/null || echo "0")
-    fi
+    # Use format_error_rate_json to normalize bc output (.123 -> 0.123) and clamp to [0, 1]
+    local error_rate
+    error_rate=$(format_error_rate_json "$(echo "scale=6; ${total_http_errors} / ${total_requests}" | bc 2>/dev/null || echo "0")" "${total_requests}")
 
     # Use the last phase's latency values for the merged output (representative of peak load)
     # Exception: p99 uses max_p99 (worst case across all phases) for conservative reporting
-    local last_avg="" last_p50="" last_p95="" last_p99=""
+    local last_avg="" last_p50="" last_p75="" last_p90="" last_p99=""
     if [[ ${#avg_latencies[@]} -gt 0 ]]; then
         last_avg="${avg_latencies[-1]}"
     fi
     if [[ ${#p50_latencies[@]} -gt 0 ]]; then
         last_p50="${p50_latencies[-1]}"
     fi
-    if [[ ${#p95_latencies[@]} -gt 0 ]]; then
-        last_p95="${p95_latencies[-1]}"
+    if [[ ${#p75_latencies[@]} -gt 0 ]]; then
+        last_p75="${p75_latencies[-1]}"
+    fi
+    if [[ ${#p90_latencies[@]} -gt 0 ]]; then
+        last_p90="${p90_latencies[-1]}"
     fi
     if [[ ${#p99_latencies[@]} -gt 0 ]]; then
         last_p99="${p99_latencies[-1]}"
@@ -2340,29 +2745,25 @@ merge_phase_results() {
     fi
 
     # Generate merged wrk.txt in wrk-compatible format
-    cat > "${merged_wrk}" << EOF
-Running ${total_duration}s test @ ${API_URL}
-  ${THREADS} threads and ${CONNECTIONS} connections
-
-=== Merged Results (${RPS_PROFILE} profile, ${phase_count} phases) ===
-
-  Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency   ${last_avg:-N/A}
-
-  Latency Distribution
-     50%    ${last_p50:-N/A}
-     75%    N/A
-     90%    N/A
-     95%    ${last_p95:-N/A}
-     99%    ${max_p99_display}
-     99.9%  N/A
-  Max P99 (across phases): ${max_p99_display}
-  ${total_requests} requests in ${total_duration}s
-Requests/sec: ${avg_rps}
-Transfer/sec: N/A (merged result)
-
---- Phase Details ---
-EOF
+    # Generate merged wrk output using printf instead of heredoc (REQ-PROFILE-JSON-001 compliance)
+    {
+        printf "Running %ss test @ %s\n" "${total_duration}" "${API_URL}"
+        printf "  %s threads and %s connections\n\n" "${THREADS}" "${CONNECTIONS}"
+        printf -- "=== Merged Results (%s profile, %s phases) ===\n\n" "${RPS_PROFILE}" "${phase_count}"
+        printf "  Thread Stats   Avg      Stdev     Max   +/- Stdev\n"
+        printf "    Latency   %s\n\n" "${last_avg:-N/A}"
+        printf "  Latency Distribution\n"
+        printf "     50%%    %s\n" "${last_p50:-N/A}"
+        printf "     75%%    %s\n" "${last_p75:-N/A}"
+        printf "     90%%    %s\n" "${last_p90:-N/A}"
+        printf "     99%%    %s\n" "${max_p99_display}"
+        printf "     99.9%%  N/A\n"
+        printf "  Max P99 (across phases): %s\n" "${max_p99_display}"
+        printf "  %s requests in %ss\n" "${total_requests}" "${total_duration}"
+        printf "Requests/sec: %s\n" "${avg_rps}"
+        printf "Transfer/sec: N/A (merged result)\n\n"
+        printf -- "--- Phase Details ---\n"
+    } > "${merged_wrk}"
 
     # Append phase summaries
     for phase_dir in ${phase_dirs}; do
@@ -2380,6 +2781,13 @@ EOF
     export MERGED_RPS="${avg_rps}"
     export MERGED_REQUESTS="${total_requests}"
     export MERGED_DURATION="${total_duration}"
+    # Export latencies in milliseconds (parse_latency_to_ms applied)
+    if [[ -n "${last_p50}" ]]; then
+        export MERGED_P50="$(parse_latency_to_ms "${last_p50}")"
+    fi
+    if [[ -n "${last_p90}" ]]; then
+        export MERGED_P90="$(parse_latency_to_ms "${last_p90}")"
+    fi
     export MERGED_P99="${max_p99}"
     export MERGED_ERROR_RATE="${error_rate}"
     export MERGED_PHASE_COUNT="${phase_count}"
@@ -2393,7 +2801,7 @@ EOF
 run_phased_benchmark() {
     local script_name="$1"
     local results_base_dir="$2"
-    local profile="${RPS_PROFILE:-constant}"
+    local profile="${RPS_PROFILE:-steady}"
 
     echo ""
     echo "Running phased benchmark: profile=${profile}"
@@ -2407,8 +2815,8 @@ run_phased_benchmark() {
     fi
 
     case "${profile}" in
-        constant)
-            # Single phase at constant RPS
+        steady|constant)
+            # Single phase at steady/constant RPS
             run_single_phase "${script_name}" "${results_base_dir}/phase_main" \
                 "${TARGET_RPS:-0}" "${duration_seconds}" "main"
             merge_phase_results "${results_base_dir}"
@@ -2619,7 +3027,7 @@ run_phased_benchmark() {
             ;;
 
         *)
-            echo -e "${YELLOW}WARNING: Unknown rps_profile '${profile}', defaulting to constant${NC}"
+            echo -e "${YELLOW}WARNING: Unknown rps_profile '${profile}', defaulting to steady${NC}"
             run_single_phase "${script_name}" "${results_base_dir}/phase_main" \
                 "${TARGET_RPS:-0}" "${duration_seconds}" "main"
             merge_phase_results "${results_base_dir}"
@@ -2628,7 +3036,7 @@ run_phased_benchmark() {
 }
 
 # Run benchmarks
-# Uses phased execution for all RPS profiles (constant, step_up, ramp_up_down, burst)
+# Uses phased execution for all RPS profiles (steady, step_up, ramp_up_down, burst)
 run_benchmark() {
     local script_name="$1"
     local script_path="${SCRIPT_DIR}/scripts/${script_name}.lua"
@@ -2668,7 +3076,7 @@ run_benchmark() {
     # Start profiling if enabled (now writes to script_results_dir)
     start_profiling
 
-    # Run phased benchmark (handles all profiles: constant, step_up, ramp_up_down, burst)
+    # Run phased benchmark (handles all profiles: steady, step_up, ramp_up_down, burst)
     if run_phased_benchmark "${script_name}" "${script_results_dir}"; then
         # Stop profiling
         stop_profiling
@@ -2684,10 +3092,10 @@ run_benchmark() {
         avg_latency=$(grep "Latency" "${result_file}" 2>/dev/null | head -1 | awk '{print $2}')
 
         # Extract latency percentiles (P50, P75, P90, P99)
-        p50=$(grep -E "^[[:space:]]+50%" "${result_file}" 2>/dev/null | awk '{print $2}')
-        p75=$(grep -E "^[[:space:]]+75%" "${result_file}" 2>/dev/null | awk '{print $2}')
-        p90=$(grep -E "^[[:space:]]+90%" "${result_file}" 2>/dev/null | awk '{print $2}')
-        p99=$(grep -E "^[[:space:]]+99%" "${result_file}" 2>/dev/null | awk '{print $2}')
+        p50=$(grep -E "^[[:space:]]+50[.0-9]*%" "${result_file}" 2>/dev/null | awk '{print $2}')
+        p75=$(grep -E "^[[:space:]]+75[.0-9]*%" "${result_file}" 2>/dev/null | awk '{print $2}')
+        p90=$(grep -E "^[[:space:]]+90[.0-9]*%" "${result_file}" 2>/dev/null | awk '{print $2}')
+        p99=$(grep -E "^[[:space:]]+99[.0-9]*%" "${result_file}" 2>/dev/null | awk '{print $2}')
 
         echo "" >> "${SUMMARY_FILE}"
         echo "${script_name}:" >> "${SUMMARY_FILE}"
@@ -2756,21 +3164,7 @@ for script in "${SCRIPTS[@]}"; do
     fi
 done
 
-echo ""
-echo "=============================================="
-echo "  Benchmark Complete"
-echo "=============================================="
-echo ""
-echo "Results saved to: ${RESULTS_DIR}"
-echo ""
-echo "Summary:"
-cat "${SUMMARY_FILE}"
-
-# Generate bottleneck analysis
-echo ""
-echo "=============================================="
-echo "  Bottleneck Analysis"
-echo "=============================================="
+# Generate bottleneck analysis (executed before summary display)
 echo "" >> "${SUMMARY_FILE}"
 echo "--- Bottleneck Analysis ---" >> "${SUMMARY_FILE}"
 
@@ -2842,15 +3236,121 @@ for result_file in "${result_files[@]}"; do
 done
 
 if [ -n "$slowest_endpoint" ]; then
-    echo -e "${YELLOW}Slowest endpoint: ${slowest_endpoint} (${slowest_rps} req/s)${NC}"
     echo "Slowest endpoint: ${slowest_endpoint} (${slowest_rps} req/s)" >> "${SUMMARY_FILE}"
 fi
 
 if [ -n "$highest_p99_endpoint" ]; then
-    echo -e "${YELLOW}Highest P99 latency: ${highest_p99_endpoint}${NC}"
     echo "Highest P99 latency: ${highest_p99_endpoint}" >> "${SUMMARY_FILE}"
 fi
 
+# =============================================================================
+# Schema Validation (REQ-PROFILE-JSON-001)
+# =============================================================================
+# Validate all generated meta.json files against the schema.
+# This ensures that JSON output is valid and conforms to the expected format.
+# Validation failure is treated as a benchmark failure.
+# Performance requirement: validation overhead must not exceed 5% of total execution time
+# =============================================================================
+
+VALIDATE_SCRIPT="${SCRIPT_DIR}/validate_meta_schema.sh"
+
+# Check if validation script exists and is executable (mandatory requirement)
+if [[ ! -x "${VALIDATE_SCRIPT}" ]]; then
+    echo "" >> "${SUMMARY_FILE}"
+    echo "--- Schema Validation ---" >> "${SUMMARY_FILE}"
+    echo "Error: Schema validation script not found or not executable" >> "${SUMMARY_FILE}"
+    FAILED_SCRIPTS+=("(validation_script_missing)")
+else
+    # Measure validation overhead (must not exceed 5% of total execution time)
+    # Use millisecond precision to avoid TOTAL_TIME=0 for short executions
+    VALIDATION_START=$(get_timestamp_ms)
+
+    # Run schema validation with --all flag for recursive search
+    # This validates all meta.json files in ${RESULTS_DIR} and subdirectories
+    # Capture validation output to include details in summary on failure
+    # Use portable mktemp syntax (works on both GNU/Linux and BSD/macOS)
+    MKTEMP_ERROR=$(mktemp -t validation.XXXXXX 2>&1) && VALIDATION_OUTPUT="${MKTEMP_ERROR}"
+    if [[ ! -f "${VALIDATION_OUTPUT}" ]]; then
+        echo "" >> "${SUMMARY_FILE}"
+        echo "--- Schema Validation ---" >> "${SUMMARY_FILE}"
+        echo "Error: Failed to create temporary file for validation output" >> "${SUMMARY_FILE}"
+        echo "mktemp error: ${MKTEMP_ERROR}" >> "${SUMMARY_FILE}"
+        FAILED_SCRIPTS+=("(validation_mktemp_failed)")
+    elif "${VALIDATE_SCRIPT}" --all "${RESULTS_DIR}" > "${VALIDATION_OUTPUT}" 2>&1; then
+        VALIDATION_END=$(get_timestamp_ms)
+        VALIDATION_TIME=$((VALIDATION_END - VALIDATION_START))
+
+        echo "" >> "${SUMMARY_FILE}"
+        echo "--- Schema Validation ---" >> "${SUMMARY_FILE}"
+        echo "Schema validation passed (${VALIDATION_TIME}ms)" >> "${SUMMARY_FILE}"
+
+        # Calculate validation overhead percentage
+        # Use BENCHMARK_START_TIME if available (set at script start)
+        if [[ -n "${BENCHMARK_START_TIME:-}" ]]; then
+            BENCHMARK_END=$(get_timestamp_ms)
+            TOTAL_TIME=$((BENCHMARK_END - BENCHMARK_START_TIME))
+            if [[ ${TOTAL_TIME} -gt 0 ]]; then
+                # Calculate overhead percentage (for display)
+                VALIDATION_OVERHEAD_PCT=$(awk -v vt="${VALIDATION_TIME}" -v tt="${TOTAL_TIME}" \
+                    'BEGIN { printf "%.2f", (vt / tt) * 100 }')
+                echo "Validation overhead: ${VALIDATION_OVERHEAD_PCT}%" >> "${SUMMARY_FILE}"
+
+                # Check if overhead exceeds 5% threshold using awk to avoid integer overflow
+                # Compare: validation_time / total_time >= 0.05 (5%)
+                # Using awk for floating-point comparison (handles large values without overflow)
+                if awk -v vt="${VALIDATION_TIME}" -v tt="${TOTAL_TIME}" \
+                    'BEGIN { exit (vt / tt >= 0.05) ? 0 : 1 }'; then
+                    echo "Error: Validation overhead (${VALIDATION_OVERHEAD_PCT}%) meets or exceeds 5% threshold" >> "${SUMMARY_FILE}"
+                    FAILED_SCRIPTS+=("(validation_overhead_exceeded)")
+                fi
+            fi
+        fi
+    else
+        VALIDATION_END=$(get_timestamp_ms)
+        VALIDATION_TIME=$((VALIDATION_END - VALIDATION_START))
+
+        # Include validation error details in summary for debugging
+        # Strip ANSI color codes to keep summary.txt clean
+        echo "" >> "${SUMMARY_FILE}"
+        echo "--- Schema Validation ---" >> "${SUMMARY_FILE}"
+        echo "Schema validation failed (${VALIDATION_TIME}ms)" >> "${SUMMARY_FILE}"
+        echo "" >> "${SUMMARY_FILE}"
+        echo "Validation errors (first 10 lines):" >> "${SUMMARY_FILE}"
+        # Strip ANSI color codes using Perl (more portable than sed for this case)
+        if command -v perl >/dev/null 2>&1; then
+            perl -pe 's/\e\[[0-9;]*m//g' "${VALIDATION_OUTPUT}" | head -10 >> "${SUMMARY_FILE}" 2>/dev/null || true
+        else
+            # Fallback: include with color codes if perl is not available
+            head -10 "${VALIDATION_OUTPUT}" >> "${SUMMARY_FILE}" 2>/dev/null || true
+        fi
+
+        FAILED_SCRIPTS+=("(schema_validation)")
+    fi
+
+    # Cleanup temporary validation output file (only if it exists)
+    [[ -n "${VALIDATION_OUTPUT:-}" && -f "${VALIDATION_OUTPUT}" ]] && rm -f "${VALIDATION_OUTPUT}"
+fi
+
+# Display summary after all processing (including validation) is complete
+echo ""
+echo "=============================================="
+echo "  Benchmark Complete"
+echo "=============================================="
+echo ""
+echo "Results saved to: ${RESULTS_DIR}"
+echo ""
+echo "Summary:"
+cat "${SUMMARY_FILE}"
+
+# Bottleneck analysis output (already written to summary.txt above)
+if [ -n "$slowest_endpoint" ]; then
+    echo ""
+    echo -e "${YELLOW}Slowest endpoint: ${slowest_endpoint} (${slowest_rps} req/s)${NC}"
+fi
+
+if [ -n "$highest_p99_endpoint" ]; then
+    echo -e "${YELLOW}Highest P99 latency: ${highest_p99_endpoint}${NC}"
+fi
 echo ""
 
 # Report failed scripts and exit with error if any failures
