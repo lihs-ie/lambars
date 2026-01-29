@@ -15,6 +15,8 @@
 
 use axum::Json;
 use axum::extract::State;
+
+use super::json_buffer::JsonResponse;
 use serde::{Deserialize, Serialize};
 
 use lambars::effect::{MonadError, ReaderT, StateT, WriterT};
@@ -259,7 +261,7 @@ pub struct LawDemonstration {
 pub async fn monad_transformers(
     State(_state): State<AppState>,
     Json(request): Json<MonadTransformerRequest>,
-) -> Result<Json<MonadTransformerResponse>, ApiErrorResponse> {
+) -> Result<JsonResponse<MonadTransformerResponse>, ApiErrorResponse> {
     // Demonstrate each transformer separately, then show composition
     let response = {
         let mut transformers_used = Vec::new();
@@ -352,7 +354,7 @@ pub async fn monad_transformers(
         }
     };
 
-    Ok(Json(response))
+    Ok(JsonResponse(response))
 }
 
 // =============================================================================
@@ -385,7 +387,7 @@ pub async fn monad_transformers(
 pub async fn functor_mut_demo(
     State(_state): State<AppState>,
     Json(request): Json<FunctorMutRequest>,
-) -> Result<Json<FunctorMutResponse>, ApiErrorResponse> {
+) -> Result<JsonResponse<FunctorMutResponse>, ApiErrorResponse> {
     let transformed: Vec<i32> = match request.transformation.as_str() {
         "double" => request.values.clone().fmap_mut(|x| x * 2),
         "square" => request.values.clone().fmap_mut(|x| x * x),
@@ -400,7 +402,7 @@ pub async fn functor_mut_demo(
         }
     };
 
-    Ok(Json(FunctorMutResponse {
+    Ok(JsonResponse(FunctorMutResponse {
         original: request.values,
         transformed,
         transformation: request.transformation,
@@ -439,7 +441,7 @@ pub async fn functor_mut_demo(
 pub async fn flatten_demo(
     State(_state): State<AppState>,
     Json(request): Json<FlattenRequest>,
-) -> Result<Json<FlattenResponse>, ApiErrorResponse> {
+) -> Result<JsonResponse<FlattenResponse>, ApiErrorResponse> {
     // Flatten Option<Option<T>>
     let flattened_option = request.nested_option.flatten();
 
@@ -478,7 +480,7 @@ pub async fn flatten_demo(
         })
         .collect();
 
-    Ok(Json(FlattenResponse {
+    Ok(JsonResponse(FlattenResponse {
         flattened_option,
         flattened_results,
     }))
@@ -526,7 +528,7 @@ pub async fn flatten_demo(
 pub async fn monad_error_demo(
     State(_state): State<AppState>,
     Json(request): Json<MonadErrorRequest>,
-) -> Result<Json<MonadErrorResponse>, ApiErrorResponse> {
+) -> Result<JsonResponse<MonadErrorResponse>, ApiErrorResponse> {
     let mut results = Vec::new();
     let mut sum: Result<i32, String> = Ok(0);
     let mut recovery_applied = false;
@@ -616,7 +618,7 @@ pub async fn monad_error_demo(
 
     let final_value = sum.ok();
 
-    Ok(Json(MonadErrorResponse {
+    Ok(JsonResponse(MonadErrorResponse {
         results,
         recovery_applied,
         final_value,
@@ -654,7 +656,7 @@ pub async fn monad_error_demo(
 pub async fn identity_demo(
     State(_state): State<AppState>,
     Json(request): Json<IdentityRequest>,
-) -> Result<Json<IdentityResponse>, ApiErrorResponse> {
+) -> Result<JsonResponse<IdentityResponse>, ApiErrorResponse> {
     let mut wrapped = Identity::new(request.value);
     let mut transformations_applied = Vec::new();
 
@@ -688,7 +690,7 @@ pub async fn identity_demo(
     // Demonstrate type class laws
     let law_demonstrations = demonstrate_identity_laws(request.value);
 
-    Ok(Json(IdentityResponse {
+    Ok(JsonResponse(IdentityResponse {
         original: request.value,
         result: wrapped.into_inner(),
         transformations_applied,

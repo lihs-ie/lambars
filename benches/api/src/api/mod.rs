@@ -14,6 +14,7 @@ pub mod dto;
 pub mod effects;
 pub mod error;
 pub mod handlers;
+pub(crate) mod json_buffer;
 pub mod misc;
 pub mod optics_advanced;
 pub mod ordered;
@@ -81,6 +82,9 @@ pub use typeclass::{
     flatten_demo, functor_mut_demo, identity_demo, monad_error_demo, monad_transformers,
 };
 pub use workflow_eff::create_task_eff;
+
+// JSON buffer exports (JsonResponse for efficient serialization)
+pub use json_buffer::JsonResponse;
 
 // Cache header middleware exports
 pub use cache_header::{CacheHeaderExtension, CacheHeaderLayer, CacheSource};

@@ -8,10 +8,12 @@
 //! - `Monoid`: Empty `ValidationError` for fold operations
 
 use axum::{
-    Json,
-    http::StatusCode,
+    body::Body,
+    http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
+
+use super::json_buffer::serialize_json_bytes;
 use lambars::typeclass::{Monoid, Semigroup};
 use serde::{Deserialize, Serialize};
 
@@ -155,7 +157,39 @@ impl ApiErrorResponse {
 
 impl IntoResponse for ApiErrorResponse {
     fn into_response(self) -> Response {
-        (self.status, Json(self.error)).into_response()
+        if let Ok(bytes) = serialize_json_bytes(&self.error) {
+            // Normal path: use optimized serialization
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            );
+            // Add Content-Length header for normal path
+            if let Ok(length_value) = HeaderValue::from_str(&bytes.len().to_string()) {
+                headers.insert(header::CONTENT_LENGTH, length_value);
+            }
+            (self.status, headers, Body::from(bytes)).into_response()
+        } else {
+            // Fallback: use fixed JSON bytes (no serialization needed)
+            // Serialization failure is an internal error, so use 500
+            const FALLBACK: &[u8] =
+                br#"{"code":"INTERNAL_ERROR","message":"Serialization failed"}"#;
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            );
+            if let Ok(length_value) = HeaderValue::from_str(&FALLBACK.len().to_string()) {
+                headers.insert(header::CONTENT_LENGTH, length_value);
+            }
+            // Serialization failure is an internal error, so use 500
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                headers,
+                Body::from(FALLBACK),
+            )
+                .into_response()
+        }
     }
 }
 
@@ -407,5 +441,164 @@ mod tests {
 
         assert_eq!(left.errors.len(), right.errors.len());
         assert_eq!(left.errors.len(), 3);
+    }
+
+    // -------------------------------------------------------------------------
+    // IntoResponse Tests for ApiErrorResponse
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_api_error_response_into_response_body() {
+        use http_body_util::BodyExt;
+
+        let error_response = ApiErrorResponse::bad_request("BAD_INPUT", "Invalid input");
+        let response = error_response.into_response();
+
+        // Extract body bytes
+        let body_bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("Failed to collect body")
+            .to_bytes();
+
+        // Parse as JSON and verify structure
+        let json: serde_json::Value =
+            serde_json::from_slice(&body_bytes).expect("Response should be valid JSON");
+        assert_eq!(json["code"], "BAD_INPUT");
+        assert_eq!(json["message"], "Invalid input");
+    }
+
+    #[rstest]
+    fn test_api_error_response_into_response_content_type() {
+        use axum::http::header::CONTENT_TYPE;
+
+        let error_response = ApiErrorResponse::not_found("Resource not found");
+        let response = error_response.into_response();
+
+        // Verify Content-Type header
+        let content_type = response.headers().get(CONTENT_TYPE);
+        assert!(content_type.is_some(), "Content-Type header should be set");
+        assert_eq!(
+            content_type.unwrap(),
+            "application/json",
+            "Content-Type should be application/json"
+        );
+    }
+
+    #[rstest]
+    fn test_api_error_response_into_response_status_preserved() {
+        // Test various status codes are preserved
+        let test_cases = vec![
+            (
+                ApiErrorResponse::bad_request("CODE", "msg"),
+                StatusCode::BAD_REQUEST,
+            ),
+            (ApiErrorResponse::not_found("msg"), StatusCode::NOT_FOUND),
+            (ApiErrorResponse::conflict("msg"), StatusCode::CONFLICT),
+            (
+                ApiErrorResponse::internal_error("msg"),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+            (
+                ApiErrorResponse::service_unavailable("msg"),
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            (
+                ApiErrorResponse::unprocessable_entity("msg", vec![]),
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+        ];
+
+        for (error_response, expected_status) in test_cases {
+            let response = error_response.into_response();
+            assert_eq!(
+                response.status(),
+                expected_status,
+                "Status code should be preserved"
+            );
+        }
+    }
+
+    #[rstest]
+    fn test_api_error_response_into_response_content_length() {
+        use axum::http::header::CONTENT_LENGTH;
+
+        let error_response = ApiErrorResponse::not_found("Resource not found");
+        let response = error_response.into_response();
+
+        // Verify Content-Length header is set in normal path
+        let content_length = response.headers().get(CONTENT_LENGTH);
+        assert!(
+            content_length.is_some(),
+            "Content-Length header should be set in normal path"
+        );
+
+        // Verify Content-Length is a valid number
+        let length_str = content_length.unwrap().to_str().unwrap();
+        let length: usize = length_str
+            .parse()
+            .expect("Content-Length should be a valid number");
+        assert!(
+            length > 0,
+            "Content-Length should be greater than 0 for non-empty body"
+        );
+    }
+
+    #[rstest]
+    fn test_api_error_response_fallback_json_format() {
+        // Verify the fallback JSON constant is valid and contains expected fields
+        // This tests the fallback format used when serialize_json_bytes fails
+        const FALLBACK: &[u8] = br#"{"code":"INTERNAL_ERROR","message":"Serialization failed"}"#;
+
+        let parsed: serde_json::Value =
+            serde_json::from_slice(FALLBACK).expect("Fallback JSON should be valid");
+
+        assert_eq!(parsed["code"], "INTERNAL_ERROR");
+        assert_eq!(parsed["message"], "Serialization failed");
+
+        // Verify no extra fields
+        let object = parsed.as_object().expect("Fallback should be an object");
+        assert_eq!(object.len(), 2, "Fallback should have exactly 2 fields");
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_api_error_response_with_details_into_response() {
+        use http_body_util::BodyExt;
+
+        let details = vec![
+            FieldError::new("title", "Title is required"),
+            FieldError::new("description", "Description is too long"),
+        ];
+        let error_response = ApiErrorResponse::validation_error("Validation failed", details);
+        let response = error_response.into_response();
+
+        // Verify status code
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        // Extract body bytes
+        let body_bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("Failed to collect body")
+            .to_bytes();
+
+        // Parse as JSON and verify structure
+        let json: serde_json::Value =
+            serde_json::from_slice(&body_bytes).expect("Response should be valid JSON");
+        assert_eq!(json["code"], "VALIDATION_ERROR");
+        assert_eq!(json["message"], "Validation failed");
+
+        let details = json["details"]
+            .as_array()
+            .expect("details should be an array");
+        assert_eq!(details.len(), 2);
+        assert_eq!(details[0]["field"], "title");
+        assert_eq!(details[0]["message"], "Title is required");
+        assert_eq!(details[1]["field"], "description");
+        assert_eq!(details[1]["message"], "Description is too long");
     }
 }

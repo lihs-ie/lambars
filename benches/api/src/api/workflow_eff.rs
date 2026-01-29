@@ -26,6 +26,8 @@
 use std::sync::Arc;
 
 use axum::{Json, extract::State, http::StatusCode};
+
+use super::json_buffer::JsonResponse;
 use lambars::eff_async;
 use lambars::effect::{AsyncIO, ExceptT};
 
@@ -87,7 +89,7 @@ type HandlerEffect<A> = ExceptT<ApiErrorResponse, AsyncIO<Result<A, ApiErrorResp
 pub async fn create_task_eff(
     State(state): State<AppState>,
     Json(request): Json<CreateTaskRequest>,
-) -> Result<(StatusCode, Json<TaskResponse>), ApiErrorResponse> {
+) -> Result<(StatusCode, JsonResponse<TaskResponse>), ApiErrorResponse> {
     // Clone task_repository before the closure to avoid partial move of state
     let task_repository = state.task_repository.clone();
 
@@ -118,7 +120,7 @@ pub async fn create_task_eff(
         Ok((response, task)) => {
             // Step 6: Update search index with the new task (lock-free write via RCU)
             state.update_search_index(TaskChange::Add(task));
-            Ok((StatusCode::CREATED, Json(response)))
+            Ok((StatusCode::CREATED, JsonResponse(response)))
         }
         Err(error) => Err(error),
     }

@@ -14,8 +14,9 @@
 use std::cmp::Ordering;
 use std::ops::Bound;
 
-use axum::Json;
 use axum::extract::{Query, State};
+
+use super::json_buffer::JsonResponse;
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 
@@ -282,7 +283,7 @@ struct ProjectStats {
 pub async fn tasks_by_deadline(
     State(state): State<AppState>,
     Query(query): Query<DeadlineQuery>,
-) -> Result<Json<DeadlineTasksResponse>, ApiErrorResponse> {
+) -> Result<JsonResponse<DeadlineTasksResponse>, ApiErrorResponse> {
     // Validate limit
     if query.limit > 1000 {
         return Err(ApiErrorResponse::validation_error(
@@ -356,7 +357,7 @@ pub async fn tasks_by_deadline(
         })
         .collect();
 
-    Ok(Json(DeadlineTasksResponse {
+    Ok(JsonResponse(DeadlineTasksResponse {
         tasks: task_responses,
         total_in_range,
         from: query.from,
@@ -462,7 +463,7 @@ fn query_deadline_range(
 pub async fn tasks_timeline(
     State(state): State<AppState>,
     Query(query): Query<TimelineQuery>,
-) -> Result<Json<TimelineResponse>, ApiErrorResponse> {
+) -> Result<JsonResponse<TimelineResponse>, ApiErrorResponse> {
     // Validate order
     if query.order != "priority_first" && query.order != "created_first" {
         return Err(ApiErrorResponse::validation_error(
@@ -551,7 +552,7 @@ pub async fn tasks_timeline(
         })
         .collect();
 
-    Ok(Json(TimelineResponse {
+    Ok(JsonResponse(TimelineResponse {
         tasks: task_responses,
         total,
         has_more,
@@ -597,7 +598,7 @@ fn build_timeline_index(tasks: &[&Task], order: &str) -> (TimelineIndex, usize) 
 pub async fn projects_leaderboard(
     State(state): State<AppState>,
     Query(query): Query<LeaderboardQuery>,
-) -> Result<Json<LeaderboardResponse>, ApiErrorResponse> {
+) -> Result<JsonResponse<LeaderboardResponse>, ApiErrorResponse> {
     // Validate sort_by
     if query.sort_by != "completed_tasks"
         && query.sort_by != "completion_rate"
@@ -677,7 +678,7 @@ pub async fn projects_leaderboard(
         })
         .collect();
 
-    Ok(Json(LeaderboardResponse {
+    Ok(JsonResponse(LeaderboardResponse {
         rankings,
         total_projects,
         sort_by: query.sort_by,

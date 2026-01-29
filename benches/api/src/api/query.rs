@@ -30,10 +30,9 @@
 
 use std::sync::Arc;
 
-use axum::{
-    Json,
-    extract::{Query, State},
-};
+use axum::extract::{Query, State};
+
+use super::json_buffer::JsonResponse;
 use serde::{Deserialize, Serialize};
 
 use super::dto::{PriorityDto, TaskResponse, TaskStatusDto};
@@ -3714,11 +3713,8 @@ impl SearchIndex {
             return (self.clone(), SearchIndexKeyMetrics::default());
         }
 
-        let (mut delta, mut metrics) = SearchIndexDelta::from_changes_with_metrics(
-            changes,
-            &self.config,
-            &self.tasks_by_id,
-        );
+        let (mut delta, mut metrics) =
+            SearchIndexDelta::from_changes_with_metrics(changes, &self.config, &self.tasks_by_id);
         // Sort and deduplicate posting lists to satisfy merge preconditions
         delta.prepare_posting_lists();
 
@@ -4106,7 +4102,7 @@ pub enum TaskChange {
 pub async fn list_tasks(
     State(state): State<AppState>,
     Query(query): Query<ListTasksQuery>,
-) -> Result<Json<PaginatedResponse<TaskResponse>>, ApiErrorResponse> {
+) -> Result<JsonResponse<PaginatedResponse<TaskResponse>>, ApiErrorResponse> {
     // Normalize pagination parameters (pure function)
     // Use clamp to ensure page_size is in valid range [1, MAX_PAGE_SIZE]
     // This prevents panic in Pagination::new when limit=0
@@ -4129,7 +4125,7 @@ pub async fn list_tasks(
     // Build response (pure function)
     let response = build_paginated_response(result);
 
-    Ok(Json(response))
+    Ok(JsonResponse(response))
 }
 
 /// Converts a [`PaginatedResult`] to a [`PaginatedResponse`] (pure function).
@@ -4418,7 +4414,7 @@ fn paginate_tasks(
 pub async fn search_tasks(
     State(state): State<AppState>,
     Query(query): Query<SearchTasksQuery>,
-) -> Result<Json<Vec<TaskResponse>>, ApiErrorResponse> {
+) -> Result<JsonResponse<Vec<TaskResponse>>, ApiErrorResponse> {
     // Create cache key from raw query parameters
     let cache_key = SearchCacheKey::from_raw(&query.q, query.scope, query.limit, query.offset);
 
@@ -4438,7 +4434,7 @@ pub async fn search_tasks(
             .take(limit as usize)
             .map(TaskResponse::from)
             .collect();
-        return Ok(Json(response));
+        return Ok(JsonResponse(response));
     }
 
     // Cache miss - log metrics
@@ -4470,7 +4466,7 @@ pub async fn search_tasks(
     // Convert to response (pure function - map transformation)
     let response: Vec<TaskResponse> = tasks.into_iter().map(TaskResponse::from).collect();
 
-    Ok(Json(response))
+    Ok(JsonResponse(response))
 }
 
 /// Searches tasks based on query and scope using index (pure function).
@@ -4601,7 +4597,7 @@ fn search_by_tags(tasks: &PersistentVector<Task>, query: &str) -> SearchResult {
 #[allow(clippy::future_not_send)]
 pub async fn count_by_priority(
     State(state): State<AppState>,
-) -> Result<Json<PriorityCountResponse>, ApiErrorResponse> {
+) -> Result<JsonResponse<PriorityCountResponse>, ApiErrorResponse> {
     // I/O boundary: Fetch all tasks from repository (use Pagination::all() for full dataset)
     let all_tasks = state
         .task_repository
@@ -4613,7 +4609,7 @@ pub async fn count_by_priority(
     // Pure computation: Count by priority using fold
     let counts = count_tasks_by_priority(&all_tasks.items);
 
-    Ok(Json(counts))
+    Ok(JsonResponse(counts))
 }
 
 /// Counts tasks by priority level (pure function).
@@ -13897,7 +13893,7 @@ mod search_index_ngram_metrics_tests {
 
         let config = SearchIndexConfig::default();
         let empty_tasks: PersistentVector<Task> = PersistentVector::new();
-        let index = SearchIndex::build_with_config(&empty_tasks, config.clone());
+        let index = SearchIndex::build_with_config(&empty_tasks, config);
         let timestamp = Timestamp::now();
         let task = Task::new(TaskId::generate(), "Test Task", timestamp)
             .with_tags(PersistentHashSet::new().insert(Tag::new("tag1")));
@@ -13919,7 +13915,7 @@ mod search_index_ngram_metrics_tests {
 
         let config = SearchIndexConfig::default();
         let empty_tasks: PersistentVector<Task> = PersistentVector::new();
-        let index = SearchIndex::build_with_config(&empty_tasks, config.clone());
+        let index = SearchIndex::build_with_config(&empty_tasks, config);
         let timestamp = Timestamp::now();
         let task = Task::new(TaskId::generate(), "Hello World Task", timestamp)
             .with_tags(PersistentHashSet::new().insert(Tag::new("rust")));
@@ -13939,7 +13935,7 @@ mod search_index_ngram_metrics_tests {
 
         let config = SearchIndexConfig::default();
         let empty_tasks: PersistentVector<Task> = PersistentVector::new();
-        let index = SearchIndex::build_with_config(&empty_tasks, config.clone());
+        let index = SearchIndex::build_with_config(&empty_tasks, config);
         let changes: Vec<TaskChange> = vec![];
 
         let (new_index, metrics) = index.apply_changes_with_metrics(&changes);
@@ -13960,7 +13956,7 @@ mod search_index_ngram_metrics_tests {
 
         let config = SearchIndexConfig::default();
         let empty_tasks: PersistentVector<Task> = PersistentVector::new();
-        let index = SearchIndex::build_with_config(&empty_tasks, config.clone());
+        let index = SearchIndex::build_with_config(&empty_tasks, config);
         let timestamp = Timestamp::now();
 
         let task1 = Task::new(TaskId::generate(), "First Task", timestamp.clone())

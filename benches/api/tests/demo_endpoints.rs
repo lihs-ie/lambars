@@ -21,8 +21,8 @@ use rstest::rstest;
 use common::{create_test_app_state, save_task_without_events};
 use task_management_benchmark_api::domain::{Priority, Tag, Task, TaskId, TaskStatus, Timestamp};
 
-use axum::Json;
 use axum::extract::{Path, Query, State};
+use task_management_benchmark_api::api::JsonResponse;
 
 // =============================================================================
 // Demo: GET /demo/tasks/{id}/history Tests
@@ -56,7 +56,7 @@ async fn test_get_task_history_demo_generates_mock() {
 
     // Should succeed
     assert!(result.is_ok(), "get_task_history_demo should succeed");
-    let Json(response) = result.unwrap();
+    let JsonResponse(response) = result.unwrap();
 
     // Should have mock history even though EventStore is empty
     assert!(!response.events.is_empty(), "Should have mock events");
@@ -99,7 +99,7 @@ async fn test_get_task_history_demo_with_status_changes() {
     .await;
 
     assert!(result.is_ok());
-    let Json(response) = result.unwrap();
+    let JsonResponse(response) = result.unwrap();
 
     // Completed task should have: Created, StatusChanged (Pending->InProgress), StatusChanged (InProgress->Completed)
     let status_change_count = response
@@ -157,7 +157,7 @@ async fn test_get_task_history_demo_with_tags() {
     .await;
 
     assert!(result.is_ok());
-    let Json(response) = result.unwrap();
+    let JsonResponse(response) = result.unwrap();
 
     // Should have TagAdded events
     let tag_events: Vec<_> = response
@@ -203,7 +203,7 @@ async fn test_get_task_history_demo_with_priority_change() {
     .await;
 
     assert!(result.is_ok());
-    let Json(response) = result.unwrap();
+    let JsonResponse(response) = result.unwrap();
 
     // Should have PriorityChanged event
     let has_priority_change = response.events.iter().any(|event| {
@@ -257,7 +257,7 @@ async fn test_demo_endpoints_use_mock_not_event_store() {
     .await;
 
     assert!(demo_result.is_ok(), "Demo endpoint should succeed");
-    let Json(demo_response) = demo_result.unwrap();
+    let JsonResponse(demo_response) = demo_result.unwrap();
     assert!(
         !demo_response.events.is_empty(),
         "Demo should return mock events"
@@ -278,7 +278,7 @@ async fn test_demo_endpoints_use_mock_not_event_store() {
         production_result.is_ok(),
         "Production endpoint should succeed"
     );
-    let Json(production_response) = production_result.unwrap();
+    let JsonResponse(production_response) = production_result.unwrap();
     assert!(
         production_response.events.is_empty(),
         "Production endpoint should return empty list when EventStore is empty"
@@ -342,7 +342,7 @@ async fn test_get_task_history_demo_pagination() {
     .await;
 
     assert!(result.is_ok());
-    let Json(response) = result.unwrap();
+    let JsonResponse(response) = result.unwrap();
 
     // Should return only 2 events but total should be higher
     assert_eq!(response.events.len(), 2, "Should return exactly 2 events");

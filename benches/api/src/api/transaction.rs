@@ -19,6 +19,8 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
 };
+
+use super::json_buffer::JsonResponse;
 use lambars::control::Either;
 use lambars::optics::{Lens, LensComposeExtension, Optional, Prism};
 use lambars::{lens, prism};
@@ -434,7 +436,7 @@ pub async fn update_task(
     State(state): State<AppState>,
     Path(path): Path<TaskPath>,
     Json(request): Json<UpdateTaskRequest>,
-) -> Result<(StatusCode, Json<TaskResponse>), ApiErrorResponse> {
+) -> Result<(StatusCode, JsonResponse<TaskResponse>), ApiErrorResponse> {
     let task_id = TaskId::from_uuid(path.id);
 
     // Fetch existing task
@@ -493,7 +495,7 @@ pub async fn update_task(
         new: updated_task,
     });
 
-    Ok((StatusCode::OK, Json(response)))
+    Ok((StatusCode::OK, JsonResponse(response)))
 }
 
 /// Describes a detected change in a task (pure value).
@@ -756,7 +758,7 @@ pub async fn update_status(
     State(state): State<AppState>,
     Path(path): Path<TaskPath>,
     Json(request): Json<UpdateStatusRequest>,
-) -> Result<(StatusCode, Json<TaskResponse>), ApiErrorResponse> {
+) -> Result<(StatusCode, JsonResponse<TaskResponse>), ApiErrorResponse> {
     let task_id = TaskId::from_uuid(path.id);
 
     // Fetch existing task
@@ -788,7 +790,7 @@ pub async fn update_status(
     match transition_result {
         Either::Right(StatusTransitionResult::NoChange) => {
             // Same status - no update needed (no-op), return current task
-            Ok((StatusCode::OK, Json(TaskResponse::from(&old_task))))
+            Ok((StatusCode::OK, JsonResponse(TaskResponse::from(&old_task))))
         }
         Either::Right(StatusTransitionResult::Transition(valid_status)) => {
             // Get current event version from EventStore (I/O boundary)
@@ -830,7 +832,7 @@ pub async fn update_status(
                 new: updated_task,
             });
 
-            Ok((StatusCode::OK, Json(response)))
+            Ok((StatusCode::OK, JsonResponse(response)))
         }
         Either::Left(error) => Err(ApiErrorResponse::from(error)),
     }
@@ -948,7 +950,7 @@ pub async fn add_subtask(
     State(state): State<AppState>,
     Path(path): Path<TaskPath>,
     Json(request): Json<AddSubtaskRequest>,
-) -> Result<(StatusCode, Json<TaskResponse>), ApiErrorResponse> {
+) -> Result<(StatusCode, JsonResponse<TaskResponse>), ApiErrorResponse> {
     let task_id = TaskId::from_uuid(path.id);
 
     // Validate subtask title
@@ -1002,7 +1004,7 @@ pub async fn add_subtask(
         new: updated_task,
     });
 
-    Ok((StatusCode::CREATED, Json(response)))
+    Ok((StatusCode::CREATED, JsonResponse(response)))
 }
 
 /// Applies a subtask addition to a task (pure function).
@@ -1066,7 +1068,7 @@ pub async fn add_tag(
     State(state): State<AppState>,
     Path(path): Path<TaskPath>,
     Json(request): Json<AddTagRequest>,
-) -> Result<(StatusCode, Json<TaskResponse>), ApiErrorResponse> {
+) -> Result<(StatusCode, JsonResponse<TaskResponse>), ApiErrorResponse> {
     let task_id = TaskId::from_uuid(path.id);
 
     // Validate tag
@@ -1141,7 +1143,7 @@ pub async fn add_tag(
         new: updated_task,
     });
 
-    Ok((StatusCode::OK, Json(response)))
+    Ok((StatusCode::OK, JsonResponse(response)))
 }
 
 /// Applies a tag addition to a task (pure function).

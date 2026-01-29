@@ -26,6 +26,8 @@ use std::time::Instant;
 
 use axum::Json;
 use axum::extract::{Query, State};
+
+use super::json_buffer::JsonResponse;
 use lambars::typeclass::Applicative;
 use serde::{Deserialize, Serialize};
 
@@ -739,17 +741,17 @@ fn parse_task_id(s: &str) -> Result<TaskId, String> {
 /// - `valid: false` with list of all `errors`
 pub async fn validate_collect_all(
     Json(request): Json<ValidateCollectAllRequest>,
-) -> Json<ValidateCollectAllResponse> {
+) -> JsonResponse<ValidateCollectAllResponse> {
     let validation_result = validate_task_all_errors(&request);
 
     match validation_result {
-        Ok(validated) => Json(ValidateCollectAllResponse {
+        Ok(validated) => JsonResponse(ValidateCollectAllResponse {
             valid: true,
             validated_task: Some(validated),
             errors: Vec::new(),
             validation_mode: "all_errors_collected".to_string(),
         }),
-        Err(errors) => Json(ValidateCollectAllResponse {
+        Err(errors) => JsonResponse(ValidateCollectAllResponse {
             valid: false,
             validated_task: None,
             errors,
@@ -795,7 +797,7 @@ pub async fn validate_collect_all(
 pub async fn dashboard(
     State(state): State<AppState>,
     Query(query): Query<DashboardQuery>,
-) -> Result<Json<DashboardResponse>, ApiErrorResponse> {
+) -> Result<JsonResponse<DashboardResponse>, ApiErrorResponse> {
     let start = Instant::now();
 
     let include_all = query.include.is_none();
@@ -866,7 +868,7 @@ pub async fn dashboard(
 
     let fetch_time_ms = start.elapsed().as_millis() as u64;
 
-    Ok(Json(DashboardResponse {
+    Ok(JsonResponse(DashboardResponse {
         recent_tasks: tasks,
         active_projects: projects,
         statistics,
@@ -902,7 +904,7 @@ pub async fn dashboard(
 #[allow(clippy::cast_possible_truncation)]
 pub async fn build_from_parts(
     Json(request): Json<BuildFromPartsRequest>,
-) -> Json<BuildFromPartsResponse> {
+) -> JsonResponse<BuildFromPartsResponse> {
     let title = resolve_title_template(request.title_template_id.as_deref(), request.use_defaults);
     let priority =
         resolve_priority_preset(request.priority_preset.as_deref(), request.use_defaults);
@@ -928,7 +930,7 @@ pub async fn build_from_parts(
         None => (None, None),
     };
 
-    Json(BuildFromPartsResponse {
+    JsonResponse(BuildFromPartsResponse {
         task: task.as_ref().map(TaskResponse::from),
         project_id: resolved_project_id,
         missing_parts,
@@ -967,7 +969,7 @@ pub async fn build_from_parts(
 pub async fn compute_parallel(
     State(state): State<AppState>,
     Json(request): Json<ComputeParallelRequest>,
-) -> Result<Json<ComputeParallelResponse>, ApiErrorResponse> {
+) -> Result<JsonResponse<ComputeParallelResponse>, ApiErrorResponse> {
     let start = Instant::now();
 
     // Validate request
@@ -1027,7 +1029,7 @@ pub async fn compute_parallel(
 
     let total_compute_time_ms = start.elapsed().as_millis() as u64;
 
-    Ok(Json(ComputeParallelResponse {
+    Ok(JsonResponse(ComputeParallelResponse {
         task_id: request.task_id,
         results: result_map,
         all_succeeded,

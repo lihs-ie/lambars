@@ -17,6 +17,8 @@ use std::time::Instant;
 
 use axum::Json;
 use axum::extract::{Path, State};
+
+use super::json_buffer::JsonResponse;
 use serde::{Deserialize, Serialize};
 
 use lambars::effect::AsyncIO;
@@ -384,7 +386,7 @@ pub async fn transform_async(
     State(state): State<AppState>,
     Path(task_id): Path<String>,
     Json(request): Json<TransformAsyncRequest>,
-) -> Result<Json<TransformAsyncResponse>, ApiErrorResponse> {
+) -> Result<JsonResponse<TransformAsyncResponse>, ApiErrorResponse> {
     let start = Instant::now();
 
     // Validate request
@@ -430,7 +432,7 @@ pub async fn transform_async(
     let execution_time_ms = start.elapsed().as_millis() as u64;
     let applied_transforms: Vec<String> = transforms.iter().map(transform_name).collect();
 
-    Ok(Json(TransformAsyncResponse {
+    Ok(JsonResponse(TransformAsyncResponse {
         task: TaskResponse::from(&task),
         applied_transforms,
         execution_time_ms,
@@ -509,7 +511,7 @@ fn fetch_task_async(
 pub async fn workflow_async(
     State(state): State<AppState>,
     Json(request): Json<WorkflowAsyncRequest>,
-) -> Result<Json<WorkflowAsyncResponse>, ApiErrorResponse> {
+) -> Result<JsonResponse<WorkflowAsyncResponse>, ApiErrorResponse> {
     let start = Instant::now();
 
     // Validate request
@@ -547,7 +549,7 @@ pub async fn workflow_async(
 
     let total_time_ms = start.elapsed().as_millis() as u64;
 
-    Ok(Json(WorkflowAsyncResponse {
+    Ok(JsonResponse(WorkflowAsyncResponse {
         task: TaskResponse::from(&task),
         steps_executed: steps,
         total_time_ms,
@@ -657,7 +659,7 @@ fn create_task_step(
 pub async fn batch_process_async(
     State(state): State<AppState>,
     Json(request): Json<BatchProcessAsyncRequest>,
-) -> Result<Json<BatchProcessAsyncResponse>, ApiErrorResponse> {
+) -> Result<JsonResponse<BatchProcessAsyncResponse>, ApiErrorResponse> {
     let start = Instant::now();
 
     // Validate request
@@ -728,7 +730,7 @@ pub async fn batch_process_async(
     let failure_count = results.len() - success_count;
     let total_time_ms = start.elapsed().as_millis() as u64;
 
-    Ok(Json(BatchProcessAsyncResponse {
+    Ok(JsonResponse(BatchProcessAsyncResponse {
         results,
         success_count,
         failure_count,
@@ -839,7 +841,7 @@ pub async fn conditional_pipeline(
     State(state): State<AppState>,
     Path(task_id): Path<String>,
     Json(request): Json<ConditionalPipelineRequest>,
-) -> Result<Json<ConditionalPipelineResponse>, ApiErrorResponse> {
+) -> Result<JsonResponse<ConditionalPipelineResponse>, ApiErrorResponse> {
     let start = Instant::now();
 
     // Parse task ID
@@ -860,7 +862,7 @@ pub async fn conditional_pipeline(
 
     let execution_time_ms = start.elapsed().as_millis() as u64;
 
-    Ok(Json(ConditionalPipelineResponse {
+    Ok(JsonResponse(ConditionalPipelineResponse {
         task: TaskResponse::from(&task),
         pipeline_used: pipeline_type,
         conditions_evaluated,

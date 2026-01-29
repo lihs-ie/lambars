@@ -20,6 +20,8 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::{Path, Query, State};
+
+use super::json_buffer::JsonResponse;
 use serde::{Deserialize, Serialize};
 
 use lambars::typeclass::Alternative;
@@ -371,7 +373,7 @@ fn parse_status(s: &str) -> Option<TaskStatus> {
 pub async fn search_fallback(
     State(state): State<AppState>,
     Query(query): Query<SearchFallbackQuery>,
-) -> Result<Json<SearchFallbackResponse>, ApiErrorResponse> {
+) -> Result<JsonResponse<SearchFallbackResponse>, ApiErrorResponse> {
     // Validate query
     if query.query.trim().is_empty() {
         return Err(ApiErrorResponse::validation_error(
@@ -447,7 +449,7 @@ pub async fn search_fallback(
     }
 
     match result {
-        Some((task, source)) => Ok(Json(SearchFallbackResponse {
+        Some((task, source)) => Ok(JsonResponse(SearchFallbackResponse {
             task: TaskResponse::from(&task),
             source,
         })),
@@ -608,7 +610,7 @@ pub async fn resolve_config(
     State(state): State<AppState>,
     Path(task_id): Path<String>,
     Query(query): Query<ResolveConfigQuery>,
-) -> Result<Json<ResolveConfigResponse>, ApiErrorResponse> {
+) -> Result<JsonResponse<ResolveConfigResponse>, ApiErrorResponse> {
     // Validate key
     if query.key.trim().is_empty() {
         return Err(ApiErrorResponse::validation_error(
@@ -634,7 +636,7 @@ pub async fn resolve_config(
     // Resolve config using choice pattern
     let (value, source) = resolve_config_hierarchy(&task, &query.key);
 
-    Ok(Json(ResolveConfigResponse {
+    Ok(JsonResponse(ResolveConfigResponse {
         key: query.key,
         value,
         source: if query.include_source.unwrap_or(false) {
@@ -734,7 +736,7 @@ fn get_default_config(key: &str) -> Option<serde_json::Value> {
 pub async fn filter_conditional(
     State(state): State<AppState>,
     Json(request): Json<FilterConditionalRequest>,
-) -> Result<Json<FilterConditionalResponse>, ApiErrorResponse> {
+) -> Result<JsonResponse<FilterConditionalResponse>, ApiErrorResponse> {
     // Validate batch size
     if request.task_ids.is_empty() {
         return Err(ApiErrorResponse::validation_error(
@@ -788,7 +790,7 @@ pub async fn filter_conditional(
         .map(|t| TaskResponse::from(*t))
         .collect();
 
-    Ok(Json(FilterConditionalResponse {
+    Ok(JsonResponse(FilterConditionalResponse {
         tasks: task_responses,
         total_input,
         filtered_count,
@@ -867,7 +869,7 @@ fn apply_guard_conditions<'a>(task: &'a Task, conditions: &FilterConditions) -> 
 pub async fn aggregate_sources(
     State(state): State<AppState>,
     Json(request): Json<AggregateSourcesRequest>,
-) -> Result<Json<AggregateSourcesResponse>, ApiErrorResponse> {
+) -> Result<JsonResponse<AggregateSourcesResponse>, ApiErrorResponse> {
     // Validate task ID
     let task_id = parse_task_id(&request.task_id).map_err(|error| {
         ApiErrorResponse::validation_error(
@@ -933,7 +935,7 @@ pub async fn aggregate_sources(
     // Calculate completeness
     let completeness = calculate_completeness(&aggregated_data);
 
-    Ok(Json(AggregateSourcesResponse {
+    Ok(JsonResponse(AggregateSourcesResponse {
         task: AggregatedTaskDto {
             id: request.task_id,
             title: aggregated_data.title,
@@ -1080,7 +1082,7 @@ fn calculate_completeness(data: &SourceData) -> f64 {
 pub async fn first_available(
     State(state): State<AppState>,
     Query(query): Query<FirstAvailableQuery>,
-) -> Result<Json<FirstAvailableResponse>, ApiErrorResponse> {
+) -> Result<JsonResponse<FirstAvailableResponse>, ApiErrorResponse> {
     // Determine which queues to check
     let queues = query
         .queues
@@ -1139,7 +1141,7 @@ pub async fn first_available(
     let result = Option::choice(queue_options);
 
     match result {
-        Some((task, queue)) => Ok(Json(FirstAvailableResponse {
+        Some((task, queue)) => Ok(JsonResponse(FirstAvailableResponse {
             task: TaskResponse::from(&task),
             queue,
             queue_depths,

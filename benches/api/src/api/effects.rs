@@ -14,6 +14,8 @@
 
 use axum::Json;
 use axum::extract::{Path, State};
+
+use super::json_buffer::JsonResponse;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -192,7 +194,7 @@ pub struct StateWorkflowResponse {
 pub async fn execute_workflow(
     State(_state): State<AppState>,
     Json(request): Json<WorkflowRequest>,
-) -> Result<Json<WorkflowResponse>, ApiErrorResponse> {
+) -> Result<JsonResponse<WorkflowResponse>, ApiErrorResponse> {
     // Build the effectful computation using Eff monad
     // Note: Eff uses Rc internally and is not Send, so we process synchronously
     let response = {
@@ -241,7 +243,7 @@ pub async fn execute_workflow(
         }
     };
 
-    Ok(Json(response))
+    Ok(JsonResponse(response))
 }
 
 /// Creates a validation workflow as an Eff computation.
@@ -307,7 +309,7 @@ pub async fn update_with_optics(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(request): Json<OpticsRequest>,
-) -> Result<Json<OpticsResponse>, ApiErrorResponse> {
+) -> Result<JsonResponse<OpticsResponse>, ApiErrorResponse> {
     let task_id = Uuid::parse_str(&id)
         .map(TaskId::from_uuid)
         .map_err(|_| ApiErrorResponse::bad_request("INVALID_TASK_ID", "Invalid task ID format"))?;
@@ -332,7 +334,7 @@ pub async fn update_with_optics(
         .await
         .map_err(ApiErrorResponse::from)?;
 
-    Ok(Json(OpticsResponse {
+    Ok(JsonResponse(OpticsResponse {
         task_id: id,
         updated_field: request.field,
         previous_value,
@@ -678,7 +680,7 @@ fn apply_optics_update(
 pub async fn execute_state_workflow(
     State(_state): State<AppState>,
     Json(request): Json<StateWorkflowRequest>,
-) -> Result<Json<StateWorkflowResponse>, ApiErrorResponse> {
+) -> Result<JsonResponse<StateWorkflowResponse>, ApiErrorResponse> {
     // Execute workflow synchronously (State/Writer/RWS use Rc, not Send)
     let response = if request.use_rws {
         execute_with_rws(&request)
@@ -686,7 +688,7 @@ pub async fn execute_state_workflow(
         execute_with_state_and_writer(&request)
     };
 
-    Ok(Json(response))
+    Ok(JsonResponse(response))
 }
 
 /// Workflow state for tracking.

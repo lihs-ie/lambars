@@ -19,6 +19,8 @@ use std::any::Any;
 
 use axum::Json;
 use axum::extract::{Query, State};
+
+use super::json_buffer::JsonResponse;
 use serde::{Deserialize, Serialize};
 
 use lambars::control::{ConcurrentLazy, Freer};
@@ -564,7 +566,7 @@ fn interpret_dry_run(workflow: Freer<TaskCommand, Task>) -> (Task, Vec<String>) 
 pub async fn partial_apply(
     State(state): State<AppState>,
     Json(request): Json<PartialApplyRequest>,
-) -> Result<Json<PartialApplyResponse>, ApiErrorResponse> {
+) -> Result<JsonResponse<PartialApplyResponse>, ApiErrorResponse> {
     // Validate request
     if request.task_ids.is_empty() || request.task_ids.len() > 100 {
         return Err(ApiErrorResponse::validation_error(
@@ -668,7 +670,7 @@ pub async fn partial_apply(
         _ => Vec::new(),
     };
 
-    Ok(Json(PartialApplyResponse {
+    Ok(JsonResponse(PartialApplyResponse {
         results,
         config_applied: request.config,
         operation: request.operation,
@@ -689,7 +691,7 @@ pub async fn partial_apply(
 pub async fn concurrent_lazy(
     State(state): State<AppState>,
     Json(request): Json<ConcurrentLazyRequest>,
-) -> Result<Json<ConcurrentLazyResponse>, ApiErrorResponse> {
+) -> Result<JsonResponse<ConcurrentLazyResponse>, ApiErrorResponse> {
     // Validate request
     if request.subsequent_calls > 100 {
         return Err(ApiErrorResponse::validation_error(
@@ -724,7 +726,7 @@ pub async fn concurrent_lazy(
     }
     let subsequent_force_time_us = subsequent_start.elapsed().as_micros() as u64;
 
-    Ok(Json(ConcurrentLazyResponse {
+    Ok(JsonResponse(ConcurrentLazyResponse {
         stats: computed_stats,
         subsequent_calls: request.subsequent_calls,
         first_force_time_us,
@@ -747,7 +749,7 @@ pub async fn concurrent_lazy(
 /// Returns `ApiErrorResponse` when `operations` is empty or has more than 50 items.
 pub async fn deque_operations(
     Json(request): Json<DequeOperationsRequest>,
-) -> Result<Json<DequeOperationsResponse>, ApiErrorResponse> {
+) -> Result<JsonResponse<DequeOperationsResponse>, ApiErrorResponse> {
     // Validate request
     if request.operations.is_empty() || request.operations.len() > 50 {
         return Err(ApiErrorResponse::validation_error(
@@ -780,7 +782,7 @@ pub async fn deque_operations(
     // Collect final state
     let final_state: Vec<String> = current_deque.iter().cloned().collect();
 
-    Ok(Json(DequeOperationsResponse {
+    Ok(JsonResponse(DequeOperationsResponse {
         final_state,
         popped_items,
         operation_count: request.operations.len(),
@@ -804,7 +806,7 @@ pub async fn deque_operations(
 pub async fn aggregate_numeric(
     State(state): State<AppState>,
     Query(query): Query<AggregateNumericQuery>,
-) -> Result<Json<AggregateNumericResponse>, ApiErrorResponse> {
+) -> Result<JsonResponse<AggregateNumericResponse>, ApiErrorResponse> {
     // Validate field
     let valid_fields = ["priority", "tag_count", "title_length"];
     if !valid_fields.contains(&query.field.as_str()) {
@@ -881,7 +883,7 @@ pub async fn aggregate_numeric(
             .collect()
     });
 
-    Ok(Json(AggregateNumericResponse {
+    Ok(JsonResponse(AggregateNumericResponse {
         result,
         field: query.field,
         aggregation: query.aggregation,
@@ -913,7 +915,7 @@ pub async fn aggregate_numeric(
 pub async fn freer_workflow(
     State(_state): State<AppState>,
     Json(request): Json<FreerWorkflowRequest>,
-) -> Result<Json<FreerWorkflowResponse>, ApiErrorResponse> {
+) -> Result<JsonResponse<FreerWorkflowResponse>, ApiErrorResponse> {
     // Validate request
     if request.steps.is_empty() || request.steps.len() > 20 {
         return Err(ApiErrorResponse::validation_error(
@@ -994,7 +996,7 @@ pub async fn freer_workflow(
 
     let response_task = result_task.map(|task| TaskResponse::from(&task));
 
-    Ok(Json(FreerWorkflowResponse {
+    Ok(JsonResponse(FreerWorkflowResponse {
         result: response_task,
         operations_executed: operations,
         execution_mode: request.execution_mode,

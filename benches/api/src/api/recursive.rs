@@ -16,6 +16,8 @@ use std::collections::HashMap;
 
 use axum::Json;
 use axum::extract::{Path, Query, State};
+
+use super::json_buffer::JsonResponse;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -211,7 +213,7 @@ pub async fn flatten_subtasks(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Query(query): Query<FlattenSubtasksQuery>,
-) -> Result<Json<FlattenSubtasksResponse>, ApiErrorResponse> {
+) -> Result<JsonResponse<FlattenSubtasksResponse>, ApiErrorResponse> {
     // Validate max_depth
     if query.max_depth > 10000 {
         return Err(ApiErrorResponse::validation_error(
@@ -257,7 +259,7 @@ pub async fn flatten_subtasks(
     let (flattened, iterations, max_depth_reached) =
         flatten_subtasks_trampoline(&simulated_subtasks, query.max_depth);
 
-    Ok(Json(FlattenSubtasksResponse {
+    Ok(JsonResponse(FlattenSubtasksResponse {
         task_id: id,
         total_count: flattened.len(),
         flattened_subtasks: flattened,
@@ -373,7 +375,7 @@ fn flatten_subtasks_trampoline(
 pub async fn resolve_dependencies(
     State(state): State<AppState>,
     Json(request): Json<ResolveDependenciesRequest>,
-) -> Result<Json<DependencyResolutionResponse>, ApiErrorResponse> {
+) -> Result<JsonResponse<DependencyResolutionResponse>, ApiErrorResponse> {
     // Validate task count
     if request.task_ids.len() > 1000 {
         return Err(ApiErrorResponse::validation_error(
@@ -417,7 +419,7 @@ pub async fn resolve_dependencies(
     let (result, iterations) = topological_sort_trampoline(&dependency_graph);
 
     match result {
-        Either::Left(cycle_path) => Ok(Json(DependencyResolutionResponse {
+        Either::Left(cycle_path) => Ok(JsonResponse(DependencyResolutionResponse {
             execution_order: Vec::new(),
             dependency_graph: dependency_graph
                 .iter()
@@ -427,7 +429,7 @@ pub async fn resolve_dependencies(
             cycle_path: Some(cycle_path),
             trampoline_iterations: iterations,
         })),
-        Either::Right(order) => Ok(Json(DependencyResolutionResponse {
+        Either::Right(order) => Ok(JsonResponse(DependencyResolutionResponse {
             execution_order: order,
             dependency_graph: dependency_graph
                 .iter()
@@ -617,7 +619,7 @@ pub async fn aggregate_tree(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Query(query): Query<AggregateTreeQuery>,
-) -> Result<Json<TreeAggregationResponse>, ApiErrorResponse> {
+) -> Result<JsonResponse<TreeAggregationResponse>, ApiErrorResponse> {
     // Validate max_depth
     if query.max_depth > 50 {
         return Err(ApiErrorResponse::validation_error(
@@ -660,7 +662,7 @@ pub async fn aggregate_tree(
     // Use Trampoline for stack-safe aggregation
     let (tree_with_stats, root_stats, iterations) = aggregate_tree_trampoline(&simulated_tree);
 
-    Ok(Json(TreeAggregationResponse {
+    Ok(JsonResponse(TreeAggregationResponse {
         project_id: id,
         root_stats,
         tree: tree_with_stats,
