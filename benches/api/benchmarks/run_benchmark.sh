@@ -2755,7 +2755,7 @@ merge_phase_results() {
     {
         printf "Running %ss test @ %s\n" "${total_duration}" "${API_URL}"
         printf "  %s threads and %s connections\n\n" "${THREADS}" "${CONNECTIONS}"
-        printf "=== Merged Results (%s profile, %s phases) ===\n\n" "${RPS_PROFILE}" "${phase_count}"
+        printf -- "=== Merged Results (%s profile, %s phases) ===\n\n" "${RPS_PROFILE}" "${phase_count}"
         printf "  Thread Stats   Avg      Stdev     Max   +/- Stdev\n"
         printf "    Latency   %s\n\n" "${last_avg:-N/A}"
         printf "  Latency Distribution\n"
@@ -2769,7 +2769,7 @@ merge_phase_results() {
         printf "  %s requests in %ss\n" "${total_requests}" "${total_duration}"
         printf "Requests/sec: %s\n" "${avg_rps}"
         printf "Transfer/sec: N/A (merged result)\n\n"
-        printf "--- Phase Details ---\n"
+        printf -- "--- Phase Details ---\n"
     } > "${merged_wrk}"
 
     # Append phase summaries
