@@ -3,7 +3,7 @@
 #
 # Check performance thresholds for benchmark scenarios.
 #
-# This script validates that latency metrics (p50, p95, p99) and optional
+# This script validates that latency metrics (p50, p90, p99) and optional
 # rate metrics (error_rate, conflict_rate) in meta.json meet the defined
 # thresholds for each scenario.
 #
@@ -24,7 +24,7 @@
 # Exit codes:
 #   0: Pass - All thresholds met
 #   1: General error (invalid arguments, unknown scenario, missing dependencies)
-#   2: Missing required metrics (meta.json not found or p50/p95/p99 missing)
+#   2: Missing required metrics (meta.json not found or p50/p90/p99 missing)
 #   3: Threshold exceeded (one or more metrics failed)
 #
 # Examples:
@@ -71,7 +71,7 @@ fi
 # =============================================================================
 
 # Get threshold from thresholds.yaml (single source of truth)
-# Arguments: scenario, metric (p50, p95, p99, error_rate, conflict_rate)
+# Arguments: scenario, metric (p50, p90, p99, error_rate, conflict_rate)
 # Returns: threshold value or empty string
 get_threshold() {
     local scenario="${1}"
@@ -85,7 +85,7 @@ get_threshold() {
 
     local yaml_key
     case "${metric}" in
-        p50|p95|p99)
+        p50|p90|p99)
             yaml_key="${metric}_latency_ms"
             ;;
         error_rate|conflict_rate)
@@ -186,7 +186,7 @@ parse_latency_to_ms() {
 
 # Validate scenario by attempting to load thresholds
 P50_MAX=$(get_threshold "${SCENARIO}" "p50")
-P95_MAX=$(get_threshold "${SCENARIO}" "p95")
+P90_MAX=$(get_threshold "${SCENARIO}" "p90")
 P99_MAX=$(get_threshold "${SCENARIO}" "p99")
 ERROR_RATE_MAX=$(get_threshold "${SCENARIO}" "error_rate")
 CONFLICT_RATE_MAX=$(get_threshold "${SCENARIO}" "conflict_rate")
@@ -232,9 +232,9 @@ echo "Checking thresholds for scenario: ${SCENARIO}"
 echo "Meta file: ${META_FILE}"
 
 # Extract latency values from meta.json
-# Values are under .results.p50, .results.p95, .results.p99
+# Values are under .results.p50, .results.p90, .results.p99
 RAW_P50=$(jq -r '.results.p50 // empty' "${META_FILE}" 2>/dev/null || true)
-RAW_P95=$(jq -r '.results.p95 // empty' "${META_FILE}" 2>/dev/null || true)
+RAW_P90=$(jq -r '.results.p90 // empty' "${META_FILE}" 2>/dev/null || true)
 RAW_P99=$(jq -r '.results.p99 // empty' "${META_FILE}" 2>/dev/null || true)
 
 # Extract rate values from meta.json (optional)
@@ -244,7 +244,7 @@ RAW_CONFLICT_RATE=$(jq -r '.results.conflict_rate // empty' "${META_FILE}" 2>/de
 
 # Convert to milliseconds
 P50=$(parse_latency_to_ms "${RAW_P50}")
-P95=$(parse_latency_to_ms "${RAW_P95}")
+P90=$(parse_latency_to_ms "${RAW_P90}")
 P99=$(parse_latency_to_ms "${RAW_P99}")
 
 # Rate values are already decimal (no conversion needed)
@@ -257,8 +257,8 @@ MISSING_METRICS=""
 if [[ -z "${P50}" ]]; then
     MISSING_METRICS="${MISSING_METRICS} p50"
 fi
-if [[ -z "${P95}" ]]; then
-    MISSING_METRICS="${MISSING_METRICS} p95"
+if [[ -z "${P90}" ]]; then
+    MISSING_METRICS="${MISSING_METRICS} p90"
 fi
 if [[ -z "${P99}" ]]; then
     MISSING_METRICS="${MISSING_METRICS} p99"
@@ -274,7 +274,7 @@ fi
 
 if [[ -n "${MISSING_METRICS}" ]]; then
     echo "ERROR: Missing required metrics in meta.json:${MISSING_METRICS}"
-    echo "Raw values: p50='${RAW_P50}', p95='${RAW_P95}', p99='${RAW_P99}'"
+    echo "Raw values: p50='${RAW_P50}', p90='${RAW_P90}', p99='${RAW_P99}'"
     if [[ -n "${ERROR_RATE_MAX}" ]]; then
         echo "  error_rate='${RAW_ERROR_RATE}' (required)"
     fi
@@ -287,7 +287,7 @@ fi
 echo ""
 echo "Thresholds:"
 echo "  p50 <= ${P50_MAX}ms"
-echo "  p95 <= ${P95_MAX}ms"
+echo "  p90 <= ${P90_MAX}ms"
 echo "  p99 <= ${P99_MAX}ms"
 if [[ -n "${ERROR_RATE_MAX}" ]]; then
     echo "  error_rate <= ${ERROR_RATE_MAX}"
@@ -298,7 +298,7 @@ fi
 echo ""
 echo "Results:"
 echo "  p50 = ${P50}ms"
-echo "  p95 = ${P95}ms"
+echo "  p90 = ${P90}ms"
 echo "  p99 = ${P99}ms"
 if [[ -n "${ERROR_RATE}" ]]; then
     echo "  error_rate = ${ERROR_RATE}"
@@ -318,9 +318,9 @@ if (( $(echo "${P50} > ${P50_MAX}" | bc -l) )); then
     FAILED=1
 fi
 
-if (( $(echo "${P95} > ${P95_MAX}" | bc -l) )); then
+if (( $(echo "${P90} > ${P90_MAX}" | bc -l) )); then
     FAILURES="${FAILURES}
-  - p95=${P95}ms exceeds threshold of ${P95_MAX}ms"
+  - p90=${P90}ms exceeds threshold of ${P90_MAX}ms"
     FAILED=1
 fi
 
@@ -349,8 +349,8 @@ if [[ -n "${CONFLICT_RATE_MAX}" ]] && [[ -n "${CONFLICT_RATE}" ]]; then
 fi
 
 # Build summary strings
-RESULTS_SUMMARY="p50=${P50}ms, p95=${P95}ms, p99=${P99}ms"
-THRESHOLDS_SUMMARY="p50<=${P50_MAX}ms, p95<=${P95_MAX}ms, p99<=${P99_MAX}ms"
+RESULTS_SUMMARY="p50=${P50}ms, p90=${P90}ms, p99=${P99}ms"
+THRESHOLDS_SUMMARY="p50<=${P50_MAX}ms, p90<=${P90_MAX}ms, p99<=${P99_MAX}ms"
 
 if [[ -n "${ERROR_RATE}" ]]; then
     RESULTS_SUMMARY="${RESULTS_SUMMARY}, error_rate=${ERROR_RATE}"

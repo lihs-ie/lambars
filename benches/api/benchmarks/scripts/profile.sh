@@ -542,8 +542,8 @@ create_wrk_json_output() {
     local latency_p90
     latency_p90=$(grep "90%" "${raw_output}" | awk '{print $2}' || echo "0")
 
-    local latency_p95
-    latency_p95=$(grep "95%" "${raw_output}" 2>/dev/null | awk '{print $2}' || echo "0")
+    local latency_p90
+    latency_p90=$(grep "90%" "${raw_output}" 2>/dev/null | awk '{print $2}' || echo "0")
 
     local latency_p99
     latency_p99=$(grep "99%" "${raw_output}" | awk '{print $2}' || echo "0")
@@ -585,7 +585,6 @@ create_wrk_json_output() {
             "p50": "${latency_p50}",
             "p75": "${latency_p75}",
             "p90": "${latency_p90}",
-            "p95": "${latency_p95}",
             "p99": "${latency_p99}"
         }
     },

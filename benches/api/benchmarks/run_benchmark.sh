@@ -1349,27 +1349,27 @@ generate_meta_json() {
     # Parse wrk output for metrics
     # Note: Use anchored patterns to avoid matching percentages in other contexts
     # (e.g., "75.99%" in Latency line should not match "99%" pattern)
-    local rps avg_latency_raw p50_raw p95_raw p99_raw total_requests
+    local rps avg_latency_raw p50_raw p90_raw p99_raw total_requests
     rps=$(grep "Requests/sec:" "${result_file}" 2>/dev/null | awk '{print $2}' || echo "0")
     avg_latency_raw=$(grep "Latency" "${result_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
     p50_raw=$(grep -E "^[[:space:]]+50[.0-9]*%" "${result_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
-    p95_raw=$(grep -E "^[[:space:]]+95[.0-9]*%" "${result_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
+    p90_raw=$(grep -E "^[[:space:]]+90[.0-9]*%" "${result_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
     p99_raw=$(grep -E "^[[:space:]]+99[.0-9]*%" "${result_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
     total_requests=$(grep -m1 "requests in" "${result_file}" 2>/dev/null | awk '{print $1}' || echo "0")
     [[ ! "${total_requests}" =~ ^[0-9]+$ ]] && total_requests=0
 
     # v3: Convert latency strings to milliseconds numbers
-    local avg_latency_ms p50_ms p95_ms p99_ms
+    local avg_latency_ms p50_ms p90_ms p99_ms
     avg_latency_ms=$(parse_latency_to_ms "${avg_latency_raw}")
     p50_ms=$(parse_latency_to_ms "${p50_raw}")
-    p95_ms=$(parse_latency_to_ms "${p95_raw}")
+    p90_ms=$(parse_latency_to_ms "${p90_raw}")
     p99_ms=$(parse_latency_to_ms "${p99_raw}")
 
     # v3: Format for JSON (null for missing values)
-    local avg_latency_json p50_json p95_json p99_json
+    local avg_latency_json p50_json p90_json p99_json
     avg_latency_json=$(format_latency_json "${avg_latency_ms}")
     p50_json=$(format_latency_json "${p50_ms}")
-    p95_json=$(format_latency_json "${p95_ms}")
+    p90_json=$(format_latency_json "${p90_ms}")
     p99_json=$(format_latency_json "${p99_ms}")
 
     # Parse socket errors breakdown
@@ -1548,10 +1548,10 @@ generate_meta_json() {
         p50_json=$(format_latency_json "${MERGED_P50}")
         p50_ms="${MERGED_P50}"
     fi
-    if [[ -n "${MERGED_P95:-}" ]]; then
-        # MERGED_P95 is already in milliseconds, format for JSON
-        p95_json=$(format_latency_json "${MERGED_P95}")
-        p95_ms="${MERGED_P95}"
+    if [[ -n "${MERGED_P90:-}" ]]; then
+        # MERGED_P90 is already in milliseconds, format for JSON
+        p90_json=$(format_latency_json "${MERGED_P90}")
+        p90_ms="${MERGED_P90}"
     fi
     if [[ -n "${MERGED_P99:-}" ]]; then
         # MERGED_P99 is already in milliseconds, format for JSON
@@ -1578,10 +1578,10 @@ generate_meta_json() {
     # Check for missing, zero, or invalid values (per REQ-PROFILE-JSON-002)
     local missing_percentiles=()
     is_valid_latency "${p50_ms}" || missing_percentiles+=("p50")
-    is_valid_latency "${p95_ms}" || missing_percentiles+=("p95")
+    is_valid_latency "${p90_ms}" || missing_percentiles+=("p90")
     is_valid_latency "${p99_ms}" || missing_percentiles+=("p99")
 
-    if ! validate_required_percentiles "${p50_ms}" "${p95_ms}" "${p99_ms}" "${total_requests}"; then
+    if ! validate_required_percentiles "${p50_ms}" "${p90_ms}" "${p99_ms}" "${total_requests}"; then
         # Determine failure reason for summary.txt
         if [[ ! "${total_requests}" =~ ^(0|[1-9][0-9]*)$ ]]; then
             echo "Benchmark failed: invalid total_requests value (${total_requests})" >> "${SUMMARY_FILE:-/dev/null}"
@@ -1798,7 +1798,7 @@ generate_meta_json() {
         --argjson rps "${validated_rps}" \
         --argjson avg_latency "${avg_latency_json}" \
         --argjson p50 "${p50_json}" \
-        --argjson p95 "${p95_json}" \
+        --argjson p90 "${p90_json}" \
         --argjson p99 "${p99_json}" \
         --argjson http_status "${http_status_json}" \
         --argjson retries "${retries}" \
@@ -1861,7 +1861,7 @@ generate_meta_json() {
     "latency_ms": {
       "avg": $avg_latency,
       "p50": $p50,
-      "p95": $p95,
+      "p90": $p90,
       "p99": $p99
     },
     "http_status": $http_status,
@@ -1913,7 +1913,7 @@ generate_meta_json() {
 # Validate Required Percentiles (REQ-PROFILE-JSON-002)
 # =============================================================================
 #
-# Validates that required percentile metrics (p50, p95, p99) are available
+# Validates that required percentile metrics (p50, p90, p99) are available
 # when the benchmark has processed requests.
 #
 # Per REQ-PROFILE-JSON-002:
@@ -1923,7 +1923,7 @@ generate_meta_json() {
 #
 # Parameters:
 #   $1: p50 value (milliseconds or null)
-#   $2: p95 value (milliseconds or null)
+#   $2: p90 value (milliseconds or null)
 #   $3: p99 value (milliseconds or null)
 #   $4: total_requests count
 #
@@ -1933,7 +1933,7 @@ generate_meta_json() {
 # =============================================================================
 validate_required_percentiles() {
     local p50="$1"
-    local p95="$2"
+    local p90="$2"
     local p99="$3"
     local total_requests="$4"
 
@@ -1954,7 +1954,7 @@ validate_required_percentiles() {
     # Check for missing, zero, or invalid values (per REQ-PROFILE-JSON-002)
     # Validate: non-empty, numeric, positive, non-zero
     is_valid_latency "${p50}" || missing+=("p50")
-    is_valid_latency "${p95}" || missing+=("p95")
+    is_valid_latency "${p90}" || missing+=("p90")
     is_valid_latency "${p99}" || missing+=("p99")
 
     if [[ ${#missing[@]} -gt 0 ]]; then
@@ -2618,7 +2618,6 @@ merge_phase_results() {
     declare -a p50_latencies=()
     declare -a p75_latencies=()
     declare -a p90_latencies=()
-    declare -a p95_latencies=()
     declare -a p99_latencies=()
 
     for phase_dir in ${phase_dirs}; do
@@ -2678,19 +2677,17 @@ merge_phase_results() {
                 fi
 
                 # Collect latencies for potential averaging
-                local avg_lat p50_lat p75_lat p90_lat p95_lat p99_lat
+                local avg_lat p50_lat p75_lat p90_lat p99_lat
                 avg_lat=$(grep "Latency" "${wrk_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
                 p50_lat=$(grep -E "^[[:space:]]+50[.0-9]*%" "${wrk_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
                 p75_lat=$(grep -E "^[[:space:]]+75[.0-9]*%" "${wrk_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
                 p90_lat=$(grep -E "^[[:space:]]+90[.0-9]*%" "${wrk_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
-                p95_lat=$(grep -E "^[[:space:]]+95[.0-9]*%" "${wrk_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
                 p99_lat=$(grep -E "^[[:space:]]+99[.0-9]*%" "${wrk_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
 
                 [[ -n "${avg_lat}" ]] && avg_latencies+=("${avg_lat}")
                 [[ -n "${p50_lat}" ]] && p50_latencies+=("${p50_lat}")
                 [[ -n "${p75_lat}" ]] && p75_latencies+=("${p75_lat}")
                 [[ -n "${p90_lat}" ]] && p90_latencies+=("${p90_lat}")
-                [[ -n "${p95_lat}" ]] && p95_latencies+=("${p95_lat}")
                 [[ -n "${p99_lat}" ]] && p99_latencies+=("${p99_lat}")
             fi
         fi
@@ -2713,7 +2710,7 @@ merge_phase_results() {
 
     # Use the last phase's latency values for the merged output (representative of peak load)
     # Exception: p99 uses max_p99 (worst case across all phases) for conservative reporting
-    local last_avg="" last_p50="" last_p75="" last_p90="" last_p95="" last_p99=""
+    local last_avg="" last_p50="" last_p75="" last_p90="" last_p99=""
     if [[ ${#avg_latencies[@]} -gt 0 ]]; then
         last_avg="${avg_latencies[-1]}"
     fi
@@ -2725,9 +2722,6 @@ merge_phase_results() {
     fi
     if [[ ${#p90_latencies[@]} -gt 0 ]]; then
         last_p90="${p90_latencies[-1]}"
-    fi
-    if [[ ${#p95_latencies[@]} -gt 0 ]]; then
-        last_p95="${p95_latencies[-1]}"
     fi
     if [[ ${#p99_latencies[@]} -gt 0 ]]; then
         last_p99="${p99_latencies[-1]}"
@@ -2762,7 +2756,6 @@ merge_phase_results() {
         printf "     50%%    %s\n" "${last_p50:-N/A}"
         printf "     75%%    %s\n" "${last_p75:-N/A}"
         printf "     90%%    %s\n" "${last_p90:-N/A}"
-        printf "     95%%    %s\n" "${last_p95:-N/A}"
         printf "     99%%    %s\n" "${max_p99_display}"
         printf "     99.9%%  N/A\n"
         printf "  Max P99 (across phases): %s\n" "${max_p99_display}"
@@ -2788,6 +2781,13 @@ merge_phase_results() {
     export MERGED_RPS="${avg_rps}"
     export MERGED_REQUESTS="${total_requests}"
     export MERGED_DURATION="${total_duration}"
+    # Export latencies in milliseconds (parse_latency_to_ms applied)
+    if [[ -n "${last_p50}" ]]; then
+        export MERGED_P50="$(parse_latency_to_ms "${last_p50}")"
+    fi
+    if [[ -n "${last_p90}" ]]; then
+        export MERGED_P90="$(parse_latency_to_ms "${last_p90}")"
+    fi
     export MERGED_P99="${max_p99}"
     export MERGED_ERROR_RATE="${error_rate}"
     export MERGED_PHASE_COUNT="${phase_count}"
