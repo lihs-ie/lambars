@@ -173,6 +173,10 @@ required-features = ["typeclass", "control", "persistent", "optics", "effect", "
 lto = "fat"
 codegen-units = 1
 opt-level = 3
+# Line tables only (debug = 1) - required for perf/flamegraph symbol resolution
+# Note: Does not include inline info or full debug info. Consider debug = 2
+# for detailed profiling, but increases binary size (~30-50%) and build time.
+debug = 1
 
 [profile.bench]
 inherits = "release"
