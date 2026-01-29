@@ -149,7 +149,7 @@
         },
         "latency_ms": {
           "type": "object",
-          "required": ["p50", "p90", "p99"],
+          "required": ["p50", "p95", "p99"],
           "properties": {
             "avg": {
               "type": ["number", "null"],
