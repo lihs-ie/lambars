@@ -341,13 +341,30 @@ run_perf_record() {
     log_info "Starting perf recording (PID: ${pid}, frequency: ${FREQUENCY}Hz)..."
 
     if [[ "$(uname)" == "Linux" ]]; then
+        # Try with --call-graph dwarf first, fallback to -g (fp) if unsupported
+        # Use larger stack size (16KB) for dwarf to handle deep call stacks
+        local callgraph_method="--call-graph dwarf,16384"
+        local test_file="${RESULT_DIR}/perf_test.data"
+        if ! sudo perf record -F "${FREQUENCY}" -p "${pid}" ${callgraph_method} -o "${test_file}" -- sleep 0.5 2>/dev/null; then
+            log_warning "--call-graph dwarf not supported, falling back to -g (fp)"
+            callgraph_method="-g"
+            # Re-validate with -g fallback
+            if ! sudo perf record -F "${FREQUENCY}" -p "${pid}" ${callgraph_method} -o "${test_file}" -- sleep 0.5 2>/dev/null; then
+                log_error "perf -g also failed. Cannot perform profiling."
+                exit 1
+            fi
+        fi
+        # Use sudo rm to handle permission issues with sudo-created files
+        sudo rm -f "${test_file}" 2>/dev/null || rm -f "${test_file}" 2>/dev/null
+
         sudo perf record \
             -F "${FREQUENCY}" \
             -p "${pid}" \
-            -g \
+            ${callgraph_method} \
             -o "${output_file}" \
             -- sleep "${DURATION}" &
         PERF_PID=$!
+        log_info "  Call-graph method: ${callgraph_method}"
     elif [[ "$(uname)" == "Darwin" ]]; then
         # On macOS, use sample command
         sample "${pid}" "${DURATION}" -f "${output_file}.sample" &
@@ -525,8 +542,8 @@ create_wrk_json_output() {
     local latency_p90
     latency_p90=$(grep "90%" "${raw_output}" | awk '{print $2}' || echo "0")
 
-    local latency_p95
-    latency_p95=$(grep "95%" "${raw_output}" 2>/dev/null | awk '{print $2}' || echo "0")
+    local latency_p90
+    latency_p90=$(grep "90%" "${raw_output}" 2>/dev/null | awk '{print $2}' || echo "0")
 
     local latency_p99
     latency_p99=$(grep "99%" "${raw_output}" | awk '{print $2}' || echo "0")
@@ -568,7 +585,6 @@ create_wrk_json_output() {
             "p50": "${latency_p50}",
             "p75": "${latency_p75}",
             "p90": "${latency_p90}",
-            "p95": "${latency_p95}",
             "p99": "${latency_p99}"
         }
     },

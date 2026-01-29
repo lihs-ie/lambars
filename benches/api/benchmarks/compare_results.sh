@@ -14,7 +14,7 @@
 #   --threshold <file>  Path to threshold YAML file for regression detection
 #
 # Output:
-#   - Comparison table with metrics: p50, p95, p99, rps, error_rate
+#   - Comparison table with metrics: p50, p90, p99, rps, error_rate
 #   - Percentage differences (positive = improvement, negative = regression)
 #   - Memory metrics if profile data available
 #
@@ -107,8 +107,8 @@ load_thresholds() {
 
     # Parse thresholds with yq if available, otherwise use grep/sed
     if command -v yq &> /dev/null; then
-        P95_WARN=$(yq '.thresholds.p95_latency_ms.warning // 50' "${file}")
-        P95_ERROR=$(yq '.thresholds.p95_latency_ms.error // 100' "${file}")
+        P90_WARN=$(yq '.thresholds.p90_latency_ms.warning // 50' "${file}")
+        P90_ERROR=$(yq '.thresholds.p90_latency_ms.error // 100' "${file}")
         P99_WARN=$(yq '.thresholds.p99_latency_ms.warning // 100' "${file}")
         P99_ERROR=$(yq '.thresholds.p99_latency_ms.error // 200' "${file}")
         ERROR_RATE_WARN=$(yq '.thresholds.error_rate.warning // 0.01' "${file}")
@@ -117,8 +117,8 @@ load_thresholds() {
         RPS_DEGRADATION_ERROR=$(yq '.thresholds.rps_degradation_percent.error // 10' "${file}")
     else
         # Fallback to grep/sed parsing
-        P95_WARN=$(grep -A2 'p95_latency_ms:' "${file}" 2>/dev/null | grep 'warning:' | sed 's/.*warning: *//' || echo "50")
-        P95_ERROR=$(grep -A2 'p95_latency_ms:' "${file}" 2>/dev/null | grep 'error:' | sed 's/.*error: *//' || echo "100")
+        P90_WARN=$(grep -A2 'p90_latency_ms:' "${file}" 2>/dev/null | grep 'warning:' | sed 's/.*warning: *//' || echo "50")
+        P90_ERROR=$(grep -A2 'p90_latency_ms:' "${file}" 2>/dev/null | grep 'error:' | sed 's/.*error: *//' || echo "100")
         P99_WARN=$(grep -A2 'p99_latency_ms:' "${file}" 2>/dev/null | grep 'warning:' | sed 's/.*warning: *//' || echo "100")
         P99_ERROR=$(grep -A2 'p99_latency_ms:' "${file}" 2>/dev/null | grep 'error:' | sed 's/.*error: *//' || echo "200")
         ERROR_RATE_WARN=$(grep -A2 'error_rate:' "${file}" 2>/dev/null | grep 'warning:' | sed 's/.*warning: *//' || echo "0.01")
@@ -335,7 +335,7 @@ compare_single() {
     # Extract metrics from wrk.txt
     local base_rps new_rps
     local base_p50 new_p50
-    local base_p95 new_p95
+    local base_p90 new_p90
     local base_p99 new_p99
     local base_avg new_avg
 
@@ -345,8 +345,8 @@ compare_single() {
     base_p50=$(extract_from_wrk "${base_wrk}" "50%")
     new_p50=$(extract_from_wrk "${new_wrk}" "50%")
 
-    base_p95=$(extract_from_wrk "${base_wrk}" "95%")
-    new_p95=$(extract_from_wrk "${new_wrk}" "95%")
+    base_p90=$(extract_from_wrk "${base_wrk}" "90%")
+    new_p90=$(extract_from_wrk "${new_wrk}" "90%")
 
     base_p99=$(extract_from_wrk "${base_wrk}" "99%")
     new_p99=$(extract_from_wrk "${new_wrk}" "99%")
@@ -361,24 +361,24 @@ compare_single() {
 
     # Convert latencies to ms for comparison
     local base_p50_ms new_p50_ms
-    local base_p95_ms new_p95_ms
+    local base_p90_ms new_p90_ms
     local base_p99_ms new_p99_ms
 
     base_p50_ms=$(parse_latency_ms "${base_p50}")
     new_p50_ms=$(parse_latency_ms "${new_p50}")
 
-    base_p95_ms=$(parse_latency_ms "${base_p95}")
-    new_p95_ms=$(parse_latency_ms "${new_p95}")
+    base_p90_ms=$(parse_latency_ms "${base_p90}")
+    new_p90_ms=$(parse_latency_ms "${new_p90}")
 
     base_p99_ms=$(parse_latency_ms "${base_p99}")
     new_p99_ms=$(parse_latency_ms "${new_p99}")
 
     # Calculate differences
-    local diff_rps diff_p50 diff_p95 diff_p99 diff_error
+    local diff_rps diff_p50 diff_p90 diff_p99 diff_error
 
     diff_rps=$(calc_diff_percent "${base_rps}" "${new_rps}" "throughput")
     diff_p50=$(calc_diff_percent "${base_p50_ms}" "${new_p50_ms}" "latency")
-    diff_p95=$(calc_diff_percent "${base_p95_ms}" "${new_p95_ms}" "latency")
+    diff_p90=$(calc_diff_percent "${base_p90_ms}" "${new_p90_ms}" "latency")
     diff_p99=$(calc_diff_percent "${base_p99_ms}" "${new_p99_ms}" "latency")
 
     if [[ "${base_error}" != "N/A" ]] && [[ "${new_error}" != "N/A" ]]; then
@@ -388,9 +388,9 @@ compare_single() {
     fi
 
     # Check thresholds if threshold file is specified
-    local p95_status="ok" p99_status="ok" rps_status="ok" error_status="ok"
+    local p90_status="ok" p99_status="ok" rps_status="ok" error_status="ok"
     if [[ -n "${THRESHOLD_FILE}" ]]; then
-        p95_status=$(check_threshold "${new_p95_ms}" "${P95_WARN}" "${P95_ERROR}" "true")
+        p90_status=$(check_threshold "${new_p90_ms}" "${P90_WARN}" "${P90_ERROR}" "true")
         p99_status=$(check_threshold "${new_p99_ms}" "${P99_WARN}" "${P99_ERROR}" "true")
 
         # RPS degradation: negative diff means regression
@@ -405,7 +405,7 @@ compare_single() {
         fi
 
         # Mark regression if any error threshold exceeded
-        if [[ "${p95_status}" == "error" ]] || [[ "${p99_status}" == "error" ]] || \
+        if [[ "${p90_status}" == "error" ]] || [[ "${p99_status}" == "error" ]] || \
            [[ "${rps_status}" == "error" ]] || [[ "${error_status}" == "error" ]]; then
             REGRESSION_DETECTED=true
         fi
@@ -418,27 +418,27 @@ compare_single() {
   "scenario": "${scenario_name}",
   "base": {
     "p50": $(json_value "${base_p50}" true),
-    "p95": $(json_value "${base_p95}" true),
+    "p90": $(json_value "${base_p90}" true),
     "p99": $(json_value "${base_p99}" true),
     "rps": $(json_value "${base_rps}"),
     "error_rate": $(json_value "${base_error}")
   },
   "new": {
     "p50": $(json_value "${new_p50}" true),
-    "p95": $(json_value "${new_p95}" true),
+    "p90": $(json_value "${new_p90}" true),
     "p99": $(json_value "${new_p99}" true),
     "rps": $(json_value "${new_rps}"),
     "error_rate": $(json_value "${new_error}")
   },
   "diff": {
     "p50_percent": $(json_value "${diff_p50}"),
-    "p95_percent": $(json_value "${diff_p95}"),
+    "p90_percent": $(json_value "${diff_p90}"),
     "p99_percent": $(json_value "${diff_p99}"),
     "rps_percent": $(json_value "${diff_rps}"),
     "error_rate_percent": $(json_value "${diff_error}")
   },
   "status": {
-    "p95": "${p95_status}",
+    "p90": "${p90_status}",
     "p99": "${p99_status}",
     "rps": "${rps_status}",
     "error_rate": "${error_status}"
@@ -456,7 +456,7 @@ EOF
         printf "%-12s | %-12s | %-12s | %-10s\n" "Metric" "Base" "New" "Diff"
         printf "%-12s-+-%-12s-+-%-12s-+-%-10s\n" "------------" "------------" "------------" "----------"
         printf "%-12s | %-12s | %-12s | %s\n" "p50" "${base_p50:-N/A}" "${new_p50:-N/A}" "$(format_diff "${diff_p50}" "latency")"
-        printf "%-12s | %-12s | %-12s | %s\n" "p95" "${base_p95:-N/A}" "${new_p95:-N/A}" "$(format_diff "${diff_p95}" "latency")"
+        printf "%-12s | %-12s | %-12s | %s\n" "p90" "${base_p90:-N/A}" "${new_p90:-N/A}" "$(format_diff "${diff_p90}" "latency")"
         printf "%-12s | %-12s | %-12s | %s\n" "p99" "${base_p99:-N/A}" "${new_p99:-N/A}" "$(format_diff "${diff_p99}" "latency")"
         printf "%-12s | %-12s | %-12s | %s\n" "rps" "${base_rps:-N/A}" "${new_rps:-N/A}" "$(format_diff "${diff_rps}" "throughput")"
 
@@ -466,10 +466,10 @@ EOF
 
         # Show threshold warnings/errors
         if [[ -n "${THRESHOLD_FILE}" ]]; then
-            if [[ "${p95_status}" != "ok" ]]; then
+            if [[ "${p90_status}" != "ok" ]]; then
                 local status_color="${YELLOW}"
-                [[ "${p95_status}" == "error" ]] && status_color="${RED}"
-                echo -e "${status_color}  [${p95_status}] p95 latency: ${new_p95_ms}ms (warn: ${P95_WARN}ms, error: ${P95_ERROR}ms)${NC}"
+                [[ "${p90_status}" == "error" ]] && status_color="${RED}"
+                echo -e "${status_color}  [${p90_status}] p90 latency: ${new_p90_ms}ms (warn: ${P90_WARN}ms, error: ${P90_ERROR}ms)${NC}"
             fi
             if [[ "${p99_status}" != "ok" ]]; then
                 local status_color="${YELLOW}"
