@@ -1352,9 +1352,9 @@ generate_meta_json() {
     local rps avg_latency_raw p50_raw p95_raw p99_raw total_requests
     rps=$(grep "Requests/sec:" "${result_file}" 2>/dev/null | awk '{print $2}' || echo "0")
     avg_latency_raw=$(grep "Latency" "${result_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
-    p50_raw=$(grep -E "^[[:space:]]+50%" "${result_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
-    p95_raw=$(grep -E "^[[:space:]]+95%" "${result_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
-    p99_raw=$(grep -E "^[[:space:]]+99%" "${result_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
+    p50_raw=$(grep -E "^[[:space:]]+50[.0-9]*%" "${result_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
+    p95_raw=$(grep -E "^[[:space:]]+95[.0-9]*%" "${result_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
+    p99_raw=$(grep -E "^[[:space:]]+99[.0-9]*%" "${result_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
     total_requests=$(grep -m1 "requests in" "${result_file}" 2>/dev/null | awk '{print $1}' || echo "0")
     [[ ! "${total_requests}" =~ ^[0-9]+$ ]] && total_requests=0
 
@@ -2664,7 +2664,7 @@ merge_phase_results() {
 
                 # Extract p99 latency and track maximum
                 local p99_raw
-                p99_raw=$(grep -E "^[[:space:]]+99%" "${wrk_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
+                p99_raw=$(grep -E "^[[:space:]]+99[.0-9]*%" "${wrk_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
                 if [[ -n "${p99_raw}" ]]; then
                     local p99_ms
                     p99_ms=$(parse_latency_to_ms "${p99_raw}")
@@ -2680,11 +2680,11 @@ merge_phase_results() {
                 # Collect latencies for potential averaging
                 local avg_lat p50_lat p75_lat p90_lat p95_lat p99_lat
                 avg_lat=$(grep "Latency" "${wrk_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
-                p50_lat=$(grep -E "^[[:space:]]+50%" "${wrk_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
-                p75_lat=$(grep -E "^[[:space:]]+75%" "${wrk_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
-                p90_lat=$(grep -E "^[[:space:]]+90%" "${wrk_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
-                p95_lat=$(grep -E "^[[:space:]]+95%" "${wrk_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
-                p99_lat=$(grep -E "^[[:space:]]+99%" "${wrk_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
+                p50_lat=$(grep -E "^[[:space:]]+50[.0-9]*%" "${wrk_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
+                p75_lat=$(grep -E "^[[:space:]]+75[.0-9]*%" "${wrk_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
+                p90_lat=$(grep -E "^[[:space:]]+90[.0-9]*%" "${wrk_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
+                p95_lat=$(grep -E "^[[:space:]]+95[.0-9]*%" "${wrk_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
+                p99_lat=$(grep -E "^[[:space:]]+99[.0-9]*%" "${wrk_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
 
                 [[ -n "${avg_lat}" ]] && avg_latencies+=("${avg_lat}")
                 [[ -n "${p50_lat}" ]] && p50_latencies+=("${p50_lat}")
@@ -3092,10 +3092,10 @@ run_benchmark() {
         avg_latency=$(grep "Latency" "${result_file}" 2>/dev/null | head -1 | awk '{print $2}')
 
         # Extract latency percentiles (P50, P75, P90, P99)
-        p50=$(grep -E "^[[:space:]]+50%" "${result_file}" 2>/dev/null | awk '{print $2}')
-        p75=$(grep -E "^[[:space:]]+75%" "${result_file}" 2>/dev/null | awk '{print $2}')
-        p90=$(grep -E "^[[:space:]]+90%" "${result_file}" 2>/dev/null | awk '{print $2}')
-        p99=$(grep -E "^[[:space:]]+99%" "${result_file}" 2>/dev/null | awk '{print $2}')
+        p50=$(grep -E "^[[:space:]]+50[.0-9]*%" "${result_file}" 2>/dev/null | awk '{print $2}')
+        p75=$(grep -E "^[[:space:]]+75[.0-9]*%" "${result_file}" 2>/dev/null | awk '{print $2}')
+        p90=$(grep -E "^[[:space:]]+90[.0-9]*%" "${result_file}" 2>/dev/null | awk '{print $2}')
+        p99=$(grep -E "^[[:space:]]+99[.0-9]*%" "${result_file}" 2>/dev/null | awk '{print $2}')
 
         echo "" >> "${SUMMARY_FILE}"
         echo "${script_name}:" >> "${SUMMARY_FILE}"
