@@ -1,0 +1,124 @@
+# PersistentList が Send を実装していない
+#
+# 概要:
+#   PersistentList<T> は内部で Rc を使用しているため Send を実装しておらず、
+#   非同期コンテキストでの使用が制限される
+#
+# 影響:
+#   - Axum ハンドラー内で await をまたいで PersistentList を保持できない
+#   - eff_async! マクロとの組み合わせで制約が発生する
+
+version: "1.0.0"
+name: "persistent_list_not_send"
+status: "open"
+created_at: "2026-01-17T21:00:00+09:00"
+priority: "medium"
+category: "enhancement"
+
+# 問題の説明
+problem:
+  summary: |
+    PersistentList<T> は内部で Rc<Node<T>> を使用しているため、
+    Send トレイトを実装していない。これにより、非同期コンテキスト
+    (特に Axum ハンドラー) での使用が制限される。
+
+  error_message: |
+    error: future cannot be sent between threads safely
+    = help: within `impl Future<Output = ...>`, the trait `Send` is not
+            implemented for `Rc<persistent::list::Node<AccountEvent>>`
+    note: future is not `Send` as this value is used across an await
+
+  affected_code: |
+    // この書き方はコンパイルエラーになる
+    pub async fn handler(...) -> ... {
+        let events = event_store.load_events(&id).run_async().await?;
+        // events は PersistentList<AccountEvent>
+
+        // この await で events がまだ生きている
+        event_store.append_events(...).run_async().await?;  // エラー！
+    }
+
+  workaround: |
+    // ブロックで囲んで events をドロップしてから await
+    let account = {
+        let events = event_store.load_events(&id).run_async().await?;
+        Account::from_events(&events)?
+    };  // events はここでドロップ
+
+    // これ以降の await は OK
+    event_store.append_events(...).run_async().await?;
+
+# 背景
+context:
+  reason_for_rc: |
+    PersistentList は不変データ構造であり、Rc を使用することで
+    O(1) のコピーと構造共有を実現している。これは関数型プログラミングの
+    重要な特性である。
+
+  trade_off: |
+    - Rc: シングルスレッド環境でのパフォーマンスが良い
+    - Arc: マルチスレッド環境で Send を実装できるが、オーバーヘッドがある
+
+# 提案する解決策
+proposed_solutions:
+  - id: arc_feature
+    name: "Arc 版の feature フラグ"
+    description: |
+      `arc-persistent` のような feature フラグを追加し、
+      Arc を使用する版の PersistentList を提供する。
+    pros:
+      - "既存コードへの影響なし"
+      - "ユーザーが選択可能"
+    cons:
+      - "コードの重複が発生"
+      - "メンテナンスコストの増加"
+
+  - id: generic_rc
+    name: "ジェネリックな参照カウント"
+    description: |
+      内部の参照カウントをジェネリック化し、Rc または Arc を選択可能にする。
+      ```rust
+      pub struct PersistentList<T, R: RefCount = Rc<Node<T>>> { ... }
+      ```
+    pros:
+      - "柔軟性が高い"
+      - "コード重複が少ない"
+    cons:
+      - "型が複雑になる"
+      - "実装が難しい"
+
+  - id: always_arc
+    name: "常に Arc を使用"
+    description: |
+      内部実装を Rc から Arc に変更する。
+    pros:
+      - "シンプル"
+      - "マルチスレッド対応"
+    cons:
+      - "シングルスレッド環境でのパフォーマンス低下"
+      - "既存コードへの破壊的変更"
+
+  - id: document_workaround
+    name: "回避策のドキュメント化"
+    description: |
+      現状を維持し、回避策をドキュメントに記載する。
+    pros:
+      - "実装コストなし"
+      - "既存コードへの影響なし"
+    cons:
+      - "ユーザーの学習コスト"
+      - "不便さが残る"
+
+# 関連
+related:
+  - "src/persistent/list.rs"
+  - "samples/bank/src/api/handlers/transaction.rs"
+  - "samples/bank/docs/internal/done/issues/20260117_1700_eff_async_limited_value.yaml"
+
+# 備考
+notes:
+  - |
+    Haskell では遅延評価のため、この問題はあまり発生しない。
+    Rust の厳格な所有権システムとの相互作用で顕在化する問題。
+  - |
+    PersistentTreeMap も同様の問題を抱えている可能性がある。
