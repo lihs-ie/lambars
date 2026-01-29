@@ -153,8 +153,8 @@ validate_with_jq() {
         fi
     done
 
-    # Check required latency_ms fields using has() (p50/p90/p99 allow null)
-    local latency_fields=("p50" "p90" "p99")
+    # Check required latency_ms fields using has() (p50/p95/p99 allow null)
+    local latency_fields=("p50" "p95" "p99")
     for field in "${latency_fields[@]}"; do
         if ! jq -e ".results.latency_ms | has(\"${field}\")" "${file}" &>/dev/null; then
             errors+=("Missing results.latency_ms.${field}")
@@ -169,7 +169,7 @@ validate_with_jq() {
     fi
 
     # Check latency values are positive numbers or null (exclusiveMinimum: 0)
-    for field in p50 p90 p99; do
+    for field in p50 p95 p99; do
         local value_type value
         value_type=$(jq -r ".results.latency_ms.${field} | type" "${file}")
         # Skip null values
