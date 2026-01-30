@@ -836,6 +836,7 @@ mod tests {
 
     #[cfg(feature = "async")]
     #[tokio::test]
+    #[allow(deprecated)]
     async fn test_to_async_result_is_captured() {
         let io = IO::pure(42);
         let async_io = io.to_async();

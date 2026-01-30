@@ -5,6 +5,7 @@
 
 #![cfg(feature = "compose")]
 #![forbid(unsafe_code)]
+#![allow(deprecated)]
 
 use lambars::for_;
 

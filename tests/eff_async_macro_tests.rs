@@ -1,4 +1,5 @@
 #![cfg(feature = "async")]
+#![allow(deprecated)]
 //! Tests for the eff_async! macro.
 //!
 //! This module tests the eff_async! macro which provides do-notation syntax

@@ -2,6 +2,8 @@
 //!
 //! Measures the performance of lambars' effect monads.
 
+#![allow(deprecated)]
+
 use criterion::{Criterion, criterion_group, criterion_main};
 use lambars::effect::{IO, Reader, State};
 use lambars::typeclass::{Functor, Monad};

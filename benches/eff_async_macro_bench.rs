@@ -12,6 +12,7 @@
 //! Each category compares `eff_async!` macro style against traditional `flat_map` chain style.
 
 #![cfg(feature = "async")]
+#![allow(deprecated)]
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use lambars::eff_async;

@@ -4,6 +4,7 @@
 //! macro with async support.
 
 #![cfg(feature = "async")]
+#![allow(deprecated)]
 
 use lambars::effect::AsyncIO;
 use lambars::for_async;

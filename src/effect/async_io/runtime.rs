@@ -1,104 +1,44 @@
 //! Runtime sharing mechanism for `AsyncIO`.
 //!
-//! This module provides a global tokio runtime and utilities for efficient
-//! async execution without creating new runtimes or `EnterGuard`s on each call.
+//! Provides a global tokio runtime and utilities for efficient async execution
+//! without creating new runtimes or `EnterGuard`s on each call.
 //!
-//! # Design Philosophy
+//! # Components
 //!
-//! To minimize overhead from runtime initialization and `EnterGuard` creation,
-//! this module provides:
+//! - **Global Runtime**: Lazily-initialized multi-thread runtime (static lifetime)
+//! - **Handle Caching**: Thread-local handle caching for O(1) access
+//! - **Blocking Execution**: `run_blocking`/`try_run_blocking` for sync contexts
 //!
-//! 1. **Global Runtime**: A lazily-initialized multi-thread runtime that is
-//!    shared across all `AsyncIO` operations. The runtime is created once and
-//!    never dropped (static lifetime).
+//! # Runtime Behavior
 //!
-//! 2. **Handle Caching**: Thread-local caching of runtime handles to avoid
-//!    repeated lookups. When inside a runtime, the current handle is used
-//!    directly. When outside, the global runtime's handle is cached in a
-//!    `thread_local!` storage and reused on subsequent calls.
+//! | Context | `try_run_blocking` Result |
+//! |---------|---------------------------|
+//! | Outside runtime | `Ok(T)` via `global().block_on()` |
+//! | Multi-thread runtime | `Ok(T)` via `block_in_place` |
+//! | Current-thread runtime | `Err(CurrentThreadRuntime)` |
+//! | Unknown flavor | `Err(UnsupportedRuntimeFlavor)` |
 //!
-//! 3. **Blocking Execution**: A `run_blocking` function that executes futures
-//!    efficiently by using `block_in_place` when already inside a multi-thread
-//!    runtime, avoiding nested runtime panics.
+//! # Limitations
 //!
-//! # Performance Characteristics
+//! `block_in_place` panics in multi-thread runtime when called from:
+//! - `LocalSet::run_until()`
+//! - Contexts with `disallow_block_in_place` enabled
 //!
-//! - `global()`: O(1) after first initialization (static `LazyLock`)
-//! - `handle()`: O(1) with thread-local caching (first call clones, subsequent
-//!   calls return cached handle)
-//! - `run_blocking()`: No additional Enter/Drop overhead when inside runtime
+//! **Workaround**: Use `spawn_blocking` to move to a worker thread first.
 //!
-//! # Runtime Flavor Considerations
+//! # Security
 //!
-//! This module handles different runtime flavors appropriately:
+//! `runtime_id()` returns an opaque counter value, not a memory address,
+//! avoiding ASLR information leakage.
 //!
-//! - **Multi-thread runtime**: Uses `block_in_place` for efficient blocking
-//!   execution without nested runtime panics.
-//! - **Current-thread runtime**: Returns an error via `BlockingError::CurrentThreadRuntime`
-//!   because `block_in_place` is not supported in current-thread runtimes.
-//!
-//! When inside a runtime, the current runtime's handle is preferred over the
-//! global runtime to preserve tracing context and metrics settings.
-//!
-//! # Important Usage Restrictions
-//!
-//! **`block_in_place` Limitations**: The `try_run_blocking` function uses
-//! `block_in_place` when inside a multi-thread runtime. The behavior differs
-//! by runtime type:
-//!
-//! ## Current-thread runtime
-//!
-//! In a `current_thread` runtime, `block_in_place` is not supported at all.
-//! `try_run_blocking` detects this and returns `Err(BlockingError::CurrentThreadRuntime)`
-//! **without panicking**.
-//!
-//! Note: Even though `spawn_blocking` itself works in a `current_thread` runtime
-//! (tokio spawns blocking threads regardless of runtime flavor), calling
-//! `try_run_blocking` from within `spawn_blocking` will still fail. This is because
-//! `Handle::try_current()` inside `spawn_blocking` returns the handle of the
-//! originating runtime (which is `current_thread`), causing the function to return
-//! `Err(BlockingError::CurrentThreadRuntime)`. Therefore, `try_run_blocking` is
-//! **not usable** from within a `current_thread` runtime context.
-//!
-//! ## Multi-thread runtime
-//!
-//! In a multi-thread runtime, `block_in_place` is generally supported, but
-//! will **panic** in the following specific contexts:
-//!
-//! - Inside `tokio::task::LocalSet::run_until()`
-//! - In any context where `disallow_block_in_place` is enabled
-//!
-//! Note: Calling from `Runtime::block_on()` on the main thread of a multi-thread
-//! runtime does **not** cause a panic by itself.
-//!
-//! **Workaround for `LocalSet` contexts (multi-thread runtime only)**:
-//!
-//! If you need to call `try_run_blocking` from within `LocalSet::run_until()`
-//! in a **multi-thread** runtime, you must first move to a worker thread using
-//! `tokio::task::spawn_blocking`. This workaround is **only available in
-//! multi-thread runtimes**; it does not work in `current_thread` runtimes.
-//!
-//! # Security Considerations
-//!
-//! The `runtime_id()` function returns an opaque identifier that does not
-//! expose memory addresses, avoiding ASLR information leakage.
-//!
-//! # Examples
+//! # Example
 //!
 //! ```rust,ignore
-//! use lambars::effect::async_io::runtime::{global, handle, run_blocking, try_run_blocking};
+//! use lambars::effect::async_io::runtime::{run_blocking, try_run_blocking};
 //!
-//! // Get the global runtime
-//! let runtime = global();
-//!
-//! // Get a cached handle
-//! let obtained_handle = handle();
-//!
-//! // Execute a future blocking (returns T directly; panics on error)
 //! let result = run_blocking(async { 42 });
 //! assert_eq!(result, 42);
 //!
-//! // Or use try_run_blocking to handle errors explicitly
 //! let result = try_run_blocking(async { 42 });
 //! assert_eq!(result, Ok(42));
 //! ```
@@ -236,136 +176,30 @@ impl Error for BlockingError {}
 // Blocking Execution
 // =============================================================================
 
-/// Attempts to execute a future synchronously, blocking the current thread.
+/// Executes a future synchronously, blocking the current thread.
 ///
-/// This function provides an efficient way to run async code from synchronous
-/// contexts. It handles the complexity of being inside or outside a tokio
-/// runtime automatically:
-///
-/// - **Inside a multi-thread runtime (worker thread or `spawn_blocking`)**: Uses
-///   `block_in_place` with the current runtime's handle to avoid nested runtime
-///   panics while preserving the caller's runtime context (tracing, metrics, etc.).
-/// - **Inside a current-thread runtime**: Returns `Err(BlockingError::CurrentThreadRuntime)`
-///   because `block_in_place` is not supported in current-thread runtimes.
-/// - **Outside a runtime**: Uses the global runtime's `block_on`.
-///
-/// # Runtime Context Preservation
-///
-/// When called from within a runtime, this function uses `Handle::current()`
-/// to preserve the caller's runtime context. This ensures that tracing spans,
-/// metrics, and other runtime-specific settings are properly inherited.
-///
-/// # Important: Runtime-Specific Behavior
-///
-/// ## Current-thread runtime
-///
-/// In a `current_thread` runtime, `block_in_place` is not supported.
-/// This function detects this and returns `Err(BlockingError::CurrentThreadRuntime)`
-/// **without panicking**.
-///
-/// Note: Even though `spawn_blocking` itself works in a `current_thread` runtime
-/// (tokio spawns blocking threads regardless of runtime flavor), calling this
-/// function from within `spawn_blocking` will still fail. This is because
-/// `Handle::try_current()` inside `spawn_blocking` returns the handle of the
-/// originating runtime (which is `current_thread`), causing the function to return
-/// `Err(BlockingError::CurrentThreadRuntime)`. Therefore, this function is
-/// **not usable** from within a `current_thread` runtime context.
-///
-/// ## Multi-thread runtime
-///
-/// In a multi-thread runtime, this function uses `block_in_place`, which
-/// will **panic** in the following specific contexts:
-///
-/// - Inside `tokio::task::LocalSet::run_until()`
-/// - In any context where `disallow_block_in_place` is enabled
-///
-/// Note: Calling from `Runtime::block_on()` on the main thread of a multi-thread
-/// runtime does **not** cause a panic by itself.
-///
-/// **Workaround for `LocalSet` contexts (multi-thread runtime only)**:
-///
-/// If you need to use this function from within `LocalSet::run_until()` in a
-/// **multi-thread** runtime, you must first move to a worker thread using
-/// `tokio::task::spawn_blocking`:
-///
-/// ```rust,ignore
-/// // Inside LocalSet::run_until (multi-thread runtime only)
-/// let result = tokio::task::spawn_blocking(|| {
-///     try_run_blocking(async { 42 })
-/// }).await.unwrap();
-/// ```
-///
-/// **Important**: This workaround is **only available in multi-thread runtimes**.
-/// It does not work in `current_thread` runtimes.
-///
-/// This design follows the functional programming principle of not using
-/// exceptions for control flow. Rather than catching and converting panics
-/// to errors, we document the constraints and let callers ensure they call
-/// from an appropriate context.
-///
-/// # Arguments
-///
-/// * `future` - The future to execute.
-///
-/// # Returns
-///
-/// `Ok(T)` with the future's output on success, or `Err(BlockingError)` if
-/// execution is not possible in the current context.
+/// Automatically handles different runtime contexts:
+/// - **Outside runtime**: Uses `global().block_on()`
+/// - **Multi-thread runtime**: Uses `block_in_place` + `handle.block_on()`
+/// - **Current-thread runtime**: Returns `Err(CurrentThreadRuntime)`
 ///
 /// # Errors
 ///
-/// - `Err(BlockingError::CurrentThreadRuntime)` when called from within
-///   a current-thread tokio runtime.
-/// - `Err(BlockingError::UnsupportedRuntimeFlavor)` when called from a
-///   runtime with an unknown flavor.
+/// - `CurrentThreadRuntime`: Called from a current-thread runtime
+/// - `UnsupportedRuntimeFlavor`: Called from an unknown runtime flavor
 ///
 /// # Panics
 ///
-/// In a **multi-thread runtime**, panics if called from within `LocalSet::run_until()`
-/// or in any context where `disallow_block_in_place` is enabled. See the
-/// documentation above for how to avoid this.
+/// In multi-thread runtime, panics if called from `LocalSet::run_until()`
+/// or when `disallow_block_in_place` is enabled.
 ///
-/// Note: In a `current_thread` runtime, this function returns
-/// `Err(BlockingError::CurrentThreadRuntime)` instead of panicking.
-///
-/// # Examples
+/// # Example
 ///
 /// ```rust,ignore
 /// use lambars::effect::async_io::runtime::try_run_blocking;
 ///
-/// // From synchronous code (outside any runtime)
-/// let result = try_run_blocking(async {
-///     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-///     42
-/// });
+/// let result = try_run_blocking(async { 42 });
 /// assert_eq!(result, Ok(42));
-/// ```
-///
-/// ```rust,ignore
-/// use lambars::effect::async_io::runtime::{try_run_blocking, BlockingError};
-///
-/// // From inside a current-thread runtime
-/// #[tokio::test(flavor = "current_thread")]
-/// async fn test() {
-///     let result = tokio::task::spawn_blocking(|| {
-///         try_run_blocking(async { 42 })
-///     }).await.unwrap();
-///     // Returns error because current_thread runtime doesn't support block_in_place
-///     assert_eq!(result, Err(BlockingError::CurrentThreadRuntime));
-/// }
-/// ```
-///
-/// ```rust,ignore
-/// use lambars::effect::async_io::runtime::try_run_blocking;
-///
-/// // From inside a multi-thread runtime's spawn_blocking
-/// #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-/// async fn test() {
-///     let result = tokio::task::spawn_blocking(|| {
-///         try_run_blocking(async { 42 })
-///     }).await.unwrap();
-///     assert_eq!(result, Ok(42));
-/// }
 /// ```
 #[inline]
 pub fn try_run_blocking<F, T>(future: F) -> Result<T, BlockingError>

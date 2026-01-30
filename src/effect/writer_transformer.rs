@@ -646,6 +646,7 @@ mod tests {
 }
 
 #[cfg(all(test, feature = "async"))]
+#[allow(deprecated)]
 mod async_io_tests {
     use super::*;
     use crate::typeclass::Monoid;

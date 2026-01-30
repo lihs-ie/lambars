@@ -1,4 +1,5 @@
 #![cfg(feature = "async")]
+#![allow(deprecated)]
 //! Unit tests for AsyncIO monad.
 //!
 //! This module tests the AsyncIO type that represents deferred asynchronous

@@ -46,6 +46,7 @@
 //! for the requirement specification (REQ-ASYNC-BENCH-001).
 
 #![cfg(feature = "async")]
+#![allow(deprecated)]
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use lambars::effect::AsyncIO;

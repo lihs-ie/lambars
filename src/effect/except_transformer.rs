@@ -523,6 +523,7 @@ where
     #[allow(clippy::inline_always)]
     #[inline(always)]
     pub async fn run_async(self) -> Result<A, E> {
+        #[allow(deprecated)]
         self.inner.run_async().await
     }
 }
@@ -567,6 +568,7 @@ mod tests {
 }
 
 #[cfg(all(test, feature = "async"))]
+#[allow(deprecated)]
 mod async_io_tests {
     use super::*;
     use crate::effect::AsyncIO;

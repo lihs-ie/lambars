@@ -43,7 +43,7 @@
 //!         x <= vec![1, 2, 3];
 //!         yield x * 2
 //!     };
-//!     assert_eq!(result.run_async().await, vec![2, 4, 6]);
+//!     assert_eq!(result.await, vec![2, 4, 6]);
 //! }
 //! ```
 //!
@@ -61,7 +61,7 @@
 //!         let processed = data + 1;
 //!         yield processed
 //!     };
-//!     assert_eq!(result.run_async().await, vec![11, 21, 31]);
+//!     assert_eq!(result.await, vec![11, 21, 31]);
 //! }
 //! ```
 //!
@@ -78,14 +78,14 @@
 //!         y <= vec![10, 20];
 //!         yield x + y
 //!     };
-//!     assert_eq!(result.run_async().await, vec![11, 21, 12, 22]);
+//!     assert_eq!(result.await, vec![11, 21, 12, 22]);
 //! }
 //! ```
 //!
 //! # Deferred Execution
 //!
 //! The returned `AsyncIO<Vec<T>>` is lazily evaluated. No computation
-//! occurs until `run_async().await` is called.
+//! occurs until `.await` is called.
 //!
 //! # Differences from `for_!`
 //!
@@ -105,21 +105,21 @@
 //!
 //! ## Prefer `let` over `AsyncIO::pure()` for pure computations
 //!
-//! Pure computations should use `let` bindings instead of `AsyncIO::pure()` to avoid
-//! boxing overhead:
+//! Pure computations should use `let` bindings instead of `AsyncIO::pure()` for
+//! optimal performance:
 //!
 //! ```rust,ignore
 //! // Recommended: Use let for pure computations
 //! for_async! {
 //!     x <= items;
-//!     let doubled = x * 2;  // No overhead
+//!     let doubled = x * 2;  // No overhead - direct value binding
 //!     yield doubled
 //! }
 //!
-//! // Not recommended: AsyncIO::pure() adds boxing overhead
+//! // Not recommended: AsyncIO::pure() adds state machine overhead
 //! for_async! {
 //!     x <= items;
-//!     doubled <~ AsyncIO::pure(x * 2);  // ~30x overhead per bind
+//!     doubled <~ AsyncIO::pure(x * 2);  // Unnecessary poll overhead
 //!     yield doubled
 //! }
 //! ```
@@ -142,7 +142,7 @@
 //! | Pattern | Overhead | Use Case |
 //! |---------|----------|----------|
 //! | `let x = expr;` | None | Pure computations |
-//! | `x <~ AsyncIO::pure(expr);` | ~30x per bind | Avoid - use let instead |
+//! | `x <~ AsyncIO::pure(expr);` | Minimal (poll overhead) | Avoid - use let instead |
 //! | `x <~ async_operation();` | Inherent | Actual async operations |
 //!
 //! # Implementation Details
@@ -162,21 +162,19 @@
 //!
 //! ## Async Bind Behavior (`<~`)
 //!
-//! The `<~` operator calls `.run_async().await` on the `AsyncIO` expression.
+//! The `<~` operator directly awaits the `AsyncIO` expression using `.await`.
+//! Since `AsyncIO` implements `Future`, this avoids unnecessary `Box::pin`
+//! allocation that would occur with the deprecated `run_async()` method.
 //!
-//! **Note**: Each `<~` invocation incurs `Box::pin` allocation overhead because
-//! `run_async()` internally uses `Box::pin` to create a pinned future, regardless
-//! of the `AsyncIO` variant. Even `AsyncIO::pure(value)` incurs this boxing
-//! overhead when awaited via `run_async()`.
-//!
-//! This is why using `let` bindings for pure computations is strongly recommended
-//! over `<~ AsyncIO::pure(expr)` - the latter adds unnecessary boxing overhead.
+//! **Performance**: For `AsyncIO::pure(value)`, the direct await has zero
+//! heap allocation overhead. For deferred `AsyncIO` operations, the allocation
+//! is determined by the internal `AsyncIO` state.
 //!
 //! ## Performance Recommendations
 //!
 //! - Use `let` bindings for pure computations (zero overhead)
 //! - Reserve `<~` for actual async operations that require deferred execution
-//! - Avoid `x <~ AsyncIO::pure(expr)`; use `let x = expr;` instead
+//! - Avoid `x <~ AsyncIO::pure(expr)`; use `let x = expr;` instead for optimal performance
 
 #![forbid(unsafe_code)]
 
@@ -218,7 +216,7 @@
 ///         x <= vec![1, 2, 3];
 ///         yield x * 2
 ///     };
-///     assert_eq!(result.run_async().await, vec![2, 4, 6]);
+///     assert_eq!(result.await, vec![2, 4, 6]);
 /// }
 /// ```
 ///
@@ -236,7 +234,7 @@
 ///         let processed = data + 1;
 ///         yield processed
 ///     };
-///     assert_eq!(result.run_async().await, vec![11, 21, 31]);
+///     assert_eq!(result.await, vec![11, 21, 31]);
 /// }
 /// ```
 ///
@@ -253,7 +251,7 @@
 ///         y <= vec![10, 20];
 ///         yield x + y
 ///     };
-///     assert_eq!(result.run_async().await, vec![11, 21, 12, 22]);
+///     assert_eq!(result.await, vec![11, 21, 12, 22]);
 /// }
 /// ```
 ///
@@ -270,7 +268,7 @@
 ///         (num, letter) <= pairs;
 ///         yield format!("{}{}", num, letter)
 ///     };
-///     assert_eq!(result.run_async().await, vec!["1a", "2b", "3c"]);
+///     assert_eq!(result.await, vec!["1a", "2b", "3c"]);
 /// }
 /// ```
 ///
@@ -286,14 +284,14 @@
 ///         _ <= vec![1, 2, 3];
 ///         yield "x"
 ///     };
-///     assert_eq!(result.run_async().await, vec!["x", "x", "x"]);
+///     assert_eq!(result.await, vec!["x", "x", "x"]);
 /// }
 /// ```
 ///
 /// # Deferred Execution
 ///
 /// The returned `AsyncIO<Vec<T>>` is lazily evaluated. No computation
-/// occurs until `run_async().await` is called.
+/// occurs until `.await` is called.
 ///
 /// # Note on Clone
 ///
@@ -375,19 +373,19 @@ macro_rules! for_async {
 
     // AsyncIO bind with identifier pattern
     (@inner $results:ident; $pattern:ident <~ $async_io:expr ; $($rest:tt)+) => {{
-        let $pattern = $async_io.run_async().await;
+        let $pattern = $async_io.await;
         $crate::for_async!(@inner $results; $($rest)+);
     }};
 
     // AsyncIO bind with tuple pattern
     (@inner $results:ident; ($($pattern:tt)*) <~ $async_io:expr ; $($rest:tt)+) => {{
-        let ($($pattern)*) = $async_io.run_async().await;
+        let ($($pattern)*) = $async_io.await;
         $crate::for_async!(@inner $results; $($rest)+);
     }};
 
     // AsyncIO bind with wildcard pattern
     (@inner $results:ident; _ <~ $async_io:expr ; $($rest:tt)+) => {{
-        let _ = $async_io.run_async().await;
+        let _ = $async_io.await;
         $crate::for_async!(@inner $results; $($rest)+);
     }};
 
@@ -426,6 +424,7 @@ macro_rules! for_async {
 }
 
 #[cfg(all(feature = "async", test))]
+#[allow(deprecated)]
 mod tests {
     #[tokio::test]
     async fn test_inline_single_iteration() {
@@ -433,7 +432,7 @@ mod tests {
             x <= vec![1, 2, 3];
             yield x * 2
         };
-        assert_eq!(result.run_async().await, vec![2, 4, 6]);
+        assert_eq!(result.await, vec![2, 4, 6]);
     }
 
     // =========================================================================
@@ -447,7 +446,7 @@ mod tests {
             if x % 2 == 0;
             yield x
         };
-        assert_eq!(result.run_async().await, vec![2, 4]);
+        assert_eq!(result.await, vec![2, 4]);
     }
 
     #[tokio::test]
@@ -458,7 +457,7 @@ mod tests {
             if x > 10;
             yield x
         };
-        assert_eq!(result.run_async().await, vec![12, 14, 16, 18, 20]);
+        assert_eq!(result.await, vec![12, 14, 16, 18, 20]);
     }
 
     // =========================================================================
@@ -476,7 +475,7 @@ mod tests {
             if let Some(doubled) = maybe_double(x);
             yield doubled
         };
-        assert_eq!(result.run_async().await, vec![2, 4, 6]);
+        assert_eq!(result.await, vec![2, 4, 6]);
     }
 
     #[tokio::test]
@@ -488,6 +487,6 @@ mod tests {
             if value > 3;
             yield value
         };
-        assert_eq!(result.run_async().await, vec![5, 10]);
+        assert_eq!(result.await, vec![5, 10]);
     }
 }

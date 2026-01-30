@@ -4,6 +4,7 @@
 //! the synchronous `for_!` macro and hand-written async code.
 
 #![cfg(feature = "async")]
+#![allow(deprecated)]
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use lambars::effect::AsyncIO;

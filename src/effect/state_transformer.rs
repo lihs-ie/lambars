@@ -1144,6 +1144,7 @@ mod tests {
 
     #[cfg(feature = "async")]
     #[allow(clippy::future_not_send)]
+    #[allow(deprecated)]
     mod async_io_tests {
         use super::*;
         use crate::effect::{AlreadyConsumedError, EffectError, EffectType, StateTTryLiftAsyncIO};

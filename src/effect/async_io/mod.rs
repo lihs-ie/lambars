@@ -20,15 +20,24 @@
 //!
 //! #[tokio::main]
 //! async fn main() {
-//!     // Direct await (recommended)
+//!     // Recommended: Direct await (no heap allocation for Pure state)
 //!     let result = AsyncIO::pure(42).await;
 //!     assert_eq!(result, 42);
 //!
-//!     // Or use run_async() for backward compatibility
+//!     // Deprecated: run_async() causes heap allocation via Box::pin
+//!     // See migration guide in CHANGELOG.md
+//!     #[allow(deprecated)]
 //!     let result = AsyncIO::pure(42).run_async().await;
 //!     assert_eq!(result, 42);
 //! }
 //! ```
+//!
+//! ## Performance Note
+//!
+//! Direct await of `AsyncIO::pure(value)` is guaranteed not to allocate heap memory
+//! for the `AsyncIO` structure itself. The `Pure` state poll implementation simply
+//! returns the value immediately. Using `run_async()` always performs `Box::pin`,
+//! causing unnecessary heap allocation for pure values.
 //!
 //! # Examples
 //!
@@ -737,15 +746,51 @@ impl<A: Send + 'static> AsyncIO<A> {
 impl<A: 'static> AsyncIO<A> {
     /// Executes the `AsyncIO` action and returns a pinned, boxed Future.
     ///
-    /// This method is provided for backward compatibility. Since `AsyncIO`
-    /// implements `Future`, you can also directly await it.
+    /// # Deprecated
     ///
-    /// # Note
+    /// This method is **deprecated**.
+    /// Use direct await instead: `async_io.await`.
     ///
-    /// This method internally uses `Box::pin` to return a `Pin<Box<dyn Future>>`.
-    /// This means that even for `AsyncIO::pure`, calling `run_async().await` will
-    /// incur a heap allocation due to the boxing. If you want to avoid this overhead,
-    /// directly await the `AsyncIO` instead (e.g., `AsyncIO::pure(42).await`).
+    /// ## Reason for Deprecation
+    ///
+    /// `run_async()` internally uses `Box::pin`, which causes a heap allocation
+    /// even for `AsyncIO::pure`. Direct await avoids this overhead for pure values.
+    ///
+    /// ## Migration Guide
+    ///
+    /// ### In async context
+    ///
+    /// ```rust,ignore
+    /// // Before (deprecated)
+    /// let result = AsyncIO::pure(42).run_async().await;
+    ///
+    /// // After (recommended)
+    /// let result = AsyncIO::pure(42).await;
+    /// ```
+    ///
+    /// ### In sync context
+    ///
+    /// ```rust,ignore
+    /// use lambars::effect::async_io::runtime;
+    ///
+    /// // Before (deprecated)
+    /// let result = runtime::run_blocking(AsyncIO::pure(42).run_async());
+    ///
+    /// // After (recommended)
+    /// let result = runtime::run_blocking(AsyncIO::pure(42));
+    /// ```
+    ///
+    /// ## Suppressing the Warning
+    ///
+    /// If you need to suppress this warning temporarily during migration:
+    ///
+    /// ```rust,ignore
+    /// #[allow(deprecated)]
+    /// let result = AsyncIO::pure(42).run_async().await;
+    /// ```
+    ///
+    /// For projects using `deny(warnings)`, add `#[allow(deprecated)]` to
+    /// the specific call site or module during the migration period.
     ///
     /// # Examples
     ///
@@ -754,16 +799,19 @@ impl<A: 'static> AsyncIO<A> {
     ///
     /// #[tokio::main]
     /// async fn main() {
-    ///     // Using run_async (backward compatible)
-    ///     let result = AsyncIO::pure(42).run_async().await;
-    ///     assert_eq!(result, 42);
-    ///
-    ///     // Direct await (recommended)
+    ///     // Recommended: Direct await
     ///     let result = AsyncIO::pure(42).await;
     ///     assert_eq!(result, 42);
     /// }
     /// ```
     #[must_use]
+    #[deprecated(
+        since = "0.2.0",
+        note = "Use direct await instead: `async_io.await`. \
+                See migration guide in CHANGELOG.md. \
+                If you need to suppress this warning temporarily, \
+                use #[allow(deprecated)]."
+    )]
     pub fn run_async(self) -> Pin<Box<dyn Future<Output = A> + Send>>
     where
         A: Send,
@@ -790,6 +838,7 @@ impl<A: 'static> AsyncIO<A> {
     where
         A: Send,
     {
+        #[allow(deprecated)]
         self.run_async()
     }
 }
@@ -1659,11 +1708,13 @@ impl<A: 'static> AsyncIO<A> {
             let resource_for_release = resource.clone();
 
             // 2. Use the resource, catching any panics
+            #[allow(deprecated)]
             let result = AssertUnwindSafe(use_resource(resource).run_async())
                 .catch_unwind()
                 .await;
 
             // 3. Release the resource (always executed), also catching panics
+            #[allow(deprecated)]
             let release_result = AssertUnwindSafe(release(resource_for_release).run_async())
                 .catch_unwind()
                 .await;
@@ -1884,6 +1935,7 @@ impl<A: Send + 'static> AsyncIO<A> {
         use std::panic::AssertUnwindSafe;
 
         AsyncIO::new(move || async move {
+            #[allow(deprecated)]
             let result = AssertUnwindSafe(self.run_async()).catch_unwind().await;
             match result {
                 Ok(value) => Ok(value),
@@ -1951,6 +2003,7 @@ impl<A: Send + 'static> AsyncIO<A> {
         since = "0.2.0",
         note = "Use `runtime::run_blocking` or await in async context"
     )]
+    #[allow(deprecated)]
     pub fn to_sync(self) -> super::IO<A> {
         super::IO::new(move || runtime::run_blocking(self.run_async()))
     }
@@ -2175,6 +2228,7 @@ impl<A: Send + 'static> IntoPipeAsync for Pure<A> {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
 

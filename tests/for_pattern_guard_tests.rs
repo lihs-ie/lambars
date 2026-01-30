@@ -1,6 +1,7 @@
 //! Integration tests for pattern guard (if let) support in for_! and for_async! macros.
 
 #![cfg(feature = "compose")]
+#![allow(deprecated)]
 
 use lambars::for_;
 

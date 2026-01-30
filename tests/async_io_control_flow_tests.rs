@@ -7,6 +7,7 @@
 //! - Timeout extensions (timeout_result, TimeoutError)
 
 #![cfg(feature = "async")]
+#![allow(deprecated)]
 
 use lambars::effect::AsyncIO;
 use std::sync::Arc;
