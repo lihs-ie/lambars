@@ -1,0 +1,129 @@
+# SearchIndex 永続構造の clone/alloc 削減 要件定義
+#
+# 概要:
+#   SearchIndex の TaskId リストと TreeMap 更新における clone/alloc を削減し、
+#   書き込み系ワークロードの CPU/メモリ消費を抑制する。
+#
+# 設計方針:
+#   1. TaskId の集合は専用構造で保持し、重複排除を O(1) に寄せる
+#   2. バッチ更新は Transient 経路で処理し、永続化は 1 回に限定する
+#   3. 破壊的操作は Transient のみで許可する
+#
+# 参照:
+#   - benches/results/profiling-investigation.yaml
+#   - benches/api/src/api/query.rs
+#   - benches/results/api-profiling-all-*/tasks_update_steady/stacks.folded
+
+version: "1.0.0"
+name: "search_index_persistent_structures"
+description: |
+  SearchIndex の TaskId リストを PersistentVector だけに依存せず、
+  小規模リストは SmallVec、大規模リストは HashSet へ自動昇格する
+  専用構造を導入する。更新時の clone/alloc を削減する。
+
+background:
+  problem: |
+    TaskId リストの更新で PersistentVector::push_back と clone が頻発し、
+    tasks_update 系の CPU を圧迫している。
+  motivation: |
+    更新コストを抑制し、検索インデックスの維持費用を下げる。
+  prior_art:
+    - name: "PersistentVector"
+      description: "純粋だが更新時の clone が支配的。"
+
+requirements:
+  # ======================================================================
+  # 1. TaskIdCollection の導入
+  # ======================================================================
+  - id: "REQ-SEARCH-STRUCT-001"
+    name: "TaskIdCollection を追加する"
+    description: |
+      - TaskId の重複排除と順序保証を一体化した構造を提供する。
+      - 8 件以下は SmallVec、9 件以上は PersistentHashSet に昇格する。
+      - 永続化は不変構造のみ公開し、破壊的更新は禁止する。
+
+    methods:
+      - name: "TaskIdCollection::insert"
+        signature: "fn insert(&self, id: TaskId) -> TaskIdCollection"
+        description: |
+          - 既存要素の場合は self を返す。
+      - name: "TaskIdCollection::remove"
+        signature: "fn remove(&self, id: &TaskId) -> TaskIdCollection"
+        description: |
+          - 空集合になった場合は Empty へ遷移する。
+      - name: "TaskIdCollection::iter_sorted"
+        signature: "fn iter_sorted(&self) -> impl Iterator<Item = &TaskId>"
+        description: |
+          - TaskId の昇順を保証する。
+
+    implementations:
+      - type: "TaskIdCollection"
+        description: |
+          - enum { Empty, Small(SmallVec<[TaskId; 8]>), Large(PersistentHashSet<TaskId>) }
+          - iter_sorted は SmallVec を sort_unstable で一時ソートし、Large は Vec 化してソートする。
+
+  # ======================================================================
+  # 2. SearchIndex での TaskIdCollection 使用
+  # ======================================================================
+  - id: "REQ-SEARCH-STRUCT-002"
+    name: "SearchIndex の値型を TaskIdCollection に置換する"
+    description: |
+      - title/tag の各インデックスは TaskIdCollection を値として保持する。
+      - 既存の PersistentVector<TaskId> を廃止し、重複排除を O(1) にする。
+
+    methods:
+      - name: "SearchIndex::add_task"
+        signature: "fn add_task(&self, task: &Task) -> SearchIndex"
+        description: |
+          - TaskIdCollection::insert を使用し、重複チェックの線形走査を禁止する。
+
+    implementations:
+      - type: "SearchIndex"
+        description: |
+          - title_word_index: PersistentTreeMap<String, TaskIdCollection>
+          - tag_index: PersistentTreeMap<String, TaskIdCollection>
+
+  # ======================================================================
+  # 3. TransientTreeMap の導入
+  # ======================================================================
+  - id: "REQ-SEARCH-STRUCT-003"
+    name: "TransientTreeMap を追加し TreeMap 更新をバッチ化する"
+    description: |
+      - PersistentTreeMap のバッチ更新は TransientTreeMap を経由する。
+      - TransientTreeMap は !Send/!Sync とし、スレッド共有を禁止する。
+      - persistent() は 1 回のみ呼び出し可能とし、二重永続化を禁止する。
+
+    methods:
+      - name: "TransientTreeMap::new"
+        signature: "fn new() -> TransientTreeMap<K, V>"
+        description: |
+          - 空の可変 TreeMap を生成する。
+      - name: "TransientTreeMap::persistent"
+        signature: "fn persistent(self) -> PersistentTreeMap<K, V>"
+        description: |
+          - COW ノードを確定し、以降の mutation を禁止する。
+
+    implementations:
+      - type: "TransientTreeMap<K, V>"
+        description: |
+          - ReferenceCounter ベースの COW を採用し、バッチ内での clone を削減する。
+          - persistent() は O(1) でノードを移動する（lambars では ReferenceCounter が
+            arc feature により Rc/Arc を切り替えるため、明示的な変換は不要）。
+
+non_functional_requirements:
+  performance:
+    - "tasks_update_steady の TaskId リスト更新コストを 50% 以上削減する。"
+    - "SearchIndex 更新時の TaskId dedup を O(1) に近づける。"
+  compatibility:
+    - "検索結果の順序は TaskId 昇順を維持する。"
+  testing:
+    - "TaskIdCollection の重複排除/順序保証テストを追加する。"
+    - "SearchIndex の結果が旧実装と一致することを差分テストで検証する。"
+
+future_extensions:
+  - id: "EXT-SEARCH-STRUCT-001"
+    name: "RoaringBitmap への移行"
+    description: |
+      TaskId を数値化できる場合、RoaringBitmap で高速化する。
+    rationale: |
+      現時点では TaskId が文字列ベースであり、数値化設計が必要なため。

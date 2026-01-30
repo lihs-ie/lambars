@@ -54,7 +54,9 @@ use std::borrow::Borrow;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::iter::FromIterator;
+use std::marker::PhantomData;
 use std::ops::{Bound, RangeBounds};
+use std::rc::Rc;
 
 use crate::typeclass::{Foldable, TypeConstructor};
 
@@ -109,31 +111,63 @@ impl<K, V> BTreeNode<K, V> {
 }
 
 impl<K: Clone, V: Clone> BTreeNode<K, V> {
-    fn take_or_clone_child(children: &mut ChildArray<K, V>, index: usize) -> Self {
+    /// Takes ownership of a child node or clones it if shared.
+    ///
+    /// Returns a tuple of (node, `took_ownership`) where:
+    /// - `took_ownership = true`: The original reference was taken and needs to be replaced.
+    /// - `took_ownership = false`: A clone was returned; the original reference is unchanged.
+    fn take_or_clone_child(children: &mut ChildArray<K, V>, index: usize) -> (Self, bool) {
+        // Check if we're the only owner before attempting to take ownership.
+        // If there are multiple owners, clone directly without creating a placeholder.
+        if ReferenceCounter::strong_count(&children[index]) > 1 {
+            return ((*children[index]).clone(), false);
+        }
+
+        // We're the only owner, so we can take ownership.
+        // Use empty_placeholder only for the swap; it will be replaced immediately.
         let reference = std::mem::replace(
             &mut children[index],
             ReferenceCounter::new(Self::empty_placeholder()),
         );
 
+        // This should always succeed since we checked strong_count above,
+        // but handle the error case defensively.
         match ReferenceCounter::try_unwrap(reference) {
-            Ok(node) => node,
+            Ok(node) => (node, true),
             Err(reference_counter) => {
+                // This case should not occur given the strong_count check above,
+                // but handle it defensively by restoring the reference.
                 let cloned = (*reference_counter).clone();
                 children[index] = reference_counter;
-                cloned
+                (cloned, false)
             }
         }
     }
 
-    fn take_or_clone_child_ref(child_ref: &mut ReferenceCounter<Self>) -> Self {
+    /// Takes ownership of a child node reference or clones it if shared.
+    ///
+    /// Returns a tuple of (node, `took_ownership`) where:
+    /// - `took_ownership = true`: The original reference was taken and needs to be replaced.
+    /// - `took_ownership = false`: A clone was returned; the original reference is unchanged.
+    fn take_or_clone_child_ref(child_ref: &mut ReferenceCounter<Self>) -> (Self, bool) {
+        // Check if we're the only owner before attempting to take ownership.
+        // If there are multiple owners, clone directly without creating a placeholder.
+        if ReferenceCounter::strong_count(child_ref) > 1 {
+            return ((**child_ref).clone(), false);
+        }
+
+        // We're the only owner, so we can take ownership.
         let placeholder = ReferenceCounter::new(Self::empty_placeholder());
         let reference = std::mem::replace(child_ref, placeholder);
+
+        // This should always succeed since we checked strong_count above.
         match ReferenceCounter::try_unwrap(reference) {
-            Ok(node) => node,
+            Ok(node) => (node, true),
             Err(reference_counter) => {
+                // Defensive: restore the reference if try_unwrap fails unexpectedly.
                 let cloned = (*reference_counter).clone();
                 *child_ref = reference_counter;
-                cloned
+                (cloned, false)
             }
         }
     }
@@ -178,12 +212,14 @@ enum InsertResult<K, V> {
     Done {
         node: BTreeNode<K, V>,
         added: bool,
+        old_value: Option<V>,
     },
     Split {
         left: BTreeNode<K, V>,
         median: (K, V),
         right: BTreeNode<K, V>,
         added: bool,
+        old_value: Option<V>,
     },
 }
 
@@ -192,10 +228,11 @@ impl<K: Clone + Ord, V: Clone> BTreeNode<K, V> {
         match self {
             Self::Leaf { mut entries } => match entries.binary_search_by(|(k, _)| k.cmp(&key)) {
                 Ok(index) => {
-                    entries[index] = (key, value);
+                    let old_value = std::mem::replace(&mut entries[index], (key, value)).1;
                     InsertResult::Done {
                         node: Self::Leaf { entries },
                         added: false,
+                        old_value: Some(old_value),
                     }
                 }
                 Err(index) => {
@@ -204,6 +241,7 @@ impl<K: Clone + Ord, V: Clone> BTreeNode<K, V> {
                         InsertResult::Done {
                             node: Self::Leaf { entries },
                             added: true,
+                            old_value: None,
                         }
                     } else {
                         Self::split_leaf(entries)
@@ -215,20 +253,27 @@ impl<K: Clone + Ord, V: Clone> BTreeNode<K, V> {
                 mut children,
             } => match entries.binary_search_by(|(k, _)| k.cmp(&key)) {
                 Ok(index) => {
-                    entries[index] = (key, value);
+                    let old_value = std::mem::replace(&mut entries[index], (key, value)).1;
                     InsertResult::Done {
                         node: Self::Internal { entries, children },
                         added: false,
+                        old_value: Some(old_value),
                     }
                 }
                 Err(index) => {
-                    let child = Self::take_or_clone_child(&mut children, index);
+                    // Insert always modifies the child, so we always need to replace it.
+                    let (child, _took_ownership) = Self::take_or_clone_child(&mut children, index);
                     match child.insert(key, value) {
-                        InsertResult::Done { node, added } => {
+                        InsertResult::Done {
+                            node,
+                            added,
+                            old_value,
+                        } => {
                             children[index] = ReferenceCounter::new(node);
                             InsertResult::Done {
                                 node: Self::Internal { entries, children },
                                 added,
+                                old_value,
                             }
                         }
                         InsertResult::Split {
@@ -236,6 +281,7 @@ impl<K: Clone + Ord, V: Clone> BTreeNode<K, V> {
                             median,
                             right,
                             added,
+                            old_value,
                         } => {
                             entries.insert(index, median);
                             children[index] = ReferenceCounter::new(left);
@@ -245,9 +291,10 @@ impl<K: Clone + Ord, V: Clone> BTreeNode<K, V> {
                                 InsertResult::Done {
                                     node: Self::Internal { entries, children },
                                     added,
+                                    old_value,
                                 }
                             } else {
-                                Self::split_internal(entries, children, added)
+                                Self::split_internal(entries, children, added, old_value)
                             }
                         }
                     }
@@ -268,6 +315,7 @@ impl<K: Clone + Ord, V: Clone> BTreeNode<K, V> {
                 entries: right_entries,
             },
             added: true,
+            old_value: None,
         }
     }
 
@@ -275,6 +323,7 @@ impl<K: Clone + Ord, V: Clone> BTreeNode<K, V> {
         mut entries: EntryArray<K, V>,
         mut children: ChildArray<K, V>,
         added: bool,
+        old_value: Option<V>,
     ) -> InsertResult<K, V> {
         let mid = entries.len() / 2;
         let right_entries: EntryArray<K, V> = entries.drain(mid + 1..).collect();
@@ -289,12 +338,17 @@ impl<K: Clone + Ord, V: Clone> BTreeNode<K, V> {
                 children: right_children,
             },
             added,
+            old_value,
         }
     }
 }
 
 enum RemoveResult<K, V> {
-    NotFound,
+    /// Key was not found; the node (potentially cloned or reconstructed) is returned.
+    ///
+    /// The caller should use the `took_ownership` flag from `take_or_clone_*` to determine
+    /// whether to restore this node or simply discard it (if the original reference was preserved).
+    NotFound(BTreeNode<K, V>),
     Done {
         node: Option<BTreeNode<K, V>>,
         removed_value: V,
@@ -346,7 +400,7 @@ impl<K: Clone + Ord, V: Clone> BTreeNode<K, V> {
                             removed_value,
                         )
                     }
-                    Err(_) => RemoveResult::NotFound,
+                    Err(_) => RemoveResult::NotFound(Self::Leaf { entries }),
                 }
             }
             Self::Internal {
@@ -372,9 +426,17 @@ impl<K: Clone + Ord, V: Clone> BTreeNode<K, V> {
                     }
                 }
                 Err(index) => {
-                    let child = Self::take_or_clone_child(&mut children, index);
+                    let (child, took_ownership) = Self::take_or_clone_child(&mut children, index);
                     match child.remove(key) {
-                        RemoveResult::NotFound => RemoveResult::NotFound,
+                        RemoveResult::NotFound(unchanged_child) => {
+                            // Key was not found. Restore the child only if we took ownership.
+                            // If we cloned (took_ownership == false), the original reference is unchanged.
+                            if took_ownership {
+                                children[index] = ReferenceCounter::new(unchanged_child);
+                            }
+                            // Return the whole internal node unchanged
+                            RemoveResult::NotFound(Self::Internal { entries, children })
+                        }
                         RemoveResult::Done {
                             node: Some(new_child),
                             removed_value,
@@ -431,7 +493,8 @@ impl<K: Clone + Ord, V: Clone> BTreeNode<K, V> {
     fn remove_max_from_child(
         child_ref: &mut ReferenceCounter<Self>,
     ) -> ((K, V), RemoveMaxResult<K, V>) {
-        let child = Self::take_or_clone_child_ref(child_ref);
+        // remove_max always modifies the node, so we always need to replace it.
+        let (child, _took_ownership) = Self::take_or_clone_child_ref(child_ref);
         match child {
             Self::Leaf { mut entries } => {
                 let (max_key, max_value) = entries.pop().unwrap();
@@ -566,8 +629,9 @@ impl<K: Clone + Ord, V: Clone> BTreeNode<K, V> {
         mut children: ChildArray<K, V>,
         index: usize,
     ) -> Self {
-        let left = Self::take_or_clone_child(&mut children, index - 1);
-        let current = Self::take_or_clone_child(&mut children, index);
+        // borrow operations always modify both nodes
+        let (left, _) = Self::take_or_clone_child(&mut children, index - 1);
+        let (current, _) = Self::take_or_clone_child(&mut children, index);
 
         match (left, current) {
             (
@@ -626,8 +690,9 @@ impl<K: Clone + Ord, V: Clone> BTreeNode<K, V> {
         mut children: ChildArray<K, V>,
         index: usize,
     ) -> Self {
-        let current = Self::take_or_clone_child(&mut children, index);
-        let right = Self::take_or_clone_child(&mut children, index + 1);
+        // borrow operations always modify both nodes
+        let (current, _) = Self::take_or_clone_child(&mut children, index);
+        let (right, _) = Self::take_or_clone_child(&mut children, index + 1);
 
         match (current, right) {
             (
@@ -686,8 +751,9 @@ impl<K: Clone + Ord, V: Clone> BTreeNode<K, V> {
         mut children: ChildArray<K, V>,
         index: usize,
     ) -> (EntryArray<K, V>, ChildArray<K, V>) {
-        let left = Self::take_or_clone_child(&mut children, index - 1);
-        let current = Self::take_or_clone_child(&mut children, index);
+        // merge operations always modify both nodes
+        let (left, _) = Self::take_or_clone_child(&mut children, index - 1);
+        let (current, _) = Self::take_or_clone_child(&mut children, index);
         let separator = entries.remove(index - 1);
         let merged = Self::merge_nodes(left, separator, current);
 
@@ -701,8 +767,9 @@ impl<K: Clone + Ord, V: Clone> BTreeNode<K, V> {
         mut children: ChildArray<K, V>,
         index: usize,
     ) -> (EntryArray<K, V>, ChildArray<K, V>) {
-        let current = Self::take_or_clone_child(&mut children, index);
-        let right = Self::take_or_clone_child(&mut children, index + 1);
+        // merge operations always modify both nodes
+        let (current, _) = Self::take_or_clone_child(&mut children, index);
+        let (right, _) = Self::take_or_clone_child(&mut children, index + 1);
         let separator = entries.remove(index);
         let merged = Self::merge_nodes(current, separator, right);
 
@@ -1055,7 +1122,7 @@ impl<K: Clone + Ord, V: Clone> PersistentTreeMap<K, V> {
             Some(root) => {
                 let root_node = (**root).clone();
                 match root_node.insert(key, value) {
-                    InsertResult::Done { node, added } => Self {
+                    InsertResult::Done { node, added, .. } => Self {
                         root: Some(ReferenceCounter::new(node)),
                         length: if added { self.length + 1 } else { self.length },
                     },
@@ -1064,6 +1131,7 @@ impl<K: Clone + Ord, V: Clone> PersistentTreeMap<K, V> {
                         median,
                         right,
                         added,
+                        ..
                     } => Self {
                         root: Some(ReferenceCounter::new(BTreeNode::Internal {
                             entries: smallvec![median],
@@ -1113,7 +1181,12 @@ impl<K: Clone + Ord, V: Clone> PersistentTreeMap<K, V> {
             Some(root) => {
                 let root_node = (**root).clone();
                 match root_node.remove(key) {
-                    RemoveResult::NotFound => self.clone(),
+                    RemoveResult::NotFound(_) => {
+                        // Key was not found. Return a clone of self.
+                        // The node returned by NotFound is discarded; it was created
+                        // from cloned data anyway, so no structural sharing is broken.
+                        self.clone()
+                    }
                     RemoveResult::Done { node, .. } => Self {
                         root: node.map(ReferenceCounter::new),
                         length: self.length - 1,
@@ -2144,6 +2217,488 @@ mod rayon_impl {
 #[cfg(feature = "rayon")]
 pub use rayon_impl::{PersistentTreeMapParallelIterator, PersistentTreeMapParallelRefIterator};
 
+// =============================================================================
+// TransientTreeMap Definition
+// =============================================================================
+
+/// A transient (mutable) version of [`PersistentTreeMap`] for batch construction.
+///
+/// `TransientTreeMap` provides mutable operations for efficient batch construction
+/// of tree maps. Once construction is complete, it can be converted back to a
+/// [`PersistentTreeMap`] using the [`persistent()`](TransientTreeMap::persistent) method.
+///
+/// # Design
+///
+/// Transient data structures use Copy-on-Write (COW) semantics via
+/// `ReferenceCounter::try_unwrap()` to efficiently share structure with the
+/// persistent version while allowing mutation.
+///
+/// # Thread Safety
+///
+/// `TransientTreeMap` is intentionally not `Send` or `Sync`. It is designed for
+/// single-threaded batch construction. For thread-safe operations, convert back
+/// to `PersistentTreeMap`.
+///
+/// # Examples
+///
+/// ```rust
+/// use lambars::persistent::{PersistentTreeMap, TransientTreeMap};
+///
+/// // Build a map efficiently using transient operations
+/// let mut transient = TransientTreeMap::new();
+/// transient.insert(3, "three");
+/// transient.insert(1, "one");
+/// transient.insert(2, "two");
+///
+/// // Convert to persistent map
+/// let persistent = transient.persistent();
+/// assert_eq!(persistent.get(&1), Some(&"one"));
+/// assert_eq!(persistent.len(), 3);
+///
+/// // Keys are in sorted order
+/// let keys: Vec<&i32> = persistent.keys().collect();
+/// assert_eq!(keys, vec![&1, &2, &3]);
+/// ```
+pub struct TransientTreeMap<K, V> {
+    root: Option<ReferenceCounter<BTreeNode<K, V>>>,
+    length: usize,
+    /// Marker to ensure `!Send` and `!Sync`.
+    _marker: PhantomData<Rc<()>>,
+}
+
+// Static assertions to verify TransientTreeMap is not Send/Sync
+static_assertions::assert_not_impl_any!(TransientTreeMap<i32, i32>: Send, Sync);
+static_assertions::assert_not_impl_any!(TransientTreeMap<String, String>: Send, Sync);
+
+// Arc feature verification: even with Arc, TransientTreeMap remains !Send/!Sync
+#[cfg(feature = "arc")]
+mod arc_send_sync_verification_transient_treemap {
+    use super::TransientTreeMap;
+    use std::sync::Arc;
+
+    // Arc<T> where T: Send+Sync is Send+Sync, but TransientTreeMap should still be !Send/!Sync
+    static_assertions::assert_not_impl_any!(TransientTreeMap<Arc<i32>, Arc<i32>>: Send, Sync);
+    static_assertions::assert_not_impl_any!(TransientTreeMap<Arc<String>, Arc<String>>: Send, Sync);
+}
+
+// =============================================================================
+// TransientTreeMap Implementation
+// =============================================================================
+
+impl<K, V> TransientTreeMap<K, V> {
+    /// Returns the number of entries in the map.
+    ///
+    /// # Complexity
+    ///
+    /// O(1)
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::TransientTreeMap;
+    ///
+    /// let mut transient: TransientTreeMap<i32, &str> = TransientTreeMap::new();
+    /// assert_eq!(transient.len(), 0);
+    /// transient.insert(1, "one");
+    /// assert_eq!(transient.len(), 1);
+    /// ```
+    #[inline]
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.length
+    }
+
+    /// Returns `true` if the map contains no entries.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::TransientTreeMap;
+    ///
+    /// let mut transient: TransientTreeMap<i32, &str> = TransientTreeMap::new();
+    /// assert!(transient.is_empty());
+    /// transient.insert(1, "one");
+    /// assert!(!transient.is_empty());
+    /// ```
+    #[inline]
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.length == 0
+    }
+}
+
+impl<K: Clone + Ord, V: Clone> TransientTreeMap<K, V> {
+    /// Creates a new empty `TransientTreeMap`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::TransientTreeMap;
+    ///
+    /// let transient: TransientTreeMap<i32, &str> = TransientTreeMap::new();
+    /// assert!(transient.is_empty());
+    /// ```
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            root: None,
+            length: 0,
+            _marker: PhantomData,
+        }
+    }
+
+    /// Creates a `TransientTreeMap` from a `PersistentTreeMap`.
+    ///
+    /// This consumes the persistent map and allows efficient batch modifications.
+    ///
+    /// # Complexity
+    ///
+    /// O(1) - only moves fields
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::{PersistentTreeMap, TransientTreeMap};
+    ///
+    /// let persistent = PersistentTreeMap::new()
+    ///     .insert(1, "one")
+    ///     .insert(2, "two");
+    ///
+    /// let mut transient = TransientTreeMap::from_persistent(persistent);
+    /// transient.insert(3, "three");
+    /// assert_eq!(transient.len(), 3);
+    /// ```
+    #[must_use]
+    pub fn from_persistent(map: PersistentTreeMap<K, V>) -> Self {
+        Self {
+            root: map.root,
+            length: map.length,
+            _marker: PhantomData,
+        }
+    }
+
+    /// Returns a reference to the value corresponding to the key.
+    ///
+    /// The key may be any borrowed form of the map's key type, but `Ord`
+    /// on the borrowed form must match that for the key type.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key to look up
+    ///
+    /// # Complexity
+    ///
+    /// O(log N)
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::TransientTreeMap;
+    ///
+    /// let mut transient: TransientTreeMap<String, i32> = TransientTreeMap::new();
+    /// transient.insert("hello".to_string(), 42);
+    ///
+    /// // Can use &str to look up String keys
+    /// assert_eq!(transient.get("hello"), Some(&42));
+    /// assert_eq!(transient.get("world"), None);
+    /// ```
+    #[must_use]
+    pub fn get<Q>(&self, key: &Q) -> Option<&V>
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        self.root.as_ref().and_then(|node| node.get(key))
+    }
+
+    /// Returns `true` if the map contains the given key.
+    ///
+    /// The key may be any borrowed form of the map's key type.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key to check
+    ///
+    /// # Complexity
+    ///
+    /// O(log N)
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::TransientTreeMap;
+    ///
+    /// let mut transient: TransientTreeMap<i32, &str> = TransientTreeMap::new();
+    /// transient.insert(1, "one");
+    ///
+    /// assert!(transient.contains_key(&1));
+    /// assert!(!transient.contains_key(&2));
+    /// ```
+    #[must_use]
+    pub fn contains_key<Q>(&self, key: &Q) -> bool
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        self.get(key).is_some()
+    }
+
+    /// Inserts a key-value pair into the map.
+    ///
+    /// If the map already contains the key, the old value is replaced and returned.
+    /// Otherwise, `None` is returned.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key to insert
+    /// * `value` - The value to associate with the key
+    ///
+    /// # Returns
+    ///
+    /// The old value if the key was already present, otherwise `None`.
+    ///
+    /// # Complexity
+    ///
+    /// O(log N)
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::TransientTreeMap;
+    ///
+    /// let mut transient: TransientTreeMap<i32, &str> = TransientTreeMap::new();
+    /// assert_eq!(transient.insert(1, "one"), None);
+    /// assert_eq!(transient.insert(1, "ONE"), Some("one"));
+    /// assert_eq!(transient.get(&1), Some(&"ONE"));
+    /// ```
+    pub fn insert(&mut self, key: K, value: V) -> Option<V> {
+        match &mut self.root {
+            None => {
+                self.root = Some(ReferenceCounter::new(BTreeNode::new_leaf(key, value)));
+                self.length = 1;
+                None
+            }
+            Some(root) => {
+                // Insert always modifies the tree, so we always need to replace the root.
+                // The `took_ownership` flag is not needed here.
+                let (root_node, _took_ownership) = Self::take_or_clone_root(root);
+                match root_node.insert(key, value) {
+                    InsertResult::Done {
+                        node,
+                        added,
+                        old_value,
+                    } => {
+                        *root = ReferenceCounter::new(node);
+                        if added {
+                            self.length += 1;
+                        }
+                        old_value
+                    }
+                    InsertResult::Split {
+                        left,
+                        median,
+                        right,
+                        added,
+                        old_value,
+                    } => {
+                        *root = ReferenceCounter::new(BTreeNode::Internal {
+                            entries: smallvec![median],
+                            children: vec![
+                                ReferenceCounter::new(left),
+                                ReferenceCounter::new(right),
+                            ],
+                        });
+                        if added {
+                            self.length += 1;
+                        }
+                        old_value
+                    }
+                }
+            }
+        }
+    }
+
+    /// Removes a key from the map and returns the value if it was present.
+    ///
+    /// The key may be any borrowed form of the map's key type.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key to remove
+    ///
+    /// # Returns
+    ///
+    /// The removed value if the key was present, otherwise `None`.
+    ///
+    /// # Complexity
+    ///
+    /// O(log N)
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::TransientTreeMap;
+    ///
+    /// let mut transient: TransientTreeMap<i32, &str> = TransientTreeMap::new();
+    /// transient.insert(1, "one");
+    /// assert_eq!(transient.remove(&1), Some("one"));
+    /// assert_eq!(transient.remove(&1), None);
+    /// assert!(transient.is_empty());
+    /// ```
+    pub fn remove<Q>(&mut self, key: &Q) -> Option<V>
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        let root = self.root.as_mut()?;
+        let (root_node, took_ownership) = Self::take_or_clone_root(root);
+        match root_node.remove(key) {
+            RemoveResult::NotFound(node) => {
+                // Key was not found. Restore the root only if we took ownership.
+                // If we cloned (took_ownership == false), the original reference is unchanged.
+                if took_ownership {
+                    *root = ReferenceCounter::new(node);
+                }
+                // If !took_ownership, the original root reference is still valid,
+                // so we don't need to do anything.
+                None
+            }
+            RemoveResult::Done {
+                node,
+                removed_value,
+            } => {
+                self.length -= 1;
+                self.root = node.map(ReferenceCounter::new);
+                Some(removed_value)
+            }
+            RemoveResult::Underflow {
+                node,
+                removed_value,
+            } => {
+                self.length -= 1;
+                self.root = Some(ReferenceCounter::new(node));
+                Some(removed_value)
+            }
+        }
+    }
+
+    /// Helper function to take ownership of a root node using COW semantics.
+    ///
+    /// Returns a tuple of (node, `took_ownership`) where:
+    /// - `took_ownership = true`: The original reference was taken and needs to be replaced.
+    /// - `took_ownership = false`: A clone was returned; the original reference is unchanged.
+    ///
+    /// This distinction is important for operations like `remove` where a `NotFound`
+    /// result should not disturb the original structure when shared.
+    fn take_or_clone_root(root: &mut ReferenceCounter<BTreeNode<K, V>>) -> (BTreeNode<K, V>, bool) {
+        // Check if we're the only owner before attempting to take ownership.
+        // If there are multiple owners, clone directly without creating a placeholder.
+        if ReferenceCounter::strong_count(root) > 1 {
+            return ((**root).clone(), false);
+        }
+
+        // We're the only owner, so we can take ownership.
+        let placeholder = ReferenceCounter::new(BTreeNode::empty_placeholder());
+        let reference = std::mem::replace(root, placeholder);
+
+        // This should always succeed since we checked strong_count above.
+        match ReferenceCounter::try_unwrap(reference) {
+            Ok(node) => (node, true),
+            Err(reference_counter) => {
+                // Defensive: restore the reference if try_unwrap fails unexpectedly.
+                let cloned = (*reference_counter).clone();
+                *root = reference_counter;
+                (cloned, false)
+            }
+        }
+    }
+
+    /// Converts this transient map into a persistent map.
+    ///
+    /// This consumes the `TransientTreeMap` and returns a `PersistentTreeMap`.
+    /// The conversion is O(1) as it simply moves the internal data.
+    ///
+    /// # Complexity
+    ///
+    /// O(1) - only moves fields
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::TransientTreeMap;
+    ///
+    /// let mut transient: TransientTreeMap<i32, &str> = TransientTreeMap::new();
+    /// transient.insert(1, "one");
+    /// transient.insert(2, "two");
+    /// let persistent = transient.persistent();
+    /// assert_eq!(persistent.len(), 2);
+    /// assert_eq!(persistent.get(&1), Some(&"one"));
+    /// ```
+    #[must_use]
+    pub fn persistent(self) -> PersistentTreeMap<K, V> {
+        PersistentTreeMap {
+            root: self.root,
+            length: self.length,
+        }
+    }
+}
+
+impl<K: Clone + Ord, V: Clone> Default for TransientTreeMap<K, V> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<K: Clone + Ord, V: Clone> FromIterator<(K, V)> for TransientTreeMap<K, V> {
+    fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
+        let mut transient = Self::new();
+        for (key, value) in iter {
+            transient.insert(key, value);
+        }
+        transient
+    }
+}
+
+// =============================================================================
+// PersistentTreeMap::transient() method
+// =============================================================================
+
+impl<K: Clone + Ord, V: Clone> PersistentTreeMap<K, V> {
+    /// Converts this persistent map into a transient map.
+    ///
+    /// This consumes the `PersistentTreeMap` and returns a `TransientTreeMap`
+    /// that can be efficiently mutated. The conversion is O(1) as it simply
+    /// moves the internal data.
+    ///
+    /// # Complexity
+    ///
+    /// O(1) - only moves fields
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::PersistentTreeMap;
+    ///
+    /// let persistent: PersistentTreeMap<i32, &str> = [
+    ///     (1, "one"),
+    ///     (2, "two"),
+    /// ].into_iter().collect();
+    ///
+    /// let mut transient = persistent.transient();
+    /// transient.insert(3, "three");
+    /// transient.remove(&1);
+    ///
+    /// let new_persistent = transient.persistent();
+    /// assert_eq!(new_persistent.len(), 2);
+    /// assert_eq!(new_persistent.get(&2), Some(&"two"));
+    /// assert_eq!(new_persistent.get(&3), Some(&"three"));
+    /// ```
+    #[must_use]
+    pub fn transient(self) -> TransientTreeMap<K, V> {
+        TransientTreeMap::from_persistent(self)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2354,6 +2909,369 @@ mod tests {
         }
         for i in (1..500).step_by(2) {
             assert_eq!(map2.get(&i), Some(&(i * 2)));
+        }
+    }
+
+    /// Verify that remove on a non-existent key maintains structure sharing
+    /// for `PersistentTreeMap`.
+    #[test]
+    fn test_persistent_remove_nonexistent_maintains_structure_sharing() {
+        let map1 = PersistentTreeMap::new()
+            .insert(1, "one")
+            .insert(2, "two")
+            .insert(3, "three");
+
+        // Clone the map to share structure
+        let map2 = map1.clone();
+
+        // Get a reference to the root before the remove operation
+        let root_before = map1.root.as_ref().unwrap();
+
+        // Remove a non-existent key
+        let map3 = map2.remove(&99);
+
+        // Verify data is preserved
+        assert_eq!(map3.len(), 3);
+        assert_eq!(map3.get(&1), Some(&"one"));
+        assert_eq!(map3.get(&2), Some(&"two"));
+        assert_eq!(map3.get(&3), Some(&"three"));
+
+        // Verify structure sharing: the root should be the same because
+        // map2.clone() shares the root with map1, and remove(&99) on map2
+        // returns a clone of map2, which still shares the same root.
+        // Note: PersistentTreeMap::remove returns self.clone() for NotFound,
+        // so the new map shares structure with the original.
+        let root_after = map3.root.as_ref().unwrap();
+        assert!(
+            ReferenceCounter::ptr_eq(root_before, root_after),
+            "Structure sharing should be maintained when removing a non-existent key"
+        );
+    }
+}
+
+// =============================================================================
+// TransientTreeMap Tests
+// =============================================================================
+
+#[cfg(test)]
+mod transient_treemap_tests {
+    use super::*;
+    use rstest::rstest;
+
+    // =========================================================================
+    // new() Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_transient_new_creates_empty() {
+        let transient: TransientTreeMap<i32, String> = TransientTreeMap::new();
+        assert!(transient.is_empty());
+        assert_eq!(transient.len(), 0);
+    }
+
+    // =========================================================================
+    // from_persistent() and persistent() Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_transient_from_persistent_empty() {
+        let persistent: PersistentTreeMap<i32, String> = PersistentTreeMap::new();
+        let transient = TransientTreeMap::from_persistent(persistent);
+        assert!(transient.is_empty());
+        assert_eq!(transient.len(), 0);
+    }
+
+    #[rstest]
+    fn test_transient_from_persistent_with_data() {
+        let persistent = PersistentTreeMap::new()
+            .insert(1, "one")
+            .insert(2, "two")
+            .insert(3, "three");
+        let transient = TransientTreeMap::from_persistent(persistent);
+        assert_eq!(transient.len(), 3);
+        assert_eq!(transient.get(&1), Some(&"one"));
+        assert_eq!(transient.get(&2), Some(&"two"));
+        assert_eq!(transient.get(&3), Some(&"three"));
+    }
+
+    #[rstest]
+    fn test_transient_persistent_roundtrip() {
+        let persistent1 = PersistentTreeMap::new()
+            .insert(10, "ten")
+            .insert(20, "twenty");
+        let mut transient = TransientTreeMap::from_persistent(persistent1);
+        transient.insert(30, "thirty");
+        let persistent2 = transient.persistent();
+
+        assert_eq!(persistent2.len(), 3);
+        assert_eq!(persistent2.get(&10), Some(&"ten"));
+        assert_eq!(persistent2.get(&20), Some(&"twenty"));
+        assert_eq!(persistent2.get(&30), Some(&"thirty"));
+    }
+
+    #[rstest]
+    fn test_persistent_treemap_transient_method() {
+        let persistent = PersistentTreeMap::new().insert("a", 1).insert("b", 2);
+        let mut transient = persistent.transient();
+        transient.insert("c", 3);
+        let new_persistent = transient.persistent();
+
+        assert_eq!(new_persistent.len(), 3);
+        assert_eq!(new_persistent.get(&"a"), Some(&1));
+        assert_eq!(new_persistent.get(&"b"), Some(&2));
+        assert_eq!(new_persistent.get(&"c"), Some(&3));
+    }
+
+    // =========================================================================
+    // insert() Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_transient_insert_new_key() {
+        let mut transient: TransientTreeMap<i32, &str> = TransientTreeMap::new();
+        let old_value = transient.insert(1, "one");
+        assert_eq!(old_value, None);
+        assert_eq!(transient.len(), 1);
+        assert_eq!(transient.get(&1), Some(&"one"));
+    }
+
+    #[rstest]
+    fn test_transient_insert_replace_existing() {
+        let mut transient: TransientTreeMap<i32, &str> = TransientTreeMap::new();
+        transient.insert(1, "one");
+        let old_value = transient.insert(1, "ONE");
+        assert_eq!(old_value, Some("one"));
+        assert_eq!(transient.len(), 1);
+        assert_eq!(transient.get(&1), Some(&"ONE"));
+    }
+
+    #[rstest]
+    fn test_transient_insert_multiple() {
+        let mut transient: TransientTreeMap<i32, i32> = TransientTreeMap::new();
+        for i in 0..100 {
+            transient.insert(i, i * 2);
+        }
+        assert_eq!(transient.len(), 100);
+        for i in 0..100 {
+            assert_eq!(transient.get(&i), Some(&(i * 2)));
+        }
+    }
+
+    // =========================================================================
+    // remove() Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_transient_remove_existing() {
+        let mut transient: TransientTreeMap<i32, &str> = TransientTreeMap::new();
+        transient.insert(1, "one");
+        transient.insert(2, "two");
+        let removed = transient.remove(&1);
+        assert_eq!(removed, Some("one"));
+        assert_eq!(transient.len(), 1);
+        assert_eq!(transient.get(&1), None);
+        assert_eq!(transient.get(&2), Some(&"two"));
+    }
+
+    #[rstest]
+    fn test_transient_remove_nonexistent() {
+        let mut transient: TransientTreeMap<i32, &str> = TransientTreeMap::new();
+        transient.insert(1, "one");
+        transient.insert(2, "two");
+        transient.insert(3, "three");
+
+        let removed = transient.remove(&99);
+        assert_eq!(removed, None);
+        assert_eq!(transient.len(), 3);
+
+        // Verify all existing data is preserved
+        assert_eq!(transient.get(&1), Some(&"one"));
+        assert_eq!(transient.get(&2), Some(&"two"));
+        assert_eq!(transient.get(&3), Some(&"three"));
+    }
+
+    #[rstest]
+    fn test_transient_remove_nonexistent_preserves_structure_sharing() {
+        // Create a persistent map
+        let persistent = PersistentTreeMap::new()
+            .insert(1, "one")
+            .insert(2, "two")
+            .insert(3, "three");
+
+        // Clone the persistent map to share structure
+        let persistent_clone = persistent.clone();
+
+        // Convert the clone to transient
+        let mut transient = persistent_clone.transient();
+
+        // Get a reference to the root before the remove operation
+        // (both persistent and transient should share the same root initially)
+        let root_before = persistent.root.as_ref().unwrap();
+
+        // Remove a nonexistent key - this should not break structure sharing
+        let removed = transient.remove(&99);
+        assert_eq!(removed, None);
+
+        // Verify all existing data is preserved
+        assert_eq!(transient.len(), 3);
+        assert_eq!(transient.get(&1), Some(&"one"));
+        assert_eq!(transient.get(&2), Some(&"two"));
+        assert_eq!(transient.get(&3), Some(&"three"));
+
+        // Convert back to persistent and verify
+        let new_persistent = transient.persistent();
+        assert_eq!(new_persistent.len(), 3);
+        assert_eq!(new_persistent.get(&1), Some(&"one"));
+        assert_eq!(new_persistent.get(&2), Some(&"two"));
+        assert_eq!(new_persistent.get(&3), Some(&"three"));
+
+        // Verify structure sharing is maintained:
+        // The new_persistent's root should be the same as the original's root
+        // because nothing was changed.
+        let root_after = new_persistent.root.as_ref().unwrap();
+        assert!(
+            ReferenceCounter::ptr_eq(root_before, root_after),
+            "Structure sharing should be maintained when removing a nonexistent key"
+        );
+    }
+
+    #[rstest]
+    fn test_transient_remove_all() {
+        let mut transient: TransientTreeMap<i32, i32> = TransientTreeMap::new();
+        for i in 0..10 {
+            transient.insert(i, i * 2);
+        }
+        for i in 0..10 {
+            transient.remove(&i);
+        }
+        assert!(transient.is_empty());
+        assert_eq!(transient.len(), 0);
+    }
+
+    // =========================================================================
+    // get() and contains_key() Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_transient_get_existing() {
+        let mut transient: TransientTreeMap<String, i32> = TransientTreeMap::new();
+        transient.insert("key".to_string(), 42);
+        assert_eq!(transient.get("key"), Some(&42));
+    }
+
+    #[rstest]
+    fn test_transient_get_nonexistent() {
+        let transient: TransientTreeMap<String, i32> = TransientTreeMap::new();
+        assert_eq!(transient.get("key"), None);
+    }
+
+    #[rstest]
+    fn test_transient_contains_key() {
+        let mut transient: TransientTreeMap<i32, &str> = TransientTreeMap::new();
+        transient.insert(1, "one");
+        assert!(transient.contains_key(&1));
+        assert!(!transient.contains_key(&2));
+    }
+
+    // =========================================================================
+    // COW (Copy-on-Write) Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_transient_cow_original_unchanged() {
+        let persistent = PersistentTreeMap::new().insert(1, "one").insert(2, "two");
+        let persistent_clone = persistent.clone();
+
+        let mut transient = TransientTreeMap::from_persistent(persistent);
+        transient.insert(3, "three");
+        transient.remove(&1);
+
+        // The original (cloned) persistent map should be unchanged
+        assert_eq!(persistent_clone.len(), 2);
+        assert_eq!(persistent_clone.get(&1), Some(&"one"));
+        assert_eq!(persistent_clone.get(&2), Some(&"two"));
+        assert_eq!(persistent_clone.get(&3), None);
+    }
+
+    #[rstest]
+    fn test_transient_cow_batch_operations() {
+        let persistent = PersistentTreeMap::new()
+            .insert(1, 10)
+            .insert(2, 20)
+            .insert(3, 30);
+        let original = persistent.clone();
+
+        let mut transient = TransientTreeMap::from_persistent(persistent);
+
+        // Batch operations
+        for i in 4..=100 {
+            transient.insert(i, i * 10);
+        }
+        for i in (1..=50).step_by(2) {
+            transient.remove(&i);
+        }
+
+        let new_persistent = transient.persistent();
+
+        // Original should be unchanged
+        assert_eq!(original.len(), 3);
+        assert_eq!(original.get(&1), Some(&10));
+        assert_eq!(original.get(&50), None);
+
+        // New map should have the batch changes
+        assert_eq!(new_persistent.get(&1), None); // Removed
+        assert_eq!(new_persistent.get(&2), Some(&20)); // Kept
+        assert_eq!(new_persistent.get(&100), Some(&1000)); // Added
+    }
+
+    // =========================================================================
+    // Large Data Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_transient_large_batch_insert() {
+        let mut transient: TransientTreeMap<i32, i32> = TransientTreeMap::new();
+        for i in 0..1000 {
+            transient.insert(i, i * 2);
+        }
+        let persistent = transient.persistent();
+
+        assert_eq!(persistent.len(), 1000);
+        for i in 0..1000 {
+            assert_eq!(persistent.get(&i), Some(&(i * 2)));
+        }
+    }
+
+    #[rstest]
+    fn test_transient_large_batch_mixed_operations() {
+        let initial: PersistentTreeMap<i32, i32> = (0..500).map(|i| (i, i)).collect();
+        let mut transient = TransientTreeMap::from_persistent(initial);
+
+        // Add new entries
+        for i in 500..1000 {
+            transient.insert(i, i);
+        }
+
+        // Update some existing entries
+        for i in (0..500).step_by(10) {
+            transient.insert(i, i * 100);
+        }
+
+        // Remove some entries
+        for i in (0..500).step_by(5) {
+            transient.remove(&i);
+        }
+
+        let result = transient.persistent();
+
+        // Verify removals (every 5th from 0..500)
+        for i in (0..500).step_by(5) {
+            assert_eq!(result.get(&i), None);
+        }
+
+        // Verify additions (500..1000)
+        for i in 500..1000 {
+            assert_eq!(result.get(&i), Some(&i));
         }
     }
 }
