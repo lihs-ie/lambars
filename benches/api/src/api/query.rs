@@ -41,7 +41,8 @@ use super::handlers::AppState;
 use crate::domain::{Priority, Task, TaskId, TaskStatus};
 use crate::infrastructure::{PaginatedResult, Pagination, SearchScope as RepositorySearchScope};
 use lambars::persistent::{
-    PersistentHashMap, PersistentHashSet, PersistentTreeMap, PersistentVector, TransientHashMap,
+    PersistentHashMap, PersistentHashSet, PersistentTreeMap, PersistentVector, TaskIdCollection,
+    TransientHashMap, TransientTreeMap,
 };
 use lambars::typeclass::{Semigroup, Traversable};
 
@@ -1002,24 +1003,25 @@ impl Default for SearchIndexConfig {
 
 /// N-gram inverted index type.
 ///
-/// Maps n-gram strings to a sorted list of `TaskId`s that contain that n-gram.
-/// The `TaskId` list is always:
-/// - Deduplicated (no duplicate `TaskId`s)
-/// - Sorted in ascending order (for efficient merge intersection)
+/// Maps n-gram strings to a deduplicated collection of `TaskId`s that contain that n-gram.
+/// `TaskIdCollection` provides:
+/// - Automatic deduplication (no duplicate `TaskId`s via hash-based set)
+/// - O(1)/O(8) insertion and O(1)/O(n) lookup
+/// - `iter_sorted()` for sorted iteration when merge intersection is needed
 ///
 /// # Structure
 ///
 /// - Key: n-gram string (e.g., "cal", "all", "llb" for "callback")
-/// - Value: `PersistentVector<TaskId>` containing all tasks with that n-gram
+/// - Value: `TaskIdCollection<TaskId>` containing all tasks with that n-gram
 ///
 /// Uses `NgramKey` (Arc<str>) for O(1) clone during merge operations.
 /// Supports `&str` lookups via `Borrow<str>` implementation.
-type NgramIndex = PersistentHashMap<NgramKey, PersistentVector<TaskId>>;
+type NgramIndex = PersistentHashMap<NgramKey, TaskIdCollection<TaskId>>;
 
 /// Mutable index for batch construction. O(1) amortized insertion, O(1) key clone via `NgramKey`.
 type MutableIndex = std::collections::HashMap<NgramKey, Vec<TaskId>>;
 
-pub type PrefixIndex = PersistentTreeMap<NgramKey, PersistentVector<TaskId>>;
+pub type PrefixIndex = PersistentTreeMap<NgramKey, TaskIdCollection<TaskId>>;
 
 /// N-gram key with reference-counted storage for O(1) cloning.
 #[derive(Clone, Hash, Eq, PartialEq, Debug)]
@@ -1829,11 +1831,12 @@ impl SearchIndexDelta {
     }
 
     fn cancel_task_from_remove(remove_index: &mut MutableIndex, key: &str, task_id: &TaskId) {
-        for (existing_key, posting_list) in remove_index.iter_mut() {
-            if existing_key.as_str() == key {
-                posting_list.retain(|id| id != task_id);
-                return;
-            }
+        if let Some(posting_list) = remove_index
+            .iter_mut()
+            .find(|(existing_key, _)| existing_key.as_str() == key)
+            .map(|(_, list)| list)
+        {
+            posting_list.retain(|id| id != task_id);
         }
     }
 
@@ -2431,33 +2434,10 @@ fn index_ngrams(
         let existing_ids = transient_index
             .get(ngram_key.as_str())
             .cloned()
-            .unwrap_or_else(PersistentVector::new);
+            .unwrap_or_else(TaskIdCollection::new);
 
-        // Collect existing IDs into a Vec for binary search
-        let ids_vec: Vec<TaskId> = existing_ids.iter().cloned().collect();
-
-        // Binary search for insertion position
-        // If Ok, TaskId already exists (deduplication - skip)
-        // If Err, insert at the returned position to maintain sorted order
-        if let Err(insert_position) = ids_vec.binary_search(task_id) {
-            // Build new vector with TaskId inserted at correct position
-            let mut transient_vec = PersistentVector::new().transient();
-
-            // Add elements before insertion position
-            for id in ids_vec.iter().take(insert_position) {
-                transient_vec.push_back(id.clone());
-            }
-
-            // Insert new TaskId
-            transient_vec.push_back(task_id.clone());
-
-            // Add elements after insertion position
-            for id in ids_vec.iter().skip(insert_position) {
-                transient_vec.push_back(id.clone());
-            }
-
-            transient_index.insert(ngram_key, transient_vec.persistent());
-        }
+        // TaskIdCollection::insert handles deduplication internally with O(1)/O(8) complexity
+        transient_index.insert(ngram_key, existing_ids.insert(task_id.clone()));
     }
 
     // Persist and return
@@ -2479,16 +2459,13 @@ fn index_ngrams(
 ///
 /// # Invariants Maintained
 ///
-/// - **No duplicate `TaskId`**: Each `TaskId` appears at most once per n-gram
-/// - **Sorted order**: `TaskId` lists are always sorted in ascending order
+/// - **No duplicate `TaskId`**: `TaskIdCollection::insert` provides automatic deduplication
 ///
 /// # Algorithm
 ///
 /// 1. Generate n-grams from the normalized token
-/// 2. For each n-gram, retrieve or create the posting list
-/// 3. Use binary search to find insertion position (maintains sorted order)
-/// 4. Skip if `TaskId` already exists (deduplication)
-/// 5. Insert at correct position to maintain sorted order
+/// 2. For each n-gram, retrieve or create the `TaskIdCollection`
+/// 3. Insert `TaskId` via `TaskIdCollection::insert` (O(1)/O(8) with automatic deduplication)
 ///
 /// # Arguments
 ///
@@ -2498,7 +2475,7 @@ fn index_ngrams(
 /// * `config` - Search index configuration
 #[allow(dead_code)] // Retained for future single-task add_task() operations
 fn index_ngrams_transient(
-    transient_index: &mut TransientHashMap<NgramKey, PersistentVector<TaskId>>,
+    transient_index: &mut TransientHashMap<NgramKey, TaskIdCollection<TaskId>>,
     normalized_token: &str,
     task_id: &TaskId,
     config: &SearchIndexConfig,
@@ -2518,33 +2495,10 @@ fn index_ngrams_transient(
         let existing_ids = transient_index
             .get(ngram_key.as_str())
             .cloned()
-            .unwrap_or_else(PersistentVector::new);
+            .unwrap_or_else(TaskIdCollection::new);
 
-        // Collect existing IDs into a Vec for binary search
-        let ids_vec: Vec<TaskId> = existing_ids.iter().cloned().collect();
-
-        // Binary search for insertion position
-        // If Ok, TaskId already exists (deduplication - skip)
-        // If Err, insert at the returned position to maintain sorted order
-        if let Err(insert_position) = ids_vec.binary_search(task_id) {
-            // Build new vector with TaskId inserted at correct position
-            let mut transient_vec = PersistentVector::new().transient();
-
-            // Add elements before insertion position
-            for id in ids_vec.iter().take(insert_position) {
-                transient_vec.push_back(id.clone());
-            }
-
-            // Insert new TaskId
-            transient_vec.push_back(task_id.clone());
-
-            // Add elements after insertion position
-            for id in ids_vec.iter().skip(insert_position) {
-                transient_vec.push_back(id.clone());
-            }
-
-            transient_index.insert(ngram_key, transient_vec.persistent());
-        }
+        // TaskIdCollection::insert handles deduplication internally with O(1)/O(8) complexity
+        transient_index.insert(ngram_key, existing_ids.insert(task_id.clone()));
     }
 }
 
@@ -2614,15 +2568,32 @@ fn index_all_suffixes_batch(
     }
 }
 
+/// Converts a mutable batch index to a persistent n-gram index.
+///
+/// # Performance Note
+///
+/// This function iteratively inserts each `TaskId` into `TaskIdCollection` via `fold`.
+/// For large posting lists (>8 elements), this incurs O(n) clone/allocation per insertion.
+///
+/// Future optimization: Implement `TaskIdCollection::from_iter` or `from_sorted_iter`
+/// to construct collections more efficiently from pre-sorted/deduplicated vectors.
 #[must_use]
 fn finalize_ngram_index(mutable_index: MutableIndex) -> NgramIndex {
     let mut result = PersistentHashMap::new().transient();
 
     for (ngram, mut task_ids) in mutable_index {
+        // Sort and dedup for consistent iteration order and to optimize
+        // Large state construction (TaskIdCollection transitions to Large at >8 elements)
         task_ids.sort();
         task_ids.dedup();
-        let persistent_ids: PersistentVector<TaskId> = task_ids.into_iter().collect();
-        result.insert(ngram, persistent_ids);
+
+        // TaskIdCollection handles deduplication internally
+        let collection: TaskIdCollection<TaskId> = task_ids
+            .into_iter()
+            .fold(TaskIdCollection::new(), |accumulator, id| {
+                accumulator.insert(id)
+            });
+        result.insert(ngram, collection);
     }
 
     result.persistent()
@@ -2631,19 +2602,19 @@ fn finalize_ngram_index(mutable_index: MutableIndex) -> NgramIndex {
 /// Removes a token's n-grams from the index (pure function).
 ///
 /// This function removes the specified `TaskId` from all n-gram entries
-/// associated with the given token.
+/// associated with the given token using `TaskIdCollection::remove`.
 ///
 /// # Algorithm
 ///
 /// 1. Generate n-grams from the normalized token
-/// 2. For each n-gram, filter out the specified `TaskId`
+/// 2. For each n-gram, remove the `TaskId` via `TaskIdCollection::remove`
 /// 3. If the posting list becomes empty, remove the n-gram entry entirely
 ///
 /// # Complexity
 ///
-/// O(G * M) where:
+/// O(G * R) where:
 /// - G = number of n-grams generated
-/// - M = average posting list length (linear scan for removal)
+/// - R = `TaskIdCollection::remove` cost (O(8) for Small state, O(n) for Large state)
 ///
 /// # Arguments
 ///
@@ -2679,18 +2650,14 @@ fn remove_ngrams(
     for ngram in ngrams {
         let ngram_key = NgramKey::new(&ngram);
         if let Some(existing_ids) = transient_index.get(ngram_key.as_str()).cloned() {
-            // Filter out the specified TaskId
-            let updated_ids: PersistentVector<TaskId> = existing_ids
-                .iter()
-                .filter(|id| *id != task_id)
-                .cloned()
-                .collect();
+            // TaskIdCollection::remove returns a new collection with the element removed
+            let updated_ids = existing_ids.remove(task_id);
 
             if updated_ids.is_empty() {
                 // Remove the n-gram entry if no TaskIds remain
                 transient_index.remove(ngram_key.as_str());
             } else {
-                // Update with filtered list
+                // Update with filtered collection
                 transient_index.insert(ngram_key, updated_ids);
             }
         }
@@ -2976,7 +2943,7 @@ pub struct SearchIndex {
     /// Uses `NgramKey` (Arc<str>) for O(1) clone during merge operations.
     title_word_index: PrefixIndex,
     /// Index mapping full normalized titles to task IDs (for multi-word substring match).
-    /// Changed from `TaskId` to `PersistentVector<TaskId>` to support multiple tasks with same title.
+    /// Uses `TaskIdCollection<TaskId>` to support multiple tasks with same title and automatic deduplication.
     /// Uses `NgramKey` (Arc<str>) for O(1) clone during merge operations.
     title_full_index: PrefixIndex,
     /// Index mapping ALL suffixes of full normalized titles to task IDs (for multi-word infix search).
@@ -3077,13 +3044,21 @@ impl SearchIndex {
     #[must_use]
     #[allow(clippy::too_many_lines)]
     pub fn build_with_config(tasks: &PersistentVector<Task>, config: SearchIndexConfig) -> Self {
-        let mut title_word_index: PrefixIndex = PersistentTreeMap::new();
-        let mut title_full_index: PrefixIndex = PersistentTreeMap::new();
-        let mut title_full_all_suffix_index: PrefixIndex = PersistentTreeMap::new();
-        let mut title_word_all_suffix_index: PrefixIndex = PersistentTreeMap::new();
-        let mut tag_index: PrefixIndex = PersistentTreeMap::new();
-        let mut tag_all_suffix_index: PrefixIndex = PersistentTreeMap::new();
-        let mut tasks_by_id: PersistentTreeMap<TaskId, Task> = PersistentTreeMap::new();
+        // Use TransientTreeMap for batch construction to reduce clone/alloc overhead
+        // (REQ-SEARCH-STRUCT-003: batch updates via TransientTreeMap)
+        let mut title_word_index: TransientTreeMap<NgramKey, TaskIdCollection<TaskId>> =
+            TransientTreeMap::new();
+        let mut title_full_index: TransientTreeMap<NgramKey, TaskIdCollection<TaskId>> =
+            TransientTreeMap::new();
+        let mut title_full_all_suffix_index: TransientTreeMap<NgramKey, TaskIdCollection<TaskId>> =
+            TransientTreeMap::new();
+        let mut title_word_all_suffix_index: TransientTreeMap<NgramKey, TaskIdCollection<TaskId>> =
+            TransientTreeMap::new();
+        let mut tag_index: TransientTreeMap<NgramKey, TaskIdCollection<TaskId>> =
+            TransientTreeMap::new();
+        let mut tag_all_suffix_index: TransientTreeMap<NgramKey, TaskIdCollection<TaskId>> =
+            TransientTreeMap::new();
+        let mut tasks_by_id: TransientTreeMap<TaskId, Task> = TransientTreeMap::new();
 
         // N-gram indexes (populated only in Ngram mode)
         // Use mutable HashMap<String, Vec<TaskId>> for O(1) amortized batch construction
@@ -3094,7 +3069,7 @@ impl SearchIndex {
 
         for task in tasks {
             // Index the task by ID
-            tasks_by_id = tasks_by_id.insert(task.task_id.clone(), task.clone());
+            tasks_by_id.insert(task.task_id.clone(), task.clone());
 
             // Normalize the title using normalize_query() for consistency
             let normalized = normalize_query(&task.title);
@@ -3117,10 +3092,10 @@ impl SearchIndex {
             let existing_ids = title_full_index
                 .get(normalized_title.as_str())
                 .cloned()
-                .unwrap_or_else(PersistentVector::new);
-            title_full_index = title_full_index.insert(
+                .unwrap_or_else(TaskIdCollection::new);
+            title_full_index.insert(
                 NgramKey::new(normalized_title),
-                existing_ids.push_back(task.task_id.clone()),
+                existing_ids.insert(task.task_id.clone()),
             );
 
             // Index infix based on mode
@@ -3135,9 +3110,9 @@ impl SearchIndex {
                     );
                 }
                 InfixMode::LegacyAllSuffix => {
-                    // Build all-suffix index for full title
-                    title_full_all_suffix_index = Self::index_all_suffixes(
-                        title_full_all_suffix_index,
+                    // Build all-suffix index for full title using transient index
+                    Self::index_all_suffixes_transient(
+                        &mut title_full_all_suffix_index,
                         normalized_title,
                         &task.task_id,
                     );
@@ -3153,10 +3128,10 @@ impl SearchIndex {
                 let task_ids = title_word_index
                     .get(word_str)
                     .cloned()
-                    .unwrap_or_else(PersistentVector::new);
-                title_word_index = title_word_index.insert(
+                    .unwrap_or_else(TaskIdCollection::new);
+                title_word_index.insert(
                     NgramKey::new(word_str),
-                    task_ids.push_back(task.task_id.clone()),
+                    task_ids.insert(task.task_id.clone()),
                 );
 
                 // Index infix based on mode
@@ -3171,9 +3146,9 @@ impl SearchIndex {
                         );
                     }
                     InfixMode::LegacyAllSuffix => {
-                        // Build all-suffix index for word
-                        title_word_all_suffix_index = Self::index_all_suffixes(
-                            title_word_all_suffix_index,
+                        // Build all-suffix index for word using transient index
+                        Self::index_all_suffixes_transient(
+                            &mut title_word_all_suffix_index,
                             word_str,
                             &task.task_id,
                         );
@@ -3195,10 +3170,10 @@ impl SearchIndex {
                 let task_ids = tag_index
                     .get(normalized_tag.as_str())
                     .cloned()
-                    .unwrap_or_else(PersistentVector::new);
-                tag_index = tag_index.insert(
+                    .unwrap_or_else(TaskIdCollection::new);
+                tag_index.insert(
                     NgramKey::new(&normalized_tag),
-                    task_ids.push_back(task.task_id.clone()),
+                    task_ids.insert(task.task_id.clone()),
                 );
 
                 // Index infix based on mode
@@ -3213,9 +3188,9 @@ impl SearchIndex {
                         );
                     }
                     InfixMode::LegacyAllSuffix => {
-                        // Build all-suffix index for tag
-                        tag_all_suffix_index = Self::index_all_suffixes(
-                            tag_all_suffix_index,
+                        // Build all-suffix index for tag using transient index
+                        Self::index_all_suffixes_transient(
+                            &mut tag_all_suffix_index,
                             &normalized_tag,
                             &task.task_id,
                         );
@@ -3227,15 +3202,16 @@ impl SearchIndex {
             }
         }
 
-        // Convert batch indexes to persistent indexes (sort, dedup, and convert)
+        // Convert transient indexes to persistent indexes via persistent() call
+        // (REQ-SEARCH-STRUCT-003: persistent() called once at end of batch)
         Self {
-            title_word_index,
-            title_full_index,
-            title_full_all_suffix_index,
-            title_word_all_suffix_index,
-            tag_index,
-            tag_all_suffix_index,
-            tasks_by_id,
+            title_word_index: title_word_index.persistent(),
+            title_full_index: title_full_index.persistent(),
+            title_full_all_suffix_index: title_full_all_suffix_index.persistent(),
+            title_word_all_suffix_index: title_word_all_suffix_index.persistent(),
+            tag_index: tag_index.persistent(),
+            tag_all_suffix_index: tag_all_suffix_index.persistent(),
+            tasks_by_id: tasks_by_id.persistent(),
             title_full_ngram_index: finalize_ngram_index(title_full_ngram_batch),
             title_word_ngram_index: finalize_ngram_index(title_word_ngram_batch),
             tag_ngram_index: finalize_ngram_index(tag_ngram_batch),
@@ -3277,21 +3253,49 @@ impl SearchIndex {
     /// Index operation: O(log N) per suffix insertion.
     fn index_all_suffixes(mut index: PrefixIndex, word: &str, task_id: &TaskId) -> PrefixIndex {
         // Generate all suffixes by taking substrings from each character position
-        // (with deduplication check)
+        // TaskIdCollection::insert handles deduplication internally
         for (byte_index, _) in word.char_indices() {
             let suffix = &word[byte_index..];
             let existing_ids = index
                 .get(suffix)
                 .cloned()
-                .unwrap_or_else(PersistentVector::new);
-            if !existing_ids.iter().any(|id| id == task_id) {
-                index = index.insert(
-                    NgramKey::new(suffix),
-                    existing_ids.push_back(task_id.clone()),
-                );
-            }
+                .unwrap_or_else(TaskIdCollection::new);
+            // TaskIdCollection::insert returns self if element already exists
+            index = index.insert(NgramKey::new(suffix), existing_ids.insert(task_id.clone()));
         }
         index
+    }
+
+    /// Indexes all suffixes of a word using a transient tree map for batch construction.
+    ///
+    /// This is the transient version of `index_all_suffixes`, optimized for batch updates
+    /// during index construction (REQ-SEARCH-STRUCT-003).
+    ///
+    /// For "callback", this generates:
+    /// - "callback" (full word - matches prefix "call")
+    /// - "allback" (matches prefix "all")
+    /// - "llback" (matches prefix "ll")
+    /// - "lback" (matches prefix "l")
+    /// - "back" (matches prefix "back")
+    /// - "ack" (matches prefix "ack")
+    /// - "ck" (matches prefix "ck")
+    /// - "k" (matches prefix "k")
+    fn index_all_suffixes_transient(
+        index: &mut TransientTreeMap<NgramKey, TaskIdCollection<TaskId>>,
+        word: &str,
+        task_id: &TaskId,
+    ) {
+        // Generate all suffixes by taking substrings from each character position
+        // TaskIdCollection::insert handles deduplication internally
+        for (byte_index, _) in word.char_indices() {
+            let suffix = &word[byte_index..];
+            let existing_ids = index
+                .get(suffix)
+                .cloned()
+                .unwrap_or_else(TaskIdCollection::new);
+            // TaskIdCollection::insert returns new collection if element already exists
+            index.insert(NgramKey::new(suffix), existing_ids.insert(task_id.clone()));
+        }
     }
 
     /// Searches the title index for tasks containing the query (pure function).
@@ -3377,8 +3381,9 @@ impl SearchIndex {
     ///
     /// # Complexity
     ///
-    /// - Time: O(q * (log N + k)) where q is query n-gram count, k is posting list size
-    /// - Intersection is O(k) using merge intersection on sorted lists
+    /// - Time: O(q * (log N + k log k)) where q is query n-gram count, k is posting list size
+    /// - `iter_sorted()` sorts each posting list in O(k log k) for merge intersection
+    /// - Intersection is O(k) using merge intersection on sorted vectors
     ///
     /// # Soundness
     ///
@@ -3416,7 +3421,8 @@ impl SearchIndex {
         for ngram in &query_ngrams {
             match index.get(ngram.as_str()) {
                 Some(task_ids) => {
-                    let current_vec: Vec<TaskId> = task_ids.iter().cloned().collect();
+                    // Use iter_sorted() to maintain sorted order for intersection
+                    let current_vec: Vec<TaskId> = task_ids.iter_sorted().cloned().collect();
 
                     candidate_vec = Some(match candidate_vec {
                         Some(existing) => {
@@ -3675,7 +3681,7 @@ impl SearchIndex {
 
     /// Uses `PersistentTreeMap::range` on full title index for prefix-based search.
     ///
-    /// This variant handles `PersistentVector<TaskId>` values for same-title support.
+    /// This variant handles `TaskIdCollection<TaskId>` values for same-title support.
     /// Complexity: O(k log N + k log k) where k is the number of matching tasks
     /// (log N for each `tasks_by_id` lookup, k log k for ordering sort).
     fn find_matching_ids_with_prefix_range_multi(
@@ -3868,9 +3874,9 @@ impl SearchIndex {
         }
     }
 
-    /// Removes a task ID from a vector-valued index entry.
+    /// Removes a task ID from a collection-valued index entry.
     ///
-    /// If the resulting vector is empty, removes the entire entry.
+    /// If the resulting collection is empty, removes the entire entry.
     fn remove_id_from_vector_index(
         index: &PrefixIndex,
         key: &str,
@@ -3879,8 +3885,8 @@ impl SearchIndex {
         index.get(key).map_or_else(
             || index.clone(),
             |ids| {
-                let filtered: PersistentVector<TaskId> =
-                    ids.iter().filter(|id| *id != task_id).cloned().collect();
+                // TaskIdCollection::remove returns a new collection with the element removed
+                let filtered = ids.remove(task_id);
                 if filtered.is_empty() {
                     index.remove(key)
                 } else {
@@ -3962,20 +3968,17 @@ impl SearchIndex {
         // Add to tasks_by_id
         let tasks_by_id = self.tasks_by_id.insert(task_id.clone(), task.clone());
 
-        // Add to title_full_index (with deduplication check)
+        // Add to title_full_index
+        // TaskIdCollection::insert handles deduplication internally
         let existing_ids = self
             .title_full_index
             .get(normalized.title_key.as_str())
             .cloned()
-            .unwrap_or_else(PersistentVector::new);
-        let title_full_index = if existing_ids.iter().any(|id| id == task_id) {
-            self.title_full_index.clone()
-        } else {
-            self.title_full_index.insert(
-                NgramKey::new(&normalized.title_key),
-                existing_ids.push_back(task_id.clone()),
-            )
-        };
+            .unwrap_or_else(TaskIdCollection::new);
+        let title_full_index = self.title_full_index.insert(
+            NgramKey::new(&normalized.title_key),
+            existing_ids.insert(task_id.clone()),
+        );
 
         // Add to infix index based on mode (full title)
         let mut title_full_all_suffix_index = self.title_full_all_suffix_index.clone();
@@ -4002,6 +4005,7 @@ impl SearchIndex {
         }
 
         // Add to title_word_index and infix index (limited by word_limit)
+        // TaskIdCollection::insert handles deduplication internally
         let mut title_word_index = self.title_word_index.clone();
         let mut title_word_all_suffix_index = self.title_word_all_suffix_index.clone();
         let mut title_word_ngram_index = self.title_word_ngram_index.clone();
@@ -4010,11 +4014,9 @@ impl SearchIndex {
             let task_ids = title_word_index
                 .get(word_str)
                 .cloned()
-                .unwrap_or_else(PersistentVector::new);
-            if !task_ids.iter().any(|id| id == task_id) {
-                title_word_index = title_word_index
-                    .insert(NgramKey::new(word_str), task_ids.push_back(task_id.clone()));
-            }
+                .unwrap_or_else(TaskIdCollection::new);
+            title_word_index =
+                title_word_index.insert(NgramKey::new(word_str), task_ids.insert(task_id.clone()));
 
             // Add to infix index based on mode
             match self.config.infix_mode {
@@ -4034,6 +4036,7 @@ impl SearchIndex {
 
         // Add to tag_index and infix index (limited by tag_limit)
         // Tags are already sorted and normalized in NormalizedTaskData
+        // TaskIdCollection::insert handles deduplication internally
         let mut tag_index = self.tag_index.clone();
         let mut tag_all_suffix_index = self.tag_all_suffix_index.clone();
         let mut tag_ngram_index = self.tag_ngram_index.clone();
@@ -4042,13 +4045,11 @@ impl SearchIndex {
             let task_ids = tag_index
                 .get(normalized_tag_str)
                 .cloned()
-                .unwrap_or_else(PersistentVector::new);
-            if !task_ids.iter().any(|id| id == task_id) {
-                tag_index = tag_index.insert(
-                    NgramKey::new(normalized_tag_str),
-                    task_ids.push_back(task_id.clone()),
-                );
-            }
+                .unwrap_or_else(TaskIdCollection::new);
+            tag_index = tag_index.insert(
+                NgramKey::new(normalized_tag_str),
+                task_ids.insert(task_id.clone()),
+            );
 
             // Add to infix index based on mode
             match self.config.infix_mode {
@@ -4265,6 +4266,15 @@ impl SearchIndex {
     }
 
     /// Computes `(existing ∪ add) - remove` for a `PrefixIndex`.
+    ///
+    /// # Performance Note
+    ///
+    /// This method converts the merged `Vec<TaskId>` (already sorted/deduped) to
+    /// `TaskIdCollection` via iterative `insert`. For Large state (>8 elements),
+    /// each `insert` triggers a persistent collection clone.
+    ///
+    /// Future optimization: Implement `TaskIdCollection::from_sorted_iter` to
+    /// construct collections more efficiently from pre-sorted vectors.
     fn merge_index_delta(
         index: &PrefixIndex,
         add: &MutableIndex,
@@ -4284,11 +4294,24 @@ impl SearchIndex {
             if merged.is_empty() {
                 acc.remove(key_str)
             } else {
-                acc.insert(key.clone(), merged.into_iter().collect())
+                // Convert Vec<TaskId> to TaskIdCollection
+                // Note: merged is already sorted/deduped, so inserts are idempotent
+                let collection = merged
+                    .into_iter()
+                    .fold(TaskIdCollection::new(), |accumulator, id| {
+                        accumulator.insert(id)
+                    });
+                acc.insert(key.clone(), collection)
             }
         })
     }
 
+    /// Computes `(existing ∪ add) - remove` for a `NgramIndex`.
+    ///
+    /// # Performance Note
+    ///
+    /// Same performance characteristics as `merge_index_delta` - see its documentation
+    /// for details on the iterative `TaskIdCollection` construction overhead.
     fn merge_ngram_delta(
         index: &NgramIndex,
         add: &MutableIndex,
@@ -4309,8 +4332,14 @@ impl SearchIndex {
             if merged.is_empty() {
                 result.remove(key_str);
             } else {
-                // O(1) clone via Arc<str> instead of String allocation
-                result.insert(key.clone(), merged.into_iter().collect());
+                // Convert Vec<TaskId> to TaskIdCollection
+                // Note: merged is already sorted/deduped, so inserts are idempotent
+                let collection = merged
+                    .into_iter()
+                    .fold(TaskIdCollection::new(), |accumulator, id| {
+                        accumulator.insert(id)
+                    });
+                result.insert(key.clone(), collection);
             }
         }
 
@@ -8543,10 +8572,11 @@ mod search_index_differential_update_tests {
     // Internal Index Uniqueness Tests
     // -------------------------------------------------------------------------
 
-    /// Helper function to check uniqueness in a `PersistentVector`.
+    /// Helper function to check uniqueness in a `TaskIdCollection`.
     ///
-    /// Returns `true` if there are duplicate `TaskId`s in the vector.
-    fn has_duplicates(ids: &PersistentVector<TaskId>) -> bool {
+    /// Returns `true` if there are duplicate `TaskId`s in the collection.
+    /// Note: `TaskIdCollection` inherently prevents duplicates, so this should always return false.
+    fn has_duplicates(ids: &TaskIdCollection<TaskId>) -> bool {
         let set: std::collections::HashSet<_> = ids.iter().collect();
         set.len() != ids.len()
     }
@@ -9686,7 +9716,7 @@ mod ngram_index_tests {
             let ids = result.get(ngram).unwrap();
             assert_eq!(ids.len(), 1, "Expected 1 TaskId for n-gram '{ngram}'");
             assert_eq!(
-                ids.get(0).unwrap(),
+                ids.iter().next().unwrap(),
                 &task_id,
                 "Expected correct TaskId for n-gram '{ngram}'"
             );
@@ -9714,10 +9744,10 @@ mod ngram_index_tests {
         assert_eq!(ids.len(), 1, "Expected 1 TaskId (no duplicates)");
     }
 
-    /// Tests that `index_ngrams` maintains sorted order of `TaskId`s.
+    /// Tests that `index_ngrams` deduplicates and `iter_sorted` returns sorted order of `TaskId`s.
     ///
     /// - Input: add `task_id2` first, then `task_id1` (where `task_id1` < `task_id2`)
-    /// - Expected: posting list is sorted `[task_id1, task_id2]`
+    /// - Expected: `iter_sorted()` returns `[task_id1, task_id2]` in sorted order
     #[rstest]
     fn index_ngrams_maintains_sorted_order() {
         let index: NgramIndex = PersistentHashMap::new();
@@ -9731,8 +9761,8 @@ mod ngram_index_tests {
         // Add task_id1 second (smaller value)
         let result = index_ngrams(result, "callback", &task_id1, &config);
 
-        // Verify sorted order
-        let ids: Vec<_> = result.get("cal").unwrap().iter().collect();
+        // Verify sorted order using iter_sorted()
+        let ids: Vec<_> = result.get("cal").unwrap().iter_sorted().collect();
         assert_eq!(ids.len(), 2, "Expected 2 TaskIds");
         assert!(
             ids[0] < ids[1],
@@ -9868,7 +9898,7 @@ mod ngram_index_tests {
         let ids = result.get("cal").unwrap();
         assert_eq!(ids.len(), 1, "Expected 1 TaskId remaining");
         assert_eq!(
-            ids.get(0).unwrap(),
+            ids.iter().next().unwrap(),
             &task_id2,
             "Expected task_id2 to remain"
         );
@@ -9895,7 +9925,7 @@ mod ngram_index_tests {
         let ids = result.get("cal").unwrap();
         assert_eq!(ids.len(), 1, "Expected 1 TaskId remaining");
         assert_eq!(
-            ids.get(0).unwrap(),
+            ids.iter().next().unwrap(),
             &task_id1,
             "Expected task_id1 to remain"
         );
@@ -9939,6 +9969,105 @@ mod ngram_index_tests {
             original_len,
             "Expected index length to remain unchanged"
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // Large State Tests (TaskIdCollection with >8 elements)
+    // -------------------------------------------------------------------------
+
+    /// Tests that `TaskIdCollection` transitions to Large state correctly.
+    ///
+    /// - Input: 12 unique `TaskId`s (exceeds Small state threshold of 8)
+    /// - Expected: All 12 `TaskId`s are stored, deduplicated, and `iter_sorted()` returns sorted order
+    #[rstest]
+    fn index_ngrams_large_state_posting_list() {
+        let index: NgramIndex = PersistentHashMap::new();
+        let config = SearchIndexConfig::default();
+
+        // Add 12 unique TaskIds to trigger Large state (>8 elements)
+        let mut result = index;
+        let task_ids: Vec<TaskId> = (1..=12).map(task_id_from_u128).collect();
+
+        for task_id in &task_ids {
+            result = index_ngrams(result, "callback", task_id, &config);
+        }
+
+        // Verify all 12 TaskIds are present
+        let stored_ids = result.get("cal").unwrap();
+        assert_eq!(stored_ids.len(), 12, "Expected 12 TaskIds in Large state");
+
+        // Verify sorted order via iter_sorted()
+        let sorted_ids: Vec<_> = stored_ids.iter_sorted().collect();
+        for window in sorted_ids.windows(2) {
+            assert!(
+                window[0] < window[1],
+                "iter_sorted() must return sorted order"
+            );
+        }
+
+        // Verify no duplicates
+        let set: std::collections::HashSet<_> = sorted_ids.iter().collect();
+        assert_eq!(set.len(), 12, "No duplicates expected in Large state");
+    }
+
+    /// Tests that `remove_ngrams` works correctly in Large state.
+    ///
+    /// - Input: 12 unique `TaskId`s, remove 6
+    /// - Expected: 6 `TaskId`s remain, correctly deduplicated
+    #[rstest]
+    fn remove_ngrams_large_state_posting_list() {
+        let index: NgramIndex = PersistentHashMap::new();
+        let config = SearchIndexConfig::default();
+
+        // Add 12 unique TaskIds
+        let mut result = index;
+        let task_ids: Vec<TaskId> = (1..=12).map(task_id_from_u128).collect();
+
+        for task_id in &task_ids {
+            result = index_ngrams(result, "callback", task_id, &config);
+        }
+
+        // Remove first 6 TaskIds
+        for task_id in task_ids.iter().take(6) {
+            result = remove_ngrams(result, "callback", task_id, &config);
+        }
+
+        // Verify 6 TaskIds remain
+        let stored_ids = result.get("cal").unwrap();
+        assert_eq!(stored_ids.len(), 6, "Expected 6 TaskIds after removal");
+
+        // Verify remaining are task_ids 7-12
+        let remaining: std::collections::HashSet<_> = stored_ids.iter().collect();
+        for task_id in task_ids.iter().skip(6) {
+            assert!(remaining.contains(task_id), "TaskId {task_id:?} should remain");
+        }
+    }
+
+    /// Tests that Large state deduplication works correctly.
+    ///
+    /// - Input: Add same 12 `TaskId`s twice
+    /// - Expected: Still only 12 unique `TaskId`s
+    #[rstest]
+    fn index_ngrams_large_state_deduplication() {
+        let index: NgramIndex = PersistentHashMap::new();
+        let config = SearchIndexConfig::default();
+
+        let task_ids: Vec<TaskId> = (1..=12).map(task_id_from_u128).collect();
+
+        // Add all TaskIds
+        let mut result = index;
+        for task_id in &task_ids {
+            result = index_ngrams(result, "callback", task_id, &config);
+        }
+
+        // Add them again (should be deduplicated)
+        for task_id in &task_ids {
+            result = index_ngrams(result, "callback", task_id, &config);
+        }
+
+        // Verify still only 12 TaskIds (no duplicates)
+        let stored_ids = result.get("cal").unwrap();
+        assert_eq!(stored_ids.len(), 12, "Expected 12 TaskIds after deduplication");
     }
 }
 
