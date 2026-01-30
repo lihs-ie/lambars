@@ -1,12 +1,12 @@
-//! Task ID collection with automatic state transitions.
+//! Ordered unique set with automatic state transitions.
 //!
-//! This module provides [`TaskIdCollection`], a specialized persistent collection
-//! optimized for storing task identifiers with automatic state transitions between
+//! This module provides [`OrderedUniqueSet`], a persistent collection
+//! optimized for storing unique elements with automatic state transitions between
 //! small (inline) and large (hash-based) representations.
 //!
 //! # Overview
 //!
-//! `TaskIdCollection` provides efficient storage for task IDs by:
+//! `OrderedUniqueSet` provides efficient storage for unique elements by:
 //! - Using inline storage (`SmallVec`) for small collections (up to 8 elements)
 //! - Automatically promoting to `PersistentHashSet` when exceeding 8 elements
 //! - Automatically demoting back to inline storage when size drops to 8 or fewer
@@ -27,16 +27,22 @@
 //! | `contains`     | O(n)              | O(log32 n)          |
 //! | `len`          | O(1)              | O(1)                |
 //! | `is_empty`     | O(1)              | O(1)                |
-//! | `iter`         | O(n) traversal    | O(n) traversal      |
-//! | `iter_sorted`  | O(n log n)        | O(n log n)          |
+//! | `iter`         | O(1) + O(n)       | O(n) + O(n)         |
+//! | `iter_sorted`  | O(n log n)        | O(n) + O(n log n)   |
+//!
+//! **Note**: For Large state, `iter` and `iter_sorted` incur an additional O(n)
+//! allocation cost because `PersistentHashSet::iter` collects elements into a
+//! `Vec` first. The `iter_sorted` in Large state performs two allocations:
+//! one internal to `PersistentHashSet::iter`, and one in `iter_sorted` for
+//! collecting and sorting the elements (sorting is done in-place).
 //!
 //! # Examples
 //!
 //! ```rust
-//! use lambars::persistent::TaskIdCollection;
+//! use lambars::persistent::OrderedUniqueSet;
 //!
 //! // Create an empty collection
-//! let collection: TaskIdCollection<i32> = TaskIdCollection::new();
+//! let collection: OrderedUniqueSet<i32> = OrderedUniqueSet::new();
 //! assert!(collection.is_empty());
 //!
 //! // Insert elements (returns new collection, original unchanged)
@@ -85,7 +91,7 @@ const SMALL_THRESHOLD: usize = 8;
 /// This enum is not publicly accessible to prevent external construction
 /// that could violate internal invariants.
 #[derive(Clone)]
-enum TaskIdCollectionInner<T: Clone + Eq + Hash> {
+enum OrderedUniqueSetInner<T: Clone + Eq + Hash> {
     /// Empty collection.
     Empty,
     /// Small collection (up to 8 elements) stored inline.
@@ -94,7 +100,7 @@ enum TaskIdCollectionInner<T: Clone + Eq + Hash> {
     Large(PersistentHashSet<T>),
 }
 
-/// A persistent collection optimized for task identifiers.
+/// A persistent collection for storing unique elements with automatic state transitions.
 ///
 /// This collection automatically transitions between three states based on size:
 /// - Empty: No elements
@@ -111,9 +117,9 @@ enum TaskIdCollectionInner<T: Clone + Eq + Hash> {
 /// # Examples
 ///
 /// ```rust
-/// use lambars::persistent::TaskIdCollection;
+/// use lambars::persistent::OrderedUniqueSet;
 ///
-/// let collection = TaskIdCollection::new()
+/// let collection = OrderedUniqueSet::new()
 ///     .insert(3)
 ///     .insert(1)
 ///     .insert(2);
@@ -123,26 +129,26 @@ enum TaskIdCollectionInner<T: Clone + Eq + Hash> {
 /// assert_eq!(sorted, vec![1, 2, 3]);
 /// ```
 #[derive(Clone)]
-pub struct TaskIdCollection<T: Clone + Eq + Hash> {
-    inner: TaskIdCollectionInner<T>,
+pub struct OrderedUniqueSet<T: Clone + Eq + Hash> {
+    inner: OrderedUniqueSetInner<T>,
 }
 
-impl<T: Clone + Eq + Hash> TaskIdCollection<T> {
+impl<T: Clone + Eq + Hash> OrderedUniqueSet<T> {
     /// Creates a new empty collection.
     ///
     /// # Examples
     ///
     /// ```rust
-    /// use lambars::persistent::TaskIdCollection;
+    /// use lambars::persistent::OrderedUniqueSet;
     ///
-    /// let collection: TaskIdCollection<i32> = TaskIdCollection::new();
+    /// let collection: OrderedUniqueSet<i32> = OrderedUniqueSet::new();
     /// assert!(collection.is_empty());
     /// ```
     #[inline]
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            inner: TaskIdCollectionInner::Empty,
+            inner: OrderedUniqueSetInner::Empty,
         }
     }
 
@@ -155,18 +161,18 @@ impl<T: Clone + Eq + Hash> TaskIdCollection<T> {
     /// # Examples
     ///
     /// ```rust
-    /// use lambars::persistent::TaskIdCollection;
+    /// use lambars::persistent::OrderedUniqueSet;
     ///
-    /// let collection = TaskIdCollection::new().insert(1).insert(2);
+    /// let collection = OrderedUniqueSet::new().insert(1).insert(2);
     /// assert_eq!(collection.len(), 2);
     /// ```
     #[inline]
     #[must_use]
     pub fn len(&self) -> usize {
         match &self.inner {
-            TaskIdCollectionInner::Empty => 0,
-            TaskIdCollectionInner::Small(vec) => vec.len(),
-            TaskIdCollectionInner::Large(set) => set.len(),
+            OrderedUniqueSetInner::Empty => 0,
+            OrderedUniqueSetInner::Small(vec) => vec.len(),
+            OrderedUniqueSetInner::Large(set) => set.len(),
         }
     }
 
@@ -175,9 +181,9 @@ impl<T: Clone + Eq + Hash> TaskIdCollection<T> {
     /// # Examples
     ///
     /// ```rust
-    /// use lambars::persistent::TaskIdCollection;
+    /// use lambars::persistent::OrderedUniqueSet;
     ///
-    /// let empty: TaskIdCollection<i32> = TaskIdCollection::new();
+    /// let empty: OrderedUniqueSet<i32> = OrderedUniqueSet::new();
     /// assert!(empty.is_empty());
     ///
     /// let non_empty = empty.insert(42);
@@ -186,13 +192,13 @@ impl<T: Clone + Eq + Hash> TaskIdCollection<T> {
     #[inline]
     #[must_use]
     pub const fn is_empty(&self) -> bool {
-        matches!(self.inner, TaskIdCollectionInner::Empty)
+        matches!(self.inner, OrderedUniqueSetInner::Empty)
     }
 
     /// Returns `true` if the collection contains the specified element.
     ///
     /// This method supports borrowed forms of the element type through the
-    /// `Borrow` trait. For example, with `TaskIdCollection<String>`, you can
+    /// `Borrow` trait. For example, with `OrderedUniqueSet<String>`, you can
     /// search using `&str` directly without allocating a new `String`.
     ///
     /// # Arguments
@@ -207,14 +213,14 @@ impl<T: Clone + Eq + Hash> TaskIdCollection<T> {
     /// # Examples
     ///
     /// ```rust
-    /// use lambars::persistent::TaskIdCollection;
+    /// use lambars::persistent::OrderedUniqueSet;
     ///
-    /// let collection = TaskIdCollection::new().insert(1).insert(2);
+    /// let collection = OrderedUniqueSet::new().insert(1).insert(2);
     /// assert!(collection.contains(&1));
     /// assert!(!collection.contains(&3));
     ///
     /// // With String elements, you can search using &str
-    /// let strings = TaskIdCollection::new()
+    /// let strings = OrderedUniqueSet::new()
     ///     .insert("hello".to_string())
     ///     .insert("world".to_string());
     /// assert!(strings.contains("hello")); // No allocation needed
@@ -227,9 +233,9 @@ impl<T: Clone + Eq + Hash> TaskIdCollection<T> {
         Q: Hash + Eq + ?Sized,
     {
         match &self.inner {
-            TaskIdCollectionInner::Empty => false,
-            TaskIdCollectionInner::Small(vec) => vec.iter().any(|item| item.borrow() == element),
-            TaskIdCollectionInner::Large(set) => set.contains(element),
+            OrderedUniqueSetInner::Empty => false,
+            OrderedUniqueSetInner::Small(vec) => vec.iter().any(|item| item.borrow() == element),
+            OrderedUniqueSetInner::Large(set) => set.contains(element),
         }
     }
 
@@ -255,9 +261,9 @@ impl<T: Clone + Eq + Hash> TaskIdCollection<T> {
     /// # Examples
     ///
     /// ```rust
-    /// use lambars::persistent::TaskIdCollection;
+    /// use lambars::persistent::OrderedUniqueSet;
     ///
-    /// let collection = TaskIdCollection::new();
+    /// let collection = OrderedUniqueSet::new();
     /// let collection = collection.insert(42);
     ///
     /// assert_eq!(collection.len(), 1);
@@ -270,46 +276,41 @@ impl<T: Clone + Eq + Hash> TaskIdCollection<T> {
     #[must_use]
     pub fn insert(&self, element: T) -> Self {
         match &self.inner {
-            TaskIdCollectionInner::Empty => {
+            OrderedUniqueSetInner::Empty => {
                 let mut vec = SmallVec::new();
                 vec.push(element);
                 Self {
-                    inner: TaskIdCollectionInner::Small(vec),
+                    inner: OrderedUniqueSetInner::Small(vec),
                 }
             }
-            TaskIdCollectionInner::Small(vec) => {
-                // Check for duplicate
+            OrderedUniqueSetInner::Small(vec) => {
                 if vec.iter().any(|item| item == &element) {
                     return self.clone();
                 }
 
-                // Check if we need to promote to Large
                 if vec.len() >= SMALL_THRESHOLD {
-                    // Promote to Large
-                    let mut set = PersistentHashSet::new();
-                    for item in vec {
-                        set = set.insert(item.clone());
-                    }
-                    set = set.insert(element);
+                    let set = vec
+                        .iter()
+                        .cloned()
+                        .fold(PersistentHashSet::new(), |set, item| set.insert(item))
+                        .insert(element);
                     Self {
-                        inner: TaskIdCollectionInner::Large(set),
+                        inner: OrderedUniqueSetInner::Large(set),
                     }
                 } else {
-                    // Stay in Small
                     let mut new_vec = vec.clone();
                     new_vec.push(element);
                     Self {
-                        inner: TaskIdCollectionInner::Small(new_vec),
+                        inner: OrderedUniqueSetInner::Small(new_vec),
                     }
                 }
             }
-            TaskIdCollectionInner::Large(set) => {
-                // Check for duplicate
+            OrderedUniqueSetInner::Large(set) => {
                 if set.contains(&element) {
                     return self.clone();
                 }
                 Self {
-                    inner: TaskIdCollectionInner::Large(set.insert(element)),
+                    inner: OrderedUniqueSetInner::Large(set.insert(element)),
                 }
             }
         }
@@ -320,7 +321,7 @@ impl<T: Clone + Eq + Hash> TaskIdCollection<T> {
     /// If the element does not exist, returns a clone of the current collection.
     ///
     /// This method supports borrowed forms of the element type through the
-    /// `Borrow` trait. For example, with `TaskIdCollection<String>`, you can
+    /// `Borrow` trait. For example, with `OrderedUniqueSet<String>`, you can
     /// remove using `&str` directly without allocating a new `String`.
     ///
     /// # State Transitions
@@ -341,16 +342,16 @@ impl<T: Clone + Eq + Hash> TaskIdCollection<T> {
     /// # Examples
     ///
     /// ```rust
-    /// use lambars::persistent::TaskIdCollection;
+    /// use lambars::persistent::OrderedUniqueSet;
     ///
-    /// let collection = TaskIdCollection::new().insert(1).insert(2).insert(3);
+    /// let collection = OrderedUniqueSet::new().insert(1).insert(2).insert(3);
     /// let collection = collection.remove(&2);
     ///
     /// assert_eq!(collection.len(), 2);
     /// assert!(!collection.contains(&2));
     ///
     /// // With String elements, you can remove using &str
-    /// let strings = TaskIdCollection::new()
+    /// let strings = OrderedUniqueSet::new()
     ///     .insert("hello".to_string())
     ///     .insert("world".to_string());
     /// let strings = strings.remove("hello"); // No allocation needed
@@ -363,10 +364,10 @@ impl<T: Clone + Eq + Hash> TaskIdCollection<T> {
         Q: Hash + Eq + ?Sized,
     {
         match &self.inner {
-            TaskIdCollectionInner::Empty => Self {
-                inner: TaskIdCollectionInner::Empty,
+            OrderedUniqueSetInner::Empty => Self {
+                inner: OrderedUniqueSetInner::Empty,
             },
-            TaskIdCollectionInner::Small(vec) => {
+            OrderedUniqueSetInner::Small(vec) => {
                 if !vec
                     .iter()
                     .any(|item| <T as Borrow<Q>>::borrow(item) == element)
@@ -380,38 +381,33 @@ impl<T: Clone + Eq + Hash> TaskIdCollection<T> {
                     .cloned()
                     .collect();
 
-                if new_vec.is_empty() {
-                    Self {
-                        inner: TaskIdCollectionInner::Empty,
-                    }
-                } else {
-                    Self {
-                        inner: TaskIdCollectionInner::Small(new_vec),
-                    }
+                Self {
+                    inner: if new_vec.is_empty() {
+                        OrderedUniqueSetInner::Empty
+                    } else {
+                        OrderedUniqueSetInner::Small(new_vec)
+                    },
                 }
             }
-            TaskIdCollectionInner::Large(set) => {
+            OrderedUniqueSetInner::Large(set) => {
                 if !set.contains(element) {
                     return self.clone();
                 }
 
                 let new_set = set.remove(element);
 
-                // Check if we need to demote to Small
                 if new_set.len() <= SMALL_THRESHOLD {
                     let vec: SmallVec<[T; SMALL_THRESHOLD]> = new_set.iter().cloned().collect();
-                    if vec.is_empty() {
-                        Self {
-                            inner: TaskIdCollectionInner::Empty,
-                        }
-                    } else {
-                        Self {
-                            inner: TaskIdCollectionInner::Small(vec),
-                        }
+                    Self {
+                        inner: if vec.is_empty() {
+                            OrderedUniqueSetInner::Empty
+                        } else {
+                            OrderedUniqueSetInner::Small(vec)
+                        },
                     }
                 } else {
                     Self {
-                        inner: TaskIdCollectionInner::Large(new_set),
+                        inner: OrderedUniqueSetInner::Large(new_set),
                     }
                 }
             }
@@ -424,30 +420,31 @@ impl<T: Clone + Eq + Hash> TaskIdCollection<T> {
     ///
     /// # Complexity
     ///
-    /// - O(1) for iterator creation
-    /// - O(n) for full traversal
+    /// - Small state: O(1) for iterator creation, O(n) for full traversal
+    /// - Large state: O(n) for iterator creation (collects elements into `Vec`),
+    ///   O(n) for full traversal
     ///
     /// # Examples
     ///
     /// ```rust
-    /// use lambars::persistent::TaskIdCollection;
+    /// use lambars::persistent::OrderedUniqueSet;
     ///
-    /// let collection = TaskIdCollection::new().insert(1).insert(2).insert(3);
+    /// let collection = OrderedUniqueSet::new().insert(1).insert(2).insert(3);
     /// let mut elements: Vec<i32> = collection.iter().copied().collect();
     /// elements.sort();
     /// assert_eq!(elements, vec![1, 2, 3]);
     /// ```
     #[inline]
     #[must_use]
-    pub fn iter(&self) -> TaskIdCollectionIterator<'_, T> {
-        TaskIdCollectionIterator {
+    pub fn iter(&self) -> OrderedUniqueSetIterator<'_, T> {
+        OrderedUniqueSetIterator {
             inner: match &self.inner {
-                TaskIdCollectionInner::Empty => TaskIdCollectionIteratorInner::Empty,
-                TaskIdCollectionInner::Small(vec) => {
-                    TaskIdCollectionIteratorInner::Small(vec.iter())
+                OrderedUniqueSetInner::Empty => OrderedUniqueSetIteratorInner::Empty,
+                OrderedUniqueSetInner::Small(vec) => {
+                    OrderedUniqueSetIteratorInner::Small(vec.iter())
                 }
-                TaskIdCollectionInner::Large(set) => {
-                    TaskIdCollectionIteratorInner::Large(set.iter())
+                OrderedUniqueSetInner::Large(set) => {
+                    OrderedUniqueSetIteratorInner::Large(set.iter())
                 }
             },
         }
@@ -458,7 +455,7 @@ impl<T: Clone + Eq + Hash> TaskIdCollection<T> {
     /// This is primarily useful for testing state transitions.
     #[cfg(test)]
     const fn is_empty_state(&self) -> bool {
-        matches!(self.inner, TaskIdCollectionInner::Empty)
+        matches!(self.inner, OrderedUniqueSetInner::Empty)
     }
 
     /// Returns `true` if the collection is in the Small state.
@@ -466,7 +463,7 @@ impl<T: Clone + Eq + Hash> TaskIdCollection<T> {
     /// This is primarily useful for testing state transitions.
     #[cfg(test)]
     const fn is_small_state(&self) -> bool {
-        matches!(self.inner, TaskIdCollectionInner::Small(_))
+        matches!(self.inner, OrderedUniqueSetInner::Small(_))
     }
 
     /// Returns `true` if the collection is in the Large state.
@@ -474,30 +471,33 @@ impl<T: Clone + Eq + Hash> TaskIdCollection<T> {
     /// This is primarily useful for testing state transitions.
     #[cfg(test)]
     const fn is_large_state(&self) -> bool {
-        matches!(self.inner, TaskIdCollectionInner::Large(_))
+        matches!(self.inner, OrderedUniqueSetInner::Large(_))
     }
 }
 
-impl<T: Clone + Eq + Hash + Ord> TaskIdCollection<T> {
+impl<T: Clone + Eq + Hash + Ord> OrderedUniqueSet<T> {
     /// Returns an iterator over references to the elements in sorted order.
     ///
     /// Elements are sorted according to their `Ord` implementation.
     ///
     /// # Complexity
     ///
-    /// O(n log n) for sorting.
+    /// - Small state: O(n log n) for sorting
+    /// - Large state: O(n) for element collection + O(n log n) for sorting
     ///
     /// # Memory Allocation
     ///
     /// - Small state (n <= 8): Uses `SmallVec` for temporary sorted storage (no heap allocation)
-    /// - Large state (n > 8): Allocates a `Vec` for sorting
+    /// - Large state (n > 8): Two allocations occur:
+    ///   1. `PersistentHashSet::iter` collects elements into a `Vec` internally (O(n))
+    ///   2. A second `Vec` is allocated for collecting and sorting (sorting is done in-place)
     ///
     /// # Examples
     ///
     /// ```rust
-    /// use lambars::persistent::TaskIdCollection;
+    /// use lambars::persistent::OrderedUniqueSet;
     ///
-    /// let collection = TaskIdCollection::new()
+    /// let collection = OrderedUniqueSet::new()
     ///     .insert(3)
     ///     .insert(1)
     ///     .insert(2);
@@ -507,24 +507,24 @@ impl<T: Clone + Eq + Hash + Ord> TaskIdCollection<T> {
     /// ```
     #[inline]
     #[must_use]
-    pub fn iter_sorted(&self) -> TaskIdCollectionSortedIterator<'_, T> {
+    pub fn iter_sorted(&self) -> OrderedUniqueSetSortedIterator<'_, T> {
         match &self.inner {
-            TaskIdCollectionInner::Empty => TaskIdCollectionSortedIterator {
+            OrderedUniqueSetInner::Empty => OrderedUniqueSetSortedIterator {
                 inner: SortedIteratorInner::Empty,
             },
-            TaskIdCollectionInner::Small(vec) => {
+            OrderedUniqueSetInner::Small(vec) => {
                 // Use SmallVec for temporary sorted storage to avoid heap allocation
                 let mut sorted: SmallVec<[&T; SMALL_THRESHOLD]> = vec.iter().collect();
                 sorted.sort_unstable();
-                TaskIdCollectionSortedIterator {
+                OrderedUniqueSetSortedIterator {
                     inner: SortedIteratorInner::Small(sorted, 0),
                 }
             }
-            TaskIdCollectionInner::Large(set) => {
+            OrderedUniqueSetInner::Large(set) => {
                 // For Large state, we need a Vec since the set can exceed SMALL_THRESHOLD
                 let mut elements: Vec<&T> = set.iter().collect();
                 elements.sort_unstable();
-                TaskIdCollectionSortedIterator {
+                OrderedUniqueSetSortedIterator {
                     inner: SortedIteratorInner::Large(elements, 0),
                 }
             }
@@ -532,57 +532,53 @@ impl<T: Clone + Eq + Hash + Ord> TaskIdCollection<T> {
     }
 }
 
-impl<T: Clone + Eq + Hash> Default for TaskIdCollection<T> {
+impl<T: Clone + Eq + Hash> Default for OrderedUniqueSet<T> {
     #[inline]
     fn default() -> Self {
         Self::new()
     }
 }
 
-// =============================================================================
-// Iterators
-// =============================================================================
-
-/// Iterator over references to elements in a `TaskIdCollection`.
-pub struct TaskIdCollectionIterator<'a, T: Clone + Eq + Hash> {
-    inner: TaskIdCollectionIteratorInner<'a, T>,
+/// Iterator over references to elements in an `OrderedUniqueSet`.
+pub struct OrderedUniqueSetIterator<'a, T: Clone + Eq + Hash> {
+    inner: OrderedUniqueSetIteratorInner<'a, T>,
 }
 
-enum TaskIdCollectionIteratorInner<'a, T: Clone + Eq + Hash> {
+enum OrderedUniqueSetIteratorInner<'a, T: Clone + Eq + Hash> {
     Empty,
     Small(std::slice::Iter<'a, T>),
     Large(super::PersistentHashSetIterator<'a, T>),
 }
 
-impl<'a, T: Clone + Eq + Hash> Iterator for TaskIdCollectionIterator<'a, T> {
+impl<'a, T: Clone + Eq + Hash> Iterator for OrderedUniqueSetIterator<'a, T> {
     type Item = &'a T;
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         match &mut self.inner {
-            TaskIdCollectionIteratorInner::Empty => None,
-            TaskIdCollectionIteratorInner::Small(iter) => iter.next(),
-            TaskIdCollectionIteratorInner::Large(iter) => iter.next(),
+            OrderedUniqueSetIteratorInner::Empty => None,
+            OrderedUniqueSetIteratorInner::Small(iter) => iter.next(),
+            OrderedUniqueSetIteratorInner::Large(iter) => iter.next(),
         }
     }
 
     #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
         match &self.inner {
-            TaskIdCollectionIteratorInner::Empty => (0, Some(0)),
-            TaskIdCollectionIteratorInner::Small(iter) => iter.size_hint(),
-            TaskIdCollectionIteratorInner::Large(iter) => iter.size_hint(),
+            OrderedUniqueSetIteratorInner::Empty => (0, Some(0)),
+            OrderedUniqueSetIteratorInner::Small(iter) => iter.size_hint(),
+            OrderedUniqueSetIteratorInner::Large(iter) => iter.size_hint(),
         }
     }
 }
 
-impl<T: Clone + Eq + Hash> ExactSizeIterator for TaskIdCollectionIterator<'_, T> {
+impl<T: Clone + Eq + Hash> ExactSizeIterator for OrderedUniqueSetIterator<'_, T> {
     #[inline]
     fn len(&self) -> usize {
         match &self.inner {
-            TaskIdCollectionIteratorInner::Empty => 0,
-            TaskIdCollectionIteratorInner::Small(iter) => iter.len(),
-            TaskIdCollectionIteratorInner::Large(iter) => iter.len(),
+            OrderedUniqueSetIteratorInner::Empty => 0,
+            OrderedUniqueSetIteratorInner::Small(iter) => iter.len(),
+            OrderedUniqueSetIteratorInner::Large(iter) => iter.len(),
         }
     }
 }
@@ -593,7 +589,7 @@ impl<T: Clone + Eq + Hash> ExactSizeIterator for TaskIdCollectionIterator<'_, T>
 /// - Empty: No storage needed
 /// - Small: Uses `SmallVec` to avoid heap allocation for small collections
 /// - Large: Uses `Vec` for large collections
-pub struct TaskIdCollectionSortedIterator<'a, T> {
+pub struct OrderedUniqueSetSortedIterator<'a, T> {
     inner: SortedIteratorInner<'a, T>,
 }
 
@@ -607,7 +603,7 @@ enum SortedIteratorInner<'a, T> {
     Large(Vec<&'a T>, usize),
 }
 
-impl<'a, T> Iterator for TaskIdCollectionSortedIterator<'a, T> {
+impl<'a, T> Iterator for OrderedUniqueSetSortedIterator<'a, T> {
     type Item = &'a T;
 
     #[inline]
@@ -615,18 +611,10 @@ impl<'a, T> Iterator for TaskIdCollectionSortedIterator<'a, T> {
         match &mut self.inner {
             SortedIteratorInner::Empty => None,
             SortedIteratorInner::Small(elements, index) => {
-                let element = elements.get(*index).copied();
-                if element.is_some() {
-                    *index += 1;
-                }
-                element
+                elements.get(*index).copied().inspect(|_| *index += 1)
             }
             SortedIteratorInner::Large(elements, index) => {
-                let element = elements.get(*index).copied();
-                if element.is_some() {
-                    *index += 1;
-                }
-                element
+                elements.get(*index).copied().inspect(|_| *index += 1)
             }
         }
     }
@@ -642,7 +630,7 @@ impl<'a, T> Iterator for TaskIdCollectionSortedIterator<'a, T> {
     }
 }
 
-impl<T> ExactSizeIterator for TaskIdCollectionSortedIterator<'_, T> {
+impl<T> ExactSizeIterator for OrderedUniqueSetSortedIterator<'_, T> {
     #[inline]
     fn len(&self) -> usize {
         match &self.inner {
@@ -653,17 +641,13 @@ impl<T> ExactSizeIterator for TaskIdCollectionSortedIterator<'_, T> {
     }
 }
 
-// =============================================================================
-// Trait Implementations
-// =============================================================================
-
-impl<T: Clone + Eq + Hash + std::fmt::Debug> std::fmt::Debug for TaskIdCollection<T> {
+impl<T: Clone + Eq + Hash + std::fmt::Debug> std::fmt::Debug for OrderedUniqueSet<T> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.debug_set().entries(self.iter()).finish()
     }
 }
 
-impl<T: Clone + Eq + Hash> PartialEq for TaskIdCollection<T> {
+impl<T: Clone + Eq + Hash> PartialEq for OrderedUniqueSet<T> {
     fn eq(&self, other: &Self) -> bool {
         if self.len() != other.len() {
             return false;
@@ -673,21 +657,17 @@ impl<T: Clone + Eq + Hash> PartialEq for TaskIdCollection<T> {
     }
 }
 
-impl<T: Clone + Eq + Hash> Eq for TaskIdCollection<T> {}
+impl<T: Clone + Eq + Hash> Eq for OrderedUniqueSet<T> {}
 
-impl<'a, T: Clone + Eq + Hash> IntoIterator for &'a TaskIdCollection<T> {
+impl<'a, T: Clone + Eq + Hash> IntoIterator for &'a OrderedUniqueSet<T> {
     type Item = &'a T;
-    type IntoIter = TaskIdCollectionIterator<'a, T>;
+    type IntoIter = OrderedUniqueSetIterator<'a, T>;
 
     #[inline]
     fn into_iter(self) -> Self::IntoIter {
         self.iter()
     }
 }
-
-// =============================================================================
-// Tests
-// =============================================================================
 
 #[cfg(test)]
 mod tests {
@@ -696,7 +676,7 @@ mod tests {
 
     #[rstest]
     fn test_new_creates_empty() {
-        let collection: TaskIdCollection<i32> = TaskIdCollection::new();
+        let collection: OrderedUniqueSet<i32> = OrderedUniqueSet::new();
         assert!(collection.is_empty_state());
     }
 
@@ -707,13 +687,13 @@ mod tests {
 
     #[rstest]
     fn test_insert_transitions_empty_to_small() {
-        let collection = TaskIdCollection::new().insert(1);
+        let collection = OrderedUniqueSet::new().insert(1);
         assert!(collection.is_small_state());
     }
 
     #[rstest]
     fn test_insert_transitions_small_to_large() {
-        let mut collection: TaskIdCollection<i32> = TaskIdCollection::new();
+        let mut collection: OrderedUniqueSet<i32> = OrderedUniqueSet::new();
         for i in 1..=9 {
             collection = collection.insert(i);
         }
@@ -722,7 +702,7 @@ mod tests {
 
     #[rstest]
     fn test_remove_transitions_large_to_small() {
-        let mut collection: TaskIdCollection<i32> = TaskIdCollection::new();
+        let mut collection: OrderedUniqueSet<i32> = OrderedUniqueSet::new();
         for i in 1..=9 {
             collection = collection.insert(i);
         }
@@ -734,35 +714,35 @@ mod tests {
 
     #[rstest]
     fn test_remove_transitions_small_to_empty() {
-        let collection = TaskIdCollection::new().insert(1);
+        let collection = OrderedUniqueSet::new().insert(1);
         let collection = collection.remove(&1);
         assert!(collection.is_empty_state());
     }
 
     #[rstest]
     fn test_equality() {
-        let collection1 = TaskIdCollection::new().insert(1).insert(2).insert(3);
-        let collection2 = TaskIdCollection::new().insert(3).insert(1).insert(2);
+        let collection1 = OrderedUniqueSet::new().insert(1).insert(2).insert(3);
+        let collection2 = OrderedUniqueSet::new().insert(3).insert(1).insert(2);
         assert_eq!(collection1, collection2);
     }
 
     #[rstest]
     fn test_inequality_different_elements() {
-        let collection1 = TaskIdCollection::new().insert(1).insert(2);
-        let collection2 = TaskIdCollection::new().insert(1).insert(3);
+        let collection1 = OrderedUniqueSet::new().insert(1).insert(2);
+        let collection2 = OrderedUniqueSet::new().insert(1).insert(3);
         assert_ne!(collection1, collection2);
     }
 
     #[rstest]
     fn test_inequality_different_lengths() {
-        let collection1 = TaskIdCollection::new().insert(1).insert(2);
-        let collection2 = TaskIdCollection::new().insert(1);
+        let collection1 = OrderedUniqueSet::new().insert(1).insert(2);
+        let collection2 = OrderedUniqueSet::new().insert(1);
         assert_ne!(collection1, collection2);
     }
 
     #[rstest]
     fn test_borrow_contains_with_str() {
-        let collection = TaskIdCollection::new()
+        let collection = OrderedUniqueSet::new()
             .insert("apple".to_string())
             .insert("banana".to_string());
 
@@ -774,7 +754,7 @@ mod tests {
 
     #[rstest]
     fn test_borrow_remove_with_str() {
-        let collection = TaskIdCollection::new()
+        let collection = OrderedUniqueSet::new()
             .insert("apple".to_string())
             .insert("banana".to_string());
 

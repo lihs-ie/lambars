@@ -1,0 +1,299 @@
+# OrderedUniqueSet API 一般化 要件定義
+#
+# 概要:
+#   TaskIdCollection を汎用の OrderedUniqueSet<T> として再設計し、
+#   lambars の公開 API からドメイン固有型を排除する。
+#
+# 設計方針:
+#   1. 型はジェネリックにし、順序保証と重複排除を一体化する
+#   2. 不変データ構造として提供し、破壊的更新を禁止する
+#   3. ベンチ用途は型エイリアスで吸収し、公開 API を汚さない
+#
+# 参照:
+#   - docs/internal/done/requirements/20260128_0905_search_index_persistent_structures.yaml
+#   - benches/api/src/api/query.rs
+
+version: "1.1.0"
+name: "ordered_unique_set"
+description: |
+  TaskIdCollection を汎用構造に一般化し、公開 API として
+  OrderedUniqueSet<T> を提供する。
+  SearchIndex などの内部利用は型エイリアスで置換し、
+  ドメイン固有名の流出を防ぐ。
+
+background:
+  problem: |
+    TaskIdCollection はベンチ/API に依存する命名であり、
+    lambars の公開 API としては不適切。
+  motivation: |
+    関数型プログラミングライブラリとしての汎用性と
+    型一貫性を維持するため、汎用集合構造に一般化する。
+  prior_art:
+    - name: "TaskIdCollection"
+      description: "TaskId 専用の重複排除 + 順序保証構造。"
+
+requirements:
+  # ======================================================================
+  # 1. OrderedUniqueSet の導入
+  # ======================================================================
+  - id: "REQ-ORDSET-001"
+    name: "OrderedUniqueSet<T> を公開 API として提供する"
+    description: |
+      - TaskIdCollection を OrderedUniqueSet<T> にリネームし一般化する。
+      - 基本 API は T: Clone + Eq + Hash を要求する。
+      - iter_sorted のみ追加で T: Ord を要求する（現行互換）。
+      - 8 件以下は SmallVec、9 件以上は PersistentHashSet に昇格する。
+      - 破壊的更新は禁止し、常に新しい値を返す。
+
+    trait_bounds:
+      - impl: "impl<T: Clone + Eq + Hash> OrderedUniqueSet<T>"
+        description: |
+          基本操作（new, insert, remove, contains, iter, len, is_empty）を提供。
+      - impl: "impl<T: Clone + Eq + Hash + Ord> OrderedUniqueSet<T>"
+        description: |
+          iter_sorted のみを追加で提供。Ord が不要な型でも基本操作は利用可能。
+
+    state_machine:
+      - state: "Empty"
+        description: "要素数 0。insert で Small に遷移。"
+      - state: "Small"
+        description: "要素数 1-8。SmallVec<[T; 8]> で管理。insert で 9 件目投入時に Large に昇格。"
+      - state: "Large"
+        description: "要素数 9 以上。PersistentHashSet<T> で管理。remove で 8 件以下になると Small に降格。"
+
+    state_transitions:
+      - from: "Empty"
+        to: "Small"
+        trigger: "insert (最初の要素)"
+      - from: "Small"
+        to: "Large"
+        trigger: "insert (9 件目の要素)"
+      - from: "Large"
+        to: "Small"
+        trigger: "remove (残り 8 件以下)"
+      - from: "Small"
+        to: "Empty"
+        trigger: "remove (最後の要素)"
+
+    laws:
+      - name: "idempotent_insert"
+        description: |
+          同一要素の insert は冪等である。
+        equation: "insert(insert(s, x), x) = insert(s, x)"
+      - name: "remove_idempotent"
+        description: |
+          存在しない要素の remove は冪等である。
+        equation: "remove(remove(s, x), x) = remove(s, x)"
+      - name: "sorted_iteration"
+        description: |
+          iter_sorted は常に昇順を返す。
+        equation: "is_sorted(iter_sorted(s)) = true"
+      - name: "insert_remove_inverse"
+        description: |
+          存在しない要素を insert 後に remove すると元に戻る。
+        equation: "remove(insert(s, x), x) = s (x が s に存在しない場合)"
+      - name: "contains_after_insert"
+        description: |
+          insert した要素は必ず contains で true を返す。
+        equation: "contains(insert(s, x), x) = true"
+
+    order_semantics:
+      iter:
+        description: |
+          順序は常に未定義。状態（Empty/Small/Large）や状態遷移の履歴に
+          関わらず、iter() の返す順序は保証されない。
+          Large から Small への降格を経た場合、Small 状態でも挿入順は
+          維持されない。順序が必要な場合は iter_sorted を使用すること。
+      iter_sorted:
+        description: |
+          常に T::cmp による昇順を保証する。
+          呼び出し時にソートを行うため O(n log n) のコストが発生する。
+
+    methods:
+      - name: "OrderedUniqueSet::new"
+        signature: "const fn new() -> Self"
+        description: |
+          空の OrderedUniqueSet を作成する。Empty 状態で開始。
+        complexity: "O(1)"
+
+      - name: "OrderedUniqueSet::insert"
+        signature: "fn insert(&self, value: T) -> OrderedUniqueSet<T>"
+        description: |
+          要素を挿入し、新しい OrderedUniqueSet を返す。
+          既存要素の場合は self.clone() を返す（冪等性）。
+          状態遷移: Empty→Small (1件目), Small→Large (9件目)
+        complexity: |
+          - Small: O(n) 重複チェック + O(1) push
+          - Large: O(log32 n) HAMT 挿入
+
+      - name: "OrderedUniqueSet::remove"
+        signature: "fn remove<Q>(&self, value: &Q) -> OrderedUniqueSet<T> where T: Borrow<Q>, Q: Hash + Eq + ?Sized"
+        description: |
+          要素を削除し、新しい OrderedUniqueSet を返す。
+          存在しない要素の場合は self.clone() を返す（冪等性）。
+          状態遷移: Large→Small (8件以下), Small→Empty (0件)
+          Borrow トレイトにより、String 型で &str による削除が可能。
+        complexity: |
+          - Small: O(n) 検索 + O(n) コピー
+          - Large: O(log32 n) HAMT 削除 + 降格時 O(n)
+
+      - name: "OrderedUniqueSet::contains"
+        signature: "fn contains<Q>(&self, value: &Q) -> bool where T: Borrow<Q>, Q: Hash + Eq + ?Sized"
+        description: |
+          要素の存在を確認する。
+          Borrow トレイトにより、String 型で &str による検索が可能。
+        complexity: |
+          - Small: O(n) 線形探索
+          - Large: O(log32 n) HAMT 検索
+
+      - name: "OrderedUniqueSet::iter"
+        signature: "fn iter(&self) -> OrderedUniqueSetIterator<'_, T>"
+        description: |
+          要素への参照のイテレータを返す。
+          順序は未定義（順序が必要な場合は iter_sorted を使用）。
+        complexity: |
+          - Small 状態: O(1) 生成、O(n) 走査
+          - Large 状態: O(n) 生成（PersistentHashSet::iter が Vec を収集）、O(n) 走査
+
+      - name: "OrderedUniqueSet::iter_sorted"
+        signature: "fn iter_sorted(&self) -> OrderedUniqueSetSortedIterator<'_, T>"
+        where: "T: Ord"
+        description: |
+          要素への参照を昇順で返すイテレータを返す。
+          Small 状態では SmallVec でソート、Large 状態では Vec でソート。
+        complexity: "O(n log n)"
+
+      - name: "OrderedUniqueSet::len"
+        signature: "fn len(&self) -> usize"
+        description: |
+          要素数を返す。全状態で O(1)。
+        complexity: "O(1)"
+
+      - name: "OrderedUniqueSet::is_empty"
+        signature: "const fn is_empty(&self) -> bool"
+        description: |
+          空かどうかを返す。Empty 状態のパターンマッチで判定。
+        complexity: "O(1)"
+
+    trait_implementations:
+      - trait: "Default"
+        description: "Self::new() を返す。"
+      - trait: "Clone"
+        description: "構造共有により効率的なクローン。"
+      - trait: "PartialEq"
+        description: "要素数と全要素の一致で判定。順序は無視。"
+      - trait: "Eq"
+        description: "PartialEq に基づく。"
+      - trait: "Debug"
+        description: "debug_set() フォーマットで出力。"
+      - trait: "IntoIterator for &OrderedUniqueSet<T>"
+        description: "iter() を返す。for ループで使用可能。"
+      - trait: "ExactSizeIterator for OrderedUniqueSetIterator"
+        description: |
+          size_hint() は (remaining, Some(remaining)) を返す。
+          len() は残り要素数を返す。現行 TaskIdCollectionIterator と互換。
+      - trait: "ExactSizeIterator for OrderedUniqueSetSortedIterator"
+        description: |
+          size_hint() は (remaining, Some(remaining)) を返す。
+          len() は残り要素数を返す。現行 TaskIdCollectionSortedIterator と互換。
+
+    implementations:
+      - type: "OrderedUniqueSet<T>"
+        description: |
+          enum OrderedUniqueSetInner<T: Clone + Eq + Hash> {
+              Empty,
+              Small(SmallVec<[T; 8]>),
+              Large(PersistentHashSet<T>),
+          }
+          内部 enum は非公開とし、API のみを公開する。
+
+  # ======================================================================
+  # 2. 公開 API からの TaskIdCollection 排除と移行戦略
+  # ======================================================================
+  - id: "REQ-ORDSET-002"
+    name: "TaskIdCollection を公開 API から排除する"
+    description: |
+      - TaskIdCollection を OrderedUniqueSet にリネームする。
+      - 旧名 TaskIdCollection は deprecated type alias として残す。
+      - benches/api 側では type TaskIdCollection = OrderedUniqueSet<TaskId> として定義する。
+      - lambars の公開 API に TaskIdCollection を残さない（1 リリース後に削除）。
+
+    migration_strategy:
+      phase1:
+        description: |
+          1. OrderedUniqueSet を新規追加する。
+          2. TaskIdCollection を deprecated type alias として定義する：
+             #[deprecated(since = "X.Y.Z", note = "Use OrderedUniqueSet instead")]
+             pub type TaskIdCollection<T> = OrderedUniqueSet<T>;
+          3. Iterator 型も同様に deprecated alias を定義する。
+      phase2:
+        description: |
+          1. 次のメジャーリリースで deprecated alias を削除する。
+          2. CHANGELOG.md に破壊的変更として記載する。
+
+    implementations:
+      - type: "deprecated alias"
+        description: |
+          src/persistent/mod.rs:
+            #[deprecated(since = "X.Y.Z", note = "Use OrderedUniqueSet instead")]
+            pub type TaskIdCollection<T> = OrderedUniqueSet<T>;
+            #[deprecated(since = "X.Y.Z", note = "Use OrderedUniqueSetIterator instead")]
+            pub type TaskIdCollectionIterator<'a, T> = OrderedUniqueSetIterator<'a, T>;
+            #[deprecated(since = "X.Y.Z", note = "Use OrderedUniqueSetSortedIterator instead")]
+            pub type TaskIdCollectionSortedIterator<'a, T> = OrderedUniqueSetSortedIterator<'a, T>;
+      - type: "bench alias"
+        description: |
+          benches/api/src/api/query.rs:
+            type TaskIdCollection = OrderedUniqueSet<TaskId>;
+          ベンチ側でのみドメイン固有名を使用する。
+
+  # ======================================================================
+  # 3. SearchIndex の型置換
+  # ======================================================================
+  - id: "REQ-ORDSET-003"
+    name: "SearchIndex の値型を OrderedUniqueSet に置換する"
+    description: |
+      - SearchIndex の TaskId リストを OrderedUniqueSet<TaskId> に置換する。
+      - 既存の動作（重複排除、ソート済み反復）を維持する。
+      - benches/api 側では type alias を使用し、lambars 本体には TaskId 依存を入れない。
+
+    implementation_notes:
+      - |
+        SearchIndex は benches/api 内で定義されているため、lambars 本体への影響はない。
+        OrderedUniqueSet<TaskId> を直接使用するか、type TaskIdCollection = OrderedUniqueSet<TaskId>
+        として alias を定義する。
+      - |
+        iter_sorted() を使用して検索結果の昇順を保証する。
+        iter() は順序未定義のため、SearchIndex の結果取得には使用しない。
+
+    methods:
+      - name: "SearchIndex::add_task"
+        signature: "fn add_task(&self, task: &Task) -> SearchIndex"
+        description: |
+          OrderedUniqueSet::insert を使用し、重複排除を行う。
+          線形重複チェックは禁止（OrderedUniqueSet が内部で処理）。
+
+non_functional_requirements:
+  performance:
+    - "Small サイズ（8 件以下）での insert/remove は SmallVec の inline storage を活用し、ヒープ確保を回避する。"
+    - "Large サイズでは PersistentHashSet の構造共有により、効率的な永続化を実現する。"
+  compatibility:
+    - "検索結果の順序は iter_sorted() を使用して TaskId 昇順を維持する。"
+    - "公開 API に TaskIdCollection を残さない（deprecated alias 経由で移行期間を設ける）。"
+    - "Borrow トレイトによる柔軟な検索・削除を維持する。"
+  testing:
+    - "OrderedUniqueSet の重複排除テストを追加する。"
+    - "OrderedUniqueSet の順序保証テスト（iter_sorted）を追加する。"
+    - "状態遷移テスト（Empty↔Small↔Large）を追加する。"
+    - "Borrow トレイトのテスト（String/&str）を追加する。"
+    - |
+      SearchIndex の動作テストは benches/api/tests/search_integration.rs で実施する。
+      OrderedUniqueSet への置換後も既存テストがパスすることで互換性を確認する。
+    - |
+      deprecated alias（TaskIdCollection）は #[deprecated] 属性で定義済み。
+      Rust の deprecated 警告はコンパイル時警告であり、ランタイムテストでは検証不可。
+      属性の存在は src/persistent/mod.rs で目視確認する。
+
+# Note: future_extensions は削除。
+# Hash/Ord の方針は本要件で確定（基本は Hash + Eq、iter_sorted のみ Ord 追加）。
+# TreeSet ベースの実装が必要になった場合は、別の型（OrderedTreeSet 等）として新規に要件を定義する。

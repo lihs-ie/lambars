@@ -41,9 +41,11 @@ use super::handlers::AppState;
 use crate::domain::{Priority, Task, TaskId, TaskStatus};
 use crate::infrastructure::{PaginatedResult, Pagination, SearchScope as RepositorySearchScope};
 use lambars::persistent::{
-    PersistentHashMap, PersistentHashSet, PersistentTreeMap, PersistentVector, TaskIdCollection,
+    OrderedUniqueSet, PersistentHashMap, PersistentHashSet, PersistentTreeMap, PersistentVector,
     TransientHashMap, TransientTreeMap,
 };
+
+type TaskIdCollection = OrderedUniqueSet<TaskId>;
 use lambars::typeclass::{Semigroup, Traversable};
 
 // =============================================================================
@@ -103,33 +105,33 @@ pub const SEARCH_MAX_LIMIT: u32 = MAX_SEARCH_LIMIT;
 ///
 /// # Arguments
 ///
-/// * `limit` - Optional limit from query. If `None`, defaults to [`SEARCH_DEFAULT_LIMIT`] (50).
+/// * `limit` - Optional limit from query. If `None`, defaults to [`DEFAULT_SEARCH_LIMIT`] (20).
 /// * `offset` - Optional offset from query. If `None`, defaults to 0.
 ///
 /// # Returns
 ///
 /// A tuple of `(normalized_limit, normalized_offset)` where:
-/// - `limit` is clamped to [`SEARCH_MAX_LIMIT`] (200) if it exceeds this value.
+/// - `limit` is clamped to [`MAX_SEARCH_LIMIT`] (100) if it exceeds this value.
 /// - `limit=0` is explicitly allowed and returns an empty result (user intent).
 /// - `offset` defaults to 0 if not provided.
 ///
 /// # Specification
 ///
-/// - **Default limit**: 50 (when `limit` is not specified)
-/// - **Maximum limit**: 200 (values above this are clamped)
+/// - **Default limit**: 20 (when `limit` is not specified)
+/// - **Maximum limit**: 100 (values above this are clamped)
 /// - **`limit=0` behavior**: Returns empty array (explicit user intent to get no results)
 ///
 /// # Examples
 ///
 /// ```ignore
 /// // Default values
-/// assert_eq!(normalize_search_pagination(None, None), (50, 0));
+/// assert_eq!(normalize_search_pagination(None, None), (20, 0));
 ///
-/// // limit exceeds max, clamped to 200
-/// assert_eq!(normalize_search_pagination(Some(500), None), (200, 0));
+/// // limit exceeds max, clamped to 100
+/// assert_eq!(normalize_search_pagination(Some(500), None), (100, 0));
 ///
 /// // Normal values
-/// assert_eq!(normalize_search_pagination(Some(100), Some(20)), (100, 20));
+/// assert_eq!(normalize_search_pagination(Some(50), Some(20)), (50, 20));
 ///
 /// // limit=0 returns empty array (explicit user intent)
 /// assert_eq!(normalize_search_pagination(Some(0), Some(10)), (0, 10));
@@ -157,8 +159,8 @@ pub struct SearchTasksQuery {
     #[serde(rename = "in", default)]
     pub scope: SearchScope,
     /// Maximum number of results to return.
-    /// - Defaults to 50 if not specified.
-    /// - Clamped to 200 if exceeds maximum.
+    /// - Defaults to 20 if not specified.
+    /// - Clamped to 100 if exceeds maximum.
     /// - `limit=0` returns empty array (explicit user intent).
     pub limit: Option<u32>,
     /// Number of results to skip (0-based offset).
@@ -1004,24 +1006,25 @@ impl Default for SearchIndexConfig {
 /// N-gram inverted index type.
 ///
 /// Maps n-gram strings to a deduplicated collection of `TaskId`s that contain that n-gram.
-/// `TaskIdCollection` provides:
-/// - Automatic deduplication (no duplicate `TaskId`s via hash-based set)
-/// - O(1)/O(8) insertion and O(1)/O(n) lookup
+/// `TaskIdCollection` (alias for `OrderedUniqueSet<TaskId>`) provides:
+/// - Automatic deduplication (no duplicate `TaskId`s)
+/// - O(n) insertion for Small state (n <= 8), O(log32 n) for Large state (n > 8)
+/// - O(n) lookup for Small state, O(log32 n) for Large state
 /// - `iter_sorted()` for sorted iteration when merge intersection is needed
 ///
 /// # Structure
 ///
 /// - Key: n-gram string (e.g., "cal", "all", "llb" for "callback")
-/// - Value: `TaskIdCollection<TaskId>` containing all tasks with that n-gram
+/// - Value: `TaskIdCollection` containing all tasks with that n-gram
 ///
 /// Uses `NgramKey` (Arc<str>) for O(1) clone during merge operations.
 /// Supports `&str` lookups via `Borrow<str>` implementation.
-type NgramIndex = PersistentHashMap<NgramKey, TaskIdCollection<TaskId>>;
+type NgramIndex = PersistentHashMap<NgramKey, TaskIdCollection>;
 
 /// Mutable index for batch construction. O(1) amortized insertion, O(1) key clone via `NgramKey`.
 type MutableIndex = std::collections::HashMap<NgramKey, Vec<TaskId>>;
 
-pub type PrefixIndex = PersistentTreeMap<NgramKey, TaskIdCollection<TaskId>>;
+pub type PrefixIndex = PersistentTreeMap<NgramKey, TaskIdCollection>;
 
 /// N-gram key with reference-counted storage for O(1) cloning.
 #[derive(Clone, Hash, Eq, PartialEq, Debug)]
@@ -2436,7 +2439,8 @@ fn index_ngrams(
             .cloned()
             .unwrap_or_else(TaskIdCollection::new);
 
-        // TaskIdCollection::insert handles deduplication internally with O(1)/O(8) complexity
+        // TaskIdCollection::insert handles deduplication internally
+        // O(n) for Small state (n <= 8), O(log32 n) for Large state (n > 8)
         transient_index.insert(ngram_key, existing_ids.insert(task_id.clone()));
     }
 
@@ -2465,7 +2469,7 @@ fn index_ngrams(
 ///
 /// 1. Generate n-grams from the normalized token
 /// 2. For each n-gram, retrieve or create the `TaskIdCollection`
-/// 3. Insert `TaskId` via `TaskIdCollection::insert` (O(1)/O(8) with automatic deduplication)
+/// 3. Insert `TaskId` via `TaskIdCollection::insert` (O(n) for Small, O(log32 n) for Large, with automatic deduplication)
 ///
 /// # Arguments
 ///
@@ -2475,7 +2479,7 @@ fn index_ngrams(
 /// * `config` - Search index configuration
 #[allow(dead_code)] // Retained for future single-task add_task() operations
 fn index_ngrams_transient(
-    transient_index: &mut TransientHashMap<NgramKey, TaskIdCollection<TaskId>>,
+    transient_index: &mut TransientHashMap<NgramKey, TaskIdCollection>,
     normalized_token: &str,
     task_id: &TaskId,
     config: &SearchIndexConfig,
@@ -2497,7 +2501,8 @@ fn index_ngrams_transient(
             .cloned()
             .unwrap_or_else(TaskIdCollection::new);
 
-        // TaskIdCollection::insert handles deduplication internally with O(1)/O(8) complexity
+        // TaskIdCollection::insert handles deduplication internally
+        // O(n) for Small state (n <= 8), O(log32 n) for Large state (n > 8)
         transient_index.insert(ngram_key, existing_ids.insert(task_id.clone()));
     }
 }
@@ -2588,7 +2593,7 @@ fn finalize_ngram_index(mutable_index: MutableIndex) -> NgramIndex {
         task_ids.dedup();
 
         // TaskIdCollection handles deduplication internally
-        let collection: TaskIdCollection<TaskId> = task_ids
+        let collection: TaskIdCollection = task_ids
             .into_iter()
             .fold(TaskIdCollection::new(), |accumulator, id| {
                 accumulator.insert(id)
@@ -2614,7 +2619,7 @@ fn finalize_ngram_index(mutable_index: MutableIndex) -> NgramIndex {
 ///
 /// O(G * R) where:
 /// - G = number of n-grams generated
-/// - R = `TaskIdCollection::remove` cost (O(8) for Small state, O(n) for Large state)
+/// - R = `TaskIdCollection::remove` cost (O(n) for Small state, O(log32 n) for Large state without demotion)
 ///
 /// # Arguments
 ///
@@ -2943,7 +2948,7 @@ pub struct SearchIndex {
     /// Uses `NgramKey` (Arc<str>) for O(1) clone during merge operations.
     title_word_index: PrefixIndex,
     /// Index mapping full normalized titles to task IDs (for multi-word substring match).
-    /// Uses `TaskIdCollection<TaskId>` to support multiple tasks with same title and automatic deduplication.
+    /// Uses `TaskIdCollection` to support multiple tasks with same title and automatic deduplication.
     /// Uses `NgramKey` (Arc<str>) for O(1) clone during merge operations.
     title_full_index: PrefixIndex,
     /// Index mapping ALL suffixes of full normalized titles to task IDs (for multi-word infix search).
@@ -3046,17 +3051,17 @@ impl SearchIndex {
     pub fn build_with_config(tasks: &PersistentVector<Task>, config: SearchIndexConfig) -> Self {
         // Use TransientTreeMap for batch construction to reduce clone/alloc overhead
         // (REQ-SEARCH-STRUCT-003: batch updates via TransientTreeMap)
-        let mut title_word_index: TransientTreeMap<NgramKey, TaskIdCollection<TaskId>> =
+        let mut title_word_index: TransientTreeMap<NgramKey, TaskIdCollection> =
             TransientTreeMap::new();
-        let mut title_full_index: TransientTreeMap<NgramKey, TaskIdCollection<TaskId>> =
+        let mut title_full_index: TransientTreeMap<NgramKey, TaskIdCollection> =
             TransientTreeMap::new();
-        let mut title_full_all_suffix_index: TransientTreeMap<NgramKey, TaskIdCollection<TaskId>> =
+        let mut title_full_all_suffix_index: TransientTreeMap<NgramKey, TaskIdCollection> =
             TransientTreeMap::new();
-        let mut title_word_all_suffix_index: TransientTreeMap<NgramKey, TaskIdCollection<TaskId>> =
+        let mut title_word_all_suffix_index: TransientTreeMap<NgramKey, TaskIdCollection> =
             TransientTreeMap::new();
-        let mut tag_index: TransientTreeMap<NgramKey, TaskIdCollection<TaskId>> =
+        let mut tag_index: TransientTreeMap<NgramKey, TaskIdCollection> =
             TransientTreeMap::new();
-        let mut tag_all_suffix_index: TransientTreeMap<NgramKey, TaskIdCollection<TaskId>> =
+        let mut tag_all_suffix_index: TransientTreeMap<NgramKey, TaskIdCollection> =
             TransientTreeMap::new();
         let mut tasks_by_id: TransientTreeMap<TaskId, Task> = TransientTreeMap::new();
 
@@ -3281,7 +3286,7 @@ impl SearchIndex {
     /// - "ck" (matches prefix "ck")
     /// - "k" (matches prefix "k")
     fn index_all_suffixes_transient(
-        index: &mut TransientTreeMap<NgramKey, TaskIdCollection<TaskId>>,
+        index: &mut TransientTreeMap<NgramKey, TaskIdCollection>,
         word: &str,
         task_id: &TaskId,
     ) {
@@ -3293,7 +3298,7 @@ impl SearchIndex {
                 .get(suffix)
                 .cloned()
                 .unwrap_or_else(TaskIdCollection::new);
-            // TaskIdCollection::insert returns new collection if element already exists
+            // TaskIdCollection::insert returns a clone if element already exists (idempotent)
             index.insert(NgramKey::new(suffix), existing_ids.insert(task_id.clone()));
         }
     }
@@ -3681,7 +3686,7 @@ impl SearchIndex {
 
     /// Uses `PersistentTreeMap::range` on full title index for prefix-based search.
     ///
-    /// This variant handles `TaskIdCollection<TaskId>` values for same-title support.
+    /// This variant handles `TaskIdCollection` values for same-title support.
     /// Complexity: O(k log N + k log k) where k is the number of matching tasks
     /// (log N for each `tasks_by_id` lookup, k log k for ordering sort).
     fn find_matching_ids_with_prefix_range_multi(
@@ -8576,7 +8581,7 @@ mod search_index_differential_update_tests {
     ///
     /// Returns `true` if there are duplicate `TaskId`s in the collection.
     /// Note: `TaskIdCollection` inherently prevents duplicates, so this should always return false.
-    fn has_duplicates(ids: &TaskIdCollection<TaskId>) -> bool {
+    fn has_duplicates(ids: &TaskIdCollection) -> bool {
         let set: std::collections::HashSet<_> = ids.iter().collect();
         set.len() != ids.len()
     }

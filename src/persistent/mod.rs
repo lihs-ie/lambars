@@ -132,7 +132,7 @@ mod deque;
 mod hashmap;
 mod hashset;
 mod list;
-mod task_id_collection;
+mod ordered_unique_set;
 mod treemap;
 mod vector;
 
@@ -149,10 +149,22 @@ pub use hashset::TransientHashSet;
 pub use list::PersistentList;
 pub use list::PersistentListIntoIterator;
 pub use list::PersistentListIterator;
-pub use task_id_collection::TaskIdCollection;
-pub use task_id_collection::TaskIdCollectionIterator;
-pub use task_id_collection::TaskIdCollectionSortedIterator;
+pub use ordered_unique_set::OrderedUniqueSet;
+pub use ordered_unique_set::OrderedUniqueSetIterator;
+pub use ordered_unique_set::OrderedUniqueSetSortedIterator;
 pub use treemap::PersistentTreeMap;
+
+/// Deprecated: Use [`OrderedUniqueSet`] instead.
+#[deprecated(since = "0.1.0", note = "Use OrderedUniqueSet instead")]
+pub type TaskIdCollection<T> = OrderedUniqueSet<T>;
+
+/// Deprecated: Use [`OrderedUniqueSetIterator`] instead.
+#[deprecated(since = "0.1.0", note = "Use OrderedUniqueSetIterator instead")]
+pub type TaskIdCollectionIterator<'a, T> = OrderedUniqueSetIterator<'a, T>;
+
+/// Deprecated: Use [`OrderedUniqueSetSortedIterator`] instead.
+#[deprecated(since = "0.1.0", note = "Use OrderedUniqueSetSortedIterator instead")]
+pub type TaskIdCollectionSortedIterator<'a, T> = OrderedUniqueSetSortedIterator<'a, T>;
 pub use treemap::PersistentTreeMapIntoIterator;
 pub use treemap::PersistentTreeMapIterator;
 pub use treemap::PersistentTreeMapRangeIterator;
