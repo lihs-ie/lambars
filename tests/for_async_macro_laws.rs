@@ -4,6 +4,7 @@
 //! and follows expected properties.
 
 #![cfg(feature = "async")]
+#![allow(deprecated)]
 
 use lambars::effect::AsyncIO;
 use lambars::for_;

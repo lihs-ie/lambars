@@ -249,6 +249,7 @@ macro_rules! pipe_async {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use crate::effect::AsyncIO;
     use rstest::rstest;

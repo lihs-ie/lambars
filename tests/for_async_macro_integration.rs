@@ -4,6 +4,7 @@
 //! lambars components and in real-world scenarios.
 
 #![cfg(feature = "async")]
+#![allow(deprecated)]
 
 use lambars::eff_async;
 use lambars::effect::AsyncIO;

@@ -680,7 +680,7 @@ async fn computation() -> i32 {
         y <= AsyncIO::pure(20);
         AsyncIO::pure(x + y)
     };
-    io.run_async().await
+    io.await
 }
 // result = 30
 ```
@@ -908,7 +908,7 @@ async fn example() {
         .flat_map_async_io(|url| ReaderT::pure_async_io(format!("Fetching: {}", url)));
 
     let config = Config { api_url: "https://api.example.com".to_string() };
-    let result = computation.run_async_io(config).run_async().await;
+    let result = computation.run_async_io(config).await;
     // result = "Fetching: https://api.example.com"
 }
 ```

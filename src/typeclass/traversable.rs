@@ -913,7 +913,7 @@ pub trait Traversable: Functor + Foldable {
     ///         let url = url.to_string();
     ///         AsyncIO::new(move || async move { format!("response from {}", url) })
     ///     });
-    ///     let responses = async_io.run_async().await;
+    ///     let responses = async_io.await;
     ///     assert_eq!(responses, vec!["response from http://a.com", "response from http://b.com"]);
     /// }
     /// ```
@@ -944,7 +944,7 @@ pub trait Traversable: Functor + Foldable {
     ///         AsyncIO::pure(3),
     ///     ];
     ///     let combined = async_ios.sequence_async_io();
-    ///     let result = combined.run_async().await;
+    ///     let result = combined.await;
     ///     assert_eq!(result, vec![1, 2, 3]);
     /// }
     /// ```
@@ -1022,7 +1022,7 @@ pub trait Traversable: Functor + Foldable {
     ///
     /// # Panics
     ///
-    /// - If called outside of a tokio runtime, `run_async()` will panic
+    /// - The returned `AsyncIO` must be awaited within a tokio runtime context
     /// - If any task panics, the panic is re-thrown after all tasks complete
     /// - Only the first panic is re-thrown; others are lost
     ///
@@ -1056,7 +1056,7 @@ pub trait Traversable: Functor + Foldable {
     ///         let url = url.to_string();
     ///         AsyncIO::new(move || async move { format!("response from {}", url) })
     ///     });
-    ///     let responses = async_io.run_async().await;
+    ///     let responses = async_io.await;
     ///     // All URLs fetched in parallel; results in original order
     ///     assert_eq!(responses.len(), 3);
     /// }
@@ -1090,7 +1090,7 @@ pub trait Traversable: Functor + Foldable {
     ///         AsyncIO::pure(3),
     ///     ];
     ///     let combined = async_ios.sequence_async_io_parallel();
-    ///     let result = combined.run_async().await;
+    ///     let result = combined.await;
     ///     assert_eq!(result, vec![1, 2, 3]);
     /// }
     /// ```
@@ -1422,7 +1422,7 @@ impl<T> Traversable for Vec<T> {
         AsyncIO::new(move || async move {
             let mut result = Vec::with_capacity(capacity);
             for async_io in async_ios {
-                result.push(async_io.run_async().await);
+                result.push(async_io.await);
             }
             result
         })
@@ -1445,10 +1445,7 @@ impl<T> Traversable for Vec<T> {
         let capacity = async_ios.len();
 
         AsyncIO::new(move || async move {
-            let handles: Vec<_> = async_ios
-                .into_iter()
-                .map(|async_io| tokio::spawn(async_io.run_async()))
-                .collect();
+            let handles: Vec<_> = async_ios.into_iter().map(tokio::spawn).collect();
 
             let mut results = Vec::with_capacity(capacity);
             let mut first_panic: Option<Box<dyn std::any::Any + Send>> = None;
@@ -2578,6 +2575,7 @@ mod property_tests {
     // =========================================================================
 
     #[cfg(all(feature = "effect", feature = "async"))]
+    #[allow(deprecated)]
     mod async_io_tests {
         use super::*;
         use crate::effect::AsyncIO;
@@ -2600,7 +2598,7 @@ mod property_tests {
                 })
             });
 
-            let result = async_io.run_async().await;
+            let result = async_io.await;
             assert_eq!(result, vec![(0, 1), (1, 2), (2, 3)]);
         }
 
@@ -2610,7 +2608,7 @@ mod property_tests {
             let values: Vec<i32> = vec![];
             let async_io = values.traverse_async_io(|value| AsyncIO::pure(value * 2));
 
-            let result = async_io.run_async().await;
+            let result = async_io.await;
             assert_eq!(result, Vec::<i32>::new());
         }
 
@@ -2620,7 +2618,7 @@ mod property_tests {
             let value = Some(42);
             let async_io = value.traverse_async_io(|number| AsyncIO::pure(number * 2));
 
-            let result = async_io.run_async().await;
+            let result = async_io.await;
             assert_eq!(result, Some(84));
         }
 
@@ -2630,7 +2628,7 @@ mod property_tests {
             let value: Option<i32> = None;
             let async_io = value.traverse_async_io(|number| AsyncIO::pure(number * 2));
 
-            let result = async_io.run_async().await;
+            let result = async_io.await;
             assert_eq!(result, None);
         }
 
@@ -2640,7 +2638,7 @@ mod property_tests {
             let value: Result<i32, &'static str> = Ok(42);
             let async_io = value.traverse_async_io(|number| AsyncIO::pure(number * 2));
 
-            let result = async_io.run_async().await;
+            let result = async_io.await;
             assert_eq!(result, Ok(84));
         }
 
@@ -2650,7 +2648,7 @@ mod property_tests {
             let value: Result<i32, &'static str> = Err("error");
             let async_io = value.traverse_async_io(|number| AsyncIO::pure(number * 2));
 
-            let result = async_io.run_async().await;
+            let result = async_io.await;
             assert_eq!(result, Err("error"));
         }
 
@@ -2660,7 +2658,7 @@ mod property_tests {
             let value = Box::new(42);
             let async_io = value.traverse_async_io(|number| AsyncIO::pure(number * 2));
 
-            let result = async_io.run_async().await;
+            let result = async_io.await;
             assert_eq!(*result, 84);
         }
 
@@ -2670,7 +2668,7 @@ mod property_tests {
             let value = Identity::new(42);
             let async_io = value.traverse_async_io(|number| AsyncIO::pure(number * 2));
 
-            let result = async_io.run_async().await;
+            let result = async_io.await;
             assert_eq!(result.0, 84);
         }
 
@@ -2681,7 +2679,7 @@ mod property_tests {
                 vec![AsyncIO::pure(1), AsyncIO::pure(2), AsyncIO::pure(3)];
             let combined = async_ios.sequence_async_io();
 
-            let result = combined.run_async().await;
+            let result = combined.await;
             assert_eq!(result, vec![1, 2, 3]);
         }
 
@@ -2699,7 +2697,7 @@ mod property_tests {
                 })
             });
 
-            async_io.run_async().await;
+            async_io.await;
             assert_eq!(counter.load(Ordering::SeqCst), 3);
         }
 
@@ -2717,7 +2715,7 @@ mod property_tests {
                 })
             });
 
-            async_io.run_async().await;
+            async_io.await;
             assert_eq!(counter.load(Ordering::SeqCst), 3);
         }
 
@@ -2731,7 +2729,7 @@ mod property_tests {
             let values = vec![1, 2, 3];
             let async_io = values.traverse_async_io_parallel(|value| AsyncIO::pure(value * 2));
 
-            let result = async_io.run_async().await;
+            let result = async_io.await;
             assert_eq!(result, vec![2, 4, 6]);
         }
 
@@ -2741,7 +2739,7 @@ mod property_tests {
             let values: Vec<i32> = vec![];
             let async_io = values.traverse_async_io_parallel(|value| AsyncIO::pure(value * 2));
 
-            let result = async_io.run_async().await;
+            let result = async_io.await;
             assert_eq!(result, Vec::<i32>::new());
         }
 
@@ -2751,7 +2749,7 @@ mod property_tests {
             let values = vec![42];
             let async_io = values.traverse_async_io_parallel(|value| AsyncIO::pure(value * 2));
 
-            let result = async_io.run_async().await;
+            let result = async_io.await;
             assert_eq!(result, vec![84]);
         }
 
@@ -2761,7 +2759,7 @@ mod property_tests {
             let values = vec![1, 2, 3];
             let async_io = values.clone().traverse_async_io_parallel(AsyncIO::pure);
 
-            let result = async_io.run_async().await;
+            let result = async_io.await;
             assert_eq!(result, values);
         }
 
@@ -2779,7 +2777,7 @@ mod property_tests {
                 })
             });
 
-            let result = async_io.run_async().await;
+            let result = async_io.await;
             // Results maintain input order, not completion order
             assert_eq!(result, vec![100, 50, 10]);
         }
@@ -2799,7 +2797,7 @@ mod property_tests {
             });
 
             let start = tokio::time::Instant::now();
-            let _ = async_io.run_async().await;
+            let _ = async_io.await;
             let elapsed = start.elapsed();
 
             // Parallel execution: ~100ms (not 300ms for sequential)
@@ -2819,7 +2817,7 @@ mod property_tests {
                 })
             });
 
-            let results: Vec<Result<i32, String>> = async_io.run_async().await;
+            let results: Vec<Result<i32, String>> = async_io.await;
             assert!(results.iter().all(|result| result.is_ok()));
             assert_eq!(
                 results
@@ -2843,7 +2841,7 @@ mod property_tests {
                 })
             });
 
-            let results: Vec<Result<i32, String>> = async_io.run_async().await;
+            let results: Vec<Result<i32, String>> = async_io.await;
             // All results are collected including errors
             assert!(results[0].is_ok());
             assert!(results[1].is_err());
@@ -2856,7 +2854,7 @@ mod property_tests {
             let value = Some(42);
             let async_io = value.traverse_async_io_parallel(|number| AsyncIO::pure(number * 2));
 
-            let result = async_io.run_async().await;
+            let result = async_io.await;
             assert_eq!(result, Some(84));
         }
 
@@ -2866,7 +2864,7 @@ mod property_tests {
             let value: Option<i32> = None;
             let async_io = value.traverse_async_io_parallel(|number| AsyncIO::pure(number * 2));
 
-            let result = async_io.run_async().await;
+            let result = async_io.await;
             assert_eq!(result, None);
         }
 
@@ -2876,7 +2874,7 @@ mod property_tests {
             let value: Result<i32, &'static str> = Ok(42);
             let async_io = value.traverse_async_io_parallel(|number| AsyncIO::pure(number * 2));
 
-            let result = async_io.run_async().await;
+            let result = async_io.await;
             assert_eq!(result, Ok(84));
         }
 
@@ -2886,7 +2884,7 @@ mod property_tests {
             let value: Result<i32, &'static str> = Err("error");
             let async_io = value.traverse_async_io_parallel(|number| AsyncIO::pure(number * 2));
 
-            let result = async_io.run_async().await;
+            let result = async_io.await;
             assert_eq!(result, Err("error"));
         }
 
@@ -2896,7 +2894,7 @@ mod property_tests {
             let value = Box::new(42);
             let async_io = value.traverse_async_io_parallel(|number| AsyncIO::pure(number * 2));
 
-            let result = async_io.run_async().await;
+            let result = async_io.await;
             assert_eq!(*result, 84);
         }
 
@@ -2906,7 +2904,7 @@ mod property_tests {
             let value = Identity::new(42);
             let async_io = value.traverse_async_io_parallel(|number| AsyncIO::pure(number * 2));
 
-            let result = async_io.run_async().await;
+            let result = async_io.await;
             assert_eq!(result.0, 84);
         }
 
@@ -2921,7 +2919,7 @@ mod property_tests {
                 vec![AsyncIO::pure(1), AsyncIO::pure(2), AsyncIO::pure(3)];
             let combined = async_ios.sequence_async_io_parallel();
 
-            let result = combined.run_async().await;
+            let result = combined.await;
             assert_eq!(result, vec![1, 2, 3]);
         }
 
@@ -2931,7 +2929,7 @@ mod property_tests {
             let async_ios: Vec<AsyncIO<i32>> = vec![];
             let combined = async_ios.sequence_async_io_parallel();
 
-            let result = combined.run_async().await;
+            let result = combined.await;
             assert_eq!(result, Vec::<i32>::new());
         }
 
@@ -2956,7 +2954,7 @@ mod property_tests {
             ];
 
             let start = tokio::time::Instant::now();
-            let result = async_ios.sequence_async_io_parallel().run_async().await;
+            let result = async_ios.sequence_async_io_parallel().await;
             let elapsed = start.elapsed();
 
             assert_eq!(result, vec![1, 2, 3]);
@@ -2981,7 +2979,7 @@ mod property_tests {
                 })
             });
 
-            async_io.run_async().await;
+            async_io.await;
             assert_eq!(counter.load(Ordering::SeqCst), 3);
         }
 
@@ -2999,7 +2997,7 @@ mod property_tests {
                 })
             });
 
-            async_io.run_async().await;
+            async_io.await;
             assert_eq!(counter.load(Ordering::SeqCst), 3);
         }
 
@@ -3017,7 +3015,7 @@ mod property_tests {
             });
 
             let start = tokio::time::Instant::now();
-            async_io.run_async().await;
+            async_io.await;
             let elapsed = start.elapsed();
 
             assert!(elapsed < Duration::from_millis(150));
@@ -3040,7 +3038,7 @@ mod property_tests {
                 })
             });
 
-            async_io.run_async().await;
+            async_io.await;
         }
 
         #[rstest]

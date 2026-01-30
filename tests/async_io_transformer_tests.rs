@@ -1,4 +1,5 @@
 #![cfg(feature = "async")]
+#![allow(deprecated)]
 //! Tests for AsyncIO with Monad Transformers (ReaderT, StateT).
 //!
 //! This module tests the integration of AsyncIO with the monad transformer types.

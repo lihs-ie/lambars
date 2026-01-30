@@ -1,4 +1,5 @@
 #![cfg(feature = "async")]
+#![allow(deprecated)]
 //! AsyncIO State Machine Tests - Phase 2: impl Future
 //!
 //! These tests verify that AsyncIO can be directly awaited via impl Future,

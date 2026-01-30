@@ -1,4 +1,5 @@
 #![cfg(feature = "async")]
+#![allow(deprecated)]
 //! Property-based tests for AsyncIO Monad laws.
 //!
 //! This module verifies that the AsyncIO type satisfies the Monad laws:
