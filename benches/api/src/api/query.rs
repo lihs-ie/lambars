@@ -1230,6 +1230,20 @@ pub struct SearchIndexKeyMetrics {
 #[deprecated(since = "0.1.0", note = "Use SearchIndexKeyMetrics instead")]
 pub type SearchIndexNgramMetrics = SearchIndexKeyMetrics;
 
+/// Keys added during an Update operation, used for remove entry cancellation.
+#[derive(Debug, Default)]
+struct AddedKeys {
+    title_full: Vec<String>,
+    title_word: Vec<String>,
+    tag: Vec<String>,
+    title_full_ngram: Vec<String>,
+    title_word_ngram: Vec<String>,
+    tag_ngram: Vec<String>,
+    title_full_suffix: Vec<String>,
+    title_word_suffix: Vec<String>,
+    tag_suffix: Vec<String>,
+}
+
 /// Represents the delta (difference) for a `SearchIndex` update.
 ///
 /// Aggregates multiple `TaskChange`s into a single batch for efficient one-pass merging.
@@ -1258,6 +1272,7 @@ pub struct SearchIndexDelta {
 }
 
 /// Cached normalization result for a task. Tags are sorted for stable ordering.
+#[derive(Clone)]
 pub(crate) struct NormalizedTaskData {
     title_key: String,
     title_words: Vec<String>,
@@ -1285,9 +1300,10 @@ impl NormalizedTaskData {
 impl SearchIndexDelta {
     /// Constructs a delta from task changes.
     ///
-    /// # Panics
-    ///
-    /// Panics on Remove followed by Add/Update for the same `TaskId`.
+    /// Duplicates for the same `TaskId` are resolved by input order:
+    /// - Remove followed by Add: Add wins (remove is cancelled)
+    /// - Remove followed by Update: treated as Add (equivalent to sequential `apply_change`)
+    /// - Add followed by Remove: Remove wins
     #[must_use]
     pub fn from_changes(
         changes: &[TaskChange],
@@ -1299,9 +1315,10 @@ impl SearchIndexDelta {
 
     /// Constructs a delta from task changes and returns metrics (REQ-SEARCH-NGRAM-MEM-005).
     ///
-    /// # Panics
-    ///
-    /// Panics on Remove followed by Add/Update for the same `TaskId`.
+    /// Duplicates for the same `TaskId` are resolved by input order:
+    /// - Remove followed by Add: Add wins (remove is cancelled)
+    /// - Remove followed by Update: treated as Add (equivalent to sequential `apply_change`)
+    /// - Add followed by Remove: Remove wins
     #[must_use]
     pub fn from_changes_with_metrics(
         changes: &[TaskChange],
@@ -1322,40 +1339,60 @@ impl SearchIndexDelta {
         let mut delta = Self::default();
         let mut pending_tasks: std::collections::HashMap<TaskId, (Task, NormalizedTaskData)> =
             std::collections::HashMap::new();
-        let mut removed_task_ids: std::collections::HashSet<TaskId> =
+        // Tracks which TaskIds have been removed (for cancellation logic).
+        // When Add/Update comes after Remove, we cancel the remove entries.
+        let mut last_change_is_remove: std::collections::HashSet<TaskId> =
             std::collections::HashSet::new();
         let mut ngram_pool = KeyPool::new();
 
         for change in changes {
             match change {
                 TaskChange::Add(task) => {
-                    assert!(
-                        !removed_task_ids.contains(&task.task_id),
-                        "Invalid change sequence: Remove followed by Add for same TaskId {:?}. \
-                         This pattern is not supported. Use Update instead.",
-                        task.task_id
-                    );
+                    let was_removed = last_change_is_remove.remove(&task.task_id);
+
+                    // Check if task already exists (idempotency - matches apply_change behavior)
+                    // Skip if exists in original tasks_by_id (unless removed in this batch)
+                    // OR already added in this batch
+                    if !was_removed
+                        && (tasks_by_id.contains_key(&task.task_id)
+                            || pending_tasks.contains_key(&task.task_id))
+                    {
+                        // no-op: task already exists
+                        continue;
+                    }
+
                     let normalized = NormalizedTaskData::from_task(task);
                     delta.collect_add(&normalized, &task.task_id, config, &mut ngram_pool);
+                    if was_removed {
+                        // Cancel the remove entries for keys that are being re-added
+                        delta.cancel_remove_for_add(&normalized, &task.task_id, config);
+                    }
                     pending_tasks.insert(task.task_id.clone(), (task.clone(), normalized));
                 }
                 TaskChange::Update { old, new } => {
-                    assert!(
-                        !removed_task_ids.contains(&new.task_id),
-                        "Invalid change sequence: Remove followed by Update for same TaskId {:?}. \
-                         This pattern is not supported.",
-                        new.task_id
-                    );
-                    let old_normalized = NormalizedTaskData::from_task(old);
+                    let was_removed = last_change_is_remove.remove(&new.task_id);
                     let new_normalized = NormalizedTaskData::from_task(new);
-                    delta.collect_update_diff(
-                        &old_normalized,
-                        &new_normalized,
-                        &new.task_id,
-                        config,
-                        &mut ngram_pool,
-                    );
-                    pending_tasks.insert(new.task_id.clone(), (new.clone(), new_normalized));
+
+                    if was_removed {
+                        // Remove→Update: treat as Add (equivalent to sequential apply_change)
+                        delta.collect_add(&new_normalized, &new.task_id, config, &mut ngram_pool);
+                        delta.cancel_remove_for_add(&new_normalized, &new.task_id, config);
+                        pending_tasks
+                            .insert(new.task_id.clone(), (new.clone(), new_normalized.clone()));
+                    } else {
+                        // Normal Update: collect diff
+                        let old_normalized = NormalizedTaskData::from_task(old);
+                        let add_keys = delta.collect_update_diff_with_add_keys(
+                            &old_normalized,
+                            &new_normalized,
+                            &new.task_id,
+                            config,
+                            &mut ngram_pool,
+                        );
+                        // Cancel remove entries for the added keys (handles Update→Update scenarios)
+                        delta.cancel_remove_for_keys(&add_keys, &new.task_id);
+                        pending_tasks.insert(new.task_id.clone(), (new.clone(), new_normalized));
+                    }
                 }
                 TaskChange::Remove(task_id) => {
                     if let Some((_, normalized)) = pending_tasks.get(task_id) {
@@ -1365,7 +1402,7 @@ impl SearchIndexDelta {
                         let normalized = NormalizedTaskData::from_task(task);
                         delta.collect_remove(&normalized, task_id, config, &mut ngram_pool);
                     }
-                    removed_task_ids.insert(task_id.clone());
+                    last_change_is_remove.insert(task_id.clone());
                 }
             }
         }
@@ -1566,6 +1603,7 @@ impl SearchIndexDelta {
     /// Matches sequential `apply_change` behavior: old tokens are fully removed (no limit),
     /// new tokens are added with limit. Ngram diff is computed at the ngram level because
     /// tokens like "tag1" and "tagA" share common ngrams.
+    #[allow(dead_code)]
     fn collect_update_diff(
         &mut self,
         old_data: &NormalizedTaskData,
@@ -1679,6 +1717,254 @@ impl SearchIndexDelta {
         }
     }
 
+    /// Cancels remove entries for keys being re-added (Remove→Add sequence).
+    fn cancel_remove_for_add(
+        &mut self,
+        data: &NormalizedTaskData,
+        task_id: &TaskId,
+        config: &SearchIndexConfig,
+    ) {
+        let (word_limit, tag_limit) = Self::compute_token_limits(data, config);
+
+        Self::cancel_task_from_remove(&mut self.title_full_remove, &data.title_key, task_id);
+        for word in data.title_words.iter().take(word_limit) {
+            Self::cancel_task_from_remove(&mut self.title_word_remove, word, task_id);
+        }
+        for tag in data.tags.iter().take(tag_limit) {
+            Self::cancel_task_from_remove(&mut self.tag_remove, tag, task_id);
+        }
+
+        match config.infix_mode {
+            InfixMode::Ngram => {
+                for ngram in generate_ngrams(
+                    &data.title_key,
+                    config.ngram_size,
+                    config.max_ngrams_per_token,
+                ) {
+                    Self::cancel_task_from_remove(
+                        &mut self.title_full_ngram_remove,
+                        &ngram,
+                        task_id,
+                    );
+                }
+                for word in data.title_words.iter().take(word_limit) {
+                    for ngram in
+                        generate_ngrams(word, config.ngram_size, config.max_ngrams_per_token)
+                    {
+                        Self::cancel_task_from_remove(
+                            &mut self.title_word_ngram_remove,
+                            &ngram,
+                            task_id,
+                        );
+                    }
+                }
+                for tag in data.tags.iter().take(tag_limit) {
+                    for ngram in
+                        generate_ngrams(tag, config.ngram_size, config.max_ngrams_per_token)
+                    {
+                        Self::cancel_task_from_remove(&mut self.tag_ngram_remove, &ngram, task_id);
+                    }
+                }
+            }
+            InfixMode::LegacyAllSuffix => {
+                for suffix in Self::generate_all_suffixes(&data.title_key) {
+                    Self::cancel_task_from_remove(
+                        &mut self.title_full_all_suffix_remove,
+                        &suffix,
+                        task_id,
+                    );
+                }
+                for word in data.title_words.iter().take(word_limit) {
+                    for suffix in Self::generate_all_suffixes(word) {
+                        Self::cancel_task_from_remove(
+                            &mut self.title_word_all_suffix_remove,
+                            &suffix,
+                            task_id,
+                        );
+                    }
+                }
+                for tag in data.tags.iter().take(tag_limit) {
+                    for suffix in Self::generate_all_suffixes(tag) {
+                        Self::cancel_task_from_remove(
+                            &mut self.tag_all_suffix_remove,
+                            &suffix,
+                            task_id,
+                        );
+                    }
+                }
+            }
+            InfixMode::Disabled => {}
+        }
+    }
+
+    /// Cancels remove entries for specific keys (Update operations).
+    fn cancel_remove_for_keys(&mut self, add_keys: &AddedKeys, task_id: &TaskId) {
+        for key in &add_keys.title_full {
+            Self::cancel_task_from_remove(&mut self.title_full_remove, key, task_id);
+        }
+        for key in &add_keys.title_word {
+            Self::cancel_task_from_remove(&mut self.title_word_remove, key, task_id);
+        }
+        for key in &add_keys.tag {
+            Self::cancel_task_from_remove(&mut self.tag_remove, key, task_id);
+        }
+        for key in &add_keys.title_full_ngram {
+            Self::cancel_task_from_remove(&mut self.title_full_ngram_remove, key, task_id);
+        }
+        for key in &add_keys.title_word_ngram {
+            Self::cancel_task_from_remove(&mut self.title_word_ngram_remove, key, task_id);
+        }
+        for key in &add_keys.tag_ngram {
+            Self::cancel_task_from_remove(&mut self.tag_ngram_remove, key, task_id);
+        }
+        for key in &add_keys.title_full_suffix {
+            Self::cancel_task_from_remove(&mut self.title_full_all_suffix_remove, key, task_id);
+        }
+        for key in &add_keys.title_word_suffix {
+            Self::cancel_task_from_remove(&mut self.title_word_all_suffix_remove, key, task_id);
+        }
+        for key in &add_keys.tag_suffix {
+            Self::cancel_task_from_remove(&mut self.tag_all_suffix_remove, key, task_id);
+        }
+    }
+
+    fn cancel_task_from_remove(remove_index: &mut MutableIndex, key: &str, task_id: &TaskId) {
+        for (existing_key, posting_list) in remove_index.iter_mut() {
+            if existing_key.as_str() == key {
+                posting_list.retain(|id| id != task_id);
+                return;
+            }
+        }
+    }
+
+    /// Collects update diff and returns added keys for cancellation.
+    #[allow(clippy::too_many_lines)]
+    fn collect_update_diff_with_add_keys(
+        &mut self,
+        old_data: &NormalizedTaskData,
+        new_data: &NormalizedTaskData,
+        task_id: &TaskId,
+        config: &SearchIndexConfig,
+        pool: &mut KeyPool,
+    ) -> AddedKeys {
+        let mut add_keys = AddedKeys::default();
+        let (new_word_limit, new_tag_limit) = Self::compute_token_limits(new_data, config);
+
+        if old_data.title_key != new_data.title_key {
+            Self::push_to_index(
+                &mut self.title_full_remove,
+                &old_data.title_key,
+                task_id,
+                pool,
+            );
+            Self::push_to_index(&mut self.title_full_add, &new_data.title_key, task_id, pool);
+            add_keys.title_full.push(new_data.title_key.clone());
+
+            match config.infix_mode {
+                InfixMode::Ngram => {
+                    let ngram_add_keys = Self::collect_ngram_diff_with_add_keys(
+                        &mut self.title_full_ngram_remove,
+                        &mut self.title_full_ngram_add,
+                        &old_data.title_key,
+                        &new_data.title_key,
+                        task_id,
+                        config,
+                        pool,
+                    );
+                    add_keys.title_full_ngram.extend(ngram_add_keys);
+                }
+                InfixMode::LegacyAllSuffix => {
+                    let suffix_add_keys = Self::collect_all_suffix_diff_with_add_keys(
+                        &mut self.title_full_all_suffix_remove,
+                        &mut self.title_full_all_suffix_add,
+                        &old_data.title_key,
+                        &new_data.title_key,
+                        task_id,
+                        pool,
+                    );
+                    add_keys.title_full_suffix.extend(suffix_add_keys);
+                }
+                InfixMode::Disabled => {}
+            }
+        }
+
+        let title_word_add_keys = Self::collect_token_diff_with_add_keys(
+            &mut self.title_word_remove,
+            &mut self.title_word_add,
+            old_data.title_words.iter(),
+            new_data.title_words.iter().take(new_word_limit),
+            task_id,
+            pool,
+        );
+        add_keys.title_word.extend(title_word_add_keys);
+
+        match config.infix_mode {
+            InfixMode::Ngram => {
+                let ngram_add_keys = Self::collect_tokens_ngram_diff_with_add_keys(
+                    &mut self.title_word_ngram_remove,
+                    &mut self.title_word_ngram_add,
+                    old_data.title_words.iter(),
+                    new_data.title_words.iter().take(new_word_limit),
+                    task_id,
+                    config,
+                    pool,
+                );
+                add_keys.title_word_ngram.extend(ngram_add_keys);
+            }
+            InfixMode::LegacyAllSuffix => {
+                let suffix_add_keys = Self::collect_tokens_all_suffix_diff_with_add_keys(
+                    &mut self.title_word_all_suffix_remove,
+                    &mut self.title_word_all_suffix_add,
+                    old_data.title_words.iter(),
+                    new_data.title_words.iter().take(new_word_limit),
+                    task_id,
+                    pool,
+                );
+                add_keys.title_word_suffix.extend(suffix_add_keys);
+            }
+            InfixMode::Disabled => {}
+        }
+
+        let tag_add_keys = Self::collect_token_diff_with_add_keys(
+            &mut self.tag_remove,
+            &mut self.tag_add,
+            old_data.tags.iter(),
+            new_data.tags.iter().take(new_tag_limit),
+            task_id,
+            pool,
+        );
+        add_keys.tag.extend(tag_add_keys);
+
+        match config.infix_mode {
+            InfixMode::Ngram => {
+                let ngram_add_keys = Self::collect_tokens_ngram_diff_with_add_keys(
+                    &mut self.tag_ngram_remove,
+                    &mut self.tag_ngram_add,
+                    old_data.tags.iter(),
+                    new_data.tags.iter().take(new_tag_limit),
+                    task_id,
+                    config,
+                    pool,
+                );
+                add_keys.tag_ngram.extend(ngram_add_keys);
+            }
+            InfixMode::LegacyAllSuffix => {
+                let suffix_add_keys = Self::collect_tokens_all_suffix_diff_with_add_keys(
+                    &mut self.tag_all_suffix_remove,
+                    &mut self.tag_all_suffix_add,
+                    old_data.tags.iter(),
+                    new_data.tags.iter().take(new_tag_limit),
+                    task_id,
+                    pool,
+                );
+                add_keys.tag_suffix.extend(suffix_add_keys);
+            }
+            InfixMode::Disabled => {}
+        }
+
+        add_keys
+    }
+
     fn push_to_index(index: &mut MutableIndex, key: &str, task_id: &TaskId, pool: &mut KeyPool) {
         index
             .entry(pool.intern(key))
@@ -1686,6 +1972,7 @@ impl SearchIndexDelta {
             .push(task_id.clone());
     }
 
+    #[allow(dead_code)]
     fn collect_token_diff<'a>(
         remove_index: &mut MutableIndex,
         add_index: &mut MutableIndex,
@@ -1705,6 +1992,34 @@ impl SearchIndexDelta {
         }
     }
 
+    fn collect_token_diff_with_add_keys<'a>(
+        remove_index: &mut MutableIndex,
+        add_index: &mut MutableIndex,
+        old_tokens: impl Iterator<Item = &'a String>,
+        new_tokens: impl Iterator<Item = &'a String>,
+        task_id: &TaskId,
+        pool: &mut KeyPool,
+    ) -> Vec<String> {
+        let old_set: std::collections::HashSet<_> = old_tokens.collect();
+        let new_set: std::collections::HashSet<_> = new_tokens.collect();
+
+        for token in old_set.difference(&new_set) {
+            Self::push_to_index(remove_index, token, task_id, pool);
+        }
+
+        let added: Vec<String> = new_set
+            .difference(&old_set)
+            .map(|token| (*token).clone())
+            .collect();
+
+        for token in &added {
+            Self::push_to_index(add_index, token, task_id, pool);
+        }
+
+        added
+    }
+
+    #[allow(dead_code)]
     fn apply_ngram_diff(
         remove_index: &mut MutableIndex,
         add_index: &mut MutableIndex,
@@ -1727,6 +2042,7 @@ impl SearchIndexDelta {
         }
     }
 
+    #[allow(dead_code)]
     fn collect_ngram_diff(
         remove_index: &mut MutableIndex,
         add_index: &mut MutableIndex,
@@ -1752,6 +2068,43 @@ impl SearchIndexDelta {
         );
     }
 
+    fn collect_ngram_diff_with_add_keys(
+        remove_index: &mut MutableIndex,
+        add_index: &mut MutableIndex,
+        old_key: &str,
+        new_key: &str,
+        task_id: &TaskId,
+        config: &SearchIndexConfig,
+        pool: &mut KeyPool,
+    ) -> Vec<String> {
+        let old_ngrams: std::collections::HashSet<_> =
+            generate_ngrams(old_key, config.ngram_size, config.max_ngrams_per_token)
+                .into_iter()
+                .collect();
+        let new_ngrams: std::collections::HashSet<_> =
+            generate_ngrams(new_key, config.ngram_size, config.max_ngrams_per_token)
+                .into_iter()
+                .collect();
+
+        for ngram in old_ngrams.difference(&new_ngrams) {
+            remove_index
+                .entry(pool.intern(ngram))
+                .or_default()
+                .push(task_id.clone());
+        }
+
+        let added: Vec<String> = new_ngrams.difference(&old_ngrams).cloned().collect();
+        for ngram in &added {
+            add_index
+                .entry(pool.intern(ngram))
+                .or_default()
+                .push(task_id.clone());
+        }
+
+        added
+    }
+
+    #[allow(dead_code)]
     fn collect_tokens_ngram_diff<'a>(
         remove_index: &mut MutableIndex,
         add_index: &mut MutableIndex,
@@ -1777,12 +2130,47 @@ impl SearchIndexDelta {
         );
     }
 
+    fn collect_tokens_ngram_diff_with_add_keys<'a>(
+        remove_index: &mut MutableIndex,
+        add_index: &mut MutableIndex,
+        old_tokens: impl Iterator<Item = &'a String>,
+        new_tokens: impl Iterator<Item = &'a String>,
+        task_id: &TaskId,
+        config: &SearchIndexConfig,
+        pool: &mut KeyPool,
+    ) -> Vec<String> {
+        let old_ngrams: std::collections::HashSet<_> = old_tokens
+            .flat_map(|t| generate_ngrams(t, config.ngram_size, config.max_ngrams_per_token))
+            .collect();
+        let new_ngrams: std::collections::HashSet<_> = new_tokens
+            .flat_map(|t| generate_ngrams(t, config.ngram_size, config.max_ngrams_per_token))
+            .collect();
+
+        for ngram in old_ngrams.difference(&new_ngrams) {
+            remove_index
+                .entry(pool.intern(ngram))
+                .or_default()
+                .push(task_id.clone());
+        }
+
+        let added: Vec<String> = new_ngrams.difference(&old_ngrams).cloned().collect();
+        for ngram in &added {
+            add_index
+                .entry(pool.intern(ngram))
+                .or_default()
+                .push(task_id.clone());
+        }
+
+        added
+    }
+
     fn generate_all_suffixes(word: &str) -> Vec<String> {
         word.char_indices()
             .map(|(byte_index, _)| word[byte_index..].to_string())
             .collect()
     }
 
+    #[allow(dead_code)]
     fn apply_suffix_diff(
         remove_index: &mut MutableIndex,
         add_index: &mut MutableIndex,
@@ -1805,6 +2193,7 @@ impl SearchIndexDelta {
         }
     }
 
+    #[allow(dead_code)]
     fn collect_all_suffix_diff(
         remove_index: &mut MutableIndex,
         add_index: &mut MutableIndex,
@@ -1825,6 +2214,38 @@ impl SearchIndexDelta {
         );
     }
 
+    fn collect_all_suffix_diff_with_add_keys(
+        remove_index: &mut MutableIndex,
+        add_index: &mut MutableIndex,
+        old_key: &str,
+        new_key: &str,
+        task_id: &TaskId,
+        pool: &mut KeyPool,
+    ) -> Vec<String> {
+        let old_suffixes: std::collections::HashSet<_> =
+            Self::generate_all_suffixes(old_key).into_iter().collect();
+        let new_suffixes: std::collections::HashSet<_> =
+            Self::generate_all_suffixes(new_key).into_iter().collect();
+
+        for suffix in old_suffixes.difference(&new_suffixes) {
+            remove_index
+                .entry(pool.intern(suffix))
+                .or_default()
+                .push(task_id.clone());
+        }
+
+        let added: Vec<String> = new_suffixes.difference(&old_suffixes).cloned().collect();
+        for suffix in &added {
+            add_index
+                .entry(pool.intern(suffix))
+                .or_default()
+                .push(task_id.clone());
+        }
+
+        added
+    }
+
+    #[allow(dead_code)]
     fn collect_tokens_all_suffix_diff<'a>(
         remove_index: &mut MutableIndex,
         add_index: &mut MutableIndex,
@@ -1847,6 +2268,39 @@ impl SearchIndexDelta {
             task_id,
             pool,
         );
+    }
+
+    fn collect_tokens_all_suffix_diff_with_add_keys<'a>(
+        remove_index: &mut MutableIndex,
+        add_index: &mut MutableIndex,
+        old_tokens: impl Iterator<Item = &'a String>,
+        new_tokens: impl Iterator<Item = &'a String>,
+        task_id: &TaskId,
+        pool: &mut KeyPool,
+    ) -> Vec<String> {
+        let old_suffixes: std::collections::HashSet<_> = old_tokens
+            .flat_map(|token| Self::generate_all_suffixes(token))
+            .collect();
+        let new_suffixes: std::collections::HashSet<_> = new_tokens
+            .flat_map(|token| Self::generate_all_suffixes(token))
+            .collect();
+
+        for suffix in old_suffixes.difference(&new_suffixes) {
+            remove_index
+                .entry(pool.intern(suffix))
+                .or_default()
+                .push(task_id.clone());
+        }
+
+        let added: Vec<String> = new_suffixes.difference(&old_suffixes).cloned().collect();
+        for suffix in &added {
+            add_index
+                .entry(pool.intern(suffix))
+                .or_default()
+                .push(task_id.clone());
+        }
+
+        added
     }
 
     pub fn prepare_posting_lists(&mut self) {
@@ -3683,9 +4137,13 @@ impl SearchIndex {
 
     /// Applies multiple task changes in a single batch operation.
     ///
-    /// # Panics
+    /// # Duplicate Handling
     ///
-    /// Panics on forbidden patterns: Remove followed by Add/Update for the same `TaskId`.
+    /// Duplicates for the same `TaskId` are resolved by input order:
+    /// - Remove followed by Add: Add wins (remove is cancelled)
+    /// - Remove followed by Update: treated as Add (equivalent to sequential `apply_change`)
+    /// - Add followed by Remove: Remove wins
+    /// - Add for existing `TaskId`: no-op (idempotent)
     #[must_use]
     pub fn apply_changes(&self, changes: &[TaskChange]) -> Self {
         if changes.is_empty() {
@@ -3701,9 +4159,8 @@ impl SearchIndex {
     ///
     /// Returns the updated index and combined metrics for delta building and merge operations.
     ///
-    /// # Panics
-    ///
-    /// Panics on forbidden patterns: Remove followed by Add/Update for the same `TaskId`.
+    /// This method handles all patterns including Remove followed by Add/Update,
+    /// which are resolved according to input order (equivalent to sequential `apply_change`).
     #[must_use]
     pub fn apply_changes_with_metrics(
         &self,
@@ -3794,7 +4251,14 @@ impl SearchIndex {
         changes
             .iter()
             .fold(self.tasks_by_id.clone(), |acc, change| match change {
-                TaskChange::Add(task) => acc.insert(task.task_id.clone(), task.clone()),
+                TaskChange::Add(task) => {
+                    // Check if task already exists (idempotency - matches apply_change behavior)
+                    if acc.contains_key(&task.task_id) {
+                        acc // no-op: task already exists
+                    } else {
+                        acc.insert(task.task_id.clone(), task.clone())
+                    }
+                }
                 TaskChange::Update { old: _, new } => acc.insert(new.task_id.clone(), new.clone()),
                 TaskChange::Remove(task_id) => acc.remove(task_id),
             })
@@ -11766,10 +12230,11 @@ mod search_index_delta_tests {
         assert!(delta.title_full_remove.contains_key("new title"));
     }
 
-    /// Tests that Remove followed by Add panics (forbidden pattern).
+    /// Tests that Remove followed by Add results in Add winning (remove is cancelled).
+    ///
+    /// Per documentation: "Remove followed by Add: Add wins (remove is cancelled)"
     #[rstest]
-    #[should_panic(expected = "Remove followed by Add")]
-    fn delta_panics_on_remove_then_add() {
+    fn delta_remove_then_add_results_in_add() {
         let task = create_task_with_title_and_id("Test Task", task_id_from_u128(1));
         let config = SearchIndexConfig::default();
         let task_id = task.task_id.clone();
@@ -11777,14 +12242,18 @@ mod search_index_delta_tests {
 
         let changes = vec![TaskChange::Remove(task_id), TaskChange::Add(task)];
 
-        // This should panic
-        let _ = SearchIndexDelta::from_changes(&changes, &config, &tasks_by_id);
+        // Should not panic - Add cancels the Remove
+        let delta = SearchIndexDelta::from_changes(&changes, &config, &tasks_by_id);
+
+        // The task title should be in add (Add wins, remove is cancelled)
+        assert!(delta.title_full_add.contains_key("test task"));
     }
 
-    /// Tests that Remove followed by Update panics (forbidden pattern).
+    /// Tests that Remove followed by Update is treated as Add.
+    ///
+    /// Per documentation: "Remove followed by Update: treated as Add (equivalent to sequential `apply_change`)"
     #[rstest]
-    #[should_panic(expected = "Remove followed by Update")]
-    fn delta_panics_on_remove_then_update() {
+    fn delta_remove_then_update_treated_as_add() {
         let task_id = task_id_from_u128(1);
         let task = create_task_with_title_and_id("Test Task", task_id.clone());
         let updated_task = create_task_with_title_and_id("Updated Task", task_id);
@@ -11800,8 +12269,11 @@ mod search_index_delta_tests {
             },
         ];
 
-        // This should panic
-        let _ = SearchIndexDelta::from_changes(&changes, &config, &tasks_by_id);
+        // Should not panic - Update is treated as Add
+        let delta = SearchIndexDelta::from_changes(&changes, &config, &tasks_by_id);
+
+        // The updated title should be in add (Update treated as Add)
+        assert!(delta.title_full_add.contains_key("updated task"));
     }
 
     /// Tests that `from_changes` respects `max_tokens_per_task` limit.
@@ -12768,13 +13240,14 @@ mod apply_changes_tests {
     }
 
     // =========================================================================
-    // Forbidden Pattern Tests (Should Panic)
+    // Remove-then-Add/Update Pattern Tests (Cancellation Logic)
     // =========================================================================
 
-    /// Test 12: Remove followed by Add panics (forbidden pattern)
+    /// Test 12: Remove followed by Add results in Add winning (remove is cancelled)
+    ///
+    /// Per documentation: "Remove followed by Add: Add wins (remove is cancelled)"
     #[rstest]
-    #[should_panic(expected = "Remove followed by Add for same TaskId")]
-    fn apply_changes_panics_on_remove_then_add() {
+    fn apply_changes_remove_then_add_results_in_add() {
         let task_id = task_id_from_u128(1);
         let task = create_test_task_with_id("Test Task", task_id.clone());
 
@@ -12782,29 +13255,39 @@ mod apply_changes_tests {
         let tasks: PersistentVector<Task> = vec![task.clone()].into_iter().collect();
         let index = SearchIndex::build_with_config(&tasks, SearchIndexConfig::default());
 
-        // 禁止パターン: Remove してから Add（同一 TaskId）
+        // Remove してから Add（同一 TaskId）- Add が勝つ
         let changes = vec![
             TaskChange::Remove(task.task_id.clone()),
             TaskChange::Add(task.clone()),
         ];
 
-        // panic する
-        let _ = index.apply_changes(&changes);
+        let batch_result = index.apply_changes(&changes);
+
+        // 逐次適用と同じ結果になるはず
+        let mut sequential_result = index.clone();
+        for change in &changes {
+            sequential_result = sequential_result.apply_change(change.clone());
+        }
+
+        assert_search_index_equals(&batch_result, &sequential_result);
+        // タスクは存在するはず
+        assert!(batch_result.tasks_by_id.contains_key(&task_id));
     }
 
-    /// Test 13: Remove followed by Update panics (forbidden pattern)
+    /// Test 13: Remove followed by Update is treated as Add
+    ///
+    /// Per documentation: "Remove followed by Update: treated as Add (equivalent to sequential `apply_change`)"
     #[rstest]
-    #[should_panic(expected = "Remove followed by Update for same TaskId")]
-    fn apply_changes_panics_on_remove_then_update() {
+    fn apply_changes_remove_then_update_treated_as_add() {
         let task_id = task_id_from_u128(1);
         let old_task = create_test_task_with_id("Old Title", task_id.clone());
-        let new_task = create_test_task_with_id("New Title", task_id.clone());
+        let new_task = create_test_task_with_id("New Title", task_id);
 
         // 初期状態: old_task が存在
         let tasks: PersistentVector<Task> = vec![old_task.clone()].into_iter().collect();
         let index = SearchIndex::build_with_config(&tasks, SearchIndexConfig::default());
 
-        // 禁止パターン: Remove してから Update（同一 TaskId）
+        // Remove してから Update（同一 TaskId）- Add として扱われる
         let changes = vec![
             TaskChange::Remove(old_task.task_id.clone()),
             TaskChange::Update {
@@ -12813,8 +13296,17 @@ mod apply_changes_tests {
             },
         ];
 
-        // panic する
-        let _ = index.apply_changes(&changes);
+        let batch_result = index.apply_changes(&changes);
+
+        // 逐次適用と同じ結果になるはず
+        let mut sequential_result = index.clone();
+        for change in &changes {
+            sequential_result = sequential_result.apply_change(change.clone());
+        }
+
+        assert_search_index_equals(&batch_result, &sequential_result);
+        // タスクは存在するはず（新しいタイトルで）
+        assert!(batch_result.tasks_by_id.contains_key(&new_task.task_id));
     }
 
     // =========================================================================
@@ -12990,6 +13482,568 @@ mod apply_changes_tests {
 
         // 追加して削除したタスクは見つからないはず
         assert_search_results_equal(&batch_result, &sequential_result, "Temporary");
+    }
+
+    // =========================================================================
+    // Phase 5: Sequential Equivalence Tests (apply_changes == sequential apply_change)
+    // =========================================================================
+
+    /// Test: Remove→Add (same key) equals sequential apply_change.
+    ///
+    /// Verifies that removing a task and re-adding the same task in a single batch
+    /// produces the same result as applying the changes sequentially.
+    #[rstest]
+    fn apply_changes_equals_sequential_for_remove_then_add_same_key() {
+        let task_id = task_id_from_u128(100);
+        let task = create_test_task_with_id("Test Task Title", task_id.clone());
+
+        // Initial state: task exists
+        let tasks: PersistentVector<Task> = vec![task.clone()].into_iter().collect();
+        let index = SearchIndex::build_with_config(&tasks, SearchIndexConfig::default());
+
+        // Remove then Add (same TaskId)
+        let changes = vec![
+            TaskChange::Remove(task.task_id.clone()),
+            TaskChange::Add(task.clone()),
+        ];
+
+        // Batch apply
+        let batch_result = index.apply_changes(&changes);
+
+        // Sequential apply
+        let mut sequential_result = index.clone();
+        for change in &changes {
+            sequential_result = sequential_result.apply_change(change.clone());
+        }
+
+        // Verify equivalence
+        assert_search_index_equals(&batch_result, &sequential_result);
+        // Task should exist after Remove→Add
+        assert!(batch_result.tasks_by_id.contains_key(&task_id));
+    }
+
+    /// Test: Remove→Add (different key) equals sequential apply_change.
+    ///
+    /// Verifies that removing one task and adding a different task in a single batch
+    /// produces the same result as applying the changes sequentially.
+    #[rstest]
+    fn apply_changes_equals_sequential_for_remove_then_add_different_key() {
+        let task_id_1 = task_id_from_u128(101);
+        let task_id_2 = task_id_from_u128(102);
+        let task_1 = create_test_task_with_id("First Task", task_id_1.clone());
+        let task_2 = create_test_task_with_id("Second Task", task_id_2.clone());
+
+        // Initial state: task_1 exists
+        let tasks: PersistentVector<Task> = vec![task_1.clone()].into_iter().collect();
+        let index = SearchIndex::build_with_config(&tasks, SearchIndexConfig::default());
+
+        // Remove task_1 then Add task_2
+        let changes = vec![
+            TaskChange::Remove(task_1.task_id.clone()),
+            TaskChange::Add(task_2.clone()),
+        ];
+
+        // Batch apply
+        let batch_result = index.apply_changes(&changes);
+
+        // Sequential apply
+        let mut sequential_result = index.clone();
+        for change in &changes {
+            sequential_result = sequential_result.apply_change(change.clone());
+        }
+
+        // Verify equivalence
+        assert_search_index_equals(&batch_result, &sequential_result);
+        // task_1 should not exist, task_2 should exist
+        assert!(!batch_result.tasks_by_id.contains_key(&task_id_1));
+        assert!(batch_result.tasks_by_id.contains_key(&task_id_2));
+    }
+
+    /// Test: Remove→Update (same key) equals sequential apply_change.
+    ///
+    /// Verifies that removing a task and then updating it (treated as Add) in a single batch
+    /// produces the same result as applying the changes sequentially.
+    #[rstest]
+    fn apply_changes_equals_sequential_for_remove_then_update_same_key() {
+        let task_id = task_id_from_u128(103);
+        let old_task = create_test_task_with_id("Old Title", task_id.clone());
+        let new_task = create_test_task_with_id("New Title", task_id.clone());
+
+        // Initial state: old_task exists
+        let tasks: PersistentVector<Task> = vec![old_task.clone()].into_iter().collect();
+        let index = SearchIndex::build_with_config(&tasks, SearchIndexConfig::default());
+
+        // Remove then Update (same TaskId)
+        let changes = vec![
+            TaskChange::Remove(old_task.task_id.clone()),
+            TaskChange::Update {
+                old: old_task.clone(),
+                new: new_task.clone(),
+            },
+        ];
+
+        // Batch apply
+        let batch_result = index.apply_changes(&changes);
+
+        // Sequential apply
+        let mut sequential_result = index.clone();
+        for change in &changes {
+            sequential_result = sequential_result.apply_change(change.clone());
+        }
+
+        // Verify equivalence
+        assert_search_index_equals(&batch_result, &sequential_result);
+        // Task should exist with new title
+        assert!(batch_result.tasks_by_id.contains_key(&task_id));
+    }
+
+    /// Test: Remove→Update (with content diff) equals sequential apply_change.
+    ///
+    /// Verifies that removing a task and updating it with different content in a single batch
+    /// produces the same result as applying the changes sequentially.
+    #[rstest]
+    fn apply_changes_equals_sequential_for_remove_then_update_diff() {
+        let task_id = task_id_from_u128(104);
+        let old_task = create_test_task_with_id_and_tags(
+            task_id.clone(),
+            "Original Title",
+            vec!["tag1", "tag2"],
+        );
+        let new_task = create_test_task_with_id_and_tags(
+            task_id.clone(),
+            "Modified Title",
+            vec!["tag3", "tag4"],
+        );
+
+        // Initial state: old_task exists
+        let tasks: PersistentVector<Task> = vec![old_task.clone()].into_iter().collect();
+        let index = SearchIndex::build_with_config(&tasks, SearchIndexConfig::default());
+
+        // Remove then Update (with content diff)
+        let changes = vec![
+            TaskChange::Remove(old_task.task_id.clone()),
+            TaskChange::Update {
+                old: old_task.clone(),
+                new: new_task.clone(),
+            },
+        ];
+
+        // Batch apply
+        let batch_result = index.apply_changes(&changes);
+
+        // Sequential apply
+        let mut sequential_result = index.clone();
+        for change in &changes {
+            sequential_result = sequential_result.apply_change(change.clone());
+        }
+
+        // Verify equivalence
+        assert_search_index_equals(&batch_result, &sequential_result);
+
+        // Verify search results match
+        assert_search_results_equal(&batch_result, &sequential_result, "Modified");
+        assert_search_results_equal(&batch_result, &sequential_result, "tag3");
+    }
+
+    /// Test: Remove→Add→Remove equals sequential apply_change.
+    ///
+    /// Verifies that the final state after Remove→Add→Remove is the same
+    /// as applying the changes sequentially.
+    #[rstest]
+    fn apply_changes_equals_sequential_for_remove_then_add_then_remove() {
+        let task_id = task_id_from_u128(105);
+        let task = create_test_task_with_id("Task to toggle", task_id.clone());
+
+        // Initial state: task exists
+        let tasks: PersistentVector<Task> = vec![task.clone()].into_iter().collect();
+        let index = SearchIndex::build_with_config(&tasks, SearchIndexConfig::default());
+
+        // Remove→Add→Remove (same TaskId)
+        let changes = vec![
+            TaskChange::Remove(task.task_id.clone()),
+            TaskChange::Add(task.clone()),
+            TaskChange::Remove(task.task_id.clone()),
+        ];
+
+        // Batch apply
+        let batch_result = index.apply_changes(&changes);
+
+        // Sequential apply
+        let mut sequential_result = index.clone();
+        for change in &changes {
+            sequential_result = sequential_result.apply_change(change.clone());
+        }
+
+        // Verify equivalence
+        assert_search_index_equals(&batch_result, &sequential_result);
+        // Task should not exist after Remove→Add→Remove
+        assert!(!batch_result.tasks_by_id.contains_key(&task_id));
+    }
+
+    /// Test: Add→Update (same TaskId) equals sequential apply_change.
+    ///
+    /// Verifies that adding a task and immediately updating it in the same batch
+    /// produces the same result as applying the changes sequentially.
+    #[rstest]
+    fn apply_changes_equals_sequential_for_add_then_update_same_task() {
+        let task_id = task_id_from_u128(106);
+        let initial_task = create_test_task_with_id("Initial Title", task_id.clone());
+        let updated_task = create_test_task_with_id("Updated Title", task_id.clone());
+
+        // Initial state: empty
+        let index = create_empty_index();
+
+        // Add then Update (same TaskId)
+        let changes = vec![
+            TaskChange::Add(initial_task.clone()),
+            TaskChange::Update {
+                old: initial_task.clone(),
+                new: updated_task.clone(),
+            },
+        ];
+
+        // Batch apply
+        let batch_result = index.apply_changes(&changes);
+
+        // Sequential apply
+        let mut sequential_result = index.clone();
+        for change in &changes {
+            sequential_result = sequential_result.apply_change(change.clone());
+        }
+
+        // Verify equivalence
+        assert_search_index_equals(&batch_result, &sequential_result);
+        // Task should exist with updated title
+        assert!(batch_result.tasks_by_id.contains_key(&task_id));
+        assert_eq!(
+            batch_result.tasks_by_id.get(&task_id).map(|t| &t.title),
+            Some(&"Updated Title".to_string())
+        );
+    }
+
+    /// Test: Add to existing TaskId equals sequential apply_change (no-op).
+    ///
+    /// Verifies that adding a task with an already existing TaskId
+    /// produces the same result as applying the changes sequentially (effectively a no-op).
+    #[rstest]
+    fn apply_changes_equals_sequential_for_add_to_existing_id() {
+        let task_id = task_id_from_u128(107);
+        let existing_task = create_test_task_with_id("Existing Task", task_id.clone());
+        let new_task = create_test_task_with_id("New Task Same ID", task_id.clone());
+
+        // Initial state: existing_task exists
+        let tasks: PersistentVector<Task> = vec![existing_task.clone()].into_iter().collect();
+        let index = SearchIndex::build_with_config(&tasks, SearchIndexConfig::default());
+
+        // Try to Add task with same TaskId
+        let changes = vec![TaskChange::Add(new_task.clone())];
+
+        // Batch apply
+        let batch_result = index.apply_changes(&changes);
+
+        // Sequential apply
+        let mut sequential_result = index.clone();
+        for change in &changes {
+            sequential_result = sequential_result.apply_change(change.clone());
+        }
+
+        // Verify equivalence
+        assert_search_index_equals(&batch_result, &sequential_result);
+    }
+
+    /// Test: Remove→Remove (same TaskId) equals sequential apply_change.
+    ///
+    /// Verifies that removing the same task twice in a batch
+    /// produces the same result as applying the changes sequentially.
+    #[rstest]
+    fn apply_changes_equals_sequential_for_remove_then_remove_same_task() {
+        let task_id = task_id_from_u128(108);
+        let task = create_test_task_with_id("Task to remove", task_id.clone());
+
+        // Initial state: task exists
+        let tasks: PersistentVector<Task> = vec![task.clone()].into_iter().collect();
+        let index = SearchIndex::build_with_config(&tasks, SearchIndexConfig::default());
+
+        // Remove then Remove (same TaskId)
+        let changes = vec![
+            TaskChange::Remove(task.task_id.clone()),
+            TaskChange::Remove(task.task_id.clone()),
+        ];
+
+        // Batch apply
+        let batch_result = index.apply_changes(&changes);
+
+        // Sequential apply
+        let mut sequential_result = index.clone();
+        for change in &changes {
+            sequential_result = sequential_result.apply_change(change.clone());
+        }
+
+        // Verify equivalence
+        assert_search_index_equals(&batch_result, &sequential_result);
+        // Task should not exist
+        assert!(!batch_result.tasks_by_id.contains_key(&task_id));
+    }
+
+    /// Test: Update→Update (same TaskId) equals sequential apply_change.
+    ///
+    /// Verifies that multiple consecutive updates to the same task in a batch
+    /// produces the same result as applying the changes sequentially.
+    #[rstest]
+    fn apply_changes_equals_sequential_for_update_then_update_same_task() {
+        let task_id = task_id_from_u128(109);
+        let task_v1 = create_test_task_with_id("Version 1", task_id.clone());
+        let task_v2 = create_test_task_with_id("Version 2", task_id.clone());
+        let task_v3 = create_test_task_with_id("Version 3", task_id.clone());
+
+        // Initial state: task_v1 exists
+        let tasks: PersistentVector<Task> = vec![task_v1.clone()].into_iter().collect();
+        let index = SearchIndex::build_with_config(&tasks, SearchIndexConfig::default());
+
+        // Update v1→v2, then v2→v3
+        let changes = vec![
+            TaskChange::Update {
+                old: task_v1.clone(),
+                new: task_v2.clone(),
+            },
+            TaskChange::Update {
+                old: task_v2.clone(),
+                new: task_v3.clone(),
+            },
+        ];
+
+        // Batch apply
+        let batch_result = index.apply_changes(&changes);
+
+        // Sequential apply
+        let mut sequential_result = index.clone();
+        for change in &changes {
+            sequential_result = sequential_result.apply_change(change.clone());
+        }
+
+        // Verify equivalence
+        assert_search_index_equals(&batch_result, &sequential_result);
+        // Task should exist with Version 3 title
+        assert!(batch_result.tasks_by_id.contains_key(&task_id));
+        assert_eq!(
+            batch_result.tasks_by_id.get(&task_id).map(|t| &t.title),
+            Some(&"Version 3".to_string())
+        );
+    }
+
+    /// Test: Add→Remove→Add equals sequential apply_change (final Add wins).
+    ///
+    /// Verifies that Add→Remove→Add produces the same result as sequential apply_change,
+    /// with the final Add operation winning.
+    #[rstest]
+    fn apply_changes_equals_sequential_for_add_then_remove_then_add() {
+        let task_id = task_id_from_u128(110);
+        let task_v1 = create_test_task_with_id("First Version", task_id.clone());
+        let task_v2 = create_test_task_with_id("Second Version", task_id.clone());
+
+        // Initial state: empty
+        let index = create_empty_index();
+
+        // Add v1→Remove→Add v2
+        let changes = vec![
+            TaskChange::Add(task_v1.clone()),
+            TaskChange::Remove(task_id.clone()),
+            TaskChange::Add(task_v2.clone()),
+        ];
+
+        // Batch apply
+        let batch_result = index.apply_changes(&changes);
+
+        // Sequential apply
+        let mut sequential_result = index.clone();
+        for change in &changes {
+            sequential_result = sequential_result.apply_change(change.clone());
+        }
+
+        // Verify equivalence
+        assert_search_index_equals(&batch_result, &sequential_result);
+        // Task should exist with Second Version title
+        assert!(batch_result.tasks_by_id.contains_key(&task_id));
+        assert_eq!(
+            batch_result.tasks_by_id.get(&task_id).map(|t| &t.title),
+            Some(&"Second Version".to_string())
+        );
+    }
+
+    // =========================================================================
+    // Phase 5: Sequential Equivalence Tests - Medium Priority
+    // =========================================================================
+
+    /// Test: Remove→Add in Ngram mode equals sequential apply_change.
+    ///
+    /// Verifies that Remove→Add in Ngram infix mode produces the same result
+    /// as applying the changes sequentially.
+    #[rstest]
+    fn apply_changes_equals_sequential_for_remove_then_add_ngram_mode() {
+        let config = SearchIndexConfig {
+            infix_mode: InfixMode::Ngram,
+            ..SearchIndexConfig::default()
+        };
+
+        let task_id = task_id_from_u128(111);
+        let task = create_test_task_with_id("Test Task for Ngram", task_id.clone());
+
+        // Initial state: task exists
+        let tasks: PersistentVector<Task> = vec![task.clone()].into_iter().collect();
+        let index = SearchIndex::build_with_config(&tasks, config);
+
+        // Remove then Add
+        let changes = vec![
+            TaskChange::Remove(task.task_id.clone()),
+            TaskChange::Add(task.clone()),
+        ];
+
+        // Batch apply
+        let batch_result = index.apply_changes(&changes);
+
+        // Sequential apply
+        let mut sequential_result = index.clone();
+        for change in &changes {
+            sequential_result = sequential_result.apply_change(change.clone());
+        }
+
+        // Verify equivalence
+        assert_search_index_equals(&batch_result, &sequential_result);
+
+        // Verify infix search works correctly
+        assert_search_results_equal(&batch_result, &sequential_result, "gram");
+        assert_search_results_equal(&batch_result, &sequential_result, "est");
+    }
+
+    /// Test: Remove→Add in LegacyAllSuffix mode equals sequential apply_change.
+    ///
+    /// Verifies that Remove→Add in LegacyAllSuffix infix mode produces the same result
+    /// as applying the changes sequentially.
+    #[rstest]
+    fn apply_changes_equals_sequential_for_remove_then_add_legacy_suffix_mode() {
+        let config = SearchIndexConfig {
+            infix_mode: InfixMode::LegacyAllSuffix,
+            ..SearchIndexConfig::default()
+        };
+
+        let task_id = task_id_from_u128(112);
+        let task = create_test_task_with_id("Test Task for Legacy", task_id.clone());
+
+        // Initial state: task exists
+        let tasks: PersistentVector<Task> = vec![task.clone()].into_iter().collect();
+        let index = SearchIndex::build_with_config(&tasks, config);
+
+        // Remove then Add
+        let changes = vec![
+            TaskChange::Remove(task.task_id.clone()),
+            TaskChange::Add(task.clone()),
+        ];
+
+        // Batch apply
+        let batch_result = index.apply_changes(&changes);
+
+        // Sequential apply
+        let mut sequential_result = index.clone();
+        for change in &changes {
+            sequential_result = sequential_result.apply_change(change.clone());
+        }
+
+        // Verify equivalence
+        assert_search_index_equals(&batch_result, &sequential_result);
+
+        // Verify suffix search works correctly
+        assert_search_results_equal(&batch_result, &sequential_result, "egacy");
+        assert_search_results_equal(&batch_result, &sequential_result, "ask");
+    }
+
+    /// Test: Remove→Update without existing task equals sequential apply_change.
+    ///
+    /// Verifies that Remove (no-op when task doesn't exist) followed by Update
+    /// produces the same result as applying the changes sequentially.
+    #[rstest]
+    fn apply_changes_equals_sequential_for_remove_then_update_without_existing_task() {
+        let task_id = task_id_from_u128(113);
+        let old_task = create_test_task_with_id("Old Task", task_id.clone());
+        let new_task = create_test_task_with_id("New Task", task_id.clone());
+
+        // Initial state: empty (task does NOT exist)
+        let index = create_empty_index();
+
+        // Remove (no-op) then Update
+        let changes = vec![
+            TaskChange::Remove(old_task.task_id.clone()),
+            TaskChange::Update {
+                old: old_task.clone(),
+                new: new_task.clone(),
+            },
+        ];
+
+        // Batch apply
+        let batch_result = index.apply_changes(&changes);
+
+        // Sequential apply
+        let mut sequential_result = index.clone();
+        for change in &changes {
+            sequential_result = sequential_result.apply_change(change.clone());
+        }
+
+        // Verify equivalence
+        assert_search_index_equals(&batch_result, &sequential_result);
+    }
+
+    /// Test: Remove cancels only target task_id when multiple tasks share same key.
+    ///
+    /// Verifies that when multiple tasks are indexed under the same key,
+    /// removing one task only affects that specific task_id.
+    #[rstest]
+    fn apply_changes_cancel_only_target_task_id() {
+        let task_id_1 = task_id_from_u128(114);
+        let task_id_2 = task_id_from_u128(115);
+        // Both tasks have the same title (same index key)
+        let task_1 = create_test_task_with_id("Same Title", task_id_1.clone());
+        let task_2 = create_test_task_with_id("Same Title", task_id_2.clone());
+
+        // Initial state: both tasks exist
+        let tasks: PersistentVector<Task> =
+            vec![task_1.clone(), task_2.clone()].into_iter().collect();
+        let index = SearchIndex::build_with_config(&tasks, SearchIndexConfig::default());
+
+        // Remove task_1 only
+        let changes = vec![TaskChange::Remove(task_id_1.clone())];
+
+        // Batch apply
+        let batch_result = index.apply_changes(&changes);
+
+        // Sequential apply
+        let mut sequential_result = index.clone();
+        for change in &changes {
+            sequential_result = sequential_result.apply_change(change.clone());
+        }
+
+        // Verify equivalence
+        assert_search_index_equals(&batch_result, &sequential_result);
+
+        // task_1 should not exist, task_2 should still exist
+        assert!(!batch_result.tasks_by_id.contains_key(&task_id_1));
+        assert!(batch_result.tasks_by_id.contains_key(&task_id_2));
+
+        // Search for "Same Title" should still find task_2
+        let search_result = batch_result.search_by_title("Same Title");
+        assert!(search_result.is_some());
+        let search_results = search_result.unwrap();
+        assert!(!search_results.is_empty());
+        assert!(
+            search_results
+                .tasks()
+                .iter()
+                .any(|t| t.task_id == task_id_2)
+        );
+        assert!(
+            !search_results
+                .tasks()
+                .iter()
+                .any(|t| t.task_id == task_id_1)
+        );
     }
 }
 
