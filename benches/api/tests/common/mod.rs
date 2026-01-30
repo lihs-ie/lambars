@@ -20,7 +20,7 @@
 #![allow(dead_code)]
 
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, AtomicUsize};
 
 use arc_swap::ArcSwap;
 
@@ -68,6 +68,7 @@ pub fn create_test_app_state() -> AppState {
         cache_strategy: "read-through".to_string(),
         cache_ttl_seconds: 60,
         applied_config: AppliedConfig::default(),
+        search_index_rcu_retries: Arc::new(AtomicUsize::new(0)),
     }
 }
 
@@ -118,6 +119,7 @@ pub fn create_test_app_state_with_fail_injection(
         cache_strategy: "read-through".to_string(),
         cache_ttl_seconds: 60,
         applied_config: AppliedConfig::default(),
+        search_index_rcu_retries: Arc::new(AtomicUsize::new(0)),
     }
 }
 

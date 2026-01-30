@@ -1656,7 +1656,7 @@ mod handler_tests {
         use crate::api::bulk::BulkConfig;
         use crate::api::handlers::{AppliedConfig, create_stub_external_sources};
         use crate::infrastructure::RngProvider;
-        use std::sync::atomic::AtomicU64;
+        use std::sync::atomic::{AtomicU64, AtomicUsize};
 
         let external_sources = create_stub_external_sources();
 
@@ -1679,6 +1679,7 @@ mod handler_tests {
             cache_strategy: "read-through".to_string(),
             cache_ttl_seconds: 60,
             applied_config: AppliedConfig::default(),
+            search_index_rcu_retries: Arc::new(AtomicUsize::new(0)),
         }
     }
 

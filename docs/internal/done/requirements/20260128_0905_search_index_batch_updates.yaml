@@ -1,0 +1,138 @@
+# SearchIndex バッチ更新最適化 要件定義
+#
+# 概要:
+#   SearchIndex の更新を 1 件ずつ RCU 適用する方式を廃止し、
+#   変更集合を 1 回で適用するバッチ更新 API を提供する。
+#
+# 設計方針:
+#   1. 更新は純粋関数で合成し、RCU は 1 回の swap に限定する
+#   2. 変更の順序は入力順で保証し、結果の決定性を維持する
+#   3. bulk の I/O と計算を分離し、更新コストを最小化する
+#
+# 参照:
+#   - benches/api/src/api/bulk.rs
+#   - benches/api/src/api/handlers.rs
+#   - benches/results/profiling-investigation.yaml
+
+version: "1.0.0"
+name: "search_index_batch_updates"
+description: |
+  bulk_create_tasks / bulk_update_tasks における SearchIndex 更新を
+  1 件ずつ適用する方式からバッチ適用へ移行する。
+  変更集合を 1 回の RCU で反映することで、コピー/再構築回数を削減する。
+
+background:
+  problem: |
+    現行の update_search_index は TaskChange ごとに RCU を実行し、
+    SearchIndex の構築・コピー・ArcSwap を n 回繰り返している。
+    tasks_bulk / tasks_eff のレイテンシが秒単位に悪化する原因になっている。
+  motivation: |
+    バルク処理は「まとめて変更する」ことが本質であり、SearchIndex も
+    同一バッチに対して 1 回の構築で完了すべきである。
+  prior_art:
+    - name: "AppState::update_search_index"
+      description: "RCU を 1 件ずつ実行する現行実装。"
+    - name: "SearchIndex::apply_change"
+      description: "単一変更適用の純粋関数。"
+
+requirements:
+  # ======================================================================
+  # 1. バッチ適用 API の追加
+  # ======================================================================
+  - id: "REQ-SEARCH-BATCH-001"
+    name: "SearchIndex::apply_changes を追加する"
+    description: |
+      - TaskChange の配列を順序通りに適用し、新しい SearchIndex を返す。
+      - 変更順序は入力順で固定し、参照透過性を維持する。
+      - 空配列の場合は self.clone() を返す。
+
+    methods:
+      - name: "SearchIndex::apply_changes"
+        signature: "fn apply_changes(&self, changes: &[TaskChange]) -> SearchIndex"
+        description: |
+          - apply_change を内部でループせず、バッチ専用の高速経路を使用する。
+          - 変更に含まれる TaskId の重複は入力順に従って解決する。
+        examples:
+          - description: "バッチ適用"
+            code: |
+              let updated = index.apply_changes(&[change1, change2]);
+
+    implementations:
+      - type: "SearchIndex"
+        description: |
+          - バッチ適用は TransientBuilder を利用し、
+            変更集合を 1 回の永続化で確定する。
+
+  # ======================================================================
+  # 2. AppState のバッチ更新
+  # ======================================================================
+  - id: "REQ-SEARCH-BATCH-002"
+    name: "AppState にバッチ更新 API を追加する"
+    description: |
+      - AppState::update_search_index_batch を追加する。
+      - ArcSwap::rcu は 1 回のみ実行し、SearchIndex を一括更新する。
+      - 変更配列は clone せず、必要最小限のコピーで完結させる。
+
+    methods:
+      - name: "AppState::update_search_index_batch"
+        signature: "fn update_search_index_batch(&self, changes: &[TaskChange])"
+        description: |
+          - changes は参照で受け取り、rcu 内では読み取り専用とする。
+          - rcu のリトライ時も同一 changes を利用し、決定性を担保する。
+        examples:
+          - description: "bulk_create_tasks での使用"
+            code: |
+              let changes: Vec<TaskChange> = results.iter().filter_map(to_change).collect();
+              state.update_search_index_batch(&changes);
+
+    implementations:
+      - type: "AppState"
+        description: |
+          - update_search_index_batch は update_search_index の内部でのみ使用しない。
+          - bulk_create_tasks / bulk_update_tasks から直接呼び出す。
+
+  # ======================================================================
+  # 3. bulk エンドポイントの更新
+  # ======================================================================
+  - id: "REQ-SEARCH-BATCH-003"
+    name: "bulk エンドポイントでバッチ更新を必須化する"
+    description: |
+      - bulk_create_tasks: 成功した Task のみ変更集合に追加する。
+      - bulk_update_tasks: (old, new) のペアを TaskChange::Update に変換する。
+      - 変更集合の適用は 1 回のみとする。
+
+    methods:
+      - name: "bulk_create_tasks"
+        signature: "PUT /tasks/bulk"
+        description: |
+          - SearchIndex 更新は TaskChange の配列を 1 回で適用する。
+        examples:
+          - description: "更新集合の作成"
+            code: |
+              let changes = results.iter().filter_map(|r| r.to_task_change()).collect::<Vec<_>>();
+
+    implementations:
+      - type: "Bulk handlers"
+        description: |
+          - update_search_index の直接呼び出しは禁止。
+          - batch API のみを使用する。
+
+non_functional_requirements:
+  performance:
+    - "tasks_bulk の平均レイテンシを 12s -> 500ms 以下に削減する。"
+    - "tasks_eff の平均レイテンシを 7.9s -> 500ms 以下に削減する。"
+  compatibility:
+    - "既存の SearchIndex::apply_change は廃止せず、内部で利用可能とする。"
+  testing:
+    - "apply_changes と apply_change の逐次適用が同一結果になることをテストする。"
+    - "RCU リトライ時に変更が欠落しないことを競合テストで保証する。"
+
+future_extensions:
+  - id: "EXT-SEARCH-BATCH-001"
+    name: "非同期バッチ適用"
+    description: |
+      バッチ適用を非同期化し、書き込みが多い環境で
+      SearchIndex 更新をバックグラウンド化する。
+    rationale: |
+      現時点では SearchIndex 更新の同期性を優先し、
+      可観測性を簡潔に保つため。

@@ -591,7 +591,7 @@ pub async fn bulk_create_tasks(
         })
         .collect();
 
-    state.update_search_index_batch(changes);
+    state.update_search_index_batch(&changes);
 
     // Step 7: Aggregate results (pure)
     let response = aggregate_create_results(results);
@@ -667,7 +667,7 @@ pub async fn bulk_update_tasks(
         })
         .collect();
 
-    state.update_search_index_batch(changes);
+    state.update_search_index_batch(&changes);
 
     // Step 7: Aggregate results (pure)
     let response = aggregate_update_results(merged.results);
@@ -3116,6 +3116,7 @@ mod tests {
         use crate::api::handlers::{AppliedConfig, create_stub_external_sources};
         use crate::api::query::{SearchCache, SearchIndex};
         use crate::infrastructure::RngProvider;
+        use std::sync::atomic::AtomicUsize;
 
         fn create_app_state_with_bulk_config(bulk_config: BulkConfig) -> AppState {
             let external_sources = create_stub_external_sources();
@@ -3139,6 +3140,7 @@ mod tests {
                 cache_strategy: "read-through".to_string(),
                 cache_ttl_seconds: 60,
                 applied_config: AppliedConfig::default(),
+                search_index_rcu_retries: Arc::new(AtomicUsize::new(0)),
             }
         }
 

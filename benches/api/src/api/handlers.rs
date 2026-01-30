@@ -16,7 +16,7 @@
 //! 3. Converting `Task` to `TaskResponse` (which is `Send`) before returning
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use arc_swap::ArcSwap;
 use axum::{
@@ -191,6 +191,8 @@ pub struct AppState {
     ///
     /// Stores actual runtime configuration for `/debug/config` endpoint.
     pub applied_config: AppliedConfig,
+    /// Counter for RCU retry events due to CAS failure (testing/monitoring).
+    pub search_index_rcu_retries: Arc<AtomicUsize>,
 }
 
 impl Clone for AppState {
@@ -212,6 +214,7 @@ impl Clone for AppState {
             cache_strategy: self.cache_strategy.clone(),
             cache_ttl_seconds: self.cache_ttl_seconds,
             applied_config: self.applied_config.clone(),
+            search_index_rcu_retries: Arc::clone(&self.search_index_rcu_retries),
         }
     }
 }
@@ -422,6 +425,7 @@ impl AppState {
             cache_strategy: cache_config.strategy.to_string(),
             cache_ttl_seconds: cache_config.ttl_seconds,
             applied_config,
+            search_index_rcu_retries: Arc::new(AtomicUsize::new(0)),
         })
     }
 
@@ -463,7 +467,7 @@ impl AppState {
     ///
     /// # Arguments
     ///
-    /// * `changes` - A vector of `TaskChange` items to apply (Add, Update, or Remove).
+    /// * `changes` - A slice of `TaskChange` items to apply (Add, Update, or Remove).
     ///   If empty, returns immediately without modifying the index.
     ///
     /// # Concurrency
@@ -489,22 +493,34 @@ impl AppState {
     ///
     /// Uses `SearchIndex::apply_changes` internally, which computes a
     /// `SearchIndexDelta` to batch index modifications efficiently.
-    #[allow(clippy::needless_pass_by_value)] // Ownership semantics preferred for API consistency
-    pub fn update_search_index_batch(&self, changes: Vec<TaskChange>) {
+    pub fn update_search_index_batch(&self, changes: &[TaskChange]) {
         if changes.is_empty() {
             return;
         }
 
         let change_count = changes.len();
         let total_start = std::time::Instant::now();
-        let mut apply_changes_us: u128 = 0;
+        let mut retry_count: u64 = 0;
+        let apply_changes_us;
 
-        self.search_index.rcu(|current| {
+        loop {
+            let current = self.search_index.load();
             let apply_start = std::time::Instant::now();
-            let updated = current.apply_changes(&changes);
-            apply_changes_us = apply_start.elapsed().as_micros();
-            Arc::new(updated)
-        });
+            let updated = Arc::new(current.apply_changes(changes));
+            let elapsed = apply_start.elapsed().as_micros();
+
+            let previous = self
+                .search_index
+                .compare_and_swap(&current, Arc::clone(&updated));
+
+            if Arc::ptr_eq(&previous, &current) {
+                apply_changes_us = elapsed;
+                break;
+            }
+            retry_count += 1;
+            self.search_index_rcu_retries
+                .fetch_add(1, Ordering::Relaxed);
+        }
 
         let total_elapsed = total_start.elapsed();
 
@@ -514,6 +530,7 @@ impl AppState {
             apply_changes_us = apply_changes_us,
             total_us = total_elapsed.as_micros(),
             total_ms = total_elapsed.as_millis(),
+            retry_count = retry_count,
             "update_search_index_batch completed"
         );
     }
@@ -1177,7 +1194,7 @@ mod tests {
         use crate::infrastructure::RngProvider;
         use arc_swap::ArcSwap;
         use lambars::persistent::PersistentVector;
-        use std::sync::atomic::AtomicU64;
+        use std::sync::atomic::{AtomicU64, AtomicUsize};
 
         let external_sources = super::create_stub_external_sources();
 
@@ -1200,6 +1217,7 @@ mod tests {
             cache_strategy: "read-through".to_string(),
             cache_ttl_seconds: 60,
             applied_config: AppliedConfig::default(),
+            search_index_rcu_retries: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -1210,7 +1228,7 @@ mod tests {
         use crate::infrastructure::RngProvider;
         use arc_swap::ArcSwap;
         use lambars::persistent::PersistentVector;
-        use std::sync::atomic::AtomicU64;
+        use std::sync::atomic::{AtomicU64, AtomicUsize};
 
         let external_sources = super::create_stub_external_sources();
 
@@ -1233,6 +1251,7 @@ mod tests {
             cache_strategy: "read-through".to_string(),
             cache_ttl_seconds: 60,
             applied_config: AppliedConfig::default(),
+            search_index_rcu_retries: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -1829,7 +1848,7 @@ mod tests {
         ];
 
         // Act
-        state.update_search_index_batch(changes);
+        state.update_search_index_batch(&changes);
 
         // Assert: Verify that all tasks were added to the search index
         let index = state.search_index.load();
@@ -1866,8 +1885,8 @@ mod tests {
         let initial_task = Task::new(TaskId::generate(), "Initial Task", Timestamp::now());
         state.update_search_index(TaskChange::Add(initial_task.clone()));
 
-        // Act: Call with empty vector
-        state.update_search_index_batch(vec![]);
+        // Act: Call with empty slice
+        state.update_search_index_batch(&[]);
 
         // Assert: Index should still contain the initial task
         let index_after = state.search_index.load();
@@ -1906,7 +1925,7 @@ mod tests {
         ];
 
         // Act
-        state.update_search_index_batch(changes);
+        state.update_search_index_batch(&changes);
 
         // Assert
         let index = state.search_index.load();
@@ -1948,7 +1967,7 @@ mod tests {
         let task = Task::new(TaskId::generate(), "Single Task", Timestamp::now());
 
         // Act
-        state.update_search_index_batch(vec![TaskChange::Add(task.clone())]);
+        state.update_search_index_batch(&[TaskChange::Add(task.clone())]);
 
         // Assert
         let index = state.search_index.load();
@@ -1958,6 +1977,176 @@ mod tests {
         let tasks = result.tasks();
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks.iter().next().unwrap().task_id, task.task_id);
+    }
+
+    /// RCU リトライ時に変更が欠落しないことを検証する競合テスト
+    ///
+    /// # テスト戦略
+    ///
+    /// 1. Barrier で全スレッドの同期開始を保証
+    /// 2. 各スレッドが複数回のバッチ更新を実行（リトライ発生を誘発）
+    /// 3. 各スレッドで生成した `TaskId` を収集（事後検証用）
+    /// 4. 全スレッド完了後、`all_tasks()` の `TaskId` セットと照合して欠落を検出
+    ///
+    /// # RCU の競合とリトライ
+    ///
+    /// `ArcSwap::rcu` は Compare-And-Swap (CAS) を使用した楽観的並行制御を行う。
+    /// 複数スレッドが同時に更新を試みると、一部のスレッドは CAS 失敗により
+    /// リトライを行う。このテストは、リトライ時に変更が欠落しないことを検証する。
+    ///
+    /// # RCU リトライの確認方法
+    ///
+    /// `RUST_LOG=search_index_batch=trace` でテストを実行すると、
+    /// `update_search_index_batch completed` ログで各バッチ更新の詳細を確認可能。
+    /// 競合が発生した場合、`apply_changes_us` が長くなる傾向がある。
+    ///
+    /// ```bash
+    /// RUST_LOG=search_index_batch=trace cargo test test_update_search_index_batch_concurrent_rcu_no_lost_changes -- --nocapture
+    /// ```
+    ///
+    /// # 実装ノート
+    ///
+    /// `std::sync::Barrier` を使用するため、`std::thread::spawn` で OS スレッドを
+    /// 生成して並行実行する。Tokio の非同期コンテキストでは `Barrier::wait()` が
+    /// ブロッキング呼び出しとなりデッドロックを引き起こすため、OS スレッドを使用する。
+    #[rstest]
+    #[tokio::test]
+    async fn test_update_search_index_batch_concurrent_rcu_no_lost_changes() {
+        use std::collections::HashSet;
+        use std::sync::{Arc, Barrier, Mutex};
+        use std::thread;
+
+        // Configuration: 8 threads x 20 batches x 5 tasks = 800 total tasks
+        // High thread count and batch count to maximize contention probability
+        let thread_count: usize = 8;
+        let batches_per_thread: usize = 20;
+        let tasks_per_batch: usize = 5;
+        let total_expected_tasks = thread_count * batches_per_thread * tasks_per_batch;
+
+        // Create empty AppState (no initial tasks)
+        let state = Arc::new(create_default_app_state());
+
+        // Barrier to synchronize all threads to start at the same time
+        // Note: Using std::sync::Barrier (not tokio::sync::Barrier) as specified
+        let barrier = Arc::new(Barrier::new(thread_count));
+
+        // Collect all generated TaskIds from each thread for verification
+        // Using Mutex<Vec<(TaskId, String)>> to store (task_id, title) pairs
+        let generated_tasks: Arc<Mutex<Vec<(TaskId, String)>>> = Arc::new(Mutex::new(Vec::new()));
+
+        // Spawn OS threads for true concurrent execution with blocking Barrier
+        let handles: Vec<_> = (0..thread_count)
+            .map(|thread_index| {
+                let state = Arc::clone(&state);
+                let barrier = Arc::clone(&barrier);
+                let generated_tasks = Arc::clone(&generated_tasks);
+
+                thread::spawn(move || {
+                    // Wait for all threads to be ready
+                    barrier.wait();
+
+                    for batch_index in 0..batches_per_thread {
+                        // Create unique tasks for this batch and collect their info
+                        let mut batch_task_info: Vec<(TaskId, String)> = Vec::new();
+                        let changes: Vec<TaskChange> = (0..tasks_per_batch)
+                            .map(|task_index| {
+                                // Generate unique task with identifiable title
+                                // Format: "Task_T{thread}_B{batch}_I{task}"
+                                let title =
+                                    format!("Task_T{thread_index}_B{batch_index}_I{task_index}");
+                                let task_id = TaskId::generate();
+                                let task =
+                                    Task::new(task_id.clone(), title.clone(), Timestamp::now());
+
+                                // Record task info for later verification
+                                batch_task_info.push((task_id, title));
+
+                                TaskChange::Add(task)
+                            })
+                            .collect();
+
+                        // Store task info before applying (in case of panic during update)
+                        {
+                            let mut guard = generated_tasks.lock().unwrap();
+                            guard.extend(batch_task_info);
+                        }
+
+                        // Apply batch update (may trigger RCU retry under contention)
+                        state.update_search_index_batch(&changes);
+                    }
+                })
+            })
+            .collect();
+
+        // Wait for all threads to complete
+        for handle in handles {
+            handle.join().expect("Thread should complete without panic");
+        }
+
+        // Retrieve all generated task info
+        let all_generated_tasks = generated_tasks.lock().unwrap().clone();
+        let expected_task_ids: HashSet<TaskId> = all_generated_tasks
+            .iter()
+            .map(|(task_id, _)| task_id.clone())
+            .collect();
+
+        // Verify: All tasks must be present in the search index using all_tasks()
+        let index = state.search_index.load();
+        let all_tasks_in_index = index.all_tasks();
+        let actual_task_ids: HashSet<TaskId> = all_tasks_in_index
+            .iter()
+            .map(|task| task.task_id.clone())
+            .collect();
+
+        // Primary assertion: count matches
+        assert_eq!(
+            actual_task_ids.len(),
+            total_expected_tasks,
+            "Expected {total_expected_tasks} tasks but found {}. RCU retry may have lost changes.",
+            actual_task_ids.len()
+        );
+
+        // Secondary assertion: all expected TaskIds are present
+        let missing_task_ids: Vec<&TaskId> = expected_task_ids
+            .iter()
+            .filter(|id| !actual_task_ids.contains(*id))
+            .collect();
+
+        if !missing_task_ids.is_empty() {
+            // Find titles of missing tasks for better error messages
+            let missing_tasks: Vec<&str> = all_generated_tasks
+                .iter()
+                .filter(|(id, _)| missing_task_ids.contains(&id))
+                .map(|(_, title)| title.as_str())
+                .collect();
+
+            panic!(
+                "Missing {} tasks in search index. RCU retry lost these changes: {:?}",
+                missing_task_ids.len(),
+                missing_tasks
+            );
+        }
+
+        // Tertiary assertion: no unexpected tasks exist
+        let unexpected_task_ids: Vec<&TaskId> = actual_task_ids
+            .iter()
+            .filter(|id| !expected_task_ids.contains(*id))
+            .collect();
+
+        assert!(
+            unexpected_task_ids.is_empty(),
+            "Found {} unexpected tasks in search index: {:?}",
+            unexpected_task_ids.len(),
+            unexpected_task_ids
+        );
+
+        // Verify that at least one RCU retry occurred (proving contention)
+        let retry_count = state.search_index_rcu_retries.load(Ordering::Relaxed);
+        assert!(
+            retry_count > 0,
+            "Expected at least one RCU retry due to contention, but got {retry_count}. \
+             Increase thread_count or batches_per_thread to force contention."
+        );
     }
 
     // -------------------------------------------------------------------------
