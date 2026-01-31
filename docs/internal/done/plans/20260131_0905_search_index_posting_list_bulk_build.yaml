@@ -1,0 +1,615 @@
+# SearchIndex posting list bulk build - Implementation Plan
+#
+# Based on requirements: 20260131_0905_search_index_posting_list_bulk_build.yaml (v1.1.0)
+#
+# Overview:
+#   This plan details the implementation of bulk construction paths for
+#   OrderedUniqueSet (TaskIdCollection) and PersistentVector to eliminate
+#   per-element COW overhead in SearchIndex merge operations.
+#
+# Codex Review: 2026-01-31
+#   - Applied: High priority issue about sorted merge preconditions
+#   - Applied: Medium priority issue about SmallVec heap allocation
+#   - Applied: Medium priority issue about iter_sorted allocation overhead
+#   - Deferred: REQ-SEARCH-BULK-004 metrics to future extension (not required for baseline recovery)
+
+version: "1.1.0"
+name: "search_index_posting_list_bulk_build"
+requirement_version: "1.1.0"
+
+# =============================================================================
+# Implementation Phases
+# =============================================================================
+
+phases:
+  - id: "PHASE-1"
+    name: "OrderedUniqueSet Bulk Constructors"
+    description: |
+      Add bulk construction APIs to OrderedUniqueSet that consume pre-sorted,
+      deduplicated inputs without per-element persistent clones.
+    requirements:
+      - "REQ-SEARCH-BULK-001"
+    estimated_effort: "2-3 hours"
+
+  - id: "PHASE-2"
+    name: "PersistentVector from_vec API"
+    description: |
+      Expose PersistentVector::from_vec as a public API and optimize from_iter
+      for exact-size iterators.
+    requirements:
+      - "REQ-PV-BULK-001"
+    estimated_effort: "1-2 hours"
+
+  - id: "PHASE-3"
+    name: "SearchIndex Delta Merge Optimization"
+    description: |
+      Update SearchIndex merge paths to use bulk constructors and sorted merge,
+      eliminating HashSet + sort/dedup overhead.
+    requirements:
+      - "REQ-SEARCH-BULK-002"
+      - "REQ-SEARCH-BULK-003"
+    estimated_effort: "2-3 hours"
+    depends_on:
+      - "PHASE-1"
+      - "PHASE-2"
+
+  - id: "PHASE-4"
+    name: "Metrics (Deferred)"
+    description: |
+      Add bench-metrics feature gate and SearchIndexMergeMetrics for validation.
+      Deferred to future extension - not required for baseline performance recovery.
+    requirements:
+      - "REQ-SEARCH-BULK-004"
+    estimated_effort: "1 hour"
+    deferred: true
+    rationale: |
+      Metrics collection is optional for performance recovery. The primary goal
+      is to restore baseline throughput, which can be validated using existing
+      benchmark tooling without additional metrics infrastructure.
+
+# =============================================================================
+# Detailed Task Breakdown
+# =============================================================================
+
+tasks:
+  # ---------------------------------------------------------------------------
+  # PHASE-1: OrderedUniqueSet Bulk Constructors
+  # ---------------------------------------------------------------------------
+
+  - id: "TASK-001"
+    phase: "PHASE-1"
+    category: "rust-lambars"
+    name: "Add OrderedUniqueSet::from_sorted_iter"
+    description: |
+      Implement bulk constructor that consumes a sorted, deduplicated iterator.
+      Uses SmallVec for small collections to avoid heap allocation (Codex review feedback).
+    file: "src/persistent/ordered_unique_set.rs"
+    implementation:
+      signature: |
+        pub fn from_sorted_iter<I>(iter: I) -> Self
+        where
+            T: Clone + Eq + Hash + Ord,
+            I: IntoIterator<Item = T>
+      behavior:
+        - "Start with SmallVec accumulation (no heap for <= 8 elements)"
+        - "If accumulator exceeds SMALL_THRESHOLD during iteration:"
+        - "  - Drain SmallVec into Vec"
+        - "  - Continue collecting remaining elements into Vec"
+        - "  - Build PersistentHashSet from Vec"
+        - "If accumulator stays <= SMALL_THRESHOLD: use SmallVec directly"
+        - "Add debug_assert! to verify ascending order in debug builds"
+      algorithm: |
+        const PANIC_MSG: &str = "from_sorted_* requires strictly increasing elements";
+
+        let mut small_buffer: SmallVec<[T; SMALL_THRESHOLD]> = SmallVec::new();
+        let mut iter = iter.into_iter();
+
+        // Phase 1: Try to fill SmallVec
+        for element in iter.by_ref() {
+            debug_assert!(
+                small_buffer.last().map_or(true, |last| last < &element),
+                "{}", PANIC_MSG
+            );
+            if small_buffer.len() >= SMALL_THRESHOLD {
+                // Promote to Large path
+                let mut vec: Vec<T> = small_buffer.drain(..).collect();
+                vec.push(element);
+                vec.extend(iter);
+                debug_assert_sorted_and_unique(&vec, PANIC_MSG);
+                return Self::from_large_vec(vec);
+            }
+            small_buffer.push(element);
+        }
+
+        // Stayed in Small path
+        if small_buffer.is_empty() {
+            Self::new()
+        } else {
+            debug_assert_sorted_and_unique(&small_buffer, PANIC_MSG);
+            Self { inner: OrderedUniqueSetInner::Small(small_buffer) }
+        }
+      complexity: "O(n) for both Small and Large paths"
+      notes:
+        - "T: Ord constraint required for debug_assert order validation"
+        - "Internal API - SearchIndex is the only caller"
+        - "Invalid input: panic in debug, undefined in release"
+        - "No heap allocation for Small state (Codex review fix)"
+    tests:
+      - "from_sorted_iter with empty iterator returns Empty state"
+      - "from_sorted_iter with 1-8 elements returns Small state"
+      - "from_sorted_iter with 9+ elements returns Large state"
+      - "from_sorted_iter preserves all elements"
+      - "from_sorted_iter with unsorted input panics in debug mode [#[cfg(debug_assertions)]]"
+      - "from_sorted_iter with duplicate input panics in debug mode [#[cfg(debug_assertions)]]"
+      - "iter_sorted on result yields elements in original order"
+    test_notes: |
+      Tests for debug_assert panic behavior MUST use #[cfg(debug_assertions)] guard:
+      ```rust
+      #[rstest]
+      #[cfg(debug_assertions)]
+      #[should_panic(expected = "strictly increasing")]
+      fn from_sorted_iter_unsorted_panics_in_debug() {
+          let _ = OrderedUniqueSet::from_sorted_iter([3, 1, 2]);
+      }
+      ```
+    depends_on: []
+
+  - id: "TASK-002"
+    phase: "PHASE-1"
+    category: "rust-lambars"
+    name: "Add OrderedUniqueSet::from_sorted_vec"
+    description: |
+      Implement bulk constructor that consumes a Vec<T> directly.
+    file: "src/persistent/ordered_unique_set.rs"
+    implementation:
+      signature: |
+        pub fn from_sorted_vec(vec: Vec<T>) -> Self
+        where
+            T: Clone + Eq + Hash + Ord
+      behavior:
+        - "If vec.is_empty(): return Empty state"
+        - "If vec.len() <= SMALL_THRESHOLD: convert to SmallVec (may reuse allocation)"
+        - "If vec.len() > SMALL_THRESHOLD: build PersistentHashSet directly"
+        - "Add debug_assert! to verify ascending order and no duplicates"
+      complexity: "O(n) for both Small and Large paths"
+      notes:
+        - "Avoids extra allocation compared to from_sorted_iter when caller has Vec"
+        - "SmallVec::from_vec can reuse heap allocation in some cases"
+    tests:
+      - "from_sorted_vec with empty vec returns Empty state"
+      - "from_sorted_vec with 1-8 elements returns Small state"
+      - "from_sorted_vec with 9+ elements returns Large state"
+      - "from_sorted_vec with unsorted vec panics in debug mode"
+      - "from_sorted_vec preserves all elements"
+    depends_on:
+      - "TASK-001"
+
+  - id: "TASK-003"
+    phase: "PHASE-1"
+    category: "rust-lambars"
+    name: "Add helper for debug order validation"
+    description: |
+      Create internal helper function for validating sorted/deduped invariant.
+    file: "src/persistent/ordered_unique_set.rs"
+    implementation:
+      function: |
+        #[inline]
+        fn debug_assert_sorted_and_unique<T: Ord>(slice: &[T], message: &str) {
+            debug_assert!(
+                slice.windows(2).all(|w| w[0] < w[1]),
+                "{}", message
+            );
+        }
+      notes:
+        - "Only runs in debug builds"
+        - "Checks strictly increasing (sorted AND unique)"
+        - "O(n) cost acceptable for debug builds"
+        - "Message parameter allows consistent error messages across call sites"
+    depends_on: []
+
+  # ---------------------------------------------------------------------------
+  # PHASE-2: PersistentVector from_vec API
+  # ---------------------------------------------------------------------------
+
+  - id: "TASK-004"
+    phase: "PHASE-2"
+    category: "rust-lambars"
+    name: "Expose PersistentVector::from_vec as public API"
+    description: |
+      Make build_persistent_vector_from_vec_no_clone available as a public method.
+    file: "src/persistent/vector.rs"
+    implementation:
+      signature: |
+        pub fn from_vec(vec: Vec<T>) -> Self
+      behavior:
+        - "Delegate to existing build_persistent_vector_from_vec_no_clone"
+        - "Handle empty vec case"
+        - "No Clone bound required"
+      complexity: "O(n)"
+      notes:
+        - "Existing implementation already handles all cases correctly"
+        - "Just need to add pub method wrapper"
+    tests:
+      - "from_vec with empty vec returns empty PersistentVector"
+      - "from_vec with small vec (< BRANCHING_FACTOR) stores in tail"
+      - "from_vec with large vec builds proper tree structure"
+      - "from_vec preserves element order"
+      - "from_vec result equals TransientVector path result"
+    depends_on: []
+
+  - id: "TASK-005"
+    phase: "PHASE-2"
+    category: "rust-lambars"
+    name: "Optimize FromIterator to use from_vec for exact-size iterators"
+    description: |
+      Update FromIterator implementation to detect exact-size iterators
+      and use from_vec path for better performance.
+    file: "src/persistent/vector.rs"
+    implementation:
+      behavior:
+        - "Check size_hint(): if lower == upper and Some(size) is returned"
+        - "If exact size >= BRANCHING_FACTOR * 2: collect to Vec, call from_vec"
+        - "Otherwise: use existing TransientVector path"
+      complexity: "O(n) for both paths"
+      notes:
+        - "Threshold of BRANCHING_FACTOR * 2 (64) balances overhead vs benefit"
+        - "Vec.into_iter() provides exact size_hint"
+        - "Range iterators provide exact size_hint"
+    tests:
+      - "from_iter with exact-size iterator uses from_vec path (large)"
+      - "from_iter with small exact-size iterator uses transient path"
+      - "from_iter with inexact size_hint uses transient path"
+      - "from_iter result identical regardless of path taken"
+    depends_on:
+      - "TASK-004"
+
+  # ---------------------------------------------------------------------------
+  # PHASE-3: SearchIndex Delta Merge Optimization
+  # ---------------------------------------------------------------------------
+
+  - id: "TASK-006"
+    phase: "PHASE-3"
+    category: "rust-benches-api"
+    name: "Update merge_index_delta to use from_sorted_vec"
+    description: |
+      Replace fold + insert loop with OrderedUniqueSet::from_sorted_vec.
+    file: "benches/api/src/api/query.rs"
+    implementation:
+      current_code: |
+        let collection = merged
+            .into_iter()
+            .fold(TaskIdCollection::new(), |accumulator, id| {
+                accumulator.insert(id)
+            });
+      new_code: |
+        let collection = TaskIdCollection::from_sorted_vec(merged);
+      notes:
+        - "merged Vec is already sorted and deduped by compute_merged_posting_list_*"
+        - "Single O(n) construction instead of O(n) * O(1) inserts with COW"
+    depends_on:
+      - "TASK-002"
+
+  - id: "TASK-007"
+    phase: "PHASE-3"
+    category: "rust-benches-api"
+    name: "Update merge_ngram_delta to use from_sorted_vec"
+    description: |
+      Replace fold + insert loop with OrderedUniqueSet::from_sorted_vec.
+    file: "benches/api/src/api/query.rs"
+    implementation:
+      current_code: |
+        let collection = merged
+            .into_iter()
+            .fold(TaskIdCollection::new(), |accumulator, id| {
+                accumulator.insert(id)
+            });
+      new_code: |
+        let collection = TaskIdCollection::from_sorted_vec(merged);
+      notes:
+        - "Same change as merge_index_delta"
+    depends_on:
+      - "TASK-002"
+
+  - id: "TASK-008"
+    phase: "PHASE-3"
+    category: "rust-benches-api"
+    name: "Update finalize_ngram_index to use from_sorted_vec"
+    description: |
+      Replace fold + insert loop with OrderedUniqueSet::from_sorted_vec.
+    file: "benches/api/src/api/query.rs"
+    implementation:
+      current_code: |
+        let collection: TaskIdCollection = task_ids
+            .into_iter()
+            .fold(TaskIdCollection::new(), |accumulator, id| {
+                accumulator.insert(id)
+            });
+      new_code: |
+        let collection = TaskIdCollection::from_sorted_vec(task_ids);
+      notes:
+        - "task_ids is sorted/deduped before this point"
+    depends_on:
+      - "TASK-002"
+
+  - id: "TASK-009A"
+    phase: "PHASE-3"
+    category: "rust-lambars"
+    name: "Add OrderedUniqueSet::to_sorted_vec for extraction"
+    description: |
+      Add API to extract sorted Vec<T>.
+      Note: Due to PersistentHashSet API limitations, Large state still requires
+      clone + collect + sort. This is semantically clearer than iter_sorted().cloned().collect()
+      but has similar allocation characteristics.
+    file: "src/persistent/ordered_unique_set.rs"
+    implementation:
+      signature: |
+        pub fn to_sorted_vec(&self) -> Vec<T>
+        where
+            T: Clone + Eq + Hash + Ord
+      behavior:
+        - "Empty: return Vec::new()"
+        - "Small: clone SmallVec to Vec, sort in-place, return"
+        - "Large: collect cloned elements from iter into Vec, sort in-place, return"
+      notes:
+        - "Semantically clearer API than iter_sorted().cloned().collect()"
+        - "Large state: same allocation cost as current approach"
+        - "Future optimization: add PersistentHashSet::into_vec if needed"
+      future_optimization: |
+        If profiling shows significant overhead, consider:
+        1. Add PersistentHashSet::into_vec_unsorted() that returns owned Vec
+        2. Add OrderedUniqueSet::into_sorted_vec() that consumes self
+        For now, to_sorted_vec() is sufficient for correctness.
+    tests:
+      - "to_sorted_vec returns empty vec for Empty state"
+      - "to_sorted_vec returns sorted vec for Small state"
+      - "to_sorted_vec returns sorted vec for Large state"
+      - "to_sorted_vec preserves original collection"
+    depends_on:
+      - "TASK-001"
+
+# TASK-009B merged into TASK-009A (single to_sorted_vec API is sufficient)
+
+  - id: "TASK-009"
+    phase: "PHASE-3"
+    category: "rust-benches-api"
+    name: "Switch merge paths to use compute_merged_posting_list_sorted"
+    description: |
+      Replace compute_merged_posting_list_iter with compute_merged_posting_list_sorted
+      in merge_index_delta and merge_ngram_delta.
+    file: "benches/api/src/api/query.rs"
+    implementation:
+      changes:
+        - location: "merge_index_delta"
+          before: |
+            let existing_iter = acc.get(key_str).into_iter().flat_map(|v| v.iter());
+            let merged = Self::compute_merged_posting_list_iter(
+                existing_iter,
+                add.get(key).map_or(&[], Vec::as_slice),
+                remove.get(key).map_or(&[], Vec::as_slice),
+            );
+          after: |
+            let existing: Vec<TaskId> = acc.get(key_str)
+                .map(|c| c.to_sorted_vec())
+                .unwrap_or_default();
+            let merged = Self::compute_merged_posting_list_sorted(
+                &existing,
+                add.get(key).map_or(&[], Vec::as_slice),
+                remove.get(key).map_or(&[], Vec::as_slice),
+            );
+        - location: "merge_ngram_delta"
+          before: |
+            let existing_iter = result.get(key_str).into_iter().flat_map(|v| v.iter());
+            let merged = Self::compute_merged_posting_list_iter(
+                existing_iter,
+                ...
+          after: |
+            let existing: Vec<TaskId> = result.get(key_str)
+                .map(|c| c.to_sorted_vec())
+                .unwrap_or_default();
+            let merged = Self::compute_merged_posting_list_sorted(
+                &existing,
+                ...
+      preconditions: |
+        IMPORTANT: apply_delta requires SearchIndexDelta to be pre-processed via
+        prepare_posting_lists() before calling. This is enforced by:
+        1. apply_changes calls prepare_posting_lists before apply_delta
+        2. apply_changes_with_metrics calls prepare_posting_lists before apply_delta
+        3. Direct apply_delta callers MUST call prepare_posting_lists first (documented)
+      notes:
+        - "to_sorted_vec() ensures sorted input for merge algorithm"
+        - "Removes HashSet allocation and sort/dedup in merge path"
+        - "Large state has O(n log n) sort cost but merge is O(n)"
+        - "Add debug_assert in merge functions to validate sorted input"
+    depends_on:
+      - "TASK-006"
+      - "TASK-007"
+      - "TASK-009A"
+
+  - id: "TASK-009C"
+    phase: "PHASE-3"
+    category: "rust-benches-api"
+    name: "Add debug_assert for sorted merge preconditions"
+    description: |
+      Add debug assertions to validate that ALL input slices (existing, add, remove)
+      are sorted and deduplicated. Addresses Codex review feedback.
+    file: "benches/api/src/api/query.rs"
+    implementation:
+      locations:
+        - "compute_merged_posting_list_sorted"
+      code: |
+        // Helper function for validation
+        fn is_sorted_and_unique<T: Ord>(slice: &[T]) -> bool {
+            slice.windows(2).all(|w| w[0] < w[1])
+        }
+
+        debug_assert!(
+            is_sorted_and_unique(existing),
+            "existing slice must be sorted and deduplicated"
+        );
+        debug_assert!(
+            is_sorted_and_unique(add),
+            "add slice must be sorted and deduplicated"
+        );
+        debug_assert!(
+            is_sorted_and_unique(remove),
+            "remove slice must be sorted and deduplicated"
+        );
+      documentation: |
+        Update apply_delta docstring to explicitly state:
+        "# Preconditions
+        The delta must be pre-processed via `prepare_posting_lists()` before
+        calling this method. Failing to do so results in undefined behavior
+        (incorrect merge results) in release builds and panics in debug builds.
+
+        Additionally, existing posting lists (from TaskIdCollection) must be
+        accessed via `to_sorted_vec()` to ensure sorted order."
+      notes:
+        - "existing is validated because it comes from to_sorted_vec()"
+        - "add/remove are validated because they should come from prepare_posting_lists()"
+        - "All three inputs must satisfy the sorted/unique invariant"
+    depends_on:
+      - "TASK-009"
+
+  - id: "TASK-010"
+    phase: "PHASE-3"
+    category: "rust-benches-api"
+    name: "Remove dead_code attribute from compute_merged_posting_list_sorted"
+    description: |
+      Remove #[allow(dead_code)] now that the function is used.
+    file: "benches/api/src/api/query.rs"
+    implementation:
+      before: |
+        #[allow(dead_code)]
+        fn compute_merged_posting_list_sorted(
+      after: |
+        fn compute_merged_posting_list_sorted(
+    depends_on:
+      - "TASK-009"
+
+  # ---------------------------------------------------------------------------
+  # PHASE-4: Metrics (Optional)
+  # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+  # PHASE-4: Metrics (Deferred)
+  # ---------------------------------------------------------------------------
+  # These tasks are deferred to a future iteration. They are not required for
+  # baseline performance recovery and can be implemented if additional
+  # observability is needed.
+
+  # - id: "TASK-011" (DEFERRED)
+  #   name: "Add bench-metrics feature gate"
+  #   rationale: "Existing benchmark tooling sufficient for validation"
+
+  # - id: "TASK-012" (DEFERRED)
+  #   name: "Add SearchIndexMergeMetrics struct"
+  #   rationale: "Can be added later if fine-grained metrics are needed"
+
+# =============================================================================
+# Implementation Order (Dependency Graph)
+# =============================================================================
+
+implementation_order:
+  - step: 1
+    tasks:
+      - "TASK-003"  # debug_assert helper (no deps)
+      - "TASK-004"  # PersistentVector::from_vec (no deps)
+    parallel: true
+
+  - step: 2
+    tasks:
+      - "TASK-001"  # OrderedUniqueSet::from_sorted_iter
+    depends_on: ["TASK-003"]
+
+  - step: 3
+    tasks:
+      - "TASK-002"  # OrderedUniqueSet::from_sorted_vec
+      - "TASK-005"  # FromIterator optimization
+    depends_on: ["TASK-001", "TASK-004"]
+    parallel: true
+
+  - step: 4
+    tasks:
+      - "TASK-009A"  # OrderedUniqueSet::to_sorted_vec
+    depends_on: ["TASK-001"]
+
+  - step: 5
+    tasks:
+      - "TASK-006"  # merge_index_delta update
+      - "TASK-007"  # merge_ngram_delta update
+      - "TASK-008"  # finalize_ngram_index update
+    depends_on: ["TASK-002"]
+    parallel: true
+
+  - step: 6
+    tasks:
+      - "TASK-009"  # Switch to sorted merge
+      - "TASK-009C"  # Add debug_assert for preconditions
+      - "TASK-010"  # Remove dead_code
+    depends_on: ["TASK-006", "TASK-007", "TASK-009A"]
+
+# PHASE-4 (Metrics) is deferred - not implemented in this iteration
+
+# =============================================================================
+# Testing Strategy
+# =============================================================================
+
+testing:
+  unit_tests:
+    - location: "src/persistent/ordered_unique_set.rs"
+      tests:
+        - "from_sorted_iter correctness"
+        - "from_sorted_vec correctness"
+        - "State transitions (Empty/Small/Large)"
+        - "Debug assert panic on unsorted/duplicate input"
+        - "iter_sorted ordering preservation"
+    - location: "src/persistent/vector.rs"
+      tests:
+        - "from_vec correctness"
+        - "FromIterator exact-size optimization"
+        - "Equivalence with TransientVector path"
+
+  integration_tests:
+    - location: "benches/api/src/api/query.rs"
+      tests:
+        - "merge_index_delta produces same results as before"
+        - "merge_ngram_delta produces same results as before"
+        - "finalize_ngram_index produces same results as before"
+        - "SearchIndex batch operations produce correct results"
+
+  property_tests:
+    - description: "from_sorted_* matches fold+insert for valid inputs"
+    - description: "merge_index_delta matches sequential apply_change"
+
+# =============================================================================
+# Validation Criteria
+# =============================================================================
+
+validation:
+  correctness:
+    - "All existing tests pass"
+    - "Search results identical to baseline"
+    - "Posting list ordering deterministic"
+
+  performance:
+    - metric: "tasks_bulk RPS"
+      target: ">= 140"
+      current: "regressed"
+    - metric: "tasks_bulk Avg Latency"
+      target: "<= 12.0s"
+      current: "regressed"
+    - metric: "tasks_eff RPS"
+      target: ">= 470"
+      current: "regressed"
+    - metric: "tasks_eff Avg Latency"
+      target: "<= 8.0s"
+      current: "regressed"
+    - metric: "TransientVector::push_back profile share"
+      target: "<= 5%"
+      current: "high"
+    - metric: "Vec::from_iter profile share"
+      target: "<= 5%"
+      current: "high"
+    - metric: "Arc::drop_slow profile share"
+      target: "<= 8%"
+      current: "high"

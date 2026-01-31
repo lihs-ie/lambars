@@ -90,10 +90,15 @@ jobs:
       - name: Check if iai benchmarks exist in main
         id: check-benchmarks
         run: |
-          if [ -f "benches/iai/persistent_vector_iai.rs" ]; then
+          if [ -d "benches/iai" ]; then
             echo "benchmarks_exist=true" >> $GITHUB_OUTPUT
+            # Extract IAI benchmark names from Cargo.toml
+            MAIN_BENCHMARKS=$(grep -B2 'path = "benches/iai/' Cargo.toml | grep 'name = ' | sed 's/.*"\(.*\)"/\1/' | tr '\n' ' ')
+            echo "main_benchmarks=$MAIN_BENCHMARKS" >> $GITHUB_OUTPUT
+            echo "Main branch IAI benchmarks: $MAIN_BENCHMARKS"
           else
             echo "benchmarks_exist=false" >> $GITHUB_OUTPUT
+            echo "main_benchmarks=" >> $GITHUB_OUTPUT
             echo "::notice::Iai benchmarks not found in main branch. Skipping baseline comparison."
           fi
 
@@ -101,9 +106,18 @@ jobs:
         if: steps.check-benchmarks.outputs.benchmarks_exist == 'true'
         run: |
           set -eo pipefail
-          cargo bench --bench persistent_vector_iai -- --save-baseline=main 2>&1 | tee baseline_output.txt
-          cargo bench --bench effect_iai -- --save-baseline=main 2>&1 | tee -a baseline_output.txt
-          cargo bench --bench scenario_iai -- --save-baseline=main 2>&1 | tee -a baseline_output.txt
+          BENCHMARKS="${{ steps.check-benchmarks.outputs.main_benchmarks }}"
+          echo "Running baseline benchmarks: $BENCHMARKS"
+          FIRST=true
+          for bench in $BENCHMARKS; do
+            echo "Running $bench..."
+            if [ "$FIRST" = true ]; then
+              cargo bench --bench "$bench" -- --save-baseline=main 2>&1 | tee baseline_output.txt
+              FIRST=false
+            else
+              cargo bench --bench "$bench" -- --save-baseline=main 2>&1 | tee -a baseline_output.txt
+            fi
+          done
 
       - name: Checkout PR branch
         uses: actions/checkout@v4
@@ -126,21 +140,100 @@ jobs:
             echo "Runner version matches, no update needed"
           fi
 
+      - name: Get PR branch benchmark list
+        id: pr-benchmarks
+        run: |
+          # Extract IAI benchmark names from PR branch's Cargo.toml
+          PR_BENCHMARKS=$(grep -B2 'path = "benches/iai/' Cargo.toml | grep 'name = ' | sed 's/.*"\(.*\)"/\1/' | tr '\n' ' ')
+          echo "pr_benchmarks=$PR_BENCHMARKS" >> $GITHUB_OUTPUT
+          echo "PR branch IAI benchmarks: $PR_BENCHMARKS"
+
+          # Find common benchmarks (exist in both main and PR)
+          MAIN_BENCHMARKS="${{ steps.check-benchmarks.outputs.main_benchmarks }}"
+          COMMON=""
+          NEW_ONLY=""
+
+          for bench in $PR_BENCHMARKS; do
+            if echo "$MAIN_BENCHMARKS" | grep -qw "$bench"; then
+              COMMON="$COMMON $bench"
+            else
+              NEW_ONLY="$NEW_ONLY $bench"
+            fi
+          done
+
+          echo "common_benchmarks=$COMMON" >> $GITHUB_OUTPUT
+          echo "new_benchmarks=$NEW_ONLY" >> $GITHUB_OUTPUT
+          echo "Common benchmarks (with baseline): $COMMON"
+          echo "New benchmarks (no baseline): $NEW_ONLY"
+
       - name: Run PR benchmarks with baseline comparison
         if: steps.check-benchmarks.outputs.benchmarks_exist == 'true'
         run: |
           set -eo pipefail
-          cargo bench --bench persistent_vector_iai -- --baseline=main 2>&1 | tee benchmark_output.txt
-          cargo bench --bench effect_iai -- --baseline=main 2>&1 | tee -a benchmark_output.txt
-          cargo bench --bench scenario_iai -- --baseline=main 2>&1 | tee -a benchmark_output.txt
+          COMMON_BENCHMARKS="${{ steps.pr-benchmarks.outputs.common_benchmarks }}"
+
+          if [ -n "$COMMON_BENCHMARKS" ]; then
+            echo "Running benchmarks with baseline comparison: $COMMON_BENCHMARKS"
+            FIRST=true
+            for bench in $COMMON_BENCHMARKS; do
+              echo "Running $bench with baseline..."
+              if [ "$FIRST" = true ]; then
+                cargo bench --bench "$bench" -- --baseline=main 2>&1 | tee benchmark_output.txt
+                FIRST=false
+              else
+                cargo bench --bench "$bench" -- --baseline=main 2>&1 | tee -a benchmark_output.txt
+              fi
+            done
+          else
+            echo "No common benchmarks found for baseline comparison"
+            # Create empty file to avoid errors in later steps
+            touch benchmark_output.txt
+          fi
 
       - name: Run PR benchmarks without baseline (new benchmarks)
-        if: steps.check-benchmarks.outputs.benchmarks_exist == 'false'
         run: |
           set -eo pipefail
-          cargo bench --bench persistent_vector_iai -- --save-baseline=pr 2>&1 | tee benchmark_output.txt
-          cargo bench --bench effect_iai -- --save-baseline=pr 2>&1 | tee -a benchmark_output.txt
-          cargo bench --bench scenario_iai -- --save-baseline=pr 2>&1 | tee -a benchmark_output.txt
+
+          # If no baseline exists at all, run all PR benchmarks
+          if [ "${{ steps.check-benchmarks.outputs.benchmarks_exist }}" == "false" ]; then
+            PR_BENCHMARKS="${{ steps.pr-benchmarks.outputs.pr_benchmarks }}"
+            echo "No baseline exists. Running all PR benchmarks: $PR_BENCHMARKS"
+            FIRST=true
+            for bench in $PR_BENCHMARKS; do
+              echo "Running $bench (no baseline)..."
+              if [ "$FIRST" = true ]; then
+                cargo bench --bench "$bench" -- --save-baseline=pr 2>&1 | tee benchmark_output.txt
+                FIRST=false
+              else
+                cargo bench --bench "$bench" -- --save-baseline=pr 2>&1 | tee -a benchmark_output.txt
+              fi
+            done
+          else
+            # Run only new benchmarks (not in main)
+            NEW_BENCHMARKS="${{ steps.pr-benchmarks.outputs.new_benchmarks }}"
+            if [ -n "$NEW_BENCHMARKS" ]; then
+              echo "Running new benchmarks (no baseline): $NEW_BENCHMARKS"
+              FIRST=true
+              # Check if benchmark_output.txt exists from previous step
+              if [ ! -f benchmark_output.txt ]; then
+                FIRST=true
+              else
+                FIRST=false
+              fi
+
+              for bench in $NEW_BENCHMARKS; do
+                echo "Running $bench (new benchmark)..."
+                if [ "$FIRST" = true ]; then
+                  cargo bench --bench "$bench" -- --save-baseline=pr 2>&1 | tee benchmark_output.txt
+                  FIRST=false
+                else
+                  cargo bench --bench "$bench" -- --save-baseline=pr 2>&1 | tee -a benchmark_output.txt
+                fi
+              done
+            else
+              echo "No new benchmarks to run"
+            fi
+          fi
 
       - name: Upload benchmark results
         uses: actions/upload-artifact@v6
@@ -205,6 +298,24 @@ jobs:
               status = ':white_check_mark: No Performance Regression';
             }
 
+            const prBenchmarks = '${{ steps.pr-benchmarks.outputs.pr_benchmarks }}'.trim();
+            const commonBenchmarks = '${{ steps.pr-benchmarks.outputs.common_benchmarks }}'.trim();
+            const newBenchmarks = '${{ steps.pr-benchmarks.outputs.new_benchmarks }}'.trim();
+
+            let benchmarkInfo = '';
+            if (noBaseline) {
+              benchmarkInfo = `> Benchmarks (no baseline): ${prBenchmarks}`;
+            } else {
+              const parts = [];
+              if (commonBenchmarks) {
+                parts.push(`with baseline: ${commonBenchmarks}`);
+              }
+              if (newBenchmarks) {
+                parts.push(`new: ${newBenchmarks}`);
+              }
+              benchmarkInfo = `> Benchmarks (${parts.join(', ')})`;
+            }
+
             const body = `## Benchmark Results
 
             ${status}
@@ -219,7 +330,7 @@ jobs:
             </details>
 
             > Threshold: 10% increase in CPU instructions
-            > Benchmarks: persistent_vector_iai, effect_iai, scenario_iai
+            ${benchmarkInfo}
             `;
 
             // Find existing comment or create new one

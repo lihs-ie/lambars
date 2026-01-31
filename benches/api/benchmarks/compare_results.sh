@@ -293,17 +293,104 @@ extract_from_meta() {
     fi
 }
 
+# Extract metric from wrk-output.json
+extract_from_wrk_json() {
+    local file="$1"
+    local key="$2"
+
+    if [[ ! -f "${file}" ]]; then
+        echo "N/A"
+        return
+    fi
+
+    # Use jq if available, otherwise use grep/sed
+    if command -v jq &> /dev/null; then
+        local value
+        case "${key}" in
+            rps)
+                value=$(jq -r '.throughput.requests_per_second // "N/A"' "${file}" 2>/dev/null || echo "N/A")
+                ;;
+            p50)
+                value=$(jq -r '.latency.percentiles.p50 // "N/A"' "${file}" 2>/dev/null || echo "N/A")
+                ;;
+            p75)
+                value=$(jq -r '.latency.percentiles.p75 // "N/A"' "${file}" 2>/dev/null || echo "N/A")
+                ;;
+            p90)
+                value=$(jq -r '.latency.percentiles.p90 // "N/A"' "${file}" 2>/dev/null || echo "N/A")
+                ;;
+            p99)
+                value=$(jq -r '.latency.percentiles.p99 // "N/A"' "${file}" 2>/dev/null || echo "N/A")
+                ;;
+            avg)
+                value=$(jq -r '.latency.mean // "N/A"' "${file}" 2>/dev/null || echo "N/A")
+                ;;
+            error_rate)
+                # Calculate error rate from connection-level errors
+                # Note: wrk only reports connection-level errors (connect, read, write, timeout).
+                # HTTP 4xx/5xx responses are NOT captured by wrk's error counters.
+                # For HTTP status code analysis, use:
+                #   - Lua script with response.status tracking (tasks_update.lua)
+                #   - result_collector.lua for detailed status distribution
+                # This error_rate metric is useful for detecting network/connection issues,
+                # but NOT for detecting application-level errors (5xx).
+                local connect read write timeout total_requests
+                connect=$(jq -r '.errors.connect // 0' "${file}" 2>/dev/null || echo "0")
+                read=$(jq -r '.errors.read // 0' "${file}" 2>/dev/null || echo "0")
+                write=$(jq -r '.errors.write // 0' "${file}" 2>/dev/null || echo "0")
+                timeout=$(jq -r '.errors.timeout // 0' "${file}" 2>/dev/null || echo "0")
+                total_requests=$(jq -r '.throughput.requests_total // 0' "${file}" 2>/dev/null || echo "0")
+
+                local total_errors
+                total_errors=$((connect + read + write + timeout))
+
+                if [[ ${total_requests} -gt 0 ]]; then
+                    value=$(echo "scale=6; ${total_errors} / ${total_requests}" | bc 2>/dev/null || echo "N/A")
+                else
+                    value="N/A"
+                fi
+                ;;
+            *)
+                value="N/A"
+                ;;
+        esac
+        echo "${value}"
+    else
+        # Fallback to grep/sed parsing
+        case "${key}" in
+            rps)
+                grep '"requests_per_second"' "${file}" 2>/dev/null | head -1 | sed 's/.*: *"\?\([^",}]*\)"\?.*/\1/' || echo "N/A"
+                ;;
+            p50)
+                grep '"p50"' "${file}" 2>/dev/null | head -1 | sed 's/.*: *"\?\([^",}]*\)"\?.*/\1/' || echo "N/A"
+                ;;
+            p90)
+                grep '"p90"' "${file}" 2>/dev/null | head -1 | sed 's/.*: *"\?\([^",}]*\)"\?.*/\1/' || echo "N/A"
+                ;;
+            p99)
+                grep '"p99"' "${file}" 2>/dev/null | head -1 | sed 's/.*: *"\?\([^",}]*\)"\?.*/\1/' || echo "N/A"
+                ;;
+            avg)
+                grep '"mean"' "${file}" 2>/dev/null | head -1 | sed 's/.*: *"\?\([^",}]*\)"\?.*/\1/' || echo "N/A"
+                ;;
+            *)
+                echo "N/A"
+                ;;
+        esac
+    fi
+}
+
 # =============================================================================
 # Result Collection
 # =============================================================================
 
-# Find all result files (wrk.txt or meta.json) in a directory
+# Find all result files (wrk.txt, wrk-output.json, or meta.json) in a directory
 find_results() {
     local dir="$1"
     local results=()
 
-    # Check if directory has direct wrk.txt (single scenario)
-    if [[ -f "${dir}/wrk.txt" ]]; then
+    # Check if directory has direct wrk.txt or wrk-output.json (single scenario)
+    if [[ -f "${dir}/wrk.txt" ]] || [[ -f "${dir}/wrk-output.json" ]]; then
         echo "${dir}"
         return
     fi
@@ -311,7 +398,7 @@ find_results() {
     # Check subdirectories
     for subdir in "${dir}"/*/; do
         if [[ -d "${subdir}" ]]; then
-            if [[ -f "${subdir}/wrk.txt" ]] || [[ -f "${subdir}/meta.json" ]]; then
+            if [[ -f "${subdir}/wrk.txt" ]] || [[ -f "${subdir}/wrk-output.json" ]] || [[ -f "${subdir}/meta.json" ]]; then
                 echo "$(basename "${subdir}")"
             fi
         fi
@@ -329,35 +416,61 @@ compare_single() {
 
     local base_wrk="${base_path}/wrk.txt"
     local new_wrk="${new_path}/wrk.txt"
+    local base_wrk_json="${base_path}/wrk-output.json"
+    local new_wrk_json="${new_path}/wrk-output.json"
     local base_meta="${base_path}/meta.json"
     local new_meta="${new_path}/meta.json"
 
-    # Extract metrics from wrk.txt
+    # Extract metrics from wrk-output.json (preferred) or wrk.txt (fallback)
     local base_rps new_rps
     local base_p50 new_p50
     local base_p90 new_p90
     local base_p99 new_p99
     local base_avg new_avg
 
-    base_rps=$(extract_from_wrk "${base_wrk}" "Requests/sec:")
-    new_rps=$(extract_from_wrk "${new_wrk}" "Requests/sec:")
+    # Base metrics
+    if [[ -f "${base_wrk_json}" ]]; then
+        base_rps=$(extract_from_wrk_json "${base_wrk_json}" "rps")
+        base_p50=$(extract_from_wrk_json "${base_wrk_json}" "p50")
+        base_p90=$(extract_from_wrk_json "${base_wrk_json}" "p90")
+        base_p99=$(extract_from_wrk_json "${base_wrk_json}" "p99")
+        base_avg=$(extract_from_wrk_json "${base_wrk_json}" "avg")
+    else
+        base_rps=$(extract_from_wrk "${base_wrk}" "Requests/sec:")
+        base_p50=$(extract_from_wrk "${base_wrk}" "50%")
+        base_p90=$(extract_from_wrk "${base_wrk}" "90%")
+        base_p99=$(extract_from_wrk "${base_wrk}" "99%")
+        base_avg=$(extract_from_wrk "${base_wrk}" "Latency")
+    fi
 
-    base_p50=$(extract_from_wrk "${base_wrk}" "50%")
-    new_p50=$(extract_from_wrk "${new_wrk}" "50%")
+    # New metrics
+    if [[ -f "${new_wrk_json}" ]]; then
+        new_rps=$(extract_from_wrk_json "${new_wrk_json}" "rps")
+        new_p50=$(extract_from_wrk_json "${new_wrk_json}" "p50")
+        new_p90=$(extract_from_wrk_json "${new_wrk_json}" "p90")
+        new_p99=$(extract_from_wrk_json "${new_wrk_json}" "p99")
+        new_avg=$(extract_from_wrk_json "${new_wrk_json}" "avg")
+    else
+        new_rps=$(extract_from_wrk "${new_wrk}" "Requests/sec:")
+        new_p50=$(extract_from_wrk "${new_wrk}" "50%")
+        new_p90=$(extract_from_wrk "${new_wrk}" "90%")
+        new_p99=$(extract_from_wrk "${new_wrk}" "99%")
+        new_avg=$(extract_from_wrk "${new_wrk}" "Latency")
+    fi
 
-    base_p90=$(extract_from_wrk "${base_wrk}" "90%")
-    new_p90=$(extract_from_wrk "${new_wrk}" "90%")
-
-    base_p99=$(extract_from_wrk "${base_wrk}" "99%")
-    new_p99=$(extract_from_wrk "${new_wrk}" "99%")
-
-    base_avg=$(extract_from_wrk "${base_wrk}" "Latency")
-    new_avg=$(extract_from_wrk "${new_wrk}" "Latency")
-
-    # Extract error rate from meta.json if available
+    # Extract error rate from wrk-output.json (preferred), meta.json, or wrk.txt
     local base_error new_error
-    base_error=$(extract_from_meta "${base_meta}" "error_rate")
-    new_error=$(extract_from_meta "${new_meta}" "error_rate")
+    if [[ -f "${base_wrk_json}" ]]; then
+        base_error=$(extract_from_wrk_json "${base_wrk_json}" "error_rate")
+    else
+        base_error=$(extract_from_meta "${base_meta}" "error_rate")
+    fi
+
+    if [[ -f "${new_wrk_json}" ]]; then
+        new_error=$(extract_from_wrk_json "${new_wrk_json}" "error_rate")
+    else
+        new_error=$(extract_from_meta "${new_meta}" "error_rate")
+    fi
 
     # Convert latencies to ms for comparison
     local base_p50_ms new_p50_ms
@@ -520,10 +633,11 @@ if [[ "${JSON_OUTPUT}" != "true" ]]; then
 fi
 
 # Determine comparison mode
-# Mode 1: Direct comparison (both directories have wrk.txt)
+# Mode 1: Direct comparison (both directories have wrk.txt or wrk-output.json)
 # Mode 2: Scenario comparison (directories have subdirectories)
 
-if [[ -f "${BASE_DIR}/wrk.txt" ]] && [[ -f "${NEW_DIR}/wrk.txt" ]]; then
+if { [[ -f "${BASE_DIR}/wrk.txt" ]] || [[ -f "${BASE_DIR}/wrk-output.json" ]]; } && \
+   { [[ -f "${NEW_DIR}/wrk.txt" ]] || [[ -f "${NEW_DIR}/wrk-output.json" ]]; }; then
     # Direct comparison
     scenario_name=$(basename "${BASE_DIR}")
     compare_single "${BASE_DIR}" "${NEW_DIR}" "${scenario_name}"

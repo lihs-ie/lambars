@@ -1,0 +1,223 @@
+# /tasks/{id} 更新エラー率解消 要件定義
+#
+# 概要:
+#   /tasks/{id} の更新失敗 (409率ほぼ100%) を解消し、成功率を99.9%以上に戻す。
+#
+# 設計方針:
+#   1. 楽観ロックの契約をAPI仕様として固定し、409を衝突に限定する
+#   2. 更新に必要な version をベンチ/実装の両方で正しく供給する
+#   3. 失敗分類をメトリクス化し、原因を即時に特定できるようにする
+#
+# 参照:
+#   - docs/internal/analysis/20260124_lambars_perf_bottlenecks.yaml
+#   - benches/api/benchmarks/scripts/tasks_update.lua
+#   - benches/api/benchmarks/scripts/test_ids.lua
+
+version: "1.0.0"
+name: "api_tasks_update_error_rate"
+description: |
+  /tasks/{id} の更新で大量の409が発生している問題を解決する。
+  更新APIの契約、version の扱い、ベンチのID/Version供給を統一し、
+  実運用相当の成功率を保証する。更新は純粋関数で表現し、
+  I/Oは保存とエラー変換のみに限定する。
+
+background:
+  problem: |
+    tasks_update ベンチで error_rate が 0.9999 に達し、ほぼ全件が409。
+    更新対象ID/Versionの供給が破綻し、性能評価が不可能。
+  motivation: |
+    更新APIの正当性と性能を回復し、本番採用に必須の更新成功率を達成する。
+  prior_art:
+    - name: "benches/api/benchmarks/scripts/tasks_update.lua"
+      description: "更新ベンチのLua実装。version を固定値で送っている。"
+    - name: "benches/api/src/api/optics_advanced.rs"
+      description: "更新系APIの実装候補（Lens/Optional）。"
+
+requirements:
+  # ======================================================================
+  # 1. 更新API契約の固定
+  # ======================================================================
+  - id: "REQ-UPDATE-API-001"
+    name: "PUT /tasks/{id} の契約を厳密化する"
+    description: |
+      - version は必須であり未指定は 400 を返す。
+      - 409 Conflict は version 不一致のみに限定する。
+      - 404 Not Found は ID が存在しない場合のみ返す。
+      - 422 Unprocessable Entity はバリデーション違反に限定する。
+      - 成功時は更新済み Task を返し、version は必ず +1 される。
+    laws:
+      - name: "version_monotonic"
+        description: "成功更新時に version が必ず 1 だけ増える。"
+        equation: "update(version = v) -> version = v + 1"
+        property_test: |
+          #[test]
+          fn version_increments_on_update() {
+              let task = task_with_version(3);
+              let updated = apply_update(task, patch());
+              assert_eq!(updated.version, 4);
+          }
+    methods:
+      - name: "PUT /tasks/{id}"
+        signature: "PUT /tasks/{id} { title?, description?, status?, priority?, tags?, version }"
+        description: |
+          version は必須。title/description/status/priority/tags は任意。
+        examples:
+          - description: "正常更新"
+            code: |
+              curl -X PUT http://localhost:3002/tasks/123 \
+                -H "Content-Type: application/json" \
+                -d '{"title":"updated","version":3}'
+          - description: "version未指定"
+            code: |
+              curl -X PUT http://localhost:3002/tasks/123 \
+                -H "Content-Type: application/json" \
+                -d '{"title":"updated"}' -i
+    implementations:
+      - type: "TaskUpdateHandler"
+        description: |
+          - update 処理は純粋関数 apply_update(task, patch) として実装。
+          - I/O層は更新結果の保存と ApiErrorResponse 変換のみを行う。
+
+  # ======================================================================
+  # 2. バージョン衝突と再試行
+  # ======================================================================
+  - id: "REQ-UPDATE-CONFLICT-001"
+    name: "衝突時の再取得/再試行を定義する"
+    description: |
+      - 409 の場合、最新 version を取得して1回のみ再試行する。
+      - 再試行でも409なら失敗として記録する。
+      - 再試行はサーバ側で行わず、ベンチ/クライアントで実施する。
+    methods:
+      - name: "update_with_retry"
+        signature: "fn update_with_retry(id, patch) -> Result<Task, ApiError>"
+        description: |
+          409 のみ再試行。無限リトライは禁止。
+        examples:
+          - description: "擬似コード"
+            code: |
+              let result = update(id, patch, version);
+              if result == Conflict {
+                  let latest = get_task(id);
+                  return update(id, patch, latest.version);
+              }
+    implementations:
+      - type: "benchmarks/scripts/tasks_update.lua"
+        description: |
+          - 409 を検知した場合、1回だけ version を再取得して再試行する。
+          - 再試行回数を meta.json に出力する。
+
+  # ======================================================================
+  # 3. ID/Version 供給の統一
+  # ======================================================================
+  - id: "REQ-UPDATE-IDS-001"
+    name: "IDとversionをペアで管理する"
+    description: |
+      - test_ids.lua は ID と version を必ずセットで返す。
+      - update 成功時に Lua 側で version をインクリメントする。
+      - seed データ生成時点で version を明示的に保存する。
+    methods:
+      - name: "get_task_state"
+        signature: "fn get_task_state(n: u64) -> { id: string, version: u64 }"
+        description: |
+          ベンチから参照するID/Versionを一元管理する。
+        examples:
+          - description: "Lua側の取得"
+            code: |
+              local task = test_ids.get_task_state(counter)
+              local body = common.json_encode({ title = "update", version = task.version })
+    implementations:
+      - type: "benchmarks/scripts/test_ids.lua"
+        description: |
+          - ID/Version のテーブルを保持し、更新成功時に version を更新する。
+          - seed_data.lua から version 初期値を受け取る。
+
+  # ======================================================================
+  # 4. ベンチマークシナリオ
+  # ======================================================================
+  - id: "REQ-UPDATE-BENCH-001"
+    name: "更新性能の再現可能なシナリオを定義する"
+    description: |
+      - tasks_update_steady: 低衝突 (single writer) で成功率を測る。
+      - tasks_update_conflict: 高衝突 (multi writer) で409率を測る。
+      - 1シナリオ=1スクリプト (tasks_update.lua) を厳守。
+    methods:
+      - name: "tasks_update_steady.yaml"
+        signature: "benchmarks/scenarios/tasks_update_steady.yaml"
+        description: |
+          低衝突での更新成功率を測定する。
+        examples:
+          - description: "YAML 例"
+            code: |
+              name: "tasks_update_steady"
+              description: "PUT /tasks/{id} steady updates"
+              storage: "postgres"
+              cache: "none"
+              data_scale: 100000
+              payload: "small"
+              rps_profile: "steady"
+              hit_rate: 0.0
+              script: "tasks_update"
+              endpoint: "PUT /tasks/{id}"
+      - name: "tasks_update_conflict.yaml"
+        signature: "benchmarks/scenarios/tasks_update_conflict.yaml"
+        description: |
+          高衝突での409率を測定する。
+        examples:
+          - description: "YAML 例"
+            code: |
+              name: "tasks_update_conflict"
+              description: "PUT /tasks/{id} conflict updates"
+              storage: "postgres"
+              cache: "none"
+              data_scale: 100000
+              payload: "small"
+              rps_profile: "steady"
+              hit_rate: 0.0
+              script: "tasks_update"
+              endpoint: "PUT /tasks/{id}"
+    implementations:
+      - type: "benchmarks/scenarios"
+        description: |
+          - steady/conflict の2シナリオを追加。
+          - tasks_update.yaml は互換維持のため残すが、合否判定には使用しない。
+
+  # ======================================================================
+  # 5. メトリクス分類
+  # ======================================================================
+  - id: "REQ-UPDATE-MET-001"
+    name: "更新エラーの分類をメトリクス化する"
+    description: |
+      - 409/404/400/422/500 を必ず個別集計する。
+      - error_rate は 4xx/5xx の合計比率とする。
+      - meta.json に conflict_rate を追加する。
+    methods:
+      - name: "meta.json fields"
+        signature: "meta.json v3"
+        description: |
+          conflict_rate を追加し、更新品質を明確化する。
+        examples:
+          - description: "meta.json 例"
+            code: |
+              {
+                "requests": 10000,
+                "error_rate": 0.001,
+                "conflict_rate": 0.0005,
+                "http_status": { "200": 9990, "409": 5, "400": 5 }
+              }
+    implementations:
+      - type: "benchmarks/scripts/common.lua"
+        description: |
+          - HTTP status を集計し、error_rate/conflict_rate を算出する。
+          - 数値は必ず小数として出力する。
+
+non_functional_requirements:
+  performance:
+    - "tasks_update_steady の成功率 >= 99.9%"
+    - "tasks_update_conflict の409率は 1% 以下 (再試行後)"
+  compatibility:
+    - "PUT /tasks/{id} のレスポンス形式は互換維持"
+  testing:
+    - "version衝突の単体テストを追加 (成功/409/再試行)"
+    - "LuaベンチのID/Version供給を統合テストで検証"
+
+future_extensions: []

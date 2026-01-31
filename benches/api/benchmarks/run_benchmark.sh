@@ -69,6 +69,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 RESULTS_DIR="${SCRIPT_DIR}/results/${TIMESTAMP}"
 
+# Source scenario environment utilities
+# shellcheck source=scripts/scenario_env.sh
+source "${SCRIPT_DIR}/scripts/scenario_env.sh"
+
 # Scenario configuration file
 SCENARIO_FILE=""
 SCENARIO_NAME=""

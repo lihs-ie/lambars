@@ -88,6 +88,8 @@ thresholds:
 #   fail_injection -> FAIL_RATE override (0|0.1|0.5)
 #   retry -> RETRY override (true|false)
 #   profile -> PROFILE (true|false)
+#   id_pool_size -> ID_POOL_SIZE (number of task IDs to use)
+#   retry_count -> RETRY_COUNT (max retry attempts on conflict)
 metadata:
   test_type: "endpoint_benchmark"
   endpoint: "PUT /tasks/{id}"
@@ -98,6 +100,8 @@ metadata:
   fail_injection: 0
   retry: true
   profile: false
+  id_pool_size: 10
+  retry_count: 1
   api_features:
     - Lens
     - Prism

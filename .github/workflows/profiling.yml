@@ -233,7 +233,7 @@ jobs:
           mkdir -p profiling-results/iai
 
           # Run iai benchmarks
-          for bench in persistent_vector_iai effect_iai scenario_iai; do
+          for bench in persistent_vector_iai effect_iai scenario_iai ordered_unique_set_iai; do
             echo "=== Running $bench ==="
             cargo bench --bench $bench 2>&1 | tee profiling-results/iai/${bench}.log || true
           done
