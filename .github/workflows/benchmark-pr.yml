@@ -104,6 +104,7 @@ jobs:
           cargo bench --bench persistent_vector_iai -- --save-baseline=main 2>&1 | tee baseline_output.txt
           cargo bench --bench effect_iai -- --save-baseline=main 2>&1 | tee -a baseline_output.txt
           cargo bench --bench scenario_iai -- --save-baseline=main 2>&1 | tee -a baseline_output.txt
+          cargo bench --bench ordered_unique_set_iai -- --save-baseline=main 2>&1 | tee -a baseline_output.txt
 
       - name: Checkout PR branch
         uses: actions/checkout@v4
@@ -133,6 +134,7 @@ jobs:
           cargo bench --bench persistent_vector_iai -- --baseline=main 2>&1 | tee benchmark_output.txt
           cargo bench --bench effect_iai -- --baseline=main 2>&1 | tee -a benchmark_output.txt
           cargo bench --bench scenario_iai -- --baseline=main 2>&1 | tee -a benchmark_output.txt
+          cargo bench --bench ordered_unique_set_iai -- --baseline=main 2>&1 | tee -a benchmark_output.txt
 
       - name: Run PR benchmarks without baseline (new benchmarks)
         if: steps.check-benchmarks.outputs.benchmarks_exist == 'false'
@@ -141,6 +143,7 @@ jobs:
           cargo bench --bench persistent_vector_iai -- --save-baseline=pr 2>&1 | tee benchmark_output.txt
           cargo bench --bench effect_iai -- --save-baseline=pr 2>&1 | tee -a benchmark_output.txt
           cargo bench --bench scenario_iai -- --save-baseline=pr 2>&1 | tee -a benchmark_output.txt
+          cargo bench --bench ordered_unique_set_iai -- --save-baseline=pr 2>&1 | tee -a benchmark_output.txt
 
       - name: Upload benchmark results
         uses: actions/upload-artifact@v6
@@ -219,7 +222,7 @@ jobs:
             </details>
 
             > Threshold: 10% increase in CPU instructions
-            > Benchmarks: persistent_vector_iai, effect_iai, scenario_iai
+            > Benchmarks: persistent_vector_iai, effect_iai, scenario_iai, ordered_unique_set_iai
             `;
 
             // Find existing comment or create new one

@@ -1,21 +1,13 @@
-//! Benchmark for PersistentVector vs standard Vec.
-//!
-//! Compares the performance of lambars' PersistentVector against Rust's standard Vec
-//! for common operations.
+//! PersistentVector vs standard Vec benchmark.
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use lambars::persistent::PersistentVector;
 use std::hint::black_box;
 
-// =============================================================================
-// push_back Benchmark
-// =============================================================================
-
 fn benchmark_push_back(criterion: &mut Criterion) {
     let mut group = criterion.benchmark_group("push_back");
 
     for size in [100, 1000, 10000] {
-        // PersistentVector push_back
         group.bench_with_input(
             BenchmarkId::new("PersistentVector", size),
             &size,
@@ -30,7 +22,6 @@ fn benchmark_push_back(criterion: &mut Criterion) {
             },
         );
 
-        // Standard Vec push
         group.bench_with_input(BenchmarkId::new("Vec", size), &size, |bencher, &size| {
             bencher.iter(|| {
                 let mut vector = Vec::new();
@@ -45,19 +36,13 @@ fn benchmark_push_back(criterion: &mut Criterion) {
     group.finish();
 }
 
-// =============================================================================
-// get Benchmark (Random Access)
-// =============================================================================
-
 fn benchmark_get(criterion: &mut Criterion) {
     let mut group = criterion.benchmark_group("get");
 
     for size in [100, 1000, 10000] {
-        // Prepare data
         let persistent_vector: PersistentVector<i32> = (0..size).collect();
         let standard_vector: Vec<i32> = (0..size).collect();
 
-        // PersistentVector get
         group.bench_with_input(
             BenchmarkId::new("PersistentVector", size),
             &size,
@@ -74,7 +59,6 @@ fn benchmark_get(criterion: &mut Criterion) {
             },
         );
 
-        // Standard Vec get
         group.bench_with_input(BenchmarkId::new("Vec", size), &size, |bencher, &size| {
             bencher.iter(|| {
                 let mut sum = 0;
@@ -91,32 +75,24 @@ fn benchmark_get(criterion: &mut Criterion) {
     group.finish();
 }
 
-// =============================================================================
-// update Benchmark
-// =============================================================================
-
 fn benchmark_update(criterion: &mut Criterion) {
     let mut group = criterion.benchmark_group("update");
 
     for size in [100, 1000, 10000, 100000] {
-        // Prepare data
         let persistent_vector: PersistentVector<i32> = (0..size).collect();
         let standard_vector: Vec<i32> = (0..size).collect();
 
-        // PersistentVector update (immutable, creates new vector)
         group.bench_with_input(
             BenchmarkId::new("PersistentVector", size),
             &size,
             |bencher, &size| {
                 bencher.iter(|| {
                     let index = (size / 2) as usize;
-                    let updated = persistent_vector.update(black_box(index), black_box(999));
-                    black_box(updated)
+                    black_box(persistent_vector.update(black_box(index), black_box(999)))
                 });
             },
         );
 
-        // Standard Vec clone + update (to compare fair immutable update)
         group.bench_with_input(
             BenchmarkId::new("Vec_clone", size),
             &size,
@@ -130,7 +106,6 @@ fn benchmark_update(criterion: &mut Criterion) {
             },
         );
 
-        // Standard Vec mutable update (in-place, for reference)
         group.bench_with_input(
             BenchmarkId::new("Vec_inplace", size),
             &size,
@@ -151,17 +126,12 @@ fn benchmark_update(criterion: &mut Criterion) {
     group.finish();
 }
 
-// =============================================================================
-// transient_update Benchmark
-// =============================================================================
-
 fn benchmark_transient_update(criterion: &mut Criterion) {
     let mut group = criterion.benchmark_group("transient_update");
 
     for size in [1000, 10000, 100000] {
         let persistent_vector: PersistentVector<i32> = (0..size).collect();
 
-        // TransientVector batch updates (issue #222 target: 100k ≤ 1.0ms)
         group.bench_with_input(
             BenchmarkId::new("TransientVector", size),
             &size,
@@ -180,7 +150,6 @@ fn benchmark_transient_update(criterion: &mut Criterion) {
             },
         );
 
-        // PersistentVector sequential updates for comparison
         group.bench_with_input(
             BenchmarkId::new("PersistentVector", size),
             &size,
@@ -204,79 +173,48 @@ fn benchmark_transient_update(criterion: &mut Criterion) {
     group.finish();
 }
 
-// =============================================================================
-// iteration Benchmark
-// =============================================================================
-
 fn benchmark_iteration(criterion: &mut Criterion) {
     let mut group = criterion.benchmark_group("iteration");
 
-    // Extended sizes for optimized iterator performance verification
-    // As per Phase 8.1 requirements (TR-002): 1,000 / 100,000 / 1,000,000 elements
     for size in [1_000, 100_000, 1_000_000] {
-        // Prepare data
         let persistent_vector: PersistentVector<i32> = (0..size).collect();
         let standard_vector: Vec<i32> = (0..size).collect();
 
-        // PersistentVector iteration
         group.bench_with_input(
             BenchmarkId::new("PersistentVector", size),
             &size,
             |bencher, _| {
-                bencher.iter(|| {
-                    let sum: i32 = persistent_vector.iter().sum();
-                    black_box(sum)
-                });
+                bencher.iter(|| black_box(persistent_vector.iter().sum::<i32>()));
             },
         );
 
-        // Standard Vec iteration
         group.bench_with_input(BenchmarkId::new("Vec", size), &size, |bencher, _| {
-            bencher.iter(|| {
-                let sum: i32 = standard_vector.iter().sum();
-                black_box(sum)
-            });
+            bencher.iter(|| black_box(standard_vector.iter().sum::<i32>()));
         });
     }
 
     group.finish();
 }
-
-// =============================================================================
-// from_iter Benchmark (Construction)
-// =============================================================================
 
 fn benchmark_from_iter(criterion: &mut Criterion) {
     let mut group = criterion.benchmark_group("from_iter");
 
     for size in [100, 1000, 10000] {
-        // PersistentVector from_iter
         group.bench_with_input(
             BenchmarkId::new("PersistentVector", size),
             &size,
             |bencher, &size| {
-                bencher.iter(|| {
-                    let vector: PersistentVector<i32> = (0..size).collect();
-                    black_box(vector)
-                });
+                bencher.iter(|| black_box((0..size).collect::<PersistentVector<i32>>()));
             },
         );
 
-        // Standard Vec from_iter
         group.bench_with_input(BenchmarkId::new("Vec", size), &size, |bencher, &size| {
-            bencher.iter(|| {
-                let vector: Vec<i32> = (0..size).collect();
-                black_box(vector)
-            });
+            bencher.iter(|| black_box((0..size).collect::<Vec<i32>>()));
         });
     }
 
     group.finish();
 }
-
-// =============================================================================
-// concat Benchmark
-// =============================================================================
 
 fn benchmark_concat(criterion: &mut Criterion) {
     let mut group = criterion.benchmark_group("concat");
@@ -287,35 +225,30 @@ fn benchmark_concat(criterion: &mut Criterion) {
         let left_vec: Vec<i32> = (0..size).collect();
         let right_vec: Vec<i32> = (size..size * 2).collect();
 
-        // PersistentVector concat - O(log n) RRB-Tree merge
         group.bench_with_input(
             BenchmarkId::new("PersistentVector_concat", size),
             &size,
             |bencher, _| {
-                bencher.iter(|| {
-                    let result = left_persistent.concat(black_box(&right_persistent));
-                    black_box(result)
-                });
+                bencher.iter(|| black_box(left_persistent.concat(black_box(&right_persistent))));
             },
         );
 
-        // Naive approach: iter().chain().collect() - O(n)
         group.bench_with_input(
             BenchmarkId::new("PersistentVector_naive", size),
             &size,
             |bencher, _| {
                 bencher.iter(|| {
-                    let result: PersistentVector<i32> = left_persistent
-                        .iter()
-                        .chain(right_persistent.iter())
-                        .copied()
-                        .collect();
-                    black_box(result)
+                    black_box(
+                        left_persistent
+                            .iter()
+                            .chain(right_persistent.iter())
+                            .copied()
+                            .collect::<PersistentVector<i32>>(),
+                    )
                 });
             },
         );
 
-        // Standard Vec clone + extend - O(n)
         group.bench_with_input(
             BenchmarkId::new("Vec_clone_extend", size),
             &size,
@@ -332,35 +265,22 @@ fn benchmark_concat(criterion: &mut Criterion) {
     group.finish();
 }
 
-// =============================================================================
-// concat Scaling Benchmark (to verify O(log n) complexity)
-// =============================================================================
-
 fn benchmark_concat_scaling(criterion: &mut Criterion) {
     let mut group = criterion.benchmark_group("concat_scaling");
     group.sample_size(50);
 
-    // Test with exponentially increasing sizes to verify O(log n) vs O(n)
     for exponent in [10, 12, 14, 16, 18, 20] {
-        let size = 1 << exponent; // 1K, 4K, 16K, 64K, 256K, 1M
-
+        let size = 1 << exponent;
         let left: PersistentVector<i32> = (0..size).collect();
         let right: PersistentVector<i32> = (size..size * 2).collect();
 
         group.bench_with_input(BenchmarkId::new("concat", size), &size, |bencher, _| {
-            bencher.iter(|| {
-                let result = left.concat(black_box(&right));
-                black_box(result)
-            });
+            bencher.iter(|| black_box(left.concat(black_box(&right))));
         });
     }
 
     group.finish();
 }
-
-// =============================================================================
-// concat Chain Benchmark (multiple concatenations)
-// =============================================================================
 
 fn benchmark_concat_chain(criterion: &mut Criterion) {
     let mut group = criterion.benchmark_group("concat_chain");
@@ -374,34 +294,34 @@ fn benchmark_concat_chain(criterion: &mut Criterion) {
             })
             .collect();
 
-        // concat chain using fold
         group.bench_with_input(
             BenchmarkId::new("PersistentVector_fold", num_vectors),
             &num_vectors,
             |bencher, _| {
                 bencher.iter(|| {
-                    let result = vectors
-                        .iter()
-                        .skip(1)
-                        .fold(vectors[0].clone(), |accumulator, vector| {
-                            accumulator.concat(black_box(vector))
-                        });
-                    black_box(result)
+                    black_box(
+                        vectors
+                            .iter()
+                            .skip(1)
+                            .fold(vectors[0].clone(), |accumulator, vector| {
+                                accumulator.concat(black_box(vector))
+                            }),
+                    )
                 });
             },
         );
 
-        // naive chain using iter().flatten().collect()
         group.bench_with_input(
             BenchmarkId::new("PersistentVector_naive", num_vectors),
             &num_vectors,
             |bencher, _| {
                 bencher.iter(|| {
-                    let result: PersistentVector<i32> = vectors
-                        .iter()
-                        .flat_map(|vector| vector.iter().copied())
-                        .collect();
-                    black_box(result)
+                    black_box(
+                        vectors
+                            .iter()
+                            .flat_map(|vector| vector.iter().copied())
+                            .collect::<PersistentVector<i32>>(),
+                    )
                 });
             },
         );
@@ -410,9 +330,101 @@ fn benchmark_concat_chain(criterion: &mut Criterion) {
     group.finish();
 }
 
-// =============================================================================
-// Criterion Group and Main
-// =============================================================================
+/// Pre-generates Vec for each size to be reused in benchmarks.
+fn generate_vec(size: i32) -> Vec<i32> {
+    (0..size).collect()
+}
+
+/// Returns the appropriate BatchSize based on input size.
+/// - SmallInput: for sizes < 1000 (Small state, fast setup, many iterations)
+/// - LargeInput: for sizes >= 1000 (Large state, slower setup, fewer iterations, better cache behavior)
+fn batch_size_for(size: i32) -> criterion::BatchSize {
+    if size < 1000 {
+        criterion::BatchSize::SmallInput
+    } else {
+        criterion::BatchSize::LargeInput
+    }
+}
+
+fn benchmark_from_vec(criterion: &mut Criterion) {
+    let mut group = criterion.benchmark_group("from_vec");
+
+    for size in [100, 1000, 10000, 100000] {
+        let base_vec = generate_vec(size);
+
+        group.bench_with_input(
+            BenchmarkId::new("PersistentVector_from_vec", size),
+            &size,
+            |bencher, &size| {
+                bencher.iter_batched(
+                    || base_vec.clone(),
+                    |elements| black_box(PersistentVector::from_vec(black_box(elements))),
+                    batch_size_for(size),
+                );
+            },
+        );
+
+        group.bench_with_input(
+            BenchmarkId::new("PersistentVector_collect", size),
+            &size,
+            |bencher, &size| {
+                bencher.iter_batched(
+                    || 0..size,
+                    |range| black_box(black_box(range).collect::<PersistentVector<i32>>()),
+                    batch_size_for(size),
+                );
+            },
+        );
+
+        group.bench_with_input(
+            BenchmarkId::new("Vec_collect", size),
+            &size,
+            |bencher, &size| {
+                bencher.iter_batched(
+                    || 0..size,
+                    |range| black_box(black_box(range).collect::<Vec<i32>>()),
+                    batch_size_for(size),
+                );
+            },
+        );
+    }
+
+    group.finish();
+}
+
+fn benchmark_bulk_construction_comparison(criterion: &mut Criterion) {
+    let mut group = criterion.benchmark_group("persistent_vector_bulk_comparison");
+
+    for size in [1000, 10000] {
+        let base_vec = generate_vec(size);
+
+        group.bench_with_input(
+            BenchmarkId::new("from_vec", size),
+            &size,
+            |bencher, &size| {
+                bencher.iter_batched(
+                    || base_vec.clone(),
+                    |elements| black_box(PersistentVector::from_vec(black_box(elements))),
+                    batch_size_for(size),
+                );
+            },
+        );
+
+        group.bench_with_input(
+            BenchmarkId::new("collect", size),
+            &size,
+            |bencher, &size| {
+                bencher.iter_batched(
+                    || 0..size,
+                    |range| black_box(black_box(range).collect::<PersistentVector<i32>>()),
+                    batch_size_for(size),
+                );
+            },
+        );
+    }
+
+    group.finish();
+}
 
 criterion_group!(
     benches,
@@ -422,6 +434,8 @@ criterion_group!(
     benchmark_transient_update,
     benchmark_iteration,
     benchmark_from_iter,
+    benchmark_from_vec,
+    benchmark_bulk_construction_comparison,
     benchmark_concat,
     benchmark_concat_scaling,
     benchmark_concat_chain

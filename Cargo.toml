@@ -163,6 +163,15 @@ name = "scenario_iai"
 harness = false
 path = "benches/iai/scenario_iai.rs"
 
+[[bench]]
+name = "ordered_unique_set_bench"
+harness = false
+
+[[bench]]
+name = "ordered_unique_set_iai"
+harness = false
+path = "benches/iai/ordered_unique_set_iai.rs"
+
 # Integration tests with feature requirements
 [[test]]
 name = "iai_benchmark_validation"
