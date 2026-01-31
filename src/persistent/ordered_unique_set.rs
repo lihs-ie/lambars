@@ -530,6 +530,195 @@ impl<T: Clone + Eq + Hash + Ord> OrderedUniqueSet<T> {
             }
         }
     }
+
+    /// Creates an `OrderedUniqueSet` from a sorted, deduplicated iterator.
+    ///
+    /// This method provides efficient bulk construction by avoiding per-element
+    /// persistent clones. It assumes the input iterator yields strictly increasing
+    /// elements (sorted and deduplicated).
+    ///
+    /// # Preconditions
+    ///
+    /// - The iterator must yield elements in strictly ascending order
+    /// - No duplicate elements are allowed
+    ///
+    /// In debug builds, these preconditions are validated with `debug_assert!`.
+    /// In release builds, invalid input results in undefined behavior (incorrect
+    /// collection state).
+    ///
+    /// # Type Constraints
+    ///
+    /// `T: Ord` is required for debug assertions to validate ordering.
+    ///
+    /// # Complexity
+    ///
+    /// O(n) for both Small and Large paths.
+    ///
+    /// # Memory Allocation
+    ///
+    /// - Small (n <= 8): Uses `SmallVec` inline storage, no heap allocation
+    /// - Large (n > 8): Allocates a `Vec` then builds `PersistentHashSet`
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::OrderedUniqueSet;
+    ///
+    /// let sorted_elements = vec![1, 3, 5, 7, 9];
+    /// let collection = OrderedUniqueSet::from_sorted_iter(sorted_elements);
+    /// assert_eq!(collection.len(), 5);
+    /// ```
+    #[must_use]
+    pub fn from_sorted_iter<I>(iter: I) -> Self
+    where
+        I: IntoIterator<Item = T>,
+    {
+        let mut small_buffer: SmallVec<[T; SMALL_THRESHOLD]> = SmallVec::new();
+        let mut iter = iter.into_iter();
+
+        for element in iter.by_ref() {
+            #[cfg(debug_assertions)]
+            debug_assert!(
+                small_buffer.last().is_none_or(|last| last < &element),
+                "{}",
+                SORTED_INVARIANT_PANIC_MESSAGE
+            );
+
+            if small_buffer.len() >= SMALL_THRESHOLD {
+                let mut vec: Vec<T> = small_buffer.drain(..).collect();
+                vec.push(element);
+                vec.extend(iter);
+
+                #[cfg(debug_assertions)]
+                debug_assert!(
+                    is_strictly_sorted(&vec),
+                    "{}",
+                    SORTED_INVARIANT_PANIC_MESSAGE
+                );
+
+                return Self::from_large_vec(vec);
+            }
+            small_buffer.push(element);
+        }
+
+        if small_buffer.is_empty() {
+            Self::new()
+        } else {
+            Self {
+                inner: OrderedUniqueSetInner::Small(small_buffer),
+            }
+        }
+    }
+
+    /// Creates an `OrderedUniqueSet` from a sorted, deduplicated `Vec`.
+    ///
+    /// This method provides efficient bulk construction by consuming a `Vec<T>`
+    /// directly, avoiding extra allocations compared to `from_sorted_iter`.
+    ///
+    /// # Preconditions
+    ///
+    /// - The vector must contain elements in strictly ascending order
+    /// - No duplicate elements are allowed
+    ///
+    /// In debug builds, these preconditions are validated with `debug_assert!`.
+    /// In release builds, invalid input results in undefined behavior (incorrect
+    /// collection state).
+    ///
+    /// # Type Constraints
+    ///
+    /// `T: Ord` is required for debug assertions to validate ordering.
+    ///
+    /// # Complexity
+    ///
+    /// O(n) for both Small and Large paths.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::OrderedUniqueSet;
+    ///
+    /// let sorted_vec = vec![2, 4, 6, 8, 10];
+    /// let collection = OrderedUniqueSet::from_sorted_vec(sorted_vec);
+    /// assert_eq!(collection.len(), 5);
+    /// ```
+    #[must_use]
+    pub fn from_sorted_vec(vec: Vec<T>) -> Self {
+        #[cfg(debug_assertions)]
+        debug_assert!(
+            is_strictly_sorted(&vec),
+            "{}",
+            SORTED_INVARIANT_PANIC_MESSAGE
+        );
+
+        if vec.is_empty() {
+            return Self::new();
+        }
+
+        if vec.len() <= SMALL_THRESHOLD {
+            let small_vec: SmallVec<[T; SMALL_THRESHOLD]> = SmallVec::from_vec(vec);
+            Self {
+                inner: OrderedUniqueSetInner::Small(small_vec),
+            }
+        } else {
+            Self::from_large_vec(vec)
+        }
+    }
+
+    /// Returns a sorted `Vec` containing clones of all elements.
+    ///
+    /// This method provides a convenient way to extract elements in sorted order
+    /// for use with APIs that require `Vec<T>` or slices.
+    ///
+    /// # Complexity
+    ///
+    /// - Empty: O(1)
+    /// - Small: O(n log n) for sorting (clone is O(n))
+    /// - Large: O(n) for iteration + O(n log n) for sorting
+    ///
+    /// # Memory Allocation
+    ///
+    /// Allocates a new `Vec<T>` to hold the sorted elements. The original
+    /// collection remains unchanged.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::OrderedUniqueSet;
+    ///
+    /// let collection = OrderedUniqueSet::new()
+    ///     .insert(3)
+    ///     .insert(1)
+    ///     .insert(2);
+    /// let sorted = collection.to_sorted_vec();
+    /// assert_eq!(sorted, vec![1, 2, 3]);
+    /// ```
+    #[must_use]
+    pub fn to_sorted_vec(&self) -> Vec<T> {
+        match &self.inner {
+            OrderedUniqueSetInner::Empty => Vec::new(),
+            OrderedUniqueSetInner::Small(vec) => {
+                let mut result: Vec<T> = vec.iter().cloned().collect();
+                result.sort();
+                result
+            }
+            OrderedUniqueSetInner::Large(set) => {
+                let mut result: Vec<T> = set.iter().cloned().collect();
+                result.sort();
+                result
+            }
+        }
+    }
+
+    /// Helper method to construct Large state from a Vec.
+    ///
+    /// Uses `PersistentHashSet::from_iter` which internally uses `TransientHashSet`
+    /// for efficient bulk construction without per-element COW overhead.
+    fn from_large_vec(vec: Vec<T>) -> Self {
+        let set: PersistentHashSet<T> = vec.into_iter().collect();
+        Self {
+            inner: OrderedUniqueSetInner::Large(set),
+        }
+    }
 }
 
 impl<T: Clone + Eq + Hash> Default for OrderedUniqueSet<T> {
@@ -669,6 +858,36 @@ impl<'a, T: Clone + Eq + Hash> IntoIterator for &'a OrderedUniqueSet<T> {
     }
 }
 
+/// Message constant for panic when `from_sorted_*` receives invalid input.
+const SORTED_INVARIANT_PANIC_MESSAGE: &str =
+    "from_sorted_* requires strictly increasing elements (sorted + deduplicated)";
+
+/// Checks if a slice is strictly sorted (ascending) and has no duplicates.
+///
+/// Returns `true` if the slice is strictly sorted, meaning each element is
+/// strictly less than the next. An empty slice or a slice with one element
+/// is considered strictly sorted.
+///
+/// This function is used for debug assertions in bulk construction methods
+/// to validate preconditions.
+///
+/// # Arguments
+///
+/// * `slice` - The slice to check
+///
+/// # Returns
+///
+/// `true` if the slice is strictly sorted, `false` otherwise
+///
+/// # Complexity
+///
+/// O(n) where n is the length of the slice.
+#[cfg(debug_assertions)]
+#[inline]
+fn is_strictly_sorted<T: Ord>(slice: &[T]) -> bool {
+    slice.windows(2).all(|window| window[0] < window[1])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -762,5 +981,190 @@ mod tests {
         let collection = collection.remove("apple");
         assert!(!collection.contains("apple"));
         assert!(collection.contains("banana"));
+    }
+
+    // =========================================================================
+    // from_sorted_iter tests
+    // =========================================================================
+
+    #[rstest]
+    fn from_sorted_iter_empty_returns_empty_state() {
+        let collection: OrderedUniqueSet<i32> =
+            OrderedUniqueSet::from_sorted_iter(std::iter::empty());
+        assert!(collection.is_empty_state());
+        assert_eq!(collection.len(), 0);
+    }
+
+    #[rstest]
+    #[case::one_element(vec![1])]
+    #[case::two_elements(vec![1, 2])]
+    #[case::eight_elements(vec![1, 2, 3, 4, 5, 6, 7, 8])]
+    fn from_sorted_iter_small_returns_small_state(#[case] elements: Vec<i32>) {
+        let collection = OrderedUniqueSet::from_sorted_iter(elements.clone());
+        assert!(collection.is_small_state());
+        assert_eq!(collection.len(), elements.len());
+        for element in &elements {
+            assert!(collection.contains(element));
+        }
+    }
+
+    #[rstest]
+    #[case::nine_elements(vec![1, 2, 3, 4, 5, 6, 7, 8, 9])]
+    #[case::twenty_elements((1..=20).collect())]
+    fn from_sorted_iter_large_returns_large_state(#[case] elements: Vec<i32>) {
+        let collection = OrderedUniqueSet::from_sorted_iter(elements.clone());
+        assert!(collection.is_large_state());
+        assert_eq!(collection.len(), elements.len());
+        for element in &elements {
+            assert!(collection.contains(element));
+        }
+    }
+
+    #[rstest]
+    fn from_sorted_iter_preserves_all_elements() {
+        let elements: Vec<i32> = (1..=15).collect();
+        let collection = OrderedUniqueSet::from_sorted_iter(elements.clone());
+
+        let mut collected: Vec<i32> = collection.iter().copied().collect();
+        collected.sort_unstable();
+        assert_eq!(collected, elements);
+    }
+
+    #[rstest]
+    fn from_sorted_iter_iter_sorted_yields_ascending_order() {
+        let elements: Vec<i32> = (1..=10).collect();
+        let collection = OrderedUniqueSet::from_sorted_iter(elements.clone());
+
+        let sorted: Vec<i32> = collection.iter_sorted().copied().collect();
+        assert_eq!(sorted, elements);
+    }
+
+    #[rstest]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "strictly increasing")]
+    fn from_sorted_iter_unsorted_panics_in_debug() {
+        let _ = OrderedUniqueSet::from_sorted_iter([3, 1, 2]);
+    }
+
+    #[rstest]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "strictly increasing")]
+    fn from_sorted_iter_duplicate_panics_in_debug() {
+        let _ = OrderedUniqueSet::from_sorted_iter([1, 2, 2, 3]);
+    }
+
+    #[rstest]
+    fn from_sorted_iter_matches_fold_insert_result() {
+        let elements: Vec<i32> = (1..=20).collect();
+        let from_iter = OrderedUniqueSet::from_sorted_iter(elements.clone());
+        let from_fold = elements
+            .into_iter()
+            .fold(OrderedUniqueSet::new(), |acc, e| acc.insert(e));
+
+        assert_eq!(from_iter, from_fold);
+    }
+
+    // =========================================================================
+    // from_sorted_vec tests
+    // =========================================================================
+
+    #[rstest]
+    fn from_sorted_vec_empty_returns_empty_state() {
+        let collection: OrderedUniqueSet<i32> = OrderedUniqueSet::from_sorted_vec(vec![]);
+        assert!(collection.is_empty_state());
+        assert_eq!(collection.len(), 0);
+    }
+
+    #[rstest]
+    #[case::one_element(vec![1])]
+    #[case::two_elements(vec![1, 2])]
+    #[case::eight_elements(vec![1, 2, 3, 4, 5, 6, 7, 8])]
+    fn from_sorted_vec_small_returns_small_state(#[case] elements: Vec<i32>) {
+        let collection = OrderedUniqueSet::from_sorted_vec(elements.clone());
+        assert!(collection.is_small_state());
+        assert_eq!(collection.len(), elements.len());
+        for element in &elements {
+            assert!(collection.contains(element));
+        }
+    }
+
+    #[rstest]
+    #[case::nine_elements(vec![1, 2, 3, 4, 5, 6, 7, 8, 9])]
+    #[case::twenty_elements((1..=20).collect())]
+    fn from_sorted_vec_large_returns_large_state(#[case] elements: Vec<i32>) {
+        let collection = OrderedUniqueSet::from_sorted_vec(elements.clone());
+        assert!(collection.is_large_state());
+        assert_eq!(collection.len(), elements.len());
+        for element in &elements {
+            assert!(collection.contains(element));
+        }
+    }
+
+    #[rstest]
+    fn from_sorted_vec_preserves_all_elements() {
+        let elements: Vec<i32> = (1..=15).collect();
+        let collection = OrderedUniqueSet::from_sorted_vec(elements.clone());
+
+        let mut collected: Vec<i32> = collection.iter().copied().collect();
+        collected.sort_unstable();
+        assert_eq!(collected, elements);
+    }
+
+    #[rstest]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "strictly increasing")]
+    fn from_sorted_vec_unsorted_panics_in_debug() {
+        let _ = OrderedUniqueSet::from_sorted_vec(vec![3, 1, 2]);
+    }
+
+    #[rstest]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "strictly increasing")]
+    fn from_sorted_vec_duplicate_panics_in_debug() {
+        let _ = OrderedUniqueSet::from_sorted_vec(vec![1, 2, 2, 3]);
+    }
+
+    // =========================================================================
+    // to_sorted_vec tests
+    // =========================================================================
+
+    #[rstest]
+    fn to_sorted_vec_empty_returns_empty_vec() {
+        let collection: OrderedUniqueSet<i32> = OrderedUniqueSet::new();
+        assert!(collection.to_sorted_vec().is_empty());
+    }
+
+    #[rstest]
+    fn to_sorted_vec_small_returns_sorted_vec() {
+        // Insert in non-sorted order
+        let collection = OrderedUniqueSet::new().insert(3).insert(1).insert(2);
+        assert!(collection.is_small_state());
+
+        let sorted = collection.to_sorted_vec();
+        assert_eq!(sorted, vec![1, 2, 3]);
+    }
+
+    #[rstest]
+    fn to_sorted_vec_large_returns_sorted_vec() {
+        let mut collection = OrderedUniqueSet::new();
+        for i in (1..=10).rev() {
+            collection = collection.insert(i);
+        }
+        assert!(collection.is_large_state());
+
+        let sorted = collection.to_sorted_vec();
+        assert_eq!(sorted, (1..=10).collect::<Vec<_>>());
+    }
+
+    #[rstest]
+    fn to_sorted_vec_preserves_original_collection() {
+        let collection = OrderedUniqueSet::new().insert(3).insert(1).insert(2);
+        let _ = collection.to_sorted_vec();
+
+        // Original collection should still be usable
+        assert_eq!(collection.len(), 3);
+        assert!(collection.contains(&1));
+        assert!(collection.contains(&2));
+        assert!(collection.contains(&3));
     }
 }

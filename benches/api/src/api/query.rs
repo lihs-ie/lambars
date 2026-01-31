@@ -1252,6 +1252,22 @@ struct AddedKeys {
 /// Represents the delta (difference) for a `SearchIndex` update.
 ///
 /// Aggregates multiple `TaskChange`s into a single batch for efficient one-pass merging.
+///
+/// # Preconditions for `apply_delta`
+///
+/// Before passing a `SearchIndexDelta` to [`SearchIndex::apply_delta`], you must call
+/// [`prepare_posting_lists`](Self::prepare_posting_lists) to ensure all posting lists
+/// are sorted and deduplicated. Failure to do so results in undefined behavior
+/// (incorrect merge results) in release builds.
+///
+/// The recommended usage pattern is:
+/// ```ignore
+/// let mut delta = SearchIndexDelta::from_changes(changes, &config, &tasks_by_id);
+/// delta.prepare_posting_lists(); // Required!
+/// let new_index = index.apply_delta(&delta, changes);
+/// ```
+///
+/// Alternatively, use [`SearchIndex::apply_changes`] which handles this automatically.
 #[derive(Debug, Clone, Default)]
 pub struct SearchIndexDelta {
     pub title_full_add: MutableIndex,
@@ -2331,6 +2347,45 @@ impl SearchIndexDelta {
         prepare_index(&mut self.tag_all_suffix_add);
         prepare_index(&mut self.tag_all_suffix_remove);
     }
+
+    /// Debug assertion helper to validate that all posting lists are prepared.
+    ///
+    /// Checks that all posting lists are sorted and deduplicated.
+    /// Only available in debug builds.
+    #[cfg(debug_assertions)]
+    pub fn debug_assert_prepared(&self) {
+        fn is_prepared(posting_list: &[TaskId]) -> bool {
+            posting_list.windows(2).all(|w| w[0] < w[1])
+        }
+        fn assert_index_prepared(index: &std::collections::HashMap<NgramKey, Vec<TaskId>>) {
+            for (key, posting_list) in index {
+                debug_assert!(
+                    posting_list.is_empty() || is_prepared(posting_list),
+                    "Posting list for key '{}' is not prepared (sorted + deduplicated)",
+                    key.as_str()
+                );
+            }
+        }
+
+        assert_index_prepared(&self.title_full_add);
+        assert_index_prepared(&self.title_full_remove);
+        assert_index_prepared(&self.title_word_add);
+        assert_index_prepared(&self.title_word_remove);
+        assert_index_prepared(&self.tag_add);
+        assert_index_prepared(&self.tag_remove);
+        assert_index_prepared(&self.title_full_ngram_add);
+        assert_index_prepared(&self.title_full_ngram_remove);
+        assert_index_prepared(&self.title_word_ngram_add);
+        assert_index_prepared(&self.title_word_ngram_remove);
+        assert_index_prepared(&self.tag_ngram_add);
+        assert_index_prepared(&self.tag_ngram_remove);
+        assert_index_prepared(&self.title_full_all_suffix_add);
+        assert_index_prepared(&self.title_full_all_suffix_remove);
+        assert_index_prepared(&self.title_word_all_suffix_add);
+        assert_index_prepared(&self.title_word_all_suffix_remove);
+        assert_index_prepared(&self.tag_all_suffix_add);
+        assert_index_prepared(&self.tag_all_suffix_remove);
+    }
 }
 
 fn prepare_index<K: Eq + std::hash::Hash>(index: &mut std::collections::HashMap<K, Vec<TaskId>>) {
@@ -2575,29 +2630,16 @@ fn index_all_suffixes_batch(
 
 /// Converts a mutable batch index to a persistent n-gram index.
 ///
-/// # Performance Note
-///
-/// This function iteratively inserts each `TaskId` into `TaskIdCollection` via `fold`.
-/// For large posting lists (>8 elements), this incurs O(n) clone/allocation per insertion.
-///
-/// Future optimization: Implement `TaskIdCollection::from_iter` or `from_sorted_iter`
-/// to construct collections more efficiently from pre-sorted/deduplicated vectors.
+/// Uses `TaskIdCollection::from_sorted_vec` for O(n) bulk construction,
+/// avoiding per-element COW overhead.
 #[must_use]
 fn finalize_ngram_index(mutable_index: MutableIndex) -> NgramIndex {
     let mut result = PersistentHashMap::new().transient();
 
     for (ngram, mut task_ids) in mutable_index {
-        // Sort and dedup for consistent iteration order and to optimize
-        // Large state construction (TaskIdCollection transitions to Large at >8 elements)
         task_ids.sort();
         task_ids.dedup();
-
-        // TaskIdCollection handles deduplication internally
-        let collection: TaskIdCollection = task_ids
-            .into_iter()
-            .fold(TaskIdCollection::new(), |accumulator, id| {
-                accumulator.insert(id)
-            });
+        let collection = TaskIdCollection::from_sorted_vec(task_ids);
         result.insert(ngram, collection);
     }
 
@@ -4191,8 +4233,27 @@ impl SearchIndex {
     }
 
     /// Applies a pre-computed `SearchIndexDelta` to this index.
+    ///
+    /// # Preconditions
+    ///
+    /// The `delta` must have been prepared via [`SearchIndexDelta::prepare_posting_lists`]
+    /// before calling this method. All posting lists in the delta must be:
+    /// - Sorted in ascending order
+    /// - Deduplicated (no duplicate `TaskId`s)
+    ///
+    /// In debug builds, these preconditions are validated with `debug_assert!`.
+    /// In release builds, invalid input results in undefined behavior (incorrect
+    /// merge results).
+    ///
+    /// # Recommended Usage
+    ///
+    /// Use [`SearchIndex::apply_changes`] instead, which automatically prepares
+    /// the delta before applying.
     #[must_use]
     pub fn apply_delta(&self, delta: &SearchIndexDelta, changes: &[TaskChange]) -> Self {
+        #[cfg(debug_assertions)]
+        delta.debug_assert_prepared();
+
         Self {
             tasks_by_id: self.update_tasks_by_id(changes),
             title_full_index: Self::merge_index_delta(
@@ -4272,14 +4333,8 @@ impl SearchIndex {
 
     /// Computes `(existing ∪ add) - remove` for a `PrefixIndex`.
     ///
-    /// # Performance Note
-    ///
-    /// This method converts the merged `Vec<TaskId>` (already sorted/deduped) to
-    /// `TaskIdCollection` via iterative `insert`. For Large state (>8 elements),
-    /// each `insert` triggers a persistent collection clone.
-    ///
-    /// Future optimization: Implement `TaskIdCollection::from_sorted_iter` to
-    /// construct collections more efficiently from pre-sorted vectors.
+    /// Uses `TaskIdCollection::from_sorted_vec` for O(n) bulk construction,
+    /// avoiding per-element COW overhead.
     fn merge_index_delta(
         index: &PrefixIndex,
         add: &MutableIndex,
@@ -4289,9 +4344,12 @@ impl SearchIndex {
 
         all_keys.into_iter().fold(index.clone(), |acc, key| {
             let key_str = key.as_str();
-            let existing_iter = acc.get(key_str).into_iter().flat_map(|v| v.iter());
-            let merged = Self::compute_merged_posting_list_iter(
-                existing_iter,
+            let existing: Vec<TaskId> = acc
+                .get(key_str)
+                .map(|collection| collection.to_sorted_vec())
+                .unwrap_or_default();
+            let merged = Self::compute_merged_posting_list_sorted(
+                &existing,
                 add.get(key).map_or(&[], Vec::as_slice),
                 remove.get(key).map_or(&[], Vec::as_slice),
             );
@@ -4299,13 +4357,7 @@ impl SearchIndex {
             if merged.is_empty() {
                 acc.remove(key_str)
             } else {
-                // Convert Vec<TaskId> to TaskIdCollection
-                // Note: merged is already sorted/deduped, so inserts are idempotent
-                let collection = merged
-                    .into_iter()
-                    .fold(TaskIdCollection::new(), |accumulator, id| {
-                        accumulator.insert(id)
-                    });
+                let collection = TaskIdCollection::from_sorted_vec(merged);
                 acc.insert(key.clone(), collection)
             }
         })
@@ -4313,10 +4365,7 @@ impl SearchIndex {
 
     /// Computes `(existing ∪ add) - remove` for a `NgramIndex`.
     ///
-    /// # Performance Note
-    ///
-    /// Same performance characteristics as `merge_index_delta` - see its documentation
-    /// for details on the iterative `TaskIdCollection` construction overhead.
+    /// Same optimizations as `merge_index_delta`.
     fn merge_ngram_delta(
         index: &NgramIndex,
         add: &MutableIndex,
@@ -4327,9 +4376,12 @@ impl SearchIndex {
 
         for key in all_keys {
             let key_str = key.as_str();
-            let existing_iter = result.get(key_str).into_iter().flat_map(|v| v.iter());
-            let merged = Self::compute_merged_posting_list_iter(
-                existing_iter,
+            let existing: Vec<TaskId> = result
+                .get(key_str)
+                .map(|collection| collection.to_sorted_vec())
+                .unwrap_or_default();
+            let merged = Self::compute_merged_posting_list_sorted(
+                &existing,
                 add.get(key).map_or(&[], Vec::as_slice),
                 remove.get(key).map_or(&[], Vec::as_slice),
             );
@@ -4337,13 +4389,7 @@ impl SearchIndex {
             if merged.is_empty() {
                 result.remove(key_str);
             } else {
-                // Convert Vec<TaskId> to TaskIdCollection
-                // Note: merged is already sorted/deduped, so inserts are idempotent
-                let collection = merged
-                    .into_iter()
-                    .fold(TaskIdCollection::new(), |accumulator, id| {
-                        accumulator.insert(id)
-                    });
+                let collection = TaskIdCollection::from_sorted_vec(merged);
                 result.insert(key.clone(), collection);
             }
         }
@@ -4376,14 +4422,39 @@ impl SearchIndex {
     /// Computes `(existing ∪ add) - remove` in a single pass.
     ///
     /// # Preconditions
+    ///
     /// - All input slices must be sorted in ascending order
     /// - All input slices must be deduplicated
-    #[allow(dead_code)]
+    ///
+    /// In debug builds, these preconditions are validated with `debug_assert!`.
+    /// In release builds, invalid input results in undefined behavior (incorrect
+    /// merge results).
     fn compute_merged_posting_list_sorted(
         existing: &[TaskId],
         add: &[TaskId],
         remove: &[TaskId],
     ) -> Vec<TaskId> {
+        #[cfg(debug_assertions)]
+        fn is_strictly_sorted(slice: &[TaskId]) -> bool {
+            slice.windows(2).all(|window| window[0] < window[1])
+        }
+
+        #[cfg(debug_assertions)]
+        {
+            debug_assert!(
+                existing.is_empty() || is_strictly_sorted(existing),
+                "existing slice must be sorted and deduplicated"
+            );
+            debug_assert!(
+                add.is_empty() || is_strictly_sorted(add),
+                "add slice must be sorted and deduplicated"
+            );
+            debug_assert!(
+                remove.is_empty() || is_strictly_sorted(remove),
+                "remove slice must be sorted and deduplicated"
+            );
+        }
+
         fn should_remove(
             candidate: &TaskId,
             remove_iterator: &mut std::iter::Peekable<std::slice::Iter<'_, TaskId>>,

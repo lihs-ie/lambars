@@ -1,0 +1,237 @@
+# SearchIndex posting list bulk build and PersistentVector builder - Requirements
+#
+# Overview:
+#   Reduce TransientVector::push_back / Vec::from_iter / Arc::drop_slow hot paths
+#   in tasks_bulk and tasks_eff by using bulk builders for posting lists and vectors.
+#
+# Design principles:
+#   1. Prefer bulk construction from sorted/deduped inputs to avoid per-element COW.
+#   2. Preserve determinism and ordering (TaskId ascending) in all posting lists.
+#   3. Keep pure APIs; destructive mutation is allowed only inside transient/builder types.
+#
+# References:
+#   - benches/results/before/api-profiling-all-82d1fe225cfc5be7a7537cf9060d2cf5edd3a010/tasks_bulk/stacks.folded
+#   - benches/results/after/api-profiling-all-f06e3f8fe2bf4fe5d39991950abbcff5ed86da4f/tasks_bulk/stacks.folded
+#   - benches/results/before/api-profiling-all-82d1fe225cfc5be7a7537cf9060d2cf5edd3a010/tasks_eff/stacks.folded
+#   - benches/results/after/api-profiling-all-f06e3f8fe2bf4fe5d39991950abbcff5ed86da4f/tasks_eff/stacks.folded
+#   - benches/api/src/api/query.rs
+#   - src/persistent/ordered_unique_set.rs
+#   - src/persistent/vector.rs
+
+version: "1.1.0"
+name: "search_index_posting_list_bulk_build"
+description: |
+  The latest profiling shows regressions in tasks_bulk/tasks_eff due to
+  TransientVector::push_back, Vec::from_iter, PersistentVectorIterator::next,
+  Arc::drop_slow, malloc, and cfree. These costs appear after recent SearchIndex
+  changes and are tied to per-element inserts and iterator-to-collection
+  conversions. This requirement introduces bulk construction paths for posting
+  lists and PersistentVector to eliminate per-element COW and reduce allocation.
+
+background:
+  problem: |
+    Profiling on tasks_bulk/tasks_eff shows new dominant costs:
+    - lambars::persistent::vector::TransientVector<T>::push_back
+    - alloc::vec::Vec<T>::from_iter
+    - lambars::persistent::vector::PersistentVectorIterator::next
+    - alloc::sync::Arc::drop_slow
+    These indicate repeated per-element inserts and conversions to persistent
+    structures, causing COW, cloning, and allocator overhead.
+  motivation: |
+    Restore and improve the throughput and latency regression by introducing
+    bulk builders that consume pre-sorted data and build persistent structures
+    in O(n) without per-element COW.
+  prior_art:
+    - name: "search_index_persistent_structures"
+      description: "Introduced TaskIdCollection but still uses iterative insert in merge paths."
+    - name: "search_index_posting_list_optimization"
+      description: "Prepared posting lists and added sorted merge but some paths still use HashSet + sort/dedup."
+    - name: "PersistentVector bulk builder helpers"
+      description: "build_persistent_vector_from_vec_no_clone exists but is private."
+
+requirements:
+  # ======================================================================
+  # 1. OrderedUniqueSet (TaskIdCollection) bulk construction
+  # ======================================================================
+  - id: "REQ-SEARCH-BULK-001"
+    name: "Add OrderedUniqueSet bulk constructors for sorted inputs"
+    description: |
+      Provide bulk construction APIs for OrderedUniqueSet to avoid O(n) inserts
+      with persistent clones. These APIs assume sorted + deduplicated inputs and
+      must preserve ascending iteration order semantics.
+
+    ordering_semantics: |
+      OrderedUniqueSet の順序保証について:
+      - `iter()` は順序を保証しない（Small: 挿入順、Large: HashSet順）
+      - `iter_sorted()` のみが昇順を保証する（T: Ord 制約あり）
+      - バルクコンストラクタはソート済み入力を前提とし、iter_sorted() での昇順を保証
+      - SearchIndex のマージ・検索結果出力では iter_sorted() を使用すること
+
+    methods:
+      - name: "OrderedUniqueSet::from_sorted_iter"
+        signature: "fn from_sorted_iter<I>(iter: I) -> OrderedUniqueSet<T> where T: Clone + Eq + Hash + Ord, I: IntoIterator<Item = T>"
+        description: |
+          - Precondition: iter yields strictly increasing elements (sorted + deduped).
+          - T: Ord 制約を追加（debug_assert での順序検証に必要）
+          - Small path (len <= SMALL_THRESHOLD): store in SmallVec without heap allocation.
+          - Large path: build via TransientHashSet (or PersistentHashSet::from_iter) once,
+            without per-element OrderedUniqueSet::insert calls.
+          - Add debug_asserts to validate order in debug builds.
+          - NOTE: 不正な入力は debug build でパニック、release では未定義動作となるが、
+            内部 API として SearchIndex からのみ呼び出されるため許容。
+      - name: "OrderedUniqueSet::from_sorted_vec"
+        signature: "fn from_sorted_vec(vec: Vec<T>) -> OrderedUniqueSet<T> where T: Clone + Eq + Hash + Ord"
+        description: |
+          - Same behavior as from_sorted_iter, but consumes Vec<T> to avoid extra clones.
+          - T: Ord 制約を追加
+          - Must not call OrderedUniqueSet::insert in a loop.
+
+    implementations:
+      - type: "OrderedUniqueSet<T>"
+        description: |
+          - Reuse SmallVec for small collections.
+          - For Large state, build a TransientHashSet and call persistent() once.
+          - Preserve immutability by exposing only persistent results.
+
+  # ======================================================================
+  # 2. Use bulk TaskIdCollection builders in SearchIndex deltas
+  # ======================================================================
+  - id: "REQ-SEARCH-BULK-002"
+    name: "Replace fold-based TaskIdCollection construction in merge paths"
+    description: |
+      Replace fold + insert loops with bulk constructors in SearchIndex delta
+      merge paths. This removes per-element persistent clones and reduces Arc drops.
+
+    methods:
+      - name: "SearchIndex::merge_index_delta"
+        signature: "fn merge_index_delta(index: &PrefixIndex, add: &MutableIndex, remove: &MutableIndex) -> PrefixIndex"
+        description: |
+          - Use OrderedUniqueSet::from_sorted_vec on merged posting lists.
+          - Use iter_sorted() when reading existing TaskIdCollection for sorted merge.
+      - name: "SearchIndex::merge_ngram_delta"
+        signature: "fn merge_ngram_delta(index: &NgramIndex, add: &MutableIndex, remove: &MutableIndex) -> NgramIndex"
+        description: |
+          - Same change as merge_index_delta.
+      - name: "finalize_ngram_index"
+        signature: "fn finalize_ngram_index(mutable_index: MutableIndex) -> NgramIndex"
+        description: |
+          - Replace fold-based TaskIdCollection construction with from_sorted_vec.
+
+    implementations:
+      - type: "SearchIndex merge paths"
+        description: |
+          - merged Vec<TaskId> is already sorted/deduped (after prepare_posting_lists or
+            sorted merge), so from_sorted_vec is safe.
+          - Avoid HashSet + sort/dedup in merge paths when preconditions hold.
+
+  # ======================================================================
+  # 3. Sorted merge path without HashSet + sort/dedup
+  # ======================================================================
+  - id: "REQ-SEARCH-BULK-003"
+    name: "Use sorted merge for posting lists and remove HashSet-based merge"
+    description: |
+      Replace compute_merged_posting_list_iter (HashSet + sort/dedup) with the
+      sorted single-pass merge. This removes Vec::from_iter and extra sort costs
+      when inputs are already sorted/deduped by prepare_posting_lists.
+
+    performance_note: |
+      iter_sorted() の Large 状態でのコスト:
+      - Large 状態の iter_sorted() は毎回ソート + Vec 確保が発生（O(n log n)）
+      - マージ頻度が高い場合は性能影響がある可能性
+      - 対策: バッチ更新時は TransientTreeMap で一括処理し、iter_sorted() 呼び出し回数を削減
+      - 将来拡張: Large 状態で sorted vec をキャッシュする設計を検討
+
+    methods:
+      - name: "SearchIndex::compute_merged_posting_list_sorted"
+        signature: "fn compute_merged_posting_list_sorted(existing: &[TaskId], add: &[TaskId], remove: &[TaskId]) -> Vec<TaskId>"
+        description: |
+          - Use existing iter_sorted() for TaskIdCollection inputs.
+          - Single-pass merge with O(n) behavior and no HashSet allocation.
+          - NOTE: iter_sorted() は Large 状態で O(n log n) だが、マージ結果は O(n) で構築
+      - name: "SearchIndex::compute_merged_posting_list_iter"
+        signature: "fn compute_merged_posting_list_iter(existing: impl Iterator<Item = &TaskId>, add: &[TaskId], remove: &[TaskId]) -> Vec<TaskId>"
+        description: |
+          - Deprecate or internal-use-only; do not use in merge paths.
+
+    implementations:
+      - type: "SearchIndex delta merge"
+        description: |
+          - Merge uses iter_sorted() for existing lists.
+          - Add/remove lists are sorted/deduped by prepare_posting_lists.
+
+  # ======================================================================
+  # 4. PersistentVector bulk builder to avoid TransientVector push_back
+  # ======================================================================
+  - id: "REQ-PV-BULK-001"
+    name: "Expose PersistentVector bulk construction for known-size iterators"
+    description: |
+      Add a bulk construction API that consumes Vec<T> directly and update
+      PersistentVector::from_iter to use it when size_hint is exact. This
+      avoids TransientVector::push_back and reduces Arc::drop_slow overhead.
+
+    methods:
+      - name: "PersistentVector::from_vec"
+        signature: "fn from_vec(vec: Vec<T>) -> PersistentVector<T>"
+        description: |
+          - Consumes Vec<T> and uses build_persistent_vector_from_vec_no_clone.
+          - O(n) build with no per-element COW.
+      - name: "PersistentVector::from_iter"
+        signature: "impl<T: Clone> FromIterator<T> for PersistentVector<T>"
+        description: |
+          - If size_hint gives exact size (lower == upper) and size >= BRANCHING_FACTOR * 2,
+            collect into Vec with capacity and call PersistentVector::from_vec.
+          - Otherwise, fall back to current TransientVector path.
+
+    implementations:
+      - type: "PersistentVector<T>"
+        description: |
+          - Keep existing semantics and ordering.
+          - Provide an additive API (no breaking changes).
+
+  # ======================================================================
+  # 5. Metrics and validation
+  # ======================================================================
+  - id: "REQ-SEARCH-BULK-004"
+    name: "Add merge/build metrics to validate regression recovery"
+    description: |
+      Extend SearchIndex metrics output to include bulk build usage and sizes,
+      enabling verification that bulk paths are taken and allocations drop.
+
+      メトリクス収集の設計方針:
+      - ベンチマーク専用機能として実装（本番コードに影響しない）
+      - feature gate "bench-metrics" で有効化（デフォルトは無効）
+      - 純粋 API とは分離し、I/O 境界（ベンチマーク実行時）でのみ収集
+      - スレッドセーフは不要（単一スレッドで収集）
+
+    implementations:
+      - type: "SearchIndexMergeMetrics"
+        description: |
+          - Add fields:
+            - bulk_collection_builds: usize
+            - bulk_collection_items_total: usize
+            - sorted_merge_calls: usize
+          - Output in benches/results/**/benchmark/meta/search_index_merge_metrics.json
+          - #[cfg(feature = "bench-metrics")] で有効化
+
+non_functional_requirements:
+  performance:
+    - "tasks_bulk RPS >= 140 and Avg Latency <= 12.0s (baseline recovery)."
+    - "tasks_eff RPS >= 470 and Avg Latency <= 8.0s (baseline recovery)."
+    - "tasks_update_steady must not regress (RPS >= 100, Avg Latency <= 2ms)."
+    - "Profile share in tasks_bulk/tasks_eff: TransientVector::push_back <= 5%, Vec::from_iter <= 5%, Arc::drop_slow <= 8%."
+  compatibility:
+    - "Search results and posting list ordering remain deterministic and identical to sequential apply_change."
+    - "All changes are additive; no public API break."
+  testing:
+    - "Unit tests for OrderedUniqueSet::from_sorted_iter/from_sorted_vec correctness and ordering."
+    - "Property tests ensuring merge_index_delta matches sequential apply_change results."
+    - "Regression test confirming from_iter exact-size path equals current behavior."
+
+future_extensions:
+  - id: "EXT-SEARCH-BULK-001"
+    name: "TaskIdCollection builder with small-buffer reuse"
+    description: |
+      Introduce a reusable TaskIdCollectionBuilder to reduce repeated allocations
+      in tight loops (e.g., batch updates).
+    rationale: |
+      Requires API design for lifetime and reuse; defer until Phase 2.

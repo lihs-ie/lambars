@@ -924,6 +924,39 @@ impl<T> PersistentVector<T> {
         }
     }
 
+    /// Creates a `PersistentVector` from a `Vec`, consuming it.
+    ///
+    /// This method provides efficient bulk construction by consuming a `Vec<T>`
+    /// directly and building the tree structure in O(n) time without per-element
+    /// COW overhead.
+    ///
+    /// Unlike `FromIterator::from_iter`, this method does not require `T: Clone`
+    /// because it takes ownership of all elements.
+    ///
+    /// # Arguments
+    ///
+    /// * `vec` - The vector to convert
+    ///
+    /// # Complexity
+    ///
+    /// O(n) where n is the number of elements.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::PersistentVector;
+    ///
+    /// let vec = vec![1, 2, 3, 4, 5];
+    /// let persistent = PersistentVector::from_vec(vec);
+    /// assert_eq!(persistent.len(), 5);
+    /// assert_eq!(persistent.get(0), Some(&1));
+    /// assert_eq!(persistent.get(4), Some(&5));
+    /// ```
+    #[must_use]
+    pub fn from_vec(vec: Vec<T>) -> Self {
+        build_persistent_vector_from_vec_no_clone(vec)
+    }
+
     /// Returns the number of elements in the vector.
     ///
     /// # Complexity
@@ -3360,13 +3393,16 @@ impl<T> Default for PersistentVector<T> {
 impl<T: Clone> FromIterator<T> for PersistentVector<T> {
     /// Creates a `PersistentVector` from an iterator.
     ///
-    /// This implementation uses `TransientVector` internally for efficient
-    /// bulk insertion, avoiding the overhead of creating intermediate
-    /// persistent vectors.
+    /// This implementation uses optimized paths based on iterator characteristics:
+    ///
+    /// - For exact-size iterators with >= 64 elements: Collects into a `Vec`
+    ///   and uses `from_vec` for O(n) construction without per-element COW.
+    /// - For other iterators: Uses `TransientVector` for efficient bulk insertion.
     ///
     /// # Complexity
     ///
-    /// O(N log32 N) where N is the number of elements in the iterator.
+    /// - O(n) for exact-size iterators with large collections
+    /// - O(n log32 n) for other iterators
     ///
     /// # Examples
     ///
@@ -3377,6 +3413,19 @@ impl<T: Clone> FromIterator<T> for PersistentVector<T> {
     /// assert_eq!(vector.len(), 100);
     /// ```
     fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        const FROM_VEC_THRESHOLD: usize = BRANCHING_FACTOR * 2;
+
+        let iter = iter.into_iter();
+        let (lower, upper) = iter.size_hint();
+
+        if let Some(upper_bound) = upper
+            && lower == upper_bound
+            && lower >= FROM_VEC_THRESHOLD
+        {
+            let vec: Vec<T> = iter.collect();
+            return Self::from_vec(vec);
+        }
+
         let mut transient = TransientVector::new();
         for element in iter {
             transient.push_back(element);
@@ -3620,7 +3669,6 @@ where
     build_persistent_vector_from_vec(elements)
 }
 
-/// Helper function to build a `PersistentVector` from a Vec.
 fn build_persistent_vector_from_vec<T: Clone>(elements: Vec<T>) -> PersistentVector<T> {
     if elements.is_empty() {
         return PersistentVector::new();
@@ -3628,7 +3676,6 @@ fn build_persistent_vector_from_vec<T: Clone>(elements: Vec<T>) -> PersistentVec
 
     let length = elements.len();
 
-    // For small vectors, just put everything in the tail
     if length <= BRANCHING_FACTOR {
         let tail_chunk: TailChunk<T> = elements.into_iter().collect();
         return PersistentVector {
@@ -3639,7 +3686,6 @@ fn build_persistent_vector_from_vec<T: Clone>(elements: Vec<T>) -> PersistentVec
         };
     }
 
-    // Calculate how many elements go in the tail
     let tail_size = length % BRANCHING_FACTOR;
     let tail_size = if tail_size == 0 {
         BRANCHING_FACTOR
@@ -3648,12 +3694,10 @@ fn build_persistent_vector_from_vec<T: Clone>(elements: Vec<T>) -> PersistentVec
     };
     let root_size = length - tail_size;
 
-    // Split elements into root and tail portions
     let mut elements = elements;
     let tail_elements = elements.split_off(root_size);
     let root_elements = elements;
 
-    // Build the root tree
     let (root, shift) = build_root_from_elements(root_elements);
 
     let tail_chunk: TailChunk<T> = tail_elements.into_iter().collect();
@@ -3665,16 +3709,12 @@ fn build_persistent_vector_from_vec<T: Clone>(elements: Vec<T>) -> PersistentVec
     }
 }
 
-/// Build the root tree from a vector of elements.
 fn build_root_from_elements<T: Clone>(elements: Vec<T>) -> (ReferenceCounter<Node<T>>, usize) {
     if elements.is_empty() {
         return (ReferenceCounter::new(Node::empty_branch()), BITS_PER_LEVEL);
     }
 
-    // Pre-calculate the number of leaf nodes needed
     let leaf_count = elements.len().div_ceil(BRANCHING_FACTOR);
-
-    // Split into chunks of BRANCHING_FACTOR with pre-allocated capacity
     let mut leaves: Vec<ReferenceCounter<Node<T>>> = Vec::with_capacity(leaf_count);
     let mut iter = elements.into_iter();
 
@@ -3689,7 +3729,6 @@ fn build_root_from_elements<T: Clone>(elements: Vec<T>) -> (ReferenceCounter<Nod
         ))));
     }
 
-    // If there's only one leaf, wrap it in a branch
     if leaves.len() == 1 {
         let leaf = leaves.remove(0);
         let leaf_size = leaf.subtree_size();
@@ -3707,12 +3746,10 @@ fn build_root_from_elements<T: Clone>(elements: Vec<T>) -> (ReferenceCounter<Nod
         );
     }
 
-    // Build tree bottom-up
     let mut current_level = leaves;
     let mut shift = BITS_PER_LEVEL;
 
     while current_level.len() > BRANCHING_FACTOR {
-        // Pre-calculate the number of nodes needed for next level
         let next_level_count = current_level.len().div_ceil(BRANCHING_FACTOR);
         let mut next_level: Vec<ReferenceCounter<Node<T>>> = Vec::with_capacity(next_level_count);
 
@@ -3758,9 +3795,8 @@ fn build_root_from_elements<T: Clone>(elements: Vec<T>) -> (ReferenceCounter<Nod
     )
 }
 
-/// Helper function to build a `PersistentVector` from a Vec without requiring Clone.
-///
-/// This is used for fmap operations where the output type doesn't implement Clone.
+/// Builds a `PersistentVector` from a `Vec` without requiring `Clone`.
+/// Used for `fmap` operations where the output type doesn't implement `Clone`.
 fn build_persistent_vector_from_vec_no_clone<T>(elements: Vec<T>) -> PersistentVector<T> {
     if elements.is_empty() {
         return PersistentVector {
@@ -3773,7 +3809,6 @@ fn build_persistent_vector_from_vec_no_clone<T>(elements: Vec<T>) -> PersistentV
 
     let length = elements.len();
 
-    // For small vectors, just put everything in the tail
     if length <= BRANCHING_FACTOR {
         let tail_chunk: TailChunk<T> = elements.into_iter().collect();
         return PersistentVector {
@@ -3784,7 +3819,6 @@ fn build_persistent_vector_from_vec_no_clone<T>(elements: Vec<T>) -> PersistentV
         };
     }
 
-    // Calculate how many elements go in the tail
     let tail_size = length % BRANCHING_FACTOR;
     let tail_size = if tail_size == 0 {
         BRANCHING_FACTOR
@@ -3793,12 +3827,10 @@ fn build_persistent_vector_from_vec_no_clone<T>(elements: Vec<T>) -> PersistentV
     };
     let root_size = length - tail_size;
 
-    // Split elements into root and tail portions
     let mut elements = elements;
     let tail_elements = elements.split_off(root_size);
     let root_elements = elements;
 
-    // Build the root tree
     let (root, shift) = build_root_from_elements_no_clone(root_elements);
 
     let tail_chunk: TailChunk<T> = tail_elements.into_iter().collect();
@@ -3810,16 +3842,12 @@ fn build_persistent_vector_from_vec_no_clone<T>(elements: Vec<T>) -> PersistentV
     }
 }
 
-/// Build the root tree from a vector of elements without requiring Clone.
 fn build_root_from_elements_no_clone<T>(elements: Vec<T>) -> (ReferenceCounter<Node<T>>, usize) {
     if elements.is_empty() {
         return (ReferenceCounter::new(Node::empty_branch()), BITS_PER_LEVEL);
     }
 
-    // Pre-calculate the number of leaf nodes needed
     let leaf_count = elements.len().div_ceil(BRANCHING_FACTOR);
-
-    // Split into chunks of BRANCHING_FACTOR with pre-allocated capacity
     let mut leaves: Vec<ReferenceCounter<Node<T>>> = Vec::with_capacity(leaf_count);
     let mut iter = elements.into_iter();
 
@@ -3828,16 +3856,12 @@ fn build_root_from_elements_no_clone<T>(elements: Vec<T>) -> (ReferenceCounter<N
         if chunk.is_empty() {
             break;
         }
-        let leaf_size = chunk.len();
         let leaf_chunk: LeafChunk<T> = chunk.into_iter().collect();
         leaves.push(ReferenceCounter::new(Node::Leaf(ReferenceCounter::new(
             leaf_chunk,
         ))));
-        // Store size for later use (we'll rebuild size tables)
-        let _ = leaf_size;
     }
 
-    // If there's only one leaf, wrap it in a branch
     if leaves.len() == 1 {
         let leaf = leaves.remove(0);
         let leaf_size = leaf.subtree_size();
@@ -3855,12 +3879,10 @@ fn build_root_from_elements_no_clone<T>(elements: Vec<T>) -> (ReferenceCounter<N
         );
     }
 
-    // Build tree bottom-up
     let mut current_level = leaves;
     let mut shift = BITS_PER_LEVEL;
 
     while current_level.len() > BRANCHING_FACTOR {
-        // Pre-calculate the number of nodes needed for next level
         let next_level_count = current_level.len().div_ceil(BRANCHING_FACTOR);
         let mut next_level: Vec<ReferenceCounter<Node<T>>> = Vec::with_capacity(next_level_count);
 
@@ -5905,6 +5927,114 @@ mod tests {
             assert_eq!(vectors[0], vector2);
             assert_eq!(vectors[1], vector3);
             assert_eq!(vectors[2], vector1);
+        }
+    }
+
+    // =========================================================================
+    // from_vec Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_from_vec_empty() {
+        let vector: PersistentVector<i32> = PersistentVector::from_vec(vec![]);
+        assert!(vector.is_empty());
+        assert_eq!(vector.len(), 0);
+    }
+
+    #[rstest]
+    fn test_from_vec_small() {
+        let vec = vec![1, 2, 3, 4, 5];
+        let vector = PersistentVector::from_vec(vec);
+        assert_eq!(vector.len(), 5);
+        for (i, expected) in (1..=5).enumerate() {
+            assert_eq!(vector.get(i), Some(&expected));
+        }
+    }
+
+    #[rstest]
+    fn test_from_vec_large() {
+        let vec: Vec<i32> = (1..=100).collect();
+        let vector = PersistentVector::from_vec(vec);
+        assert_eq!(vector.len(), 100);
+        for (i, expected) in (1..=100).enumerate() {
+            assert_eq!(vector.get(i), Some(&expected));
+        }
+    }
+
+    #[rstest]
+    fn test_from_vec_preserves_order() {
+        let vec = vec![10, 20, 30, 40, 50];
+        let vector = PersistentVector::from_vec(vec);
+        let collected: Vec<i32> = vector.iter().copied().collect();
+        assert_eq!(collected, vec![10, 20, 30, 40, 50]);
+    }
+
+    #[rstest]
+    fn test_from_vec_equals_transient_path() {
+        let elements: Vec<i32> = (1..=200).collect();
+        let from_vec = PersistentVector::from_vec(elements.clone());
+        let from_transient: PersistentVector<i32> = {
+            let mut transient = TransientVector::new();
+            for e in &elements {
+                transient.push_back(*e);
+            }
+            transient.persistent()
+        };
+        assert_eq!(from_vec.len(), from_transient.len());
+        for i in 0..elements.len() {
+            assert_eq!(from_vec.get(i), from_transient.get(i));
+        }
+    }
+
+    // =========================================================================
+    // FromIterator Optimization Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_from_iter_exact_size_uses_from_vec_path() {
+        // Large exact-size iterator should use from_vec path
+        let vector: PersistentVector<i32> = (1..=100).collect();
+        assert_eq!(vector.len(), 100);
+        for (i, expected) in (1..=100).enumerate() {
+            assert_eq!(vector.get(i), Some(&expected));
+        }
+    }
+
+    #[rstest]
+    fn test_from_iter_small_exact_size_uses_transient_path() {
+        // Small exact-size iterator should use transient path (< 64 elements)
+        let vector: PersistentVector<i32> = (1..=10).collect();
+        assert_eq!(vector.len(), 10);
+        for (i, expected) in (1..=10).enumerate() {
+            assert_eq!(vector.get(i), Some(&expected));
+        }
+    }
+
+    #[rstest]
+    fn test_from_iter_inexact_size_uses_transient_path() {
+        // Filter iterator has inexact size_hint
+        let vector: PersistentVector<i32> = (1..=100).filter(|x| x % 2 == 0).collect();
+        assert_eq!(vector.len(), 50);
+        let expected: Vec<i32> = (1..=50).map(|x| x * 2).collect();
+        for (i, expected_val) in expected.iter().enumerate() {
+            assert_eq!(vector.get(i), Some(expected_val));
+        }
+    }
+
+    #[rstest]
+    fn test_from_iter_result_identical_regardless_of_path() {
+        // Verify that both paths produce identical results
+        let elements: Vec<i32> = (1..=100).collect();
+
+        // Path 1: exact-size (uses from_vec)
+        let from_exact: PersistentVector<i32> = elements.clone().into_iter().collect();
+
+        // Path 2: inexact-size (uses transient)
+        let from_inexact: PersistentVector<i32> = elements.into_iter().filter(|_| true).collect();
+
+        assert_eq!(from_exact.len(), from_inexact.len());
+        for i in 0..100 {
+            assert_eq!(from_exact.get(i), from_inexact.get(i));
         }
     }
 }
