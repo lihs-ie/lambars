@@ -1,0 +1,309 @@
+# REQ-BOTTLENECK-003 分析結果
+#
+# PersistentVector の get/update 性能回帰調査の分析記録
+#
+# 参照:
+#   - docs/internal/requirements/20260131_1100_bulk_construction_api_bottleneck_remediation.yaml
+#   - benches/iai/persistent_vector_iai.rs
+
+version: "1.0.0"
+created: "2026-01-31"
+updated: "2026-01-31"
+
+# ====================================================================
+# 1. iai-callgrind の測定境界確認
+# ====================================================================
+measurement_boundary_analysis:
+  question: |
+    #[bench::with_setup] は setup コストを Ir（命令実行数）に含めるか？
+
+  method: "Option A: 公式ドキュメント確認"
+
+  source:
+    url: "https://docs.rs/iai-callgrind/0.16/iai_callgrind/"
+    accessed: "2026-01-31"
+    version: "0.16 (Cargo.toml: iai-callgrind = \"0.16\")"
+
+  findings: |
+    公式ドキュメントに以下の記述を確認:
+
+    "the big advantage is, that the setup costs and event counts aren't
+    attributed to the benchmark."
+
+    これは library benchmarks で #[bench] 属性と setup 関数を使用する場合に
+    適用される。
+
+    Binary benchmarks についても同様に、setup は "before the Command is
+    executed" で実行され、測定から分離されることが明記されている。
+
+  conclusion: |
+    #[bench::with_setup] は setup コストを Ir に含めない。
+    したがって、OnceLock による setup コスト分離は不要である。
+
+  validation_status: "CONFIRMED"
+  oncelock_required: false
+
+# ====================================================================
+# 2. 複数サイズでのサイズ別回帰率記録
+# ====================================================================
+size_based_regression_analysis:
+  description: |
+    get_sequential と update を 100, 1000, 10000 の 3 サイズで測定し、
+    サイズ依存の回帰パターンを検出する。
+
+  benchmarks_added:
+    - name: "get_sequential_100"
+      size: 100
+      purpose: "Small 状態での get 性能"
+    - name: "get_sequential_1000"
+      size: 1000
+      purpose: "既存ベンチマーク（回帰報告の対象）"
+    - name: "get_sequential_10000"
+      size: 10000
+      purpose: "Large 状態での get 性能"
+    - name: "update_100"
+      size: 100
+      purpose: "Small 状態での update 性能"
+    - name: "update_1000"
+      size: 1000
+      purpose: "既存ベンチマーク（回帰報告の対象）"
+    - name: "update_10000"
+      size: 10000
+      purpose: "Large 状態での update 性能"
+
+  baseline_measurement:
+    note: |
+      ベースライン測定は CI で iai-callgrind を実行した際に自動的に記録される。
+      回帰検出は iai-callgrind の比較機能を使用する。
+
+      測定結果の格納先:
+      - CI アーティファクト: profiling-results/iai/persistent_vector_iai.log
+      - callgrind 出力: profiling-results/iai/callgrind.out.*
+      - CI ワークフロー: .github/workflows/profiling.yml
+      - 各ベンチマークの Ir 値を比較し、回帰率を計算
+
+  regression_pattern_analysis:
+    status: "READY_FOR_CI"
+    note: |
+      現時点では setup 混入の可能性は排除された。
+      実際の回帰が存在するかは、CI 環境での IAI ベンチマーク実行結果を待つ。
+
+      ローカル環境での測定:
+      - iai-callgrind-runner は Linux 環境 (valgrind) が必要
+      - macOS ではインストール不可
+      - CI (Linux) で自動実行される
+
+      分析方針:
+      - 全サイズで一貫した回帰 -> ホットパス変更の可能性
+      - 特定サイズのみ回帰 -> キャッシュ効果またはデータ構造の閾値
+      - 回帰なし -> 以前の測定誤差
+
+    measurement_environment:
+      local: "macOS - iai-callgrind-runner 非対応"
+      ci: "Linux - valgrind + iai-callgrind-runner で実行"
+      results_location:
+        ci_artifact: "profiling-results/iai/*.log"
+        ci_workflow: ".github/workflows/profiling.yml"
+        note: |
+          CI でのベンチマーク結果は GitHub Actions のアーティファクトとして保存される。
+          - ログファイル: profiling-results/iai/${bench}.log
+          - callgrind 出力: profiling-results/iai/callgrind.out.*
+          結果の比較は、CI 実行間でアーティファクトをダウンロードして行う。
+
+# ====================================================================
+# 3. 回帰原因の分類
+# ====================================================================
+regression_cause_classification:
+  possible_causes:
+    - id: "CAUSE-1"
+      name: "setup 混入"
+      description: "IAI が setup コストを Ir に含めていた"
+      status: "EXCLUDED"
+      evidence: "公式ドキュメントで setup は測定に含まれないことを確認"
+
+    - id: "CAUSE-2"
+      name: "ホットパス変更"
+      description: "find_child_index 等のホットパスが変更された"
+      status: "UNLIKELY"
+      evidence: |
+        Codex 分析により、ホットパス（find_child_index）は bulk construction
+        API 追加で変更されていないことが確認されている。
+
+    - id: "CAUSE-3"
+      name: "FromIterator 経路変更"
+      description: "collect() が from_vec 経路を使用するようになった"
+      status: "POSSIBLE"
+      evidence: |
+        exact-size イテレータで >= 64 要素の場合、FromIterator は from_vec を
+        使用する。これにより構築コストが変化した可能性がある。
+        ただし、setup は測定に含まれないため、get/update への影響はない。
+
+    - id: "CAUSE-4"
+      name: "測定誤差"
+      description: "以前のベースライン測定に誤差があった"
+      status: "POSSIBLE"
+      evidence: |
+        iai-callgrind は決定的な測定を提供するが、コンパイラ最適化や
+        環境差により微小な変動（< 1%）が発生する可能性がある。
+        +163.9% の回帰は測定誤差では説明できない規模であるため、
+        実際に回帰が存在する可能性がある。
+
+    - id: "CAUSE-5"
+      name: "キャッシュ親和性"
+      description: "static ベクトルによるキャッシュ親和性の変化"
+      status: "NOT_APPLICABLE"
+      evidence: |
+        OnceLock による static ベクトルは採用しないため、キャッシュ親和性の
+        変化は発生しない。各ベンチマークは setup で新規にベクトルを生成する。
+
+        要件定義では「static ベクトルのキャッシュ親和性による bias」を
+        検出するためのサイズ別測定が記載されているが、OnceLock を使用しない
+        ため、この観点は該当しない。
+
+        ただし、サイズ別測定自体は有用であり、以下の観点で活用する:
+        - L1/L2/L3 キャッシュ容量との関係
+        - per-element の不効率性検出
+        - 分岐予測の安定性
+
+  current_conclusion: |
+    setup 混入の可能性は排除された。
+    回帰が実在するかの確認は、次のステップで実施する:
+    1. 最新コミットで IAI ベンチマークを実行
+    2. 前回の測定結果と比較
+    3. 回帰が確認された場合、git bisect で原因コミットを特定
+
+# ====================================================================
+# 4. 構築経路ベンチの分析
+# ====================================================================
+construction_path_analysis:
+  existing_benchmarks:
+    - name: "from_vec_*"
+      description: "Vec から PersistentVector を構築"
+      sizes: [100, 1000, 10000, 100000]
+
+    - name: "collect_*"
+      description: "Range イテレータから collect で構築"
+      sizes: [100, 1000, 10000, 100000]
+      note: |
+        Range<i32> は ExactSizeIterator を実装しており、
+        FromIterator の実装で from_vec 経路が選択される。
+
+        **重要**: 測定範囲の違い
+        - from_vec_*: #[bench::with_setup] により Vec 構築は測定外
+        - collect_*: Range 反復と Vec 構築が測定に含まれる
+
+        したがって Ir 値は直接比較できない。
+        collect_* は collect 経路の性能追跡用であり、
+        from_vec_* との比較を目的としていない。
+
+  from_iter_specialized_bench:
+    status: "DEFERRED"
+    requirement_reference: |
+      要件定義 docs/internal/requirements/20260131_1100_bulk_construction_api_bottleneck_remediation.yaml
+      の methods セクション「構築経路専用ベンチの追加」に記載されている。
+
+    analysis: |
+      要件定義では、以下の目的で構築経路専用ベンチが記載されている:
+      - IAI の with_setup が Ir に含まれる場合、from_vec vs from_iter の比較
+
+      しかし、測定境界確認の結果:
+      - #[bench::with_setup] は setup コストを Ir に含めない（ドキュメント確認済み）
+      - したがって、構築経路の差分は get/update の測定に影響しない
+
+      既存の collect_* ベンチマーク:
+      - Range<i32> は ExactSizeIterator であり、from_vec 経路を使用
+      - ただし測定範囲が異なる（from_vec_* は setup で Vec 構築を除外、
+        collect_* は Range 反復を含む）ため、Ir 値は直接比較できない
+      - collect_* は collect 経路の性能追跡用であり、from_vec_* との比較ではない
+
+      from_iter 経路を強制する方法:
+      - filter 付きイテレータ（例: (0..1000).filter(|_| true)）
+      - これは size_hint が (0, Some(n)) となり、exact-size ではない
+      - ただし、filter の追加は測定対象外の操作であり、純粋な比較とならない
+
+    decision: |
+      以下の理由で、本 PR では構築経路専用ベンチを DEFERRED（延期）とする:
+      1. setup 混入が排除されたため、get/update の回帰調査には不要
+      2. 純粋な from_vec vs from_iter の比較が技術的に困難
+      3. REQ-BOTTLENECK-002 で bulk construction の効果測定は別途実施される
+
+      将来の実装候補:
+      - iter_with_unknown_size ベンチ（filter 付き、参考用）
+      - 要件定義の future_extensions として記録することを推奨
+
+    requirement_status: "要件定義への変更提案: 本 methods を notes に移動、または優先度を明示"
+
+# ====================================================================
+# 5. 要件定義との整合性
+# ====================================================================
+requirement_alignment:
+  oncelock_implementation:
+    requirement: |
+      要件定義 docs/internal/requirements/20260131_1100_bulk_construction_api_bottleneck_remediation.yaml
+      の methods セクション「std::sync::OnceLock による setup コスト分離」に記載。
+      「前提: IAI の測定境界確認で setup が Ir に含まれることが確認されたら実施」
+
+    analysis_result: |
+      測定境界確認の結果、#[bench::with_setup] は setup を Ir に含めないことが
+      公式ドキュメント (version 0.16) で確認された。
+
+    conclusion: |
+      前提条件「setup が Ir に含まれることが確認された」が FALSE であるため、
+      OnceLock 実装は NOT_APPLICABLE（適用外）となる。
+
+    status: "NOT_APPLICABLE"
+    reason: "前提条件が FALSE のため実施対象外"
+
+  construction_path_bench:
+    requirement: |
+      要件定義の methods セクション「構築経路専用ベンチの追加」に記載。
+
+    analysis_result: |
+      1. setup 混入が排除されたため、get/update の回帰調査には不要
+      2. collect_* は ExactSizeIterator により from_vec 経路を使用
+      3. 純粋な from_iter 経路の比較は filter 等の追加が必要で不適切
+
+    conclusion: |
+      構築経路専用ベンチは get/update の回帰調査には必要ない。
+      REQ-BOTTLENECK-002 で bulk construction の効果測定は別途実施される。
+
+    status: "DEFERRED"
+    reason: "回帰調査の目的には不要、bulk construction 効果測定は REQ-BOTTLENECK-002 で対応"
+
+  validation_items:
+    - item: "iai-callgrind ドキュメント確認で #[bench::with_setup] の動作を確認"
+      status: "DONE"
+      evidence: "公式ドキュメント version 0.16 で確認"
+
+    - item: "複数サイズ（100, 1000, 10000）での IAI 測定でサイズ別回帰率を記録"
+      status: "READY_FOR_CI"
+      evidence: "ベンチマークを追加済み、CI で実行"
+
+    - item: "回帰の原因分類を REQ-BOTTLENECK-003-analysis.yaml に記録"
+      status: "DONE"
+      evidence: "本ファイルの regression_cause_classification セクション"
+
+    - item: "OnceLock 分離後の get/update で baseline との比較"
+      status: "NOT_APPLICABLE"
+      evidence: "OnceLock 不要と判断（前提条件 FALSE）"
+
+    - item: "構築経路ベンチで from_vec vs from_iter の比較"
+      status: "DEFERRED"
+      evidence: "回帰調査には不要、REQ-BOTTLENECK-002 で対応"
+
+# ====================================================================
+# 6. 次のステップ
+# ====================================================================
+next_steps:
+  - step: 1
+    action: "現在のコードで IAI ベンチマークを実行"
+    status: "PENDING"
+
+  - step: 2
+    action: "回帰が確認された場合、git bisect で原因コミットを特定"
+    status: "PENDING"
+    script: "benches/scripts/bisect_regression.sh（必要に応じて作成）"
+
+  - step: 3
+    action: "原因コミットの diff を分析し、回帰原因を特定"
+    status: "PENDING"

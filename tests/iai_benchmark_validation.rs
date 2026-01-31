@@ -300,3 +300,59 @@ fn test_persistent_vector_collect_1000() {
     assert_eq!(result.get(500), Some(&500));
     assert_eq!(result.get(999), Some(&999));
 }
+
+#[rstest]
+fn test_get_sequential_100() {
+    let vector: PersistentVector<i32> = (0..100).collect();
+    let vector = black_box(vector);
+    let mut sum = 0;
+    for index in 0..100 {
+        if let Some(&value) = vector.get(black_box(index)) {
+            sum += value;
+        }
+    }
+    assert_eq!(black_box(sum), 4950);
+}
+
+#[rstest]
+fn test_get_sequential_10000() {
+    let vector: PersistentVector<i32> = (0..10000).collect();
+    let vector = black_box(vector);
+    let mut sum = 0;
+    for index in 0..10000 {
+        if let Some(&value) = vector.get(black_box(index)) {
+            sum += value;
+        }
+    }
+    assert_eq!(black_box(sum), 49995000);
+}
+
+#[rstest]
+fn test_update_100() {
+    let vector: PersistentVector<i32> = (0..100).collect();
+    let mut vector = black_box(vector);
+    for index in 0..100 {
+        if let Some(updated) = vector.update(black_box(index), black_box(index as i32 * 2)) {
+            vector = updated;
+        }
+    }
+    let result = black_box(vector);
+    assert_eq!(result.get(0), Some(&0));
+    assert_eq!(result.get(50), Some(&100));
+    assert_eq!(result.get(99), Some(&198));
+}
+
+#[rstest]
+fn test_update_10000() {
+    let vector: PersistentVector<i32> = (0..10000).collect();
+    let mut vector = black_box(vector);
+    for index in 0..10000 {
+        if let Some(updated) = vector.update(black_box(index), black_box(index as i32 * 2)) {
+            vector = updated;
+        }
+    }
+    let result = black_box(vector);
+    assert_eq!(result.get(0), Some(&0));
+    assert_eq!(result.get(5000), Some(&10000));
+    assert_eq!(result.get(9999), Some(&19998));
+}
