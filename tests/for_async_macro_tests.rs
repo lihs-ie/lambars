@@ -18,7 +18,7 @@ async fn test_single_iteration_vec() {
         x <= vec![1, 2, 3];
         yield x * 2
     };
-    assert_eq!(result.run_async().await, vec![2, 4, 6]);
+    assert_eq!(result.await, vec![2, 4, 6]);
 }
 
 #[tokio::test]
@@ -27,7 +27,7 @@ async fn test_single_iteration_array() {
         x <= [1, 2, 3];
         yield x + 10
     };
-    assert_eq!(result.run_async().await, vec![11, 12, 13]);
+    assert_eq!(result.await, vec![11, 12, 13]);
 }
 
 #[tokio::test]
@@ -36,7 +36,7 @@ async fn test_single_iteration_range() {
         x <= 1..4;
         yield x * x
     };
-    assert_eq!(result.run_async().await, vec![1, 4, 9]);
+    assert_eq!(result.await, vec![1, 4, 9]);
 }
 
 // =============================================================================
@@ -50,7 +50,7 @@ async fn test_nested_iteration_two_levels() {
         y <= vec![10, 20];
         yield x + y
     };
-    assert_eq!(result.run_async().await, vec![11, 21, 12, 22]);
+    assert_eq!(result.await, vec![11, 21, 12, 22]);
 }
 
 #[tokio::test]
@@ -61,10 +61,7 @@ async fn test_nested_iteration_three_levels() {
         z <= vec![100, 200];
         yield x + y + z
     };
-    assert_eq!(
-        result.run_async().await,
-        vec![111, 211, 121, 221, 112, 212, 122, 222]
-    );
+    assert_eq!(result.await, vec![111, 211, 121, 221, 112, 212, 122, 222]);
 }
 
 // =============================================================================
@@ -78,7 +75,7 @@ async fn test_async_bind_simple() {
         doubled <~ AsyncIO::pure(x * 2);
         yield doubled
     };
-    assert_eq!(result.run_async().await, vec![2, 4, 6]);
+    assert_eq!(result.await, vec![2, 4, 6]);
 }
 
 #[tokio::test]
@@ -89,7 +86,7 @@ async fn test_async_bind_multiple() {
         z <~ AsyncIO::pure(y + 1);
         yield z
     };
-    assert_eq!(result.run_async().await, vec![11, 21]);
+    assert_eq!(result.await, vec![11, 21]);
 }
 
 #[tokio::test]
@@ -100,7 +97,7 @@ async fn test_async_bind_with_collection() {
         sum <~ AsyncIO::pure(x + y);
         yield sum
     };
-    assert_eq!(result.run_async().await, vec![11, 21, 12, 22]);
+    assert_eq!(result.await, vec![11, 21, 12, 22]);
 }
 
 // =============================================================================
@@ -114,7 +111,7 @@ async fn test_tuple_pattern_collection() {
         (num, letter) <= pairs;
         yield format!("{}{}", num, letter)
     };
-    assert_eq!(result.run_async().await, vec!["1a", "2b", "3c"]);
+    assert_eq!(result.await, vec!["1a", "2b", "3c"]);
 }
 
 #[tokio::test]
@@ -124,7 +121,7 @@ async fn test_tuple_pattern_async_bind() {
         (a, b) <~ AsyncIO::pure((x, x * 10));
         yield a + b
     };
-    assert_eq!(result.run_async().await, vec![11, 22]);
+    assert_eq!(result.await, vec![11, 22]);
 }
 
 #[tokio::test]
@@ -134,7 +131,7 @@ async fn test_tuple_pattern_nested() {
         ((x, y), label) <= nested;
         yield format!("{}: ({}, {})", label, x, y)
     };
-    assert_eq!(result.run_async().await, vec!["a: (1, 2)", "b: (3, 4)"]);
+    assert_eq!(result.await, vec!["a: (1, 2)", "b: (3, 4)"]);
 }
 
 // =============================================================================
@@ -148,7 +145,7 @@ async fn test_wildcard_collection() {
         (_, letter) <= pairs;
         yield letter.to_uppercase()
     };
-    assert_eq!(result.run_async().await, vec!["A", "B", "C"]);
+    assert_eq!(result.await, vec!["A", "B", "C"]);
 }
 
 #[tokio::test]
@@ -157,7 +154,7 @@ async fn test_wildcard_full_element() {
         _ <= vec![1, 2, 3];
         yield "x"
     };
-    assert_eq!(result.run_async().await, vec!["x", "x", "x"]);
+    assert_eq!(result.await, vec!["x", "x", "x"]);
 }
 
 #[tokio::test]
@@ -167,7 +164,7 @@ async fn test_wildcard_async_bind() {
         _ <~ AsyncIO::pure("ignored");
         yield x
     };
-    assert_eq!(result.run_async().await, vec![1, 2, 3]);
+    assert_eq!(result.await, vec![1, 2, 3]);
 }
 
 // =============================================================================
@@ -181,7 +178,7 @@ async fn test_let_binding_simple() {
         let doubled = x * 2;
         yield doubled
     };
-    assert_eq!(result.run_async().await, vec![2, 4, 6]);
+    assert_eq!(result.await, vec![2, 4, 6]);
 }
 
 #[tokio::test]
@@ -192,7 +189,7 @@ async fn test_let_binding_with_async() {
         let processed = data + 1;
         yield processed
     };
-    assert_eq!(result.run_async().await, vec![11, 21, 31]);
+    assert_eq!(result.await, vec![11, 21, 31]);
 }
 
 #[tokio::test]
@@ -203,7 +200,7 @@ async fn test_let_binding_multiple() {
         let squared = doubled * doubled;
         yield squared
     };
-    assert_eq!(result.run_async().await, vec![4, 16, 36]);
+    assert_eq!(result.await, vec![4, 16, 36]);
 }
 
 #[tokio::test]
@@ -213,7 +210,7 @@ async fn test_let_tuple_binding() {
         let (a, b) = pair;
         yield a + b
     };
-    assert_eq!(result.run_async().await, vec![3, 7, 11]);
+    assert_eq!(result.await, vec![3, 7, 11]);
 }
 
 // =============================================================================
@@ -227,7 +224,7 @@ async fn test_empty_source_collection() {
         x <= empty;
         yield x * 2
     };
-    assert_eq!(result.run_async().await, Vec::<i32>::new());
+    assert_eq!(result.await, Vec::<i32>::new());
 }
 
 #[tokio::test]
@@ -237,7 +234,7 @@ async fn test_empty_nested_collection() {
         y <= if x == 2 { vec![] } else { vec![x] };
         yield y
     };
-    assert_eq!(result.run_async().await, vec![1, 3]);
+    assert_eq!(result.await, vec![1, 3]);
 }
 
 // =============================================================================
@@ -265,7 +262,7 @@ async fn test_deferred_execution() {
     assert_eq!(execution_count.load(Ordering::SeqCst), 0);
 
     // Execute
-    let values = result.run_async().await;
+    let values = result.await;
 
     // Now execution should have happened 3 times
     assert_eq!(execution_count.load(Ordering::SeqCst), 3);
@@ -284,7 +281,7 @@ async fn test_fmap_composition() {
     }
     .fmap(|vec| vec.into_iter().sum::<i32>());
 
-    assert_eq!(result.run_async().await, 12);
+    assert_eq!(result.await, 12);
 }
 
 #[tokio::test]
@@ -295,7 +292,7 @@ async fn test_flat_map_composition() {
     }
     .flat_map(|vec| AsyncIO::pure(vec.len()));
 
-    assert_eq!(result.run_async().await, 3);
+    assert_eq!(result.await, 3);
 }
 
 // =============================================================================
@@ -308,7 +305,7 @@ async fn test_string_iteration() {
         s <= vec!["hello", "world"];
         yield s.to_uppercase()
     };
-    assert_eq!(result.run_async().await, vec!["HELLO", "WORLD"]);
+    assert_eq!(result.await, vec!["HELLO", "WORLD"]);
 }
 
 #[tokio::test]
@@ -324,5 +321,5 @@ async fn test_complex_async_chain() {
         b <~ AsyncIO::pure(y * 100);
         yield a + b
     };
-    assert_eq!(result.run_async().await, vec![310, 410, 320, 420]);
+    assert_eq!(result.await, vec![310, 410, 320, 420]);
 }

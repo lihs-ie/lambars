@@ -195,7 +195,6 @@ pub async fn get_task_history_demo(
     let task = state
         .task_repository
         .find_by_id(&task_id)
-        .run_async()
         .await
         .map_err(ApiErrorResponse::from)?
         .ok_or_else(|| ApiErrorResponse::not_found("Task not found"))?;

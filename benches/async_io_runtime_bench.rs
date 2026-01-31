@@ -118,7 +118,7 @@ fn benchmark_async_io_pure(criterion: &mut Criterion) {
     group.bench_function("pure_run_async", |bencher| {
         bencher.to_async(&runtime).iter(|| async {
             let async_io = AsyncIO::pure(black_box(42));
-            black_box(async_io.run_async().await)
+            black_box(async_io.await)
         });
     });
 
@@ -135,11 +135,11 @@ fn benchmark_async_io_pure(criterion: &mut Criterion) {
 
     group.bench_function("pure_sequence_5_run_async", |bencher| {
         bencher.to_async(&runtime).iter(|| async {
-            let a = AsyncIO::pure(black_box(1)).run_async().await;
-            let b = AsyncIO::pure(black_box(2)).run_async().await;
-            let c = AsyncIO::pure(black_box(3)).run_async().await;
-            let d = AsyncIO::pure(black_box(4)).run_async().await;
-            let e = AsyncIO::pure(black_box(5)).run_async().await;
+            let a = AsyncIO::pure(black_box(1)).await;
+            let b = AsyncIO::pure(black_box(2)).await;
+            let c = AsyncIO::pure(black_box(3)).await;
+            let d = AsyncIO::pure(black_box(4)).await;
+            let e = AsyncIO::pure(black_box(5)).await;
             black_box(a + b + c + d + e)
         });
     });
@@ -166,7 +166,7 @@ fn benchmark_async_io_fmap(criterion: &mut Criterion) {
     group.bench_function("fmap_1_run_async", |bencher| {
         bencher.to_async(&runtime).iter(|| async {
             let async_io = AsyncIO::pure(black_box(1)).fmap(|x| x + 1);
-            black_box(async_io.run_async().await)
+            black_box(async_io.await)
         });
     });
 
@@ -190,7 +190,7 @@ fn benchmark_async_io_fmap(criterion: &mut Criterion) {
                 .fmap(|x| x + 3)
                 .fmap(|x| x * 4)
                 .fmap(|x| x + 5);
-            black_box(async_io.run_async().await)
+            black_box(async_io.await)
         });
     });
 
@@ -224,7 +224,7 @@ fn benchmark_async_io_fmap(criterion: &mut Criterion) {
                 .fmap(|x| x + 1)
                 .fmap(|x| x + 1)
                 .fmap(|x| x + 1);
-            black_box(async_io.run_async().await)
+            black_box(async_io.await)
         });
     });
 
@@ -254,7 +254,7 @@ fn benchmark_async_io_fmap(criterion: &mut Criterion) {
                     for _ in 0..depth {
                         async_io = async_io.fmap(|x| x + 1);
                     }
-                    black_box(async_io.run_async().await)
+                    black_box(async_io.await)
                 });
             },
         );
@@ -282,7 +282,7 @@ fn benchmark_async_io_flat_map(criterion: &mut Criterion) {
     group.bench_function("flat_map_1_run_async", |bencher| {
         bencher.to_async(&runtime).iter(|| async {
             let async_io = AsyncIO::pure(black_box(1)).flat_map(|x| AsyncIO::pure(x + 1));
-            black_box(async_io.run_async().await)
+            black_box(async_io.await)
         });
     });
 
@@ -306,7 +306,7 @@ fn benchmark_async_io_flat_map(criterion: &mut Criterion) {
                 .flat_map(|x| AsyncIO::pure(x + 3))
                 .flat_map(|x| AsyncIO::pure(x * 4))
                 .flat_map(|x| AsyncIO::pure(x + 5));
-            black_box(async_io.run_async().await)
+            black_box(async_io.await)
         });
     });
 
@@ -340,7 +340,7 @@ fn benchmark_async_io_flat_map(criterion: &mut Criterion) {
                 .flat_map(|x| AsyncIO::pure(x + 1))
                 .flat_map(|x| AsyncIO::pure(x + 1))
                 .flat_map(|x| AsyncIO::pure(x + 1));
-            black_box(async_io.run_async().await)
+            black_box(async_io.await)
         });
     });
 
@@ -370,7 +370,7 @@ fn benchmark_async_io_flat_map(criterion: &mut Criterion) {
                     for _ in 0..depth {
                         async_io = async_io.flat_map(|x| AsyncIO::pure(x + 1));
                     }
-                    black_box(async_io.run_async().await)
+                    black_box(async_io.await)
                 });
             },
         );
@@ -396,7 +396,7 @@ fn benchmark_async_io_flat_map(criterion: &mut Criterion) {
                 .flat_map(|x| AsyncIO::pure(x + 3))
                 .flat_map(|x| AsyncIO::pure(x * 4))
                 .flat_map(|x| AsyncIO::pure(x + 5));
-            black_box(async_io.run_async().await)
+            black_box(async_io.await)
         });
     });
 
@@ -509,7 +509,7 @@ fn benchmark_async_pool_spawn_drain(criterion: &mut Criterion) {
         bencher.to_async(&runtime).iter(|| async {
             let mut results = Vec::with_capacity(10);
             for i in 0..10 {
-                results.push(AsyncIO::pure(i).run_async().await);
+                results.push(AsyncIO::pure(i).await);
             }
             black_box(results)
         });
@@ -579,7 +579,7 @@ fn benchmark_async_io_batch_run(criterion: &mut Criterion) {
         bencher.to_async(&runtime).iter(|| async {
             let mut results = Vec::with_capacity(10);
             for i in 0..10 {
-                results.push(AsyncIO::pure(i).run_async().await);
+                results.push(AsyncIO::pure(i).await);
             }
             black_box(results)
         });
@@ -610,7 +610,7 @@ fn benchmark_comparison(criterion: &mut Criterion) {
 
     group.bench_function("async_io_pure_run_async", |bencher| {
         bencher.to_async(&runtime).iter(|| async {
-            let result = AsyncIO::pure(black_box(42)).run_async().await;
+            let result = AsyncIO::pure(black_box(42)).await;
             black_box(result)
         });
     });
@@ -624,7 +624,7 @@ fn benchmark_comparison(criterion: &mut Criterion) {
 
     group.bench_function("async_io_new_run_async", |bencher| {
         bencher.to_async(&runtime).iter(|| async {
-            let result = AsyncIO::new(|| async { black_box(42) }).run_async().await;
+            let result = AsyncIO::new(|| async { black_box(42) }).await;
             black_box(result)
         });
     });
@@ -662,7 +662,6 @@ fn benchmark_comparison(criterion: &mut Criterion) {
                 .fmap(|x| x + 3)
                 .fmap(|x| x * 4)
                 .fmap(|x| x + 5)
-                .run_async()
                 .await;
             black_box(result)
         });

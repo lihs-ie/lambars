@@ -581,7 +581,6 @@ pub async fn process_with_error_transform(
     let task = state
         .task_repository
         .find_by_id(&task_id)
-        .run_async()
         .await
         .map_err(|_| ApiErrorResponse::internal_error("Repository error"))?
         .ok_or_else(|| ApiErrorResponse::not_found(format!("Task not found: {task_id}")))?;
@@ -649,7 +648,6 @@ pub async fn transform_pair(
     let task = state
         .task_repository
         .find_by_id(&task_id)
-        .run_async()
         .await
         .map_err(|_| ApiErrorResponse::internal_error("Repository error"))?
         .ok_or_else(|| ApiErrorResponse::not_found(format!("Task not found: {task_id}")))?;
@@ -732,7 +730,6 @@ pub async fn enrich_error(
     let task = state
         .task_repository
         .find_by_id(&task_id)
-        .run_async()
         .await
         .map_err(|_| ApiErrorResponse::internal_error("Repository error"))?
         .ok_or_else(|| ApiErrorResponse::not_found(format!("Task not found: {task_id}")))?;
@@ -888,7 +885,7 @@ pub async fn batch_transform_results(
                     )))
                 } else {
                     // Fetch task
-                    match state.task_repository.find_by_id(&task_id).run_async().await {
+                    match state.task_repository.find_by_id(&task_id).await {
                         Ok(Some(task)) => Ok(task),
                         Ok(None) => Err(ProcessingError::NotFound(task_id_str.clone())),
                         Err(_) => Err(ProcessingError::InternalError(

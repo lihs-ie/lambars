@@ -425,7 +425,6 @@ pub async fn transform_async(
 
     // Execute the pipeline
     let task = pipeline
-        .run_async()
         .await
         .map_err(PipelineError::into_api_error)?;
 
@@ -477,7 +476,6 @@ fn fetch_task_async(
     AsyncIO::new(move || async move {
         repository
             .find_by_id(&task_id)
-            .run_async()
             .await
             .map_err(|e| PipelineError::InternalError(format!("Repository error: {e}")))?
             .ok_or_else(|| {
@@ -543,7 +541,6 @@ pub async fn workflow_async(
 
     // Execute pipeline
     let (task, steps) = pipeline
-        .run_async()
         .await
         .map_err(|_| ApiErrorResponse::internal_error("Workflow execution failed"))?;
 
@@ -579,7 +576,6 @@ fn build_workflow_pipeline(
                 let step_start = Instant::now();
 
                 repo.save(&task)
-                    .run_async()
                     .await
                     .map_err(|e| format!("Save failed: {e}"))?;
 
@@ -723,7 +719,6 @@ pub async fn batch_process_async(
             let steps = steps.clone();
             build_batch_item_pipeline(repo, task_id, steps)
         })
-        .run_async()
         .await;
 
     let success_count = results.iter().filter(|r| r.success).count();
@@ -796,7 +791,7 @@ fn fetch_task_for_batch(
     task_id: TaskId,
 ) -> AsyncIO<BatchFetchResult> {
     AsyncIO::new(move || async move {
-        match repository.find_by_id(&task_id).run_async().await {
+        match repository.find_by_id(&task_id).await {
             Ok(Some(task)) => BatchFetchResult::Found(task),
             Ok(None) => BatchFetchResult::NotFound,
             Err(e) => BatchFetchResult::Error(format!("Repository error: {e}")),
@@ -856,7 +851,6 @@ pub async fn conditional_pipeline(
     let pipeline = build_conditional_pipeline(repository, id, &conditions);
 
     let (task, pipeline_type, conditions_evaluated) = pipeline
-        .run_async()
         .await
         .map_err(PipelineError::into_api_error)?;
 
@@ -1088,7 +1082,6 @@ mod tests {
             => normalize_title,
             => bump_priority
         )
-        .run_async()
         .await;
 
         assert_eq!(result.title, "Test");
@@ -1103,7 +1096,6 @@ mod tests {
             => |x| x * 2,
             =>> |x| AsyncIO::pure(x + 10)
         )
-        .run_async()
         .await;
 
         assert_eq!(result, 20);
@@ -1129,7 +1121,7 @@ mod tests {
         assert!(!executed.load(Ordering::SeqCst));
 
         // Execute
-        let result = pipeline.run_async().await;
+        let result = pipeline.await;
         assert!(executed.load(Ordering::SeqCst));
         assert_eq!(result, 84);
     }

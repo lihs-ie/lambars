@@ -30,14 +30,14 @@
 //! async fn main() {
 //!     // Single lift operation
 //!     let result = pipe_async!(AsyncIO::pure(5), => |x| x * 2);
-//!     assert_eq!(result.run_async().await, 10);
+//!     assert_eq!(result.await, 10);
 //!
 //!     // Single bind operation
 //!     let result = pipe_async!(
 //!         AsyncIO::pure(5),
 //!         =>> |x| AsyncIO::pure(x * 2)
 //!     );
-//!     assert_eq!(result.run_async().await, 10);
+//!     assert_eq!(result.await, 10);
 //! }
 //! ```
 //!
@@ -55,7 +55,7 @@
 //!         =>> |x| AsyncIO::pure(x + 10),    // flat_map: AsyncIO(15)
 //!         => |x| x * 2                      // fmap: AsyncIO(30)
 //!     );
-//!     assert_eq!(result.run_async().await, 30);
+//!     assert_eq!(result.await, 30);
 //! }
 //! ```
 //!
@@ -87,7 +87,7 @@
 //!     assert!(!executed.load(Ordering::SeqCst));
 //!
 //!     // Execute the workflow
-//!     let result = workflow.run_async().await;
+//!     let result = workflow.await;
 //!     assert!(executed.load(Ordering::SeqCst));
 //!     assert_eq!(result, 10);
 //! }
@@ -156,7 +156,7 @@
 /// use lambars::pipe_async;
 ///
 /// let result = pipe_async!(42);
-/// assert_eq!(result.run_async().await, 42);
+/// assert_eq!(result.await, 42);
 /// ```
 ///
 /// ## Comma syntax (implicit fmap)
@@ -165,7 +165,7 @@
 /// use lambars::pipe_async;
 ///
 /// let result = pipe_async!(5, |x| x * 2);
-/// assert_eq!(result.run_async().await, 10);
+/// assert_eq!(result.await, 10);
 /// ```
 ///
 /// ## Multiple fmaps with comma syntax
@@ -178,7 +178,7 @@
 ///     |x| x + 1,
 ///     |x| x * 2
 /// );
-/// assert_eq!(result.run_async().await, 12); // (5 + 1) * 2
+/// assert_eq!(result.await, 12); // (5 + 1) * 2
 /// ```
 ///
 /// ## Mixed operators
@@ -193,7 +193,7 @@
 ///     => |x| x * 2,           // explicit fmap: 12
 ///     =>> |x| AsyncIO::pure(x + 3)  // flat_map: 15
 /// );
-/// assert_eq!(result.run_async().await, 15);
+/// assert_eq!(result.await, 15);
 /// ```
 ///
 /// ## User-defined types with Pure wrapper
@@ -205,7 +205,7 @@
 /// struct MyData { value: i32 }
 ///
 /// let result = pipe_async!(Pure(MyData { value: 42 }), |d| d.value * 2);
-/// assert_eq!(result.run_async().await, 84);
+/// assert_eq!(result.await, 84);
 /// ```
 #[macro_export]
 macro_rules! pipe_async {
@@ -258,14 +258,14 @@ mod tests {
     async fn test_pipe_async_value_only() {
         let async_io = AsyncIO::pure(42);
         let result = pipe_async!(async_io);
-        assert_eq!(result.run_async().await, 42);
+        assert_eq!(result.await, 42);
     }
 
     #[rstest]
     #[tokio::test]
     async fn test_pipe_async_single_lift() {
         let result = pipe_async!(AsyncIO::pure(5), => |x| x * 2);
-        assert_eq!(result.run_async().await, 10);
+        assert_eq!(result.await, 10);
     }
 
     #[rstest]
@@ -277,7 +277,7 @@ mod tests {
             => |x| x * 2,
             => |x| x + 3
         );
-        assert_eq!(result.run_async().await, 15); // ((5 + 1) * 2) + 3
+        assert_eq!(result.await, 15); // ((5 + 1) * 2) + 3
     }
 
     #[rstest]
@@ -288,7 +288,7 @@ mod tests {
             => |x: i32| x.to_string(),
             => |s: String| s.len()
         );
-        assert_eq!(result.run_async().await, 2);
+        assert_eq!(result.await, 2);
     }
 
     #[rstest]
@@ -298,7 +298,7 @@ mod tests {
             AsyncIO::pure(5),
             =>> |x| AsyncIO::pure(x * 2)
         );
-        assert_eq!(result.run_async().await, 10);
+        assert_eq!(result.await, 10);
     }
 
     #[rstest]
@@ -310,7 +310,7 @@ mod tests {
             =>> |x| AsyncIO::pure(x * 2),
             =>> |x| AsyncIO::pure(x + 3)
         );
-        assert_eq!(result.run_async().await, 15);
+        assert_eq!(result.await, 15);
     }
 
     #[rstest]
@@ -322,7 +322,7 @@ mod tests {
             =>> |x| AsyncIO::pure(x + 10),
             => |x| x * 2
         );
-        assert_eq!(result.run_async().await, 30);
+        assert_eq!(result.await, 30);
     }
 
     #[rstest]
@@ -335,7 +335,7 @@ mod tests {
             => |x| x + 1,
             =>> |x| AsyncIO::pure(x * 2)
         );
-        assert_eq!(result.run_async().await, 10);
+        assert_eq!(result.await, 10);
     }
 
     #[rstest]
@@ -354,7 +354,7 @@ mod tests {
             => double,
             =>> add_async
         );
-        assert_eq!(result.run_async().await, 20);
+        assert_eq!(result.await, 20);
     }
 
     #[rstest]
@@ -364,7 +364,7 @@ mod tests {
             AsyncIO::pure(5),
             => |x| x * 2,
         );
-        assert_eq!(result.run_async().await, 10);
+        assert_eq!(result.await, 10);
     }
 
     #[rstest]
@@ -374,7 +374,7 @@ mod tests {
             AsyncIO::pure(5),
             =>> |x| AsyncIO::pure(x * 2),
         );
-        assert_eq!(result.run_async().await, 10);
+        assert_eq!(result.await, 10);
     }
 
     #[rstest]
@@ -396,7 +396,7 @@ mod tests {
 
         assert!(!executed.load(Ordering::SeqCst));
 
-        let result = async_io.run_async().await;
+        let result = async_io.await;
         assert!(executed.load(Ordering::SeqCst));
         assert_eq!(result, 10);
     }
@@ -427,7 +427,7 @@ mod tests {
 
         assert_eq!(counter.load(Ordering::SeqCst), 0);
 
-        let result = async_io.run_async().await;
+        let result = async_io.await;
         assert_eq!(counter.load(Ordering::SeqCst), 2);
         assert_eq!(result, 10);
     }
@@ -443,7 +443,7 @@ mod tests {
             => |len| len * 5,
             =>> |x| AsyncIO::pure(x + 1)
         );
-        assert_eq!(result.run_async().await, 11);
+        assert_eq!(result.await, 11);
     }
 
     #[rstest]
@@ -470,7 +470,7 @@ mod tests {
             })
         );
 
-        let profile = result.run_async().await;
+        let profile = result.await;
         assert_eq!(profile.user_id, 42);
         assert_eq!(profile.bio, "User Alice");
     }
@@ -491,7 +491,7 @@ mod tests {
             => |x| x + 1,
             => |x| x + 1
         );
-        assert_eq!(result.run_async().await, 10);
+        assert_eq!(result.await, 10);
     }
 
     #[rstest]
@@ -501,7 +501,7 @@ mod tests {
             AsyncIO::pure(()),
             => |()| 42
         );
-        assert_eq!(result.run_async().await, 42);
+        assert_eq!(result.await, 42);
     }
 
     #[rstest]
@@ -511,7 +511,7 @@ mod tests {
             AsyncIO::pure(42),
             => |_| ()
         );
-        assert_eq!(result.run_async().await, ());
+        assert_eq!(result.await, ());
     }
 
     // =========================================================================
@@ -535,10 +535,7 @@ mod tests {
             let add_one = |x: i32| x + 1;
             let result_comma = pipe_async!(value, add_one);
             let result_lift = pipe_async!(value, => add_one);
-            assert_eq!(
-                result_comma.run_async().await,
-                result_lift.run_async().await
-            );
+            assert_eq!(result_comma.await, result_lift.await);
         }
 
         // =====================================================================
@@ -555,10 +552,7 @@ mod tests {
             let double = |x: i32| x * 2;
             let result_chain = pipe_async!(value, add_one, double);
             let result_composed = pipe_async!(value, move |v| double(add_one(v)));
-            assert_eq!(
-                result_chain.run_async().await,
-                result_composed.run_async().await
-            );
+            assert_eq!(result_chain.await, result_composed.await);
         }
 
         // =====================================================================
@@ -569,14 +563,14 @@ mod tests {
         #[tokio::test]
         async fn backward_compatibility_lift() {
             let result = pipe_async!(AsyncIO::pure(5), => |x| x * 2);
-            assert_eq!(result.run_async().await, 10);
+            assert_eq!(result.await, 10);
         }
 
         #[rstest]
         #[tokio::test]
         async fn backward_compatibility_bind() {
             let result = pipe_async!(AsyncIO::pure(5), =>> |x| AsyncIO::pure(x * 2));
-            assert_eq!(result.run_async().await, 10);
+            assert_eq!(result.await, 10);
         }
 
         #[rstest]
@@ -587,7 +581,7 @@ mod tests {
                 => |x| x * 2,
                 =>> |x| AsyncIO::pure(x + 1)
             );
-            assert_eq!(result.run_async().await, 11);
+            assert_eq!(result.await, 11);
         }
 
         // =====================================================================
@@ -604,7 +598,7 @@ mod tests {
 
             let wrapped = Pure(MyData { value: 42 });
             let result = pipe_async!(wrapped, |d| d.value * 2);
-            assert_eq!(result.run_async().await, 84);
+            assert_eq!(result.await, 84);
         }
 
         #[rstest]
@@ -617,7 +611,7 @@ mod tests {
 
             let result = pipe_async!(Pure(MyData { value: 10 }), |d| d.value, |v| v + 5, |v| v
                 * 2);
-            assert_eq!(result.run_async().await, 30);
+            assert_eq!(result.await, 30);
         }
 
         // =====================================================================
@@ -628,14 +622,14 @@ mod tests {
         #[tokio::test]
         async fn test_pipe_async_unit_type() {
             let result = pipe_async!((), |()| 42);
-            assert_eq!(result.run_async().await, 42);
+            assert_eq!(result.await, 42);
         }
 
         #[rstest]
         #[tokio::test]
         async fn test_pipe_async_unit_type_to_unit() {
             let result = pipe_async!(42, |_| ());
-            assert_eq!(result.run_async().await, ());
+            assert_eq!(result.await, ());
         }
 
         // =====================================================================
@@ -646,28 +640,28 @@ mod tests {
         #[tokio::test]
         async fn test_pipe_async_primitive_i32() {
             let result = pipe_async!(42);
-            assert_eq!(result.run_async().await, 42);
+            assert_eq!(result.await, 42);
         }
 
         #[rstest]
         #[tokio::test]
         async fn test_pipe_async_primitive_string() {
             let result = pipe_async!(String::from("hello"), |s: String| s.len());
-            assert_eq!(result.run_async().await, 5);
+            assert_eq!(result.await, 5);
         }
 
         #[rstest]
         #[tokio::test]
         async fn test_pipe_async_primitive_bool() {
             let result = pipe_async!(true, |b: bool| i32::from(b));
-            assert_eq!(result.run_async().await, 1);
+            assert_eq!(result.await, 1);
         }
 
         #[rstest]
         #[tokio::test]
         async fn test_pipe_async_static_str() {
             let result = pipe_async!("hello", |s: &str| s.len());
-            assert_eq!(result.run_async().await, 5);
+            assert_eq!(result.await, 5);
         }
 
         // =====================================================================
@@ -682,7 +676,7 @@ mod tests {
                 |x| x + 1,
                 =>> |x| AsyncIO::pure(x * 2)
             );
-            assert_eq!(result.run_async().await, 12);
+            assert_eq!(result.await, 12);
         }
 
         #[rstest]
@@ -693,7 +687,7 @@ mod tests {
                 =>> |x| AsyncIO::pure(x + 1),
                 |x| x * 2
             );
-            assert_eq!(result.run_async().await, 12);
+            assert_eq!(result.await, 12);
         }
 
         #[rstest]
@@ -706,7 +700,7 @@ mod tests {
                 =>> |x| AsyncIO::pure(x + 3),   // flat_map: 15
                 |x: i32| x.to_string()          // comma (implicit fmap): "15"
             );
-            assert_eq!(result.run_async().await, "15");
+            assert_eq!(result.await, "15");
         }
 
         // =====================================================================
@@ -737,7 +731,7 @@ mod tests {
 
             assert!(executed.load(Ordering::SeqCst));
 
-            let result = async_io.run_async().await;
+            let result = async_io.await;
             assert_eq!(result, 84);
         }
 
@@ -771,7 +765,7 @@ mod tests {
             assert!(!thunk_executed.load(Ordering::SeqCst));
             assert!(!function_executed.load(Ordering::SeqCst));
 
-            let result = async_io.run_async().await;
+            let result = async_io.await;
             assert!(thunk_executed.load(Ordering::SeqCst));
             assert!(function_executed.load(Ordering::SeqCst));
             assert_eq!(result, 84);

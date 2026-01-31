@@ -839,6 +839,6 @@ mod tests {
     async fn test_to_async_result_is_captured() {
         let io = IO::pure(42);
         let async_io = io.to_async();
-        assert_eq!(async_io.run_async().await, 42);
+        assert_eq!(async_io.await, 42);
     }
 }

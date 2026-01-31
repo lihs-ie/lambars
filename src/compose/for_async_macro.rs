@@ -43,7 +43,7 @@
 //!         x <= vec![1, 2, 3];
 //!         yield x * 2
 //!     };
-//!     assert_eq!(result.run_async().await, vec![2, 4, 6]);
+//!     assert_eq!(result.await, vec![2, 4, 6]);
 //! }
 //! ```
 //!
@@ -61,7 +61,7 @@
 //!         let processed = data + 1;
 //!         yield processed
 //!     };
-//!     assert_eq!(result.run_async().await, vec![11, 21, 31]);
+//!     assert_eq!(result.await, vec![11, 21, 31]);
 //! }
 //! ```
 //!
@@ -78,7 +78,7 @@
 //!         y <= vec![10, 20];
 //!         yield x + y
 //!     };
-//!     assert_eq!(result.run_async().await, vec![11, 21, 12, 22]);
+//!     assert_eq!(result.await, vec![11, 21, 12, 22]);
 //! }
 //! ```
 //!
@@ -162,7 +162,7 @@
 //!
 //! ## Async Bind Behavior (`<~`)
 //!
-//! The `<~` operator calls `.run_async().await` on the `AsyncIO` expression.
+//! The `<~` operator calls `.await` on the `AsyncIO` expression.
 //!
 //! **Note**: Each `<~` invocation incurs `Box::pin` allocation overhead because
 //! `run_async()` internally uses `Box::pin` to create a pinned future, regardless
@@ -218,7 +218,7 @@
 ///         x <= vec![1, 2, 3];
 ///         yield x * 2
 ///     };
-///     assert_eq!(result.run_async().await, vec![2, 4, 6]);
+///     assert_eq!(result.await, vec![2, 4, 6]);
 /// }
 /// ```
 ///
@@ -236,7 +236,7 @@
 ///         let processed = data + 1;
 ///         yield processed
 ///     };
-///     assert_eq!(result.run_async().await, vec![11, 21, 31]);
+///     assert_eq!(result.await, vec![11, 21, 31]);
 /// }
 /// ```
 ///
@@ -253,7 +253,7 @@
 ///         y <= vec![10, 20];
 ///         yield x + y
 ///     };
-///     assert_eq!(result.run_async().await, vec![11, 21, 12, 22]);
+///     assert_eq!(result.await, vec![11, 21, 12, 22]);
 /// }
 /// ```
 ///
@@ -270,7 +270,7 @@
 ///         (num, letter) <= pairs;
 ///         yield format!("{}{}", num, letter)
 ///     };
-///     assert_eq!(result.run_async().await, vec!["1a", "2b", "3c"]);
+///     assert_eq!(result.await, vec!["1a", "2b", "3c"]);
 /// }
 /// ```
 ///
@@ -286,7 +286,7 @@
 ///         _ <= vec![1, 2, 3];
 ///         yield "x"
 ///     };
-///     assert_eq!(result.run_async().await, vec!["x", "x", "x"]);
+///     assert_eq!(result.await, vec!["x", "x", "x"]);
 /// }
 /// ```
 ///
@@ -375,19 +375,19 @@ macro_rules! for_async {
 
     // AsyncIO bind with identifier pattern
     (@inner $results:ident; $pattern:ident <~ $async_io:expr ; $($rest:tt)+) => {{
-        let $pattern = $async_io.run_async().await;
+        let $pattern = $async_io.await;
         $crate::for_async!(@inner $results; $($rest)+);
     }};
 
     // AsyncIO bind with tuple pattern
     (@inner $results:ident; ($($pattern:tt)*) <~ $async_io:expr ; $($rest:tt)+) => {{
-        let ($($pattern)*) = $async_io.run_async().await;
+        let ($($pattern)*) = $async_io.await;
         $crate::for_async!(@inner $results; $($rest)+);
     }};
 
     // AsyncIO bind with wildcard pattern
     (@inner $results:ident; _ <~ $async_io:expr ; $($rest:tt)+) => {{
-        let _ = $async_io.run_async().await;
+        let _ = $async_io.await;
         $crate::for_async!(@inner $results; $($rest)+);
     }};
 
@@ -433,7 +433,7 @@ mod tests {
             x <= vec![1, 2, 3];
             yield x * 2
         };
-        assert_eq!(result.run_async().await, vec![2, 4, 6]);
+        assert_eq!(result.await, vec![2, 4, 6]);
     }
 
     // =========================================================================
@@ -447,7 +447,7 @@ mod tests {
             if x % 2 == 0;
             yield x
         };
-        assert_eq!(result.run_async().await, vec![2, 4]);
+        assert_eq!(result.await, vec![2, 4]);
     }
 
     #[tokio::test]
@@ -458,7 +458,7 @@ mod tests {
             if x > 10;
             yield x
         };
-        assert_eq!(result.run_async().await, vec![12, 14, 16, 18, 20]);
+        assert_eq!(result.await, vec![12, 14, 16, 18, 20]);
     }
 
     // =========================================================================
@@ -476,7 +476,7 @@ mod tests {
             if let Some(doubled) = maybe_double(x);
             yield doubled
         };
-        assert_eq!(result.run_async().await, vec![2, 4, 6]);
+        assert_eq!(result.await, vec![2, 4, 6]);
     }
 
     #[tokio::test]
@@ -488,6 +488,6 @@ mod tests {
             if value > 3;
             yield value
         };
-        assert_eq!(result.run_async().await, vec![5, 10]);
+        assert_eq!(result.await, vec![5, 10]);
     }
 }

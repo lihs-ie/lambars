@@ -612,7 +612,6 @@ pub async fn partial_apply(
     let all_tasks = state
         .task_repository
         .list(Pagination::default())
-        .run_async()
         .await
         .map_err(ApiErrorResponse::from)?;
 
@@ -704,7 +703,6 @@ pub async fn concurrent_lazy(
     let all_tasks = state
         .task_repository
         .list(Pagination::default())
-        .run_async()
         .await
         .map_err(ApiErrorResponse::from)?;
 
@@ -832,7 +830,6 @@ pub async fn aggregate_numeric(
     let all_tasks = state
         .task_repository
         .list(Pagination::default())
-        .run_async()
         .await
         .map_err(ApiErrorResponse::from)?;
 

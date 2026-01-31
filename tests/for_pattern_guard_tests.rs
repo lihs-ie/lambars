@@ -244,7 +244,7 @@ mod async_tests {
             if let Some(doubled) = maybe_double(x);
             yield doubled
         };
-        assert_eq!(result.run_async().await, vec![2, 4, 6]);
+        assert_eq!(result.await, vec![2, 4, 6]);
     }
 
     #[tokio::test]
@@ -255,7 +255,7 @@ mod async_tests {
             if let Some(value) = opt;
             yield value
         };
-        assert_eq!(result.run_async().await, vec![20, 30]);
+        assert_eq!(result.await, vec![20, 30]);
     }
 
     #[tokio::test]
@@ -267,7 +267,7 @@ mod async_tests {
             if let Some(value) = inner;
             yield value
         };
-        assert_eq!(result.run_async().await, vec![1, 5]);
+        assert_eq!(result.await, vec![1, 5]);
     }
 
     #[tokio::test]
@@ -279,7 +279,7 @@ mod async_tests {
             if value > 3;
             yield value
         };
-        assert_eq!(result.run_async().await, vec![5, 10]);
+        assert_eq!(result.await, vec![5, 10]);
     }
 
     #[tokio::test]
@@ -289,7 +289,7 @@ mod async_tests {
             if let Ok(n) = s.parse::<i32>();
             yield n
         };
-        assert_eq!(result.run_async().await, vec![1, 2]);
+        assert_eq!(result.await, vec![1, 2]);
     }
 
     #[tokio::test]
@@ -301,7 +301,7 @@ mod async_tests {
             let doubled = value * 2;
             yield doubled
         };
-        assert_eq!(result.run_async().await, vec![2, 4]);
+        assert_eq!(result.await, vec![2, 4]);
     }
 
     #[tokio::test]
@@ -312,7 +312,7 @@ mod async_tests {
             if let Some((num, letter)) = item;
             yield format!("{}{}", num, letter)
         };
-        assert_eq!(result.run_async().await, vec!["1a", "2b"]);
+        assert_eq!(result.await, vec!["1a", "2b"]);
     }
 
     #[tokio::test]
@@ -344,7 +344,7 @@ mod async_tests {
             yield (name, a)
         };
         assert_eq!(
-            result.run_async().await,
+            result.await,
             vec![("Alice".to_string(), 30), ("Charlie".to_string(), 25),]
         );
     }

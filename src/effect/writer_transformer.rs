@@ -443,7 +443,7 @@ where
     /// async fn main() {
     ///     let writer: WriterT<Vec<String>, AsyncIO<(i32, Vec<String>)>> =
     ///         WriterT::pure_async_io(42);
-    ///     let (value, output) = writer.run().run_async().await;
+    ///     let (value, output) = writer.run().await;
     ///     assert_eq!(value, 42);
     ///     assert_eq!(output, Vec::<String>::empty());
     /// }
@@ -469,7 +469,7 @@ where
     ///     let inner = AsyncIO::pure(42);
     ///     let writer: WriterT<Vec<String>, AsyncIO<(i32, Vec<String>)>> =
     ///         WriterT::lift_async_io(inner);
-    ///     let (value, output) = writer.run().run_async().await;
+    ///     let (value, output) = writer.run().await;
     ///     assert_eq!(value, 42);
     ///     assert_eq!(output, Vec::<String>::empty());
     /// }
@@ -496,7 +496,7 @@ where
     ///         WriterT::<Vec<String>, AsyncIO<((), Vec<String>)>>::tell_async_io(
     ///             vec!["log".to_string()]
     ///         );
-    ///     let (_, output) = writer.run().run_async().await;
+    ///     let (_, output) = writer.run().await;
     ///     assert_eq!(output, vec!["log"]);
     /// }
     /// ```
@@ -520,7 +520,7 @@ where
     ///     let writer: WriterT<Vec<String>, AsyncIO<(i32, Vec<String>)>> =
     ///         WriterT::new(AsyncIO::pure((21, vec!["log".to_string()])));
     ///     let mapped = writer.fmap_async_io(|v| v * 2);
-    ///     let (value, output) = mapped.run().run_async().await;
+    ///     let (value, output) = mapped.run().await;
     ///     assert_eq!(value, 42);
     ///     assert_eq!(output, vec!["log"]);
     /// }
@@ -554,7 +554,7 @@ where
     ///     let chained = writer.flat_map_async_io(|v| {
     ///         WriterT::new(AsyncIO::pure((v * 2, vec!["second".to_string()])))
     ///     });
-    ///     let (value, output) = chained.run().run_async().await;
+    ///     let (value, output) = chained.run().await;
     ///     assert_eq!(value, 20);
     ///     assert_eq!(output, vec!["first", "second"]);
     /// }
@@ -583,7 +583,7 @@ where
     ///     let writer: WriterT<Vec<String>, AsyncIO<(i32, Vec<String>)>> =
     ///         WriterT::new(AsyncIO::pure((42, vec!["log".to_string()])));
     ///     let listened = WriterT::listen_async_io(writer);
-    ///     let ((value, inner_output), output) = listened.run().run_async().await;
+    ///     let ((value, inner_output), output) = listened.run().await;
     ///     assert_eq!(value, 42);
     ///     assert_eq!(inner_output, vec!["log"]);
     ///     assert_eq!(output, vec!["log"]);
@@ -653,7 +653,7 @@ mod async_io_tests {
     #[tokio::test]
     async fn writer_pure_async_io_returns_value_with_empty_output() {
         let writer: WriterT<Vec<String>, AsyncIO<(i32, Vec<String>)>> = WriterT::pure_async_io(42);
-        let (value, output) = writer.run().run_async().await;
+        let (value, output) = writer.run().await;
         assert_eq!(value, 42);
         assert_eq!(output, Vec::<String>::empty());
     }
@@ -663,7 +663,7 @@ mod async_io_tests {
         let inner = AsyncIO::pure(42);
         let writer: WriterT<Vec<String>, AsyncIO<(i32, Vec<String>)>> =
             WriterT::lift_async_io(inner);
-        let (value, output) = writer.run().run_async().await;
+        let (value, output) = writer.run().await;
         assert_eq!(value, 42);
         assert_eq!(output, Vec::<String>::empty());
     }
@@ -674,7 +674,7 @@ mod async_io_tests {
             WriterT::<Vec<String>, AsyncIO<((), Vec<String>)>>::tell_async_io(vec![
                 "log".to_string(),
             ]);
-        let ((), output) = writer.run().run_async().await;
+        let ((), output) = writer.run().await;
         assert_eq!(output, vec!["log"]);
     }
 
@@ -683,7 +683,7 @@ mod async_io_tests {
         let writer: WriterT<Vec<String>, AsyncIO<(i32, Vec<String>)>> =
             WriterT::new(AsyncIO::pure((21, vec!["log".to_string()])));
         let mapped = writer.fmap_async_io(|v| v * 2);
-        let (value, output) = mapped.run().run_async().await;
+        let (value, output) = mapped.run().await;
         assert_eq!(value, 42);
         assert_eq!(output, vec!["log"]);
     }
@@ -695,7 +695,7 @@ mod async_io_tests {
         let chained = writer.flat_map_async_io(|v| {
             WriterT::new(AsyncIO::pure((v * 2, vec!["second".to_string()])))
         });
-        let (value, output) = chained.run().run_async().await;
+        let (value, output) = chained.run().await;
         assert_eq!(value, 20);
         assert_eq!(output, vec!["first", "second"]);
     }
@@ -705,7 +705,7 @@ mod async_io_tests {
         let writer: WriterT<Vec<String>, AsyncIO<(i32, Vec<String>)>> =
             WriterT::new(AsyncIO::pure((42, vec!["log".to_string()])));
         let listened = WriterT::listen_async_io(writer);
-        let ((value, inner_output), output) = listened.run().run_async().await;
+        let ((value, inner_output), output) = listened.run().await;
         assert_eq!(value, 42);
         assert_eq!(inner_output, vec!["log"]);
         assert_eq!(output, vec!["log"]);
@@ -720,8 +720,8 @@ mod async_io_tests {
         let via_pure: WriterT<Vec<String>, AsyncIO<(i32, Vec<String>)>> =
             WriterT::pure_async_io(value);
 
-        let (lift_value, lift_output) = via_lift.run().run_async().await;
-        let (pure_value, pure_output) = via_pure.run().run_async().await;
+        let (lift_value, lift_output) = via_lift.run().await;
+        let (pure_value, pure_output) = via_pure.run().await;
 
         assert_eq!(lift_value, pure_value);
         assert_eq!(lift_output, pure_output);
@@ -741,7 +741,7 @@ mod async_io_tests {
             WriterT::<Vec<String>, AsyncIO<(i32, Vec<String>)>>::pure_async_io(42)
         });
 
-        let (value, output) = computation.run().run_async().await;
+        let (value, output) = computation.run().await;
         assert_eq!(value, 42);
         assert_eq!(output, vec!["step1", "step2"]);
     }

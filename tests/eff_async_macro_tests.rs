@@ -21,7 +21,7 @@ async fn test_eff_async_single_bind() {
         x <= AsyncIO::pure(5);
         AsyncIO::pure(x * 2)
     };
-    assert_eq!(result.run_async().await, 10);
+    assert_eq!(result.await, 10);
 }
 
 #[rstest]
@@ -33,7 +33,7 @@ async fn test_eff_async_multiple_binds() {
         z <= AsyncIO::pure(15);
         AsyncIO::pure(x + y + z)
     };
-    assert_eq!(result.run_async().await, 30);
+    assert_eq!(result.await, 30);
 }
 
 #[rstest]
@@ -46,7 +46,7 @@ async fn test_eff_async_with_let() {
         let sum = doubled + y;
         AsyncIO::pure(sum)
     };
-    assert_eq!(result.run_async().await, 20);
+    assert_eq!(result.await, 20);
 }
 
 // =============================================================================
@@ -60,7 +60,7 @@ async fn test_eff_async_wildcard_pattern() {
         _ <= AsyncIO::pure("ignored");
         AsyncIO::pure(42)
     };
-    assert_eq!(result.run_async().await, 42);
+    assert_eq!(result.await, 42);
 }
 
 #[rstest]
@@ -70,7 +70,7 @@ async fn test_eff_async_tuple_pattern() {
         (x, y) <= AsyncIO::pure((10, 20));
         AsyncIO::pure(x + y)
     };
-    assert_eq!(result.run_async().await, 30);
+    assert_eq!(result.await, 30);
 }
 
 #[rstest]
@@ -80,7 +80,7 @@ async fn test_eff_async_nested_tuple_pattern() {
         ((a, b), c) <= AsyncIO::pure(((1, 2), 3));
         AsyncIO::pure(a + b + c)
     };
-    assert_eq!(result.run_async().await, 6);
+    assert_eq!(result.await, 6);
 }
 
 #[rstest]
@@ -91,7 +91,7 @@ async fn test_eff_async_let_tuple_pattern() {
         let (x, y) = pair;
         AsyncIO::pure(x * y)
     };
-    assert_eq!(result.run_async().await, 200);
+    assert_eq!(result.await, 200);
 }
 
 // =============================================================================
@@ -111,7 +111,7 @@ async fn test_eff_async_with_function_calls() {
         y <= AsyncIO::pure(doubled);
         AsyncIO::pure(y + 1)
     };
-    assert_eq!(result.run_async().await, 11);
+    assert_eq!(result.await, 11);
 }
 
 #[rstest]
@@ -124,7 +124,7 @@ async fn test_eff_async_with_closures() {
         let result = x * multiplier;
         AsyncIO::pure(result)
     };
-    assert_eq!(result.run_async().await, 15);
+    assert_eq!(result.await, 15);
 }
 
 #[rstest]
@@ -141,7 +141,7 @@ async fn test_eff_async_nested() {
         AsyncIO::pure(y + z)
     };
 
-    assert_eq!(outer.run_async().await, 25);
+    assert_eq!(outer.await, 25);
 }
 
 // =============================================================================
@@ -182,7 +182,7 @@ async fn test_eff_async_execution_order() {
         AsyncIO::pure(sum)
     };
 
-    let result = async_io.run_async().await;
+    let result = async_io.await;
     assert_eq!(result, 30);
 
     let execution_order = order.lock().unwrap().clone();
@@ -208,7 +208,7 @@ async fn test_eff_async_is_lazy() {
 
     assert_eq!(counter.load(Ordering::SeqCst), 0);
 
-    let result = async_io.run_async().await;
+    let result = async_io.await;
     assert_eq!(result, 42);
     assert_eq!(counter.load(Ordering::SeqCst), 1);
 }
@@ -225,7 +225,7 @@ async fn test_eff_async_type_change() {
         let string = format!("value: {}", x);
         AsyncIO::pure(string)
     };
-    assert_eq!(result.run_async().await, "value: 42");
+    assert_eq!(result.await, "value: 42");
 }
 
 #[rstest]
@@ -236,7 +236,7 @@ async fn test_eff_async_with_string() {
         let upper = s.to_uppercase();
         AsyncIO::pure(upper)
     };
-    assert_eq!(result.run_async().await, "HELLO");
+    assert_eq!(result.await, "HELLO");
 }
 
 // =============================================================================
@@ -249,7 +249,7 @@ async fn test_eff_async_single_expression() {
     let result = eff_async! {
         AsyncIO::pure(42)
     };
-    assert_eq!(result.run_async().await, 42);
+    assert_eq!(result.await, 42);
 }
 
 #[rstest]
@@ -260,7 +260,7 @@ async fn test_eff_async_only_let() {
         let y = 20;
         AsyncIO::pure(x + y)
     };
-    assert_eq!(result.run_async().await, 30);
+    assert_eq!(result.await, 30);
 }
 
 #[rstest]
@@ -285,5 +285,5 @@ async fn test_eff_async_complex_workflow() {
         AsyncIO::pure(transformed)
     };
 
-    assert_eq!(result.run_async().await, 20);
+    assert_eq!(result.await, 20);
 }

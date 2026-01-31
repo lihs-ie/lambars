@@ -33,7 +33,7 @@
 //!         let z = x + y;
 //!         AsyncIO::pure(z * 2)
 //!     };
-//!     assert_eq!(result.run_async().await, 30);
+//!     assert_eq!(result.await, 30);
 //! }
 //! ```
 //!
@@ -145,7 +145,7 @@
 ///         y <= AsyncIO::pure(2);
 ///         AsyncIO::pure(x + y)
 ///     };
-///     assert_eq!(result.run_async().await, 3);
+///     assert_eq!(result.await, 3);
 /// }
 /// ```
 #[macro_export]
@@ -211,7 +211,7 @@ mod tests {
             x <= AsyncIO::pure(5);
             AsyncIO::pure(x * 2)
         };
-        assert_eq!(result.run_async().await, 10);
+        assert_eq!(result.await, 10);
     }
 
     #[tokio::test]
@@ -221,7 +221,7 @@ mod tests {
             y <= AsyncIO::pure(10);
             AsyncIO::pure(x + y)
         };
-        assert_eq!(result.run_async().await, 15);
+        assert_eq!(result.await, 15);
     }
 
     #[tokio::test]
@@ -232,7 +232,7 @@ mod tests {
             y <= AsyncIO::pure(10);
             AsyncIO::pure(doubled + y)
         };
-        assert_eq!(result.run_async().await, 20);
+        assert_eq!(result.await, 20);
     }
 
     #[tokio::test]
@@ -241,7 +241,7 @@ mod tests {
             _ <= AsyncIO::pure("ignored");
             AsyncIO::pure(42)
         };
-        assert_eq!(result.run_async().await, 42);
+        assert_eq!(result.await, 42);
     }
 
     #[tokio::test]
@@ -250,7 +250,7 @@ mod tests {
             (x, y) <= AsyncIO::pure((10, 20));
             AsyncIO::pure(x + y)
         };
-        assert_eq!(result.run_async().await, 30);
+        assert_eq!(result.await, 30);
     }
 
     #[tokio::test]
@@ -271,7 +271,7 @@ mod tests {
         }
 
         let config = Config { value: 21 };
-        let result = computation_with_config().run(config).run_async().await;
+        let result = computation_with_config().run(config).await;
         assert_eq!(result, 42);
     }
 
@@ -287,7 +287,7 @@ mod tests {
             })
         }
 
-        let (result, final_state) = stateful_computation().run(41).run_async().await;
+        let (result, final_state) = stateful_computation().run(41).await;
         assert_eq!(result, "State was: 41");
         assert_eq!(final_state, 42);
     }

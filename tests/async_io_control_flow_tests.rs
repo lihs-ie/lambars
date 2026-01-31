@@ -45,7 +45,7 @@ mod retry_tests {
         )
         .timeout_result(Duration::from_secs(5));
 
-        let result = action.run_async().await;
+        let result = action.await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), Ok(42));
         assert_eq!(counter.load(Ordering::SeqCst), 3);
@@ -78,7 +78,7 @@ mod retry_tests {
             }
         });
 
-        let result = action.run_async().await;
+        let result = action.await;
         assert_eq!(result, Err("permanent failure"));
         assert!(cleanup_called.load(Ordering::SeqCst));
         assert_eq!(counter.load(Ordering::SeqCst), 3);
@@ -116,7 +116,7 @@ mod retry_tests {
             }
         });
 
-        let result = action.run_async().await;
+        let result = action.await;
         assert!(result.is_err());
         assert!(error_logged.load(Ordering::SeqCst));
         // on_error should be called once after all retries fail
@@ -138,7 +138,7 @@ mod parallel_tests {
         let slow = AsyncIO::delay_async(Duration::from_millis(50)).fmap(|_| "slow");
         let fast = AsyncIO::pure("fast");
 
-        let (slow_result, fast_result) = slow.par(fast).run_async().await;
+        let (slow_result, fast_result) = slow.par(fast).await;
         let elapsed = start.elapsed();
 
         assert_eq!(slow_result, "slow");
@@ -155,10 +155,7 @@ mod parallel_tests {
         let action_second = AsyncIO::delay_async(Duration::from_millis(50)).fmap(|_| 2);
         let action_third = AsyncIO::delay_async(Duration::from_millis(50)).fmap(|_| 3);
 
-        let (first, second, third) = action_first
-            .par3(action_second, action_third)
-            .run_async()
-            .await;
+        let (first, second, third) = action_first.par3(action_second, action_third).await;
         let elapsed = start.elapsed();
 
         assert_eq!((first, second, third), (1, 2, 3));
@@ -173,7 +170,7 @@ mod parallel_tests {
         let first = AsyncIO::delay_async(Duration::from_millis(50)).fmap(|_| 1);
         let second = AsyncIO::delay_async(Duration::from_millis(100)).fmap(|_| 2);
 
-        let result = first.race_result(second).run_async().await;
+        let result = first.race_result(second).await;
         let elapsed = start.elapsed();
 
         assert_eq!(result, 1); // first should win
@@ -189,7 +186,6 @@ mod parallel_tests {
         let result = first
             .par(second)
             .fmap(|(first_value, second_value)| first_value + second_value)
-            .run_async()
             .await;
 
         assert_eq!(result, 30);
@@ -211,7 +207,6 @@ mod parallel_tests {
                     cleanup.store(true, Ordering::SeqCst);
                 }
             })
-            .run_async()
             .await;
 
         assert_eq!(result, 2);
@@ -259,7 +254,7 @@ mod resource_tests {
             },
         );
 
-        let value = result.run_async().await;
+        let value = result.await;
         assert_eq!(value, "used resource");
         assert_eq!(acquire_count.load(Ordering::SeqCst), 1);
         assert_eq!(use_count.load(Ordering::SeqCst), 1);
@@ -296,7 +291,6 @@ mod resource_tests {
                 })
             },
         )
-        .run_async()
         .await;
 
         assert_eq!(result, 22); // (1 + 10) * 2
@@ -325,7 +319,6 @@ mod resource_tests {
                     second.store(true, Ordering::SeqCst);
                 }
             })
-            .run_async()
             .await;
 
         assert_eq!(result, 42);
@@ -346,7 +339,6 @@ mod resource_tests {
                     called.store(true, Ordering::SeqCst);
                 }
             })
-            .run_async()
             .await;
 
         assert_eq!(result, Ok(42));
@@ -368,7 +360,7 @@ mod timeout_tests {
             .fmap(|_| 42)
             .timeout_result(timeout_duration);
 
-        let result = slow.run_async().await;
+        let result = slow.await;
 
         match result {
             Err(error) => {
@@ -408,7 +400,7 @@ mod timeout_tests {
             5,
         );
 
-        let result = action.run_async().await;
+        let result = action.await;
         assert_eq!(result, Ok(42));
         assert_eq!(counter.load(Ordering::SeqCst), 3); // First 2 timed out, 3rd succeeded
     }
@@ -421,7 +413,7 @@ mod timeout_tests {
 
         let fast = AsyncIO::pure(2).timeout_result(Duration::from_secs(1));
 
-        let (slow_result, fast_result) = slow.par(fast).run_async().await;
+        let (slow_result, fast_result) = slow.par(fast).await;
 
         assert!(slow_result.is_err()); // Timed out
         assert_eq!(fast_result, Ok(2)); // Completed in time
@@ -480,7 +472,7 @@ mod combined_tests {
             }
         });
 
-        let final_result = result.run_async().await;
+        let final_result = result.await;
 
         assert_eq!(final_result, Ok("success".to_string()));
         assert_eq!(operation_count.load(Ordering::SeqCst), 2); // 1 failure + 1 success
@@ -514,7 +506,7 @@ mod combined_tests {
         assert!(!executed.load(Ordering::SeqCst));
 
         // Now execute
-        let _ = pipeline.run_async().await;
+        let _ = pipeline.await;
         assert!(executed.load(Ordering::SeqCst));
     }
 }
@@ -530,14 +522,10 @@ mod law_tests {
     async fn test_retry_zero_equals_one() {
         // Retry Zero Law: retry(0) == retry(1) == f()
         let result_zero: Result<i32, &str> =
-            AsyncIO::retry_with_factory(|| AsyncIO::pure(Ok::<i32, &str>(42)), 0)
-                .run_async()
-                .await;
+            AsyncIO::retry_with_factory(|| AsyncIO::pure(Ok::<i32, &str>(42)), 0).await;
 
         let result_one: Result<i32, &str> =
-            AsyncIO::retry_with_factory(|| AsyncIO::pure(Ok::<i32, &str>(42)), 1)
-                .run_async()
-                .await;
+            AsyncIO::retry_with_factory(|| AsyncIO::pure(Ok::<i32, &str>(42)), 1).await;
 
         assert_eq!(result_zero, result_one);
         assert_eq!(result_zero, Ok(42));
@@ -562,7 +550,6 @@ mod law_tests {
             },
             10,
         )
-        .run_async()
         .await;
 
         // Should only be called once despite 10 max attempts
@@ -586,7 +573,6 @@ mod law_tests {
                 })
             },
         )
-        .run_async()
         .await;
 
         assert_eq!(result, Err("error"));
@@ -599,7 +585,7 @@ mod law_tests {
         let first = AsyncIO::delay_async(Duration::from_millis(50)).fmap(|_| "first");
         let second = AsyncIO::pure("second");
 
-        let (first_result, second_result) = first.par(second).run_async().await;
+        let (first_result, second_result) = first.par(second).await;
 
         // Even though second finishes first, order is preserved
         assert_eq!(first_result, "first");

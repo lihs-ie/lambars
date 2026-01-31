@@ -571,7 +571,7 @@ pub async fn bulk_create_tasks(
                 1, // Initial event version (expected_version=0 + 1)
             );
             // For new tasks, expected_version is 0 (no events exist yet)
-            match state.event_store.append(&event, 0).run_async().await {
+            match state.event_store.append(&event, 0).await {
                 Ok(()) => {}
                 Err(e) => {
                     let warning =
@@ -1164,7 +1164,7 @@ async fn try_primary_save_with_error(
     repository: &Arc<dyn TaskRepository + Send + Sync>,
     task: &Task,
 ) -> Result<SaveResult, crate::infrastructure::RepositoryError> {
-    match repository.save(task).run_async().await {
+    match repository.save(task).await {
         Ok(()) => Ok(SaveResult {
             task: task.clone(),
             used_fallback: false,
@@ -1191,7 +1191,7 @@ async fn try_fallback_save_with_error(
 ) -> Result<SaveResult, crate::infrastructure::RepositoryError> {
     // Simulate a retry or alternative strategy
     // In production, this could be a different repository, cache, or queue
-    match repository.save(task).run_async().await {
+    match repository.save(task).await {
         Ok(()) => {
             tracing::info!("Fallback save succeeded");
             Ok(SaveResult {
@@ -1252,7 +1252,7 @@ pub fn save_chunk(
             let (indices, tasks): (Vec<usize>, Vec<Task>) = indexed_tasks.into_iter().unzip();
 
             // Call repository's save_bulk (takes &[Task], so we keep ownership of tasks)
-            let save_results = repository.save_bulk(&tasks).run_async().await;
+            let save_results = repository.save_bulk(&tasks).await;
 
             // Pair results with indices, consuming tasks to avoid clone
             indices
@@ -1319,7 +1319,7 @@ pub fn save_chunk_with_fallback(
             let tasks: Vec<Task> = indexed_tasks.into_iter().map(|(_, task)| task).collect();
 
             // Step 1: Attempt bulk save
-            let bulk_results = repository.save_bulk(&tasks).run_async().await;
+            let bulk_results = repository.save_bulk(&tasks).await;
 
             // Step 2: Separate successes from failures
             let mut final_results: Vec<(usize, Either<ItemError, SaveResult>)> =
@@ -1353,7 +1353,7 @@ pub fn save_chunk_with_fallback(
 
             // Step 3: Attempt individual save for failed tasks (fallback)
             for (index, task, original_error) in failed_tasks {
-                match repository.save(&task).run_async().await {
+                match repository.save(&task).await {
                     Ok(()) => {
                         // Fallback succeeded
                         tracing::info!(
@@ -1557,14 +1557,14 @@ async fn process_unique_updates(
         let update = &updates[index];
         let task_id = TaskId::from_uuid(update.id);
 
-        let bulk_result = match repository.find_by_id(&task_id).run_async().await {
+        let bulk_result = match repository.find_by_id(&task_id).await {
             Ok(Some(task)) => {
                 // Check version (positive condition first)
                 if task.version == update.version {
                     // Apply update (returns None if no changes)
                     match apply_update(task.clone(), update, now.clone()) {
                         Some(updated_task) => {
-                            match repository.save(&updated_task).run_async().await {
+                            match repository.save(&updated_task).await {
                                 Ok(()) => BulkUpdateResult {
                                     result: Either::Right(updated_task),
                                     old_task: Some(task), // Track old task for index update
@@ -2908,7 +2908,7 @@ mod tests {
             }
 
             // Verify tasks are actually in the repository
-            let count = repository.count().run_async().await.unwrap();
+            let count = repository.count().await.unwrap();
             assert_eq!(count, 20);
         }
 
@@ -2957,7 +2957,7 @@ mod tests {
             }
 
             // Verify only valid tasks are in repository
-            let count = repository.count().run_async().await.unwrap();
+            let count = repository.count().await.unwrap();
             assert_eq!(count, 3);
         }
 
@@ -2986,7 +2986,7 @@ mod tests {
             assert!(results[1].is_left());
 
             // Nothing should be in repository
-            let count = repository.count().run_async().await.unwrap();
+            let count = repository.count().await.unwrap();
             assert_eq!(count, 0);
         }
 
@@ -3057,7 +3057,7 @@ mod tests {
             }
 
             // Verify tasks are actually in the repository
-            let count = repository.count().run_async().await.unwrap();
+            let count = repository.count().await.unwrap();
             assert_eq!(count, 10);
         }
 
@@ -3091,7 +3091,7 @@ mod tests {
             }
 
             // Verify tasks are in repository
-            let count = repository.count().run_async().await.unwrap();
+            let count = repository.count().await.unwrap();
             assert_eq!(count, 5);
         }
     }
@@ -3182,7 +3182,7 @@ mod tests {
             assert_eq!(response.summary.failed, 0);
 
             // Verify tasks were saved
-            let count = state.task_repository.count().run_async().await.unwrap();
+            let count = state.task_repository.count().await.unwrap();
             assert_eq!(count, 2);
         }
 
@@ -3224,7 +3224,7 @@ mod tests {
             assert_eq!(response.summary.failed, 0);
 
             // Verify tasks were saved (legacy path)
-            let count = state.task_repository.count().run_async().await.unwrap();
+            let count = state.task_repository.count().await.unwrap();
             assert_eq!(count, 2);
         }
 
@@ -3261,7 +3261,7 @@ mod tests {
             assert_eq!(response.summary.succeeded, 10);
 
             // Verify all tasks were saved correctly with custom config
-            let count = state.task_repository.count().run_async().await.unwrap();
+            let count = state.task_repository.count().await.unwrap();
             assert_eq!(count, 10);
         }
 
@@ -3614,7 +3614,7 @@ mod tests {
                                 ))));
                             } else {
                                 // Actually save to inner repository
-                                let save_result = inner.save(task).run_async().await;
+                                let save_result = inner.save(task).await;
                                 results.push(save_result);
                             }
                         }

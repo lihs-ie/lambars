@@ -138,7 +138,7 @@ fn benchmark_async_io_pure(criterion: &mut Criterion) {
     group.bench_function("pure", |bencher| {
         bencher.iter(|| {
             let async_io = AsyncIO::pure(black_box(42));
-            let result = runtime.block_on(async_io.run_async());
+            let result = runtime.block_on(async_io);
             black_box(result)
         });
     });
@@ -146,7 +146,7 @@ fn benchmark_async_io_pure(criterion: &mut Criterion) {
     group.bench_function("new", |bencher| {
         bencher.iter(|| {
             let async_io = AsyncIO::new(|| async { 42 });
-            let result = runtime.block_on(async_io.run_async());
+            let result = runtime.block_on(async_io);
             black_box(result)
         });
     });
@@ -170,7 +170,7 @@ fn benchmark_async_io_chain(criterion: &mut Criterion) {
                 .flat_map(|x| AsyncIO::pure(x + 3))
                 .flat_map(|x| AsyncIO::pure(x * 4))
                 .flat_map(|x| AsyncIO::pure(x + 5));
-            let result = runtime.block_on(async_io.run_async());
+            let result = runtime.block_on(async_io);
             black_box(result)
         });
     });
@@ -389,9 +389,7 @@ fn benchmark_async_io_retry(criterion: &mut Criterion) {
     group.bench_function("retry_success_first", |bencher| {
         bencher.iter(|| {
             let result = runtime.block_on(async {
-                AsyncIO::retry_with_factory(|| AsyncIO::pure(Ok::<i32, &str>(42)), 3)
-                    .run_async()
-                    .await
+                AsyncIO::retry_with_factory(|| AsyncIO::pure(Ok::<i32, &str>(42)), 3).await
             });
             black_box(result)
         });
@@ -417,7 +415,6 @@ fn benchmark_async_io_retry(criterion: &mut Criterion) {
                     },
                     5,
                 )
-                .run_async()
                 .await
             });
             black_box(result)
@@ -436,8 +433,7 @@ fn benchmark_async_io_par(criterion: &mut Criterion) {
     // par: two pure values
     group.bench_function("par_pure_2", |bencher| {
         bencher.iter(|| {
-            let result = runtime
-                .block_on(async { AsyncIO::pure(1).par(AsyncIO::pure(2)).run_async().await });
+            let result = runtime.block_on(async { AsyncIO::pure(1).par(AsyncIO::pure(2)).await });
             black_box(result)
         });
     });
@@ -448,7 +444,6 @@ fn benchmark_async_io_par(criterion: &mut Criterion) {
             let result = runtime.block_on(async {
                 AsyncIO::pure(1)
                     .par3(AsyncIO::pure(2), AsyncIO::pure(3))
-                    .run_async()
                     .await
             });
             black_box(result)
@@ -458,12 +453,8 @@ fn benchmark_async_io_par(criterion: &mut Criterion) {
     // race_result: two pure values
     group.bench_function("race_result_pure", |bencher| {
         bencher.iter(|| {
-            let result = runtime.block_on(async {
-                AsyncIO::pure(1)
-                    .race_result(AsyncIO::pure(2))
-                    .run_async()
-                    .await
-            });
+            let result =
+                runtime.block_on(async { AsyncIO::pure(1).race_result(AsyncIO::pure(2)).await });
             black_box(result)
         });
     });
@@ -486,7 +477,6 @@ fn benchmark_async_io_bracket(criterion: &mut Criterion) {
                     |resource| AsyncIO::pure(resource * 2),
                     |_| AsyncIO::pure(()),
                 )
-                .run_async()
                 .await
             });
             black_box(result)
@@ -496,12 +486,8 @@ fn benchmark_async_io_bracket(criterion: &mut Criterion) {
     // finally_async: simple cleanup
     group.bench_function("finally_async_simple", |bencher| {
         bencher.iter(|| {
-            let result = runtime.block_on(async {
-                AsyncIO::pure(42)
-                    .finally_async(|| async {})
-                    .run_async()
-                    .await
-            });
+            let result =
+                runtime.block_on(async { AsyncIO::pure(42).finally_async(|| async {}).await });
             black_box(result)
         });
     });
@@ -512,7 +498,6 @@ fn benchmark_async_io_bracket(criterion: &mut Criterion) {
             let result = runtime.block_on(async {
                 AsyncIO::pure(Ok::<i32, &str>(42))
                     .on_error(|_| async {})
-                    .run_async()
                     .await
             });
             black_box(result)
@@ -535,7 +520,6 @@ fn benchmark_async_io_timeout(criterion: &mut Criterion) {
             let result = runtime.block_on(async {
                 AsyncIO::pure(42)
                     .timeout_result(Duration::from_secs(10))
-                    .run_async()
                     .await
             });
             black_box(result)
@@ -554,7 +538,7 @@ fn benchmark_async_io_overhead_comparison(criterion: &mut Criterion) {
     // Baseline: pure value
     group.bench_function("baseline_pure", |bencher| {
         bencher.iter(|| {
-            let result = runtime.block_on(async { AsyncIO::pure(42).run_async().await });
+            let result = runtime.block_on(async { AsyncIO::pure(42).await });
             black_box(result)
         });
     });
@@ -562,12 +546,8 @@ fn benchmark_async_io_overhead_comparison(criterion: &mut Criterion) {
     // With finally_async (overhead of catch_unwind)
     group.bench_function("with_finally_async", |bencher| {
         bencher.iter(|| {
-            let result = runtime.block_on(async {
-                AsyncIO::pure(42)
-                    .finally_async(|| async {})
-                    .run_async()
-                    .await
-            });
+            let result =
+                runtime.block_on(async { AsyncIO::pure(42).finally_async(|| async {}).await });
             black_box(result)
         });
     });
@@ -578,7 +558,6 @@ fn benchmark_async_io_overhead_comparison(criterion: &mut Criterion) {
             let result = runtime.block_on(async {
                 AsyncIO::pure(Ok::<i32, &str>(42))
                     .on_error(|_| async {})
-                    .run_async()
                     .await
             });
             black_box(result)
@@ -589,9 +568,7 @@ fn benchmark_async_io_overhead_comparison(criterion: &mut Criterion) {
     group.bench_function("with_retry_no_retry", |bencher| {
         bencher.iter(|| {
             let result = runtime.block_on(async {
-                AsyncIO::retry_with_factory(|| AsyncIO::pure(Ok::<i32, &str>(42)), 1)
-                    .run_async()
-                    .await
+                AsyncIO::retry_with_factory(|| AsyncIO::pure(Ok::<i32, &str>(42)), 1).await
             });
             black_box(result)
         });
@@ -607,7 +584,6 @@ fn benchmark_async_io_overhead_comparison(criterion: &mut Criterion) {
                     .fmap(|x| x + 1)
                     .fmap(|x| x * 2)
                     .fmap(|x| x + 10)
-                    .run_async()
                     .await
             });
             black_box(result)
@@ -629,7 +605,6 @@ fn benchmark_async_io_overhead_comparison(criterion: &mut Criterion) {
                     .fmap(|x| x + 1)
                     .fmap(|x| x + 1)
                     .fmap(|x| x + 1)
-                    .run_async()
                     .await
             });
             black_box(result)
@@ -708,7 +683,7 @@ fn benchmark_async_io_batch_run(criterion: &mut Criterion) {
             let result = runtime.block_on(async {
                 let mut results = Vec::with_capacity(10);
                 for i in 0..10 {
-                    results.push(AsyncIO::pure(i).run_async().await);
+                    results.push(AsyncIO::pure(i).await);
                 }
                 results
             });

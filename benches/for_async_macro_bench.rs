@@ -35,7 +35,7 @@ fn benchmark_async_single_iteration(criterion: &mut Criterion) {
                             x <= data_inner;
                             yield black_box(x * 2)
                         };
-                        black_box(result.run_async().await)
+                        black_box(result.await)
                     })
                 });
             },
@@ -89,7 +89,7 @@ fn benchmark_async_nested_two_levels(criterion: &mut Criterion) {
                             y <= inner_inner.clone();
                             yield black_box(x + y)
                         };
-                        black_box(result.run_async().await)
+                        black_box(result.await)
                     })
                 });
             },
@@ -143,7 +143,7 @@ fn benchmark_async_io_bind(criterion: &mut Criterion) {
                             doubled <~ AsyncIO::pure(x * 2);
                             yield black_box(doubled)
                         };
-                        black_box(result.run_async().await)
+                        black_box(result.await)
                     })
                 });
             },
@@ -162,7 +162,7 @@ fn benchmark_async_io_bind(criterion: &mut Criterion) {
                             x <= data_inner;
                             yield black_box(x * 2)
                         };
-                        black_box(result.run_async().await)
+                        black_box(result.await)
                     })
                 });
             },
@@ -198,7 +198,7 @@ fn benchmark_async_let_binding(criterion: &mut Criterion) {
                             let squared = doubled * doubled;
                             yield black_box(squared)
                         };
-                        black_box(result.run_async().await)
+                        black_box(result.await)
                     })
                 });
             },
@@ -249,7 +249,7 @@ fn benchmark_multiple_async_binds(criterion: &mut Criterion) {
                         squared <~ AsyncIO::pure(doubled * doubled);
                         yield black_box(squared)
                     };
-                    black_box(result.run_async().await)
+                    black_box(result.await)
                 })
             });
         });
@@ -270,7 +270,7 @@ fn benchmark_multiple_async_binds(criterion: &mut Criterion) {
                             c <~ AsyncIO::pure(b + 10);
                             yield black_box(c)
                         };
-                        black_box(result.run_async().await)
+                        black_box(result.await)
                     })
                 });
             },

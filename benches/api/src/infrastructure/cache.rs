@@ -372,7 +372,7 @@ impl<P: TaskRepository + 'static> CachedTaskRepository<P> {
         AsyncIO::new(move || async move {
             // If cache is disabled, bypass cache entirely
             if !config.enabled {
-                let result = primary.find_by_id(&task_id).run_async().await?;
+                let result = primary.find_by_id(&task_id).await?;
                 return Ok(CacheResult::bypass(result));
             }
 
@@ -386,7 +386,7 @@ impl<P: TaskRepository + 'static> CachedTaskRepository<P> {
                         error = %error,
                         "Redis connection failed, falling back to primary storage"
                     );
-                    let result = primary.find_by_id(&task_id).run_async().await?;
+                    let result = primary.find_by_id(&task_id).await?;
                     return Ok(CacheResult::error(result));
                 }
             };
@@ -401,7 +401,7 @@ impl<P: TaskRepository + 'static> CachedTaskRepository<P> {
                         error = %error,
                         "Redis GET failed, falling back to primary storage"
                     );
-                    let result = primary.find_by_id(&task_id).run_async().await?;
+                    let result = primary.find_by_id(&task_id).await?;
                     return Ok(CacheResult::error(result));
                 }
             };
@@ -417,7 +417,7 @@ impl<P: TaskRepository + 'static> CachedTaskRepository<P> {
                             error = %error,
                             "Redis GET failed, falling back to primary storage"
                         );
-                        let result = primary.find_by_id(&task_id).run_async().await?;
+                        let result = primary.find_by_id(&task_id).await?;
                         return Ok(CacheResult::error(result));
                     }
                 };
@@ -448,7 +448,7 @@ impl<P: TaskRepository + 'static> CachedTaskRepository<P> {
             }
 
             // Cache miss: fetch from primary storage
-            let result = primary.find_by_id(&task_id).run_async().await?;
+            let result = primary.find_by_id(&task_id).await?;
 
             // If found, populate the cache (best effort - log errors but don't fail)
             if let Some(ref task) = result {
@@ -620,7 +620,7 @@ impl<P: TaskRepository + 'static> TaskRepository for CachedTaskRepository<P> {
         AsyncIO::new(move || async move {
             // If cache is disabled, bypass cache entirely
             if !config.enabled {
-                return primary.find_by_id(&task_id).run_async().await;
+                return primary.find_by_id(&task_id).await;
             }
 
             // Try to get from cache first (fail-open on Redis errors)
@@ -633,7 +633,7 @@ impl<P: TaskRepository + 'static> TaskRepository for CachedTaskRepository<P> {
                         error = %error,
                         "Redis connection failed, falling back to primary storage"
                     );
-                    return primary.find_by_id(&task_id).run_async().await;
+                    return primary.find_by_id(&task_id).await;
                 }
             };
 
@@ -647,7 +647,7 @@ impl<P: TaskRepository + 'static> TaskRepository for CachedTaskRepository<P> {
                         error = %error,
                         "Redis GET failed, falling back to primary storage"
                     );
-                    return primary.find_by_id(&task_id).run_async().await;
+                    return primary.find_by_id(&task_id).await;
                 }
             };
 
@@ -662,7 +662,7 @@ impl<P: TaskRepository + 'static> TaskRepository for CachedTaskRepository<P> {
                             error = %error,
                             "Redis GET failed, falling back to primary storage"
                         );
-                        return primary.find_by_id(&task_id).run_async().await;
+                        return primary.find_by_id(&task_id).await;
                     }
                 };
 
@@ -692,7 +692,7 @@ impl<P: TaskRepository + 'static> TaskRepository for CachedTaskRepository<P> {
             }
 
             // Cache miss: fetch from primary storage
-            let result = primary.find_by_id(&task_id).run_async().await?;
+            let result = primary.find_by_id(&task_id).await?;
 
             // If found, populate the cache (best effort - log errors but don't fail)
             if let Some(ref task) = result {
@@ -753,11 +753,11 @@ impl<P: TaskRepository + 'static> TaskRepository for CachedTaskRepository<P> {
                          operating as WriteThrough (CACHE-FUT-001)"
                     );
                     // Primary storage first to ensure data consistency
-                    primary.save(&task).run_async().await?;
+                    primary.save(&task).await?;
                 }
                 CacheStrategy::ReadThrough | CacheStrategy::WriteThrough => {
                     // Write-through: save to primary storage first
-                    primary.save(&task).run_async().await?;
+                    primary.save(&task).await?;
                 }
             }
 
@@ -867,7 +867,7 @@ impl<P: TaskRepository + 'static> TaskRepository for CachedTaskRepository<P> {
             }
 
             // Save all to primary storage first (write-through behavior)
-            let primary_results = primary.save_bulk(&tasks).run_async().await;
+            let primary_results = primary.save_bulk(&tasks).await;
 
             // Get Redis connection (best effort - don't fail if Redis is down)
             let mut connection = match pool.get().await {
@@ -969,7 +969,7 @@ impl<P: TaskRepository + 'static> TaskRepository for CachedTaskRepository<P> {
 
         AsyncIO::new(move || async move {
             // First, delete from primary storage
-            let deleted = primary.delete(&task_id).run_async().await?;
+            let deleted = primary.delete(&task_id).await?;
 
             // Get Redis connection (best effort - don't fail if Redis is down)
             let mut connection = match pool.get().await {
@@ -1109,7 +1109,7 @@ impl<P: ProjectRepository + 'static> CachedProjectRepository<P> {
         AsyncIO::new(move || async move {
             // If cache is disabled, bypass cache entirely
             if !config.enabled {
-                let result = primary.find_by_id(&project_id).run_async().await?;
+                let result = primary.find_by_id(&project_id).await?;
                 return Ok(CacheResult::bypass(result));
             }
 
@@ -1123,7 +1123,7 @@ impl<P: ProjectRepository + 'static> CachedProjectRepository<P> {
                         error = %error,
                         "Redis connection failed, falling back to primary storage"
                     );
-                    let result = primary.find_by_id(&project_id).run_async().await?;
+                    let result = primary.find_by_id(&project_id).await?;
                     return Ok(CacheResult::error(result));
                 }
             };
@@ -1138,7 +1138,7 @@ impl<P: ProjectRepository + 'static> CachedProjectRepository<P> {
                         error = %error,
                         "Redis GET failed, falling back to primary storage"
                     );
-                    let result = primary.find_by_id(&project_id).run_async().await?;
+                    let result = primary.find_by_id(&project_id).await?;
                     return Ok(CacheResult::error(result));
                 }
             };
@@ -1154,7 +1154,7 @@ impl<P: ProjectRepository + 'static> CachedProjectRepository<P> {
                             error = %error,
                             "Redis GET failed, falling back to primary storage"
                         );
-                        let result = primary.find_by_id(&project_id).run_async().await?;
+                        let result = primary.find_by_id(&project_id).await?;
                         return Ok(CacheResult::error(result));
                     }
                 };
@@ -1185,7 +1185,7 @@ impl<P: ProjectRepository + 'static> CachedProjectRepository<P> {
             }
 
             // Cache miss: fetch from primary storage
-            let result = primary.find_by_id(&project_id).run_async().await?;
+            let result = primary.find_by_id(&project_id).await?;
 
             // If found, populate the cache (best effort - log errors but don't fail)
             if let Some(ref project) = result {
@@ -1240,7 +1240,7 @@ impl<P: ProjectRepository + 'static> ProjectRepository for CachedProjectReposito
         AsyncIO::new(move || async move {
             // If cache is disabled, bypass cache entirely
             if !config.enabled {
-                return primary.find_by_id(&project_id).run_async().await;
+                return primary.find_by_id(&project_id).await;
             }
 
             // Try to get from cache first (fail-open on Redis errors)
@@ -1253,7 +1253,7 @@ impl<P: ProjectRepository + 'static> ProjectRepository for CachedProjectReposito
                         error = %error,
                         "Redis connection failed, falling back to primary storage"
                     );
-                    return primary.find_by_id(&project_id).run_async().await;
+                    return primary.find_by_id(&project_id).await;
                 }
             };
 
@@ -1267,7 +1267,7 @@ impl<P: ProjectRepository + 'static> ProjectRepository for CachedProjectReposito
                         error = %error,
                         "Redis GET failed, falling back to primary storage"
                     );
-                    return primary.find_by_id(&project_id).run_async().await;
+                    return primary.find_by_id(&project_id).await;
                 }
             };
 
@@ -1282,7 +1282,7 @@ impl<P: ProjectRepository + 'static> ProjectRepository for CachedProjectReposito
                             error = %error,
                             "Redis GET failed, falling back to primary storage"
                         );
-                        return primary.find_by_id(&project_id).run_async().await;
+                        return primary.find_by_id(&project_id).await;
                     }
                 };
 
@@ -1312,7 +1312,7 @@ impl<P: ProjectRepository + 'static> ProjectRepository for CachedProjectReposito
             }
 
             // Cache miss: fetch from primary storage
-            let result = primary.find_by_id(&project_id).run_async().await?;
+            let result = primary.find_by_id(&project_id).await?;
 
             // If found, populate the cache (best effort - log errors but don't fail)
             if let Some(ref project) = result {
@@ -1373,11 +1373,11 @@ impl<P: ProjectRepository + 'static> ProjectRepository for CachedProjectReposito
                          operating as WriteThrough (CACHE-FUT-001)"
                     );
                     // Primary storage first to ensure data consistency
-                    primary.save(&project).run_async().await?;
+                    primary.save(&project).await?;
                 }
                 CacheStrategy::ReadThrough | CacheStrategy::WriteThrough => {
                     // Write-through: save to primary storage first
-                    primary.save(&project).run_async().await?;
+                    primary.save(&project).await?;
                 }
             }
 
@@ -1466,7 +1466,7 @@ impl<P: ProjectRepository + 'static> ProjectRepository for CachedProjectReposito
 
         AsyncIO::new(move || async move {
             // First, delete from primary storage
-            let deleted = primary.delete(&project_id).run_async().await?;
+            let deleted = primary.delete(&project_id).await?;
 
             // Get Redis connection (best effort - don't fail if Redis is down)
             let mut connection = match pool.get().await {
