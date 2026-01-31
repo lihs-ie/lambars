@@ -514,18 +514,6 @@ where
     pub fn run_async_io(self) -> super::AsyncIO<Result<A, E>> {
         self.inner
     }
-
-    /// Executes the `ExceptT` computation and returns the result.
-    ///
-    /// # Errors
-    ///
-    /// Returns `Err(E)` if the computation failed with an error of type `E`.
-    #[allow(clippy::inline_always)]
-    #[inline(always)]
-    pub async fn run_async(self) -> Result<A, E> {
-        #[allow(deprecated)]
-        self.inner.run_async().await
-    }
 }
 
 #[cfg(test)]
@@ -577,14 +565,14 @@ mod async_io_tests {
     #[tokio::test]
     async fn pure_async_io_returns_success_value() {
         let except: ExceptT<String, AsyncIO<Result<i32, String>>> = ExceptT::pure_async_io(42);
-        assert_eq!(except.run().run_async().await, Ok(42));
+        assert_eq!(except.run().await, Ok(42));
     }
 
     #[tokio::test]
     async fn throw_async_io_returns_error_value() {
         let except: ExceptT<String, AsyncIO<Result<i32, String>>> =
             ExceptT::throw_async_io("error".to_string());
-        assert_eq!(except.run().run_async().await, Err("error".to_string()));
+        assert_eq!(except.run().await, Err("error".to_string()));
     }
 
     #[tokio::test]
@@ -592,27 +580,27 @@ mod async_io_tests {
         let async_io = AsyncIO::pure(42);
         let except: ExceptT<String, AsyncIO<Result<i32, String>>> =
             ExceptT::lift_async_io(async_io);
-        assert_eq!(except.run().run_async().await, Ok(42));
+        assert_eq!(except.run().await, Ok(42));
     }
 
     #[tokio::test]
     async fn from_result_lifts_ok_value() {
         let except: ExceptT<String, AsyncIO<Result<i32, String>>> = ExceptT::from_result(Ok(42));
-        assert_eq!(except.run().run_async().await, Ok(42));
+        assert_eq!(except.run().await, Ok(42));
     }
 
     #[tokio::test]
     async fn from_result_lifts_err_value() {
         let except: ExceptT<String, AsyncIO<Result<i32, String>>> =
             ExceptT::from_result(Err("error".to_string()));
-        assert_eq!(except.run().run_async().await, Err("error".to_string()));
+        assert_eq!(except.run().await, Err("error".to_string()));
     }
 
     #[tokio::test]
     async fn fmap_async_io_transforms_success_value() {
         let except: ExceptT<String, AsyncIO<Result<i32, String>>> = ExceptT::pure_async_io(10);
         let mapped = except.fmap_async_io(|x| x * 2);
-        assert_eq!(mapped.run().run_async().await, Ok(20));
+        assert_eq!(mapped.run().await, Ok(20));
     }
 
     #[tokio::test]
@@ -620,14 +608,14 @@ mod async_io_tests {
         let except: ExceptT<String, AsyncIO<Result<i32, String>>> =
             ExceptT::throw_async_io("error".to_string());
         let mapped = except.fmap_async_io(|x| x * 2);
-        assert_eq!(mapped.run().run_async().await, Err("error".to_string()));
+        assert_eq!(mapped.run().await, Err("error".to_string()));
     }
 
     #[tokio::test]
     async fn flat_map_chains_success_computations() {
         let except: ExceptT<String, AsyncIO<Result<i32, String>>> = ExceptT::pure_async_io(10);
         let chained = except.flat_map(|v| ExceptT::pure_async_io(v * 2));
-        assert_eq!(chained.run().run_async().await, Ok(20));
+        assert_eq!(chained.run().await, Ok(20));
     }
 
     #[tokio::test]
@@ -635,7 +623,7 @@ mod async_io_tests {
         let except: ExceptT<String, AsyncIO<Result<i32, String>>> =
             ExceptT::throw_async_io("error".to_string());
         let chained = except.flat_map(|v| ExceptT::pure_async_io(v * 2));
-        assert_eq!(chained.run().run_async().await, Err("error".to_string()));
+        assert_eq!(chained.run().await, Err("error".to_string()));
     }
 
     #[tokio::test]
@@ -646,10 +634,7 @@ mod async_io_tests {
                 "chained error".to_string(),
             )
         });
-        assert_eq!(
-            chained.run().run_async().await,
-            Err("chained error".to_string())
-        );
+        assert_eq!(chained.run().await, Err("chained error".to_string()));
     }
 
     #[tokio::test]
@@ -659,14 +644,14 @@ mod async_io_tests {
             .flat_map(|x| ExceptT::pure_async_io(x + 1))
             .flat_map(|x| ExceptT::pure_async_io(x * 2))
             .flat_map(|x| ExceptT::pure_async_io(x + 10));
-        assert_eq!(chained.run().run_async().await, Ok(22));
+        assert_eq!(chained.run().await, Ok(22));
     }
 
     #[tokio::test]
     async fn flat_map_async_io_is_alias_for_flat_map() {
         let except: ExceptT<String, AsyncIO<Result<i32, String>>> = ExceptT::pure_async_io(10);
         let chained = except.flat_map_async_io(|v| ExceptT::pure_async_io(v * 2));
-        assert_eq!(chained.run().run_async().await, Ok(20));
+        assert_eq!(chained.run().await, Ok(20));
     }
 
     #[tokio::test]
@@ -676,14 +661,14 @@ mod async_io_tests {
         #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
         let recovered =
             ExceptT::catch_async_io(failing, |e| ExceptT::pure_async_io(e.len() as i32));
-        assert_eq!(recovered.run().run_async().await, Ok(5));
+        assert_eq!(recovered.run().await, Ok(5));
     }
 
     #[tokio::test]
     async fn catch_async_io_passes_through_success() {
         let success: ExceptT<String, AsyncIO<Result<i32, String>>> = ExceptT::pure_async_io(42);
         let unchanged = ExceptT::catch_async_io(success, |_| ExceptT::pure_async_io(0));
-        assert_eq!(unchanged.run().run_async().await, Ok(42));
+        assert_eq!(unchanged.run().await, Ok(42));
     }
 
     #[tokio::test]
@@ -692,23 +677,20 @@ mod async_io_tests {
             ExceptT::throw_async_io("original".to_string());
         let re_thrown =
             ExceptT::catch_async_io(failing, |e| ExceptT::throw_async_io(format!("caught: {e}")));
-        assert_eq!(
-            re_thrown.run().run_async().await,
-            Err("caught: original".to_string())
-        );
+        assert_eq!(re_thrown.run().await, Err("caught: original".to_string()));
     }
 
     #[tokio::test]
-    async fn run_async_is_shortcut_for_run_then_run_async() {
+    async fn run_returns_success_value() {
         let except: ExceptT<String, AsyncIO<Result<i32, String>>> = ExceptT::pure_async_io(42);
-        assert_eq!(except.run_async().await, Ok(42));
+        assert_eq!(except.run().await, Ok(42));
     }
 
     #[tokio::test]
-    async fn run_async_returns_error() {
+    async fn run_returns_error_value() {
         let except: ExceptT<String, AsyncIO<Result<i32, String>>> =
             ExceptT::throw_async_io("error".to_string());
-        assert_eq!(except.run_async().await, Err("error".to_string()));
+        assert_eq!(except.run().await, Err("error".to_string()));
     }
 
     // Monad Laws
@@ -723,9 +705,9 @@ mod async_io_tests {
 
         let left = ExceptT::<String, AsyncIO<Result<i32, String>>>::pure_async_io(value)
             .flat_map(f)
-            .run_async()
+            .run()
             .await;
-        let right = f(value).run_async().await;
+        let right = f(value).run().await;
 
         assert_eq!(left, right);
     }
@@ -738,10 +720,10 @@ mod async_io_tests {
     async fn monad_right_identity_law(#[case] value: i32) {
         let left = ExceptT::<String, AsyncIO<Result<i32, String>>>::pure_async_io(value)
             .flat_map(ExceptT::pure_async_io)
-            .run_async()
+            .run()
             .await;
         let right = ExceptT::<String, AsyncIO<Result<i32, String>>>::pure_async_io(value)
-            .run_async()
+            .run()
             .await;
 
         assert_eq!(left, right);
@@ -763,11 +745,11 @@ mod async_io_tests {
         let left = ExceptT::<String, AsyncIO<Result<i32, String>>>::pure_async_io(value)
             .flat_map(f)
             .flat_map(g)
-            .run_async()
+            .run()
             .await;
         let right = ExceptT::<String, AsyncIO<Result<i32, String>>>::pure_async_io(value)
             .flat_map(|x| f(x).flat_map(g))
-            .run_async()
+            .run()
             .await;
 
         assert_eq!(left, right);
@@ -783,10 +765,10 @@ mod async_io_tests {
     async fn functor_identity_law(#[case] value: i32) {
         let left = ExceptT::<String, AsyncIO<Result<i32, String>>>::pure_async_io(value)
             .fmap_async_io(|x| x)
-            .run_async()
+            .run()
             .await;
         let right = ExceptT::<String, AsyncIO<Result<i32, String>>>::pure_async_io(value)
-            .run_async()
+            .run()
             .await;
 
         assert_eq!(left, right);
@@ -807,12 +789,12 @@ mod async_io_tests {
 
         let left = ExceptT::<String, AsyncIO<Result<i32, String>>>::pure_async_io(value)
             .fmap_async_io(|x| g(f(x)))
-            .run_async()
+            .run()
             .await;
         let right = ExceptT::<String, AsyncIO<Result<i32, String>>>::pure_async_io(value)
             .fmap_async_io(f)
             .fmap_async_io(g)
-            .run_async()
+            .run()
             .await;
 
         assert_eq!(left, right);
@@ -826,7 +808,7 @@ mod async_io_tests {
             x <= ExceptT::<String, AsyncIO<Result<i32, String>>>::pure_async_io(5);
             ExceptT::<String, AsyncIO<Result<i32, String>>>::pure_async_io(x * 2)
         };
-        assert_eq!(result.run_async().await, Ok(10));
+        assert_eq!(result.run().await, Ok(10));
     }
 
     #[tokio::test]
@@ -837,7 +819,7 @@ mod async_io_tests {
             let z = x + y;
             ExceptT::<String, AsyncIO<Result<i32, String>>>::pure_async_io(z * 2)
         };
-        assert_eq!(result.run_async().await, Ok(30));
+        assert_eq!(result.run().await, Ok(30));
     }
 
     #[tokio::test]
@@ -847,7 +829,7 @@ mod async_io_tests {
             _ <= ExceptT::<String, AsyncIO<Result<i32, String>>>::throw_async_io("error".to_string());
             ExceptT::<String, AsyncIO<Result<i32, String>>>::pure_async_io(x * 2)
         };
-        assert_eq!(result.run_async().await, Err("error".to_string()));
+        assert_eq!(result.run().await, Err("error".to_string()));
     }
 
     #[tokio::test]
@@ -866,10 +848,7 @@ mod async_io_tests {
             z <= divide(y, 0);
             ExceptT::<String, AsyncIO<Result<i32, String>>>::pure_async_io(z)
         };
-        assert_eq!(
-            result.run_async().await,
-            Err("Division by zero".to_string())
-        );
+        assert_eq!(result.run().await, Err("Division by zero".to_string()));
     }
 
     #[tokio::test]
@@ -887,7 +866,7 @@ mod async_io_tests {
             z <= double(y);
             ExceptT::<String, AsyncIO<Result<i32, String>>>::pure_async_io(z + 10)
         };
-        assert_eq!(result.run_async().await, Ok(22));
+        assert_eq!(result.run().await, Ok(22));
     }
 
     #[tokio::test]
@@ -896,7 +875,7 @@ mod async_io_tests {
             _ <= ExceptT::<String, AsyncIO<Result<&str, String>>>::pure_async_io("ignored");
             ExceptT::<String, AsyncIO<Result<i32, String>>>::pure_async_io(42)
         };
-        assert_eq!(result.run_async().await, Ok(42));
+        assert_eq!(result.run().await, Ok(42));
     }
 
     #[tokio::test]
@@ -905,6 +884,6 @@ mod async_io_tests {
             (a, b) <= ExceptT::<String, AsyncIO<Result<(i32, i32), String>>>::pure_async_io((10, 20));
             ExceptT::<String, AsyncIO<Result<i32, String>>>::pure_async_io(a + b)
         };
-        assert_eq!(result.run_async().await, Ok(30));
+        assert_eq!(result.run().await, Ok(30));
     }
 }

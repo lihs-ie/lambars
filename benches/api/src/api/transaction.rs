@@ -443,7 +443,6 @@ pub async fn update_task(
     let old_task = state
         .task_repository
         .find_by_id(&task_id)
-        .run_async()
         .await
         .map_err(ApiErrorResponse::from)?
         .ok_or_else(|| ApiErrorResponse::not_found(format!("Task {task_id} not found")))?;
@@ -464,7 +463,6 @@ pub async fn update_task(
     let current_event_version = state
         .event_store
         .get_current_version(&task_id)
-        .run_async()
         .await
         .map_err(ApiErrorResponse::from)?;
 
@@ -765,7 +763,6 @@ pub async fn update_status(
     let old_task = state
         .task_repository
         .find_by_id(&task_id)
-        .run_async()
         .await
         .map_err(ApiErrorResponse::from)?
         .ok_or_else(|| ApiErrorResponse::not_found(format!("Task {task_id} not found")))?;
@@ -797,7 +794,6 @@ pub async fn update_status(
             let current_event_version = state
                 .event_store
                 .get_current_version(&task_id)
-                .run_async()
                 .await
                 .map_err(ApiErrorResponse::from)?;
 
@@ -962,7 +958,6 @@ pub async fn add_subtask(
     let old_task = state
         .task_repository
         .find_by_id(&task_id)
-        .run_async()
         .await
         .map_err(ApiErrorResponse::from)?
         .ok_or_else(|| ApiErrorResponse::not_found(format!("Task {task_id} not found")))?;
@@ -992,7 +987,6 @@ pub async fn add_subtask(
     state
         .task_repository
         .save(&updated_task)
-        .run_async()
         .await
         .map_err(ApiErrorResponse::from)?;
 
@@ -1084,7 +1078,6 @@ pub async fn add_tag(
     let old_task = state
         .task_repository
         .find_by_id(&task_id)
-        .run_async()
         .await
         .map_err(ApiErrorResponse::from)?
         .ok_or_else(|| ApiErrorResponse::not_found(format!("Task {task_id} not found")))?;
@@ -1105,7 +1098,6 @@ pub async fn add_tag(
     let current_event_version = state
         .event_store
         .get_current_version(&task_id)
-        .run_async()
         .await
         .map_err(ApiErrorResponse::from)?;
 

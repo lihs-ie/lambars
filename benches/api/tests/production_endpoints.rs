@@ -128,7 +128,6 @@ async fn test_get_task_history_pagination() {
     state
         .event_store
         .append(&event2, 1)
-        .run_async()
         .await
         .expect("Failed to append second event");
 
@@ -519,7 +518,6 @@ async fn test_create_task_writes_to_event_store() {
     let current_version = state
         .event_store
         .get_current_version(&task_id)
-        .run_async()
         .await
         .expect("Failed to get version");
 
@@ -532,7 +530,6 @@ async fn test_create_task_writes_to_event_store() {
     let history = state
         .event_store
         .load_events(&task_id)
-        .run_async()
         .await
         .expect("Failed to load events");
 

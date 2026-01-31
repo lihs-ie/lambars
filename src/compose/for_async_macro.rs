@@ -162,9 +162,7 @@
 //!
 //! ## Async Bind Behavior (`<~`)
 //!
-//! The `<~` operator directly awaits the `AsyncIO` expression using `.await`.
-//! Since `AsyncIO` implements `Future`, this avoids unnecessary `Box::pin`
-//! allocation that would occur with the deprecated `run_async()` method.
+//! The `<~` operator calls `.await` on the `AsyncIO` expression.
 //!
 //! **Performance**: For `AsyncIO::pure(value)`, the direct await has zero
 //! heap allocation overhead. For deferred `AsyncIO` operations, the allocation

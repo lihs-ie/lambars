@@ -607,7 +607,7 @@ mod tests {
         let stub = StubExternalDataSource::with_data(data, "test");
         let task_id = TaskId::generate();
 
-        let result = stub.fetch_task_data(&task_id).run_async().await;
+        let result = stub.fetch_task_data(&task_id).await;
 
         assert!(result.is_ok());
         let task_data = result.unwrap();
@@ -621,7 +621,7 @@ mod tests {
         let stub = StubExternalDataSource::not_found("test");
         let task_id = TaskId::generate();
 
-        let result = stub.fetch_task_data(&task_id).run_async().await;
+        let result = stub.fetch_task_data(&task_id).await;
 
         assert!(result.is_ok());
         assert!(result.unwrap().is_none());
@@ -636,7 +636,7 @@ mod tests {
         );
         let task_id = TaskId::generate();
 
-        let result = stub.fetch_task_data(&task_id).run_async().await;
+        let result = stub.fetch_task_data(&task_id).await;
 
         assert!(result.is_err());
         let error = result.unwrap_err();

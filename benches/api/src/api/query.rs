@@ -4687,7 +4687,6 @@ pub async fn list_tasks(
     let result = state
         .task_repository
         .list_filtered(status_filter, priority_filter, pagination)
-        .run_async()
         .await
         .map_err(ApiErrorResponse::from)?;
 
@@ -5024,7 +5023,6 @@ pub async fn search_tasks(
     let tasks = state
         .task_repository
         .search(&query.q, query.scope.to_repository_scope(), limit, offset)
-        .run_async()
         .await
         .map_err(ApiErrorResponse::from)?;
 
@@ -5171,7 +5169,6 @@ pub async fn count_by_priority(
     let all_tasks = state
         .task_repository
         .list(Pagination::all())
-        .run_async()
         .await
         .map_err(ApiErrorResponse::from)?;
 

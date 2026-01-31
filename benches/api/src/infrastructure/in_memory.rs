@@ -97,8 +97,8 @@ fn detect_duplicate_task_ids(tasks: &[Task]) -> std::collections::HashSet<usize>
 /// let repository = InMemoryTaskRepository::new();
 /// let task = Task::new(TaskId::generate(), "My Task", Timestamp::now());
 ///
-/// repository.save(&task).run_async().await?;
-/// let found = repository.find_by_id(&task.task_id).run_async().await?;
+/// repository.save(&task).await?;
+/// let found = repository.find_by_id(&task.task_id).await?;
 /// ```
 #[derive(Debug, Clone)]
 pub struct InMemoryTaskRepository {
@@ -376,8 +376,8 @@ impl TaskRepository for InMemoryTaskRepository {
 /// let repository = InMemoryProjectRepository::new();
 /// let project = Project::new(ProjectId::generate(), "My Project", Timestamp::now());
 ///
-/// repository.save(&project).run_async().await?;
-/// let found = repository.find_by_id(&project.project_id).run_async().await?;
+/// repository.save(&project).await?;
+/// let found = repository.find_by_id(&project.project_id).await?;
 /// ```
 #[derive(Debug, Clone)]
 pub struct InMemoryProjectRepository {
@@ -510,10 +510,10 @@ impl ProjectRepository for InMemoryProjectRepository {
 /// let store = InMemoryEventStore::new();
 ///
 /// // Append an event with expected version 0 (for first event)
-/// store.append(&event, 0).run_async().await?;
+/// store.append(&event, 0).await?;
 ///
 /// // Load all events
-/// let history = store.load_events(&task_id).run_async().await?;
+/// let history = store.load_events(&task_id).await?;
 /// ```
 #[derive(Debug, Clone)]
 pub struct InMemoryEventStore {
@@ -689,7 +689,7 @@ mod tests {
         let repository = InMemoryTaskRepository::new();
         let task_id = TaskId::generate();
 
-        let result = repository.find_by_id(&task_id).run_async().await;
+        let result = repository.find_by_id(&task_id).await;
 
         assert!(result.is_ok());
         assert!(result.unwrap().is_none());
@@ -703,11 +703,11 @@ mod tests {
         let task_id = task.task_id.clone();
 
         // Save the task
-        let save_result = repository.save(&task).run_async().await;
+        let save_result = repository.save(&task).await;
         assert!(save_result.is_ok());
 
         // Find the task
-        let find_result = repository.find_by_id(&task_id).run_async().await;
+        let find_result = repository.find_by_id(&task_id).await;
         assert!(find_result.is_ok());
         let found_task = find_result.unwrap();
         assert!(found_task.is_some());
@@ -722,17 +722,16 @@ mod tests {
         let task_id = task.task_id.clone();
 
         // Save the original task
-        repository.save(&task).run_async().await.unwrap();
+        repository.save(&task).await.unwrap();
 
         // Update the task with incremented version
         let updated_task = test_task_with_id(task_id.clone(), "Updated Title").increment_version();
-        let update_result = repository.save(&updated_task).run_async().await;
+        let update_result = repository.save(&updated_task).await;
         assert!(update_result.is_ok());
 
         // Verify the update
         let found = repository
             .find_by_id(&task_id)
-            .run_async()
             .await
             .unwrap()
             .unwrap();
@@ -748,11 +747,11 @@ mod tests {
         let task_id = task.task_id.clone();
 
         // Save the original task
-        repository.save(&task).run_async().await.unwrap();
+        repository.save(&task).await.unwrap();
 
         // Try to save with same version (should fail)
         let conflicting_task = test_task_with_id(task_id, "Conflicting Task");
-        let result = repository.save(&conflicting_task).run_async().await;
+        let result = repository.save(&conflicting_task).await;
 
         assert!(result.is_err());
         match result.unwrap_err() {
@@ -772,15 +771,15 @@ mod tests {
         let task_id = task.task_id.clone();
 
         // Save the task
-        repository.save(&task).run_async().await.unwrap();
+        repository.save(&task).await.unwrap();
 
         // Delete the task
-        let delete_result = repository.delete(&task_id).run_async().await;
+        let delete_result = repository.delete(&task_id).await;
         assert!(delete_result.is_ok());
         assert!(delete_result.unwrap());
 
         // Verify deletion
-        let find_result = repository.find_by_id(&task_id).run_async().await.unwrap();
+        let find_result = repository.find_by_id(&task_id).await.unwrap();
         assert!(find_result.is_none());
     }
 
@@ -790,7 +789,7 @@ mod tests {
         let repository = InMemoryTaskRepository::new();
         let task_id = TaskId::generate();
 
-        let result = repository.delete(&task_id).run_async().await;
+        let result = repository.delete(&task_id).await;
         assert!(result.is_ok());
         assert!(!result.unwrap());
     }
@@ -801,7 +800,7 @@ mod tests {
         let repository = InMemoryTaskRepository::new();
         let pagination = Pagination::new(0, 10);
 
-        let result = repository.list(pagination).run_async().await;
+        let result = repository.list(pagination).await;
         assert!(result.is_ok());
         let paginated = result.unwrap();
         assert!(paginated.items.is_empty());
@@ -816,12 +815,12 @@ mod tests {
         // Save 5 tasks
         for i in 0..5 {
             let task = test_task(&format!("Task {i}"));
-            repository.save(&task).run_async().await.unwrap();
+            repository.save(&task).await.unwrap();
         }
 
         // Get first page (2 items)
         let pagination = Pagination::new(0, 2);
-        let result = repository.list(pagination).run_async().await.unwrap();
+        let result = repository.list(pagination).await.unwrap();
         assert_eq!(result.items.len(), 2);
         assert_eq!(result.total, 5);
         assert_eq!(result.page, 0);
@@ -829,13 +828,13 @@ mod tests {
 
         // Get second page
         let pagination = Pagination::new(1, 2);
-        let result = repository.list(pagination).run_async().await.unwrap();
+        let result = repository.list(pagination).await.unwrap();
         assert_eq!(result.items.len(), 2);
         assert_eq!(result.total, 5);
 
         // Get third page (only 1 item left)
         let pagination = Pagination::new(2, 2);
-        let result = repository.list(pagination).run_async().await.unwrap();
+        let result = repository.list(pagination).await.unwrap();
         assert_eq!(result.items.len(), 1);
     }
 
@@ -844,14 +843,14 @@ mod tests {
     async fn test_task_repository_count() {
         let repository = InMemoryTaskRepository::new();
 
-        assert_eq!(repository.count().run_async().await.unwrap(), 0);
+        assert_eq!(repository.count().await.unwrap(), 0);
 
         for i in 0..3 {
             let task = test_task(&format!("Task {i}"));
-            repository.save(&task).run_async().await.unwrap();
+            repository.save(&task).await.unwrap();
         }
 
-        assert_eq!(repository.count().run_async().await.unwrap(), 3);
+        assert_eq!(repository.count().await.unwrap(), 3);
     }
 
     // -------------------------------------------------------------------------
@@ -864,7 +863,7 @@ mod tests {
         let repository = InMemoryProjectRepository::new();
         let project_id = ProjectId::generate();
 
-        let result = repository.find_by_id(&project_id).run_async().await;
+        let result = repository.find_by_id(&project_id).await;
 
         assert!(result.is_ok());
         assert!(result.unwrap().is_none());
@@ -878,11 +877,11 @@ mod tests {
         let project_id = project.project_id.clone();
 
         // Save the project
-        let save_result = repository.save(&project).run_async().await;
+        let save_result = repository.save(&project).await;
         assert!(save_result.is_ok());
 
         // Find the project
-        let find_result = repository.find_by_id(&project_id).run_async().await;
+        let find_result = repository.find_by_id(&project_id).await;
         assert!(find_result.is_ok());
         let found_project = find_result.unwrap();
         assert!(found_project.is_some());
@@ -897,18 +896,17 @@ mod tests {
         let project_id = project.project_id.clone();
 
         // Save the original project
-        repository.save(&project).run_async().await.unwrap();
+        repository.save(&project).await.unwrap();
 
         // Update the project with incremented version
         let updated_project =
             test_project_with_id(project_id.clone(), "Updated Name").increment_version();
-        let update_result = repository.save(&updated_project).run_async().await;
+        let update_result = repository.save(&updated_project).await;
         assert!(update_result.is_ok());
 
         // Verify the update
         let found = repository
             .find_by_id(&project_id)
-            .run_async()
             .await
             .unwrap()
             .unwrap();
@@ -924,11 +922,11 @@ mod tests {
         let project_id = project.project_id.clone();
 
         // Save the original project
-        repository.save(&project).run_async().await.unwrap();
+        repository.save(&project).await.unwrap();
 
         // Try to save with same version (should fail)
         let conflicting_project = test_project_with_id(project_id, "Conflicting Project");
-        let result = repository.save(&conflicting_project).run_async().await;
+        let result = repository.save(&conflicting_project).await;
 
         assert!(result.is_err());
         match result.unwrap_err() {
@@ -948,17 +946,16 @@ mod tests {
         let project_id = project.project_id.clone();
 
         // Save the project
-        repository.save(&project).run_async().await.unwrap();
+        repository.save(&project).await.unwrap();
 
         // Delete the project
-        let delete_result = repository.delete(&project_id).run_async().await;
+        let delete_result = repository.delete(&project_id).await;
         assert!(delete_result.is_ok());
         assert!(delete_result.unwrap());
 
         // Verify deletion
         let find_result = repository
             .find_by_id(&project_id)
-            .run_async()
             .await
             .unwrap();
         assert!(find_result.is_none());
@@ -970,7 +967,7 @@ mod tests {
         let repository = InMemoryProjectRepository::new();
         let project_id = ProjectId::generate();
 
-        let result = repository.delete(&project_id).run_async().await;
+        let result = repository.delete(&project_id).await;
         assert!(result.is_ok());
         assert!(!result.unwrap());
     }
@@ -981,7 +978,7 @@ mod tests {
         let repository = InMemoryProjectRepository::new();
         let pagination = Pagination::new(0, 10);
 
-        let result = repository.list(pagination).run_async().await;
+        let result = repository.list(pagination).await;
         assert!(result.is_ok());
         let paginated = result.unwrap();
         assert!(paginated.items.is_empty());
@@ -996,12 +993,12 @@ mod tests {
         // Save 5 projects
         for i in 0..5 {
             let project = test_project(&format!("Project {i}"));
-            repository.save(&project).run_async().await.unwrap();
+            repository.save(&project).await.unwrap();
         }
 
         // Get first page (2 items)
         let pagination = Pagination::new(0, 2);
-        let result = repository.list(pagination).run_async().await.unwrap();
+        let result = repository.list(pagination).await.unwrap();
         assert_eq!(result.items.len(), 2);
         assert_eq!(result.total, 5);
         assert_eq!(result.page, 0);
@@ -1009,13 +1006,13 @@ mod tests {
 
         // Get second page
         let pagination = Pagination::new(1, 2);
-        let result = repository.list(pagination).run_async().await.unwrap();
+        let result = repository.list(pagination).await.unwrap();
         assert_eq!(result.items.len(), 2);
         assert_eq!(result.total, 5);
 
         // Get third page (only 1 item left)
         let pagination = Pagination::new(2, 2);
-        let result = repository.list(pagination).run_async().await.unwrap();
+        let result = repository.list(pagination).await.unwrap();
         assert_eq!(result.items.len(), 1);
     }
 
@@ -1024,14 +1021,14 @@ mod tests {
     async fn test_project_repository_count() {
         let repository = InMemoryProjectRepository::new();
 
-        assert_eq!(repository.count().run_async().await.unwrap(), 0);
+        assert_eq!(repository.count().await.unwrap(), 0);
 
         for i in 0..3 {
             let project = test_project(&format!("Project {i}"));
-            repository.save(&project).run_async().await.unwrap();
+            repository.save(&project).await.unwrap();
         }
 
-        assert_eq!(repository.count().run_async().await.unwrap(), 3);
+        assert_eq!(repository.count().await.unwrap(), 3);
     }
 
     // -------------------------------------------------------------------------
@@ -1046,13 +1043,12 @@ mod tests {
         let event = test_task_event(task_id.clone(), 1);
 
         // Append first event with expected version 0
-        let result = store.append(&event, 0).run_async().await;
+        let result = store.append(&event, 0).await;
         assert!(result.is_ok());
 
         // Verify current version
         let version = store
             .get_current_version(&task_id)
-            .run_async()
             .await
             .unwrap();
         assert_eq!(version, 1);
@@ -1067,19 +1063,18 @@ mod tests {
         // Append three events
         for i in 1..=3 {
             let event = test_task_event(task_id.clone(), i);
-            store.append(&event, i - 1).run_async().await.unwrap();
+            store.append(&event, i - 1).await.unwrap();
         }
 
         // Verify current version
         let version = store
             .get_current_version(&task_id)
-            .run_async()
             .await
             .unwrap();
         assert_eq!(version, 3);
 
         // Verify event count
-        let history = store.load_events(&task_id).run_async().await.unwrap();
+        let history = store.load_events(&task_id).await.unwrap();
         assert_eq!(history.event_count(), 3);
     }
 
@@ -1091,11 +1086,11 @@ mod tests {
         let event1 = test_task_event(task_id.clone(), 1);
 
         // Append first event
-        store.append(&event1, 0).run_async().await.unwrap();
+        store.append(&event1, 0).await.unwrap();
 
         // Try to append with wrong expected version
         let event2 = test_task_event(task_id, 2);
-        let result = store.append(&event2, 0).run_async().await;
+        let result = store.append(&event2, 0).await;
 
         assert!(result.is_err());
         match result.unwrap_err() {
@@ -1113,7 +1108,7 @@ mod tests {
         let store = InMemoryEventStore::new();
         let task_id = TaskId::generate();
 
-        let history = store.load_events(&task_id).run_async().await.unwrap();
+        let history = store.load_events(&task_id).await.unwrap();
         assert!(history.is_empty());
     }
 
@@ -1126,11 +1121,11 @@ mod tests {
         // Append events
         for i in 1..=3 {
             let event = test_task_event(task_id.clone(), i);
-            store.append(&event, i - 1).run_async().await.unwrap();
+            store.append(&event, i - 1).await.unwrap();
         }
 
         // Load events
-        let history = store.load_events(&task_id).run_async().await.unwrap();
+        let history = store.load_events(&task_id).await.unwrap();
         assert_eq!(history.event_count(), 3);
 
         // Oldest-first order: first event is version 1, last is version 3
@@ -1147,13 +1142,12 @@ mod tests {
         // Append 5 events
         for i in 1..=5 {
             let event = test_task_event(task_id.clone(), i);
-            store.append(&event, i - 1).run_async().await.unwrap();
+            store.append(&event, i - 1).await.unwrap();
         }
 
         // Load events from version 2 (should get events 3, 4, 5)
         let history = store
             .load_events_from_version(&task_id, 2)
-            .run_async()
             .await
             .unwrap();
         assert_eq!(history.event_count(), 3);
@@ -1174,13 +1168,12 @@ mod tests {
         // Append 3 events
         for i in 1..=3 {
             let event = test_task_event(task_id.clone(), i);
-            store.append(&event, i - 1).run_async().await.unwrap();
+            store.append(&event, i - 1).await.unwrap();
         }
 
         // Load events from version 0 (should get all events)
         let history = store
             .load_events_from_version(&task_id, 0)
-            .run_async()
             .await
             .unwrap();
         assert_eq!(history.event_count(), 3);
@@ -1195,13 +1188,12 @@ mod tests {
         // Append 3 events
         for i in 1..=3 {
             let event = test_task_event(task_id.clone(), i);
-            store.append(&event, i - 1).run_async().await.unwrap();
+            store.append(&event, i - 1).await.unwrap();
         }
 
         // Load events from version 10 (should get no events)
         let history = store
             .load_events_from_version(&task_id, 10)
-            .run_async()
             .await
             .unwrap();
         assert!(history.is_empty());
@@ -1215,7 +1207,6 @@ mod tests {
 
         let version = store
             .get_current_version(&task_id)
-            .run_async()
             .await
             .unwrap();
         assert_eq!(version, 0);
@@ -1230,12 +1221,11 @@ mod tests {
         // Append 3 events
         for i in 1..=3 {
             let event = test_task_event(task_id.clone(), i);
-            store.append(&event, i - 1).run_async().await.unwrap();
+            store.append(&event, i - 1).await.unwrap();
         }
 
         let version = store
             .get_current_version(&task_id)
-            .run_async()
             .await
             .unwrap();
         assert_eq!(version, 3);
@@ -1256,7 +1246,7 @@ mod tests {
             let repo = Arc::clone(&repository);
             handles.push(tokio::spawn(async move {
                 let task = test_task(&format!("Task {i}"));
-                repo.save(&task).run_async().await
+                repo.save(&task).await
             }));
         }
 
@@ -1266,7 +1256,7 @@ mod tests {
         }
 
         // Verify all tasks were saved
-        let count = repository.count().run_async().await.unwrap();
+        let count = repository.count().await.unwrap();
         assert_eq!(count, 10);
     }
 
@@ -1282,7 +1272,7 @@ mod tests {
             handles.push(tokio::spawn(async move {
                 let task_id = TaskId::generate();
                 let event = test_task_event(task_id, 1);
-                store.append(&event, 0).run_async().await
+                store.append(&event, 0).await
             }));
         }
 
@@ -1327,11 +1317,11 @@ mod tests {
         // Append events 1, 2, 3 in order
         for i in 1..=3 {
             let event = test_task_event(task_id.clone(), i);
-            store.append(&event, i - 1).run_async().await.unwrap();
+            store.append(&event, i - 1).await.unwrap();
         }
 
         // Load events - should be in oldest-first order
-        let history = store.load_events(&task_id).run_async().await.unwrap();
+        let history = store.load_events(&task_id).await.unwrap();
         let versions: Vec<u64> = history.iter().map(|event| event.version).collect();
 
         // Verify oldest-first order: 1, 2, 3
@@ -1347,13 +1337,12 @@ mod tests {
         // Append 5 events
         for i in 1..=5 {
             let event = test_task_event(task_id.clone(), i);
-            store.append(&event, i - 1).run_async().await.unwrap();
+            store.append(&event, i - 1).await.unwrap();
         }
 
         // Load events from version 2 (should get events 3, 4, 5 in oldest-first order)
         let history = store
             .load_events_from_version(&task_id, 2)
-            .run_async()
             .await
             .unwrap();
         let versions: Vec<u64> = history.iter().map(|event| event.version).collect();
@@ -1375,12 +1364,12 @@ mod tests {
 
         // Save initial task (version 1)
         let task = Task::new(task_id.clone(), "Test Task", timestamp);
-        repository.save(&task).run_async().await.unwrap();
+        repository.save(&task).await.unwrap();
 
         // Try to save with version 3 (jumping from 1 to 3) - should fail
         let mut jumped_task = task.clone();
         jumped_task.version = 3; // Skip version 2
-        let result = repository.save(&jumped_task).run_async().await;
+        let result = repository.save(&jumped_task).await;
 
         assert!(result.is_err());
         match result {
@@ -1401,12 +1390,12 @@ mod tests {
 
         // Save initial project (version 1)
         let project = Project::new(project_id.clone(), "Test Project", timestamp);
-        repository.save(&project).run_async().await.unwrap();
+        repository.save(&project).await.unwrap();
 
         // Try to save with version 5 (jumping from 1 to 5) - should fail
         let mut jumped_project = project.clone();
         jumped_project.version = 5; // Skip versions 2, 3, 4
-        let result = repository.save(&jumped_project).run_async().await;
+        let result = repository.save(&jumped_project).await;
 
         assert!(result.is_err());
         match result {
@@ -1428,10 +1417,10 @@ mod tests {
         let repository = InMemoryTaskRepository::new();
         let tasks: Vec<Task> = vec![];
 
-        let results = repository.save_bulk(&tasks).run_async().await;
+        let results = repository.save_bulk(&tasks).await;
 
         assert!(results.is_empty());
-        assert_eq!(repository.count().run_async().await.unwrap(), 0);
+        assert_eq!(repository.count().await.unwrap(), 0);
     }
 
     #[rstest]
@@ -1441,16 +1430,15 @@ mod tests {
         let task = test_task("Single Task");
         let task_id = task.task_id.clone();
 
-        let results = repository.save_bulk(&[task]).run_async().await;
+        let results = repository.save_bulk(&[task]).await;
 
         assert_eq!(results.len(), 1);
         assert!(results[0].is_ok());
-        assert_eq!(repository.count().run_async().await.unwrap(), 1);
+        assert_eq!(repository.count().await.unwrap(), 1);
 
         // Verify the task was saved correctly
         let found = repository
             .find_by_id(&task_id)
-            .run_async()
             .await
             .unwrap()
             .unwrap();
@@ -1464,7 +1452,7 @@ mod tests {
         let tasks: Vec<Task> = (0..5).map(|i| test_task(&format!("Task {i}"))).collect();
         let task_ids: Vec<TaskId> = tasks.iter().map(|t| t.task_id.clone()).collect();
 
-        let results = repository.save_bulk(&tasks).run_async().await;
+        let results = repository.save_bulk(&tasks).await;
 
         // Verify all results are successful
         assert_eq!(results.len(), 5);
@@ -1473,13 +1461,12 @@ mod tests {
         }
 
         // Verify count
-        assert_eq!(repository.count().run_async().await.unwrap(), 5);
+        assert_eq!(repository.count().await.unwrap(), 5);
 
         // Verify each task was saved correctly
         for (index, task_id) in task_ids.iter().enumerate() {
             let found = repository
                 .find_by_id(task_id)
-                .run_async()
                 .await
                 .unwrap()
                 .unwrap();
@@ -1495,7 +1482,7 @@ mod tests {
 
         // Pre-save a task to cause version conflict
         let existing_task = test_task_with_id(task_id.clone(), "Existing Task");
-        repository.save(&existing_task).run_async().await.unwrap();
+        repository.save(&existing_task).await.unwrap();
 
         // Create bulk tasks: 2 new tasks, 1 conflicting, 2 more new tasks
         let new_task_1 = test_task("New Task 1");
@@ -1512,7 +1499,7 @@ mod tests {
             new_task_4.clone(),
         ];
 
-        let results = repository.save_bulk(&tasks).run_async().await;
+        let results = repository.save_bulk(&tasks).await;
 
         // Verify results: 0, 1, 3, 4 should succeed, 2 should fail
         assert_eq!(results.len(), 5);
@@ -1532,13 +1519,12 @@ mod tests {
         }
 
         // Verify total count (1 existing + 4 new = 5)
-        assert_eq!(repository.count().run_async().await.unwrap(), 5);
+        assert_eq!(repository.count().await.unwrap(), 5);
 
         // Verify new tasks were saved
         assert!(
             repository
                 .find_by_id(&new_task_1.task_id)
-                .run_async()
                 .await
                 .unwrap()
                 .is_some()
@@ -1546,7 +1532,6 @@ mod tests {
         assert!(
             repository
                 .find_by_id(&new_task_2.task_id)
-                .run_async()
                 .await
                 .unwrap()
                 .is_some()
@@ -1554,7 +1539,6 @@ mod tests {
         assert!(
             repository
                 .find_by_id(&new_task_3.task_id)
-                .run_async()
                 .await
                 .unwrap()
                 .is_some()
@@ -1562,7 +1546,6 @@ mod tests {
         assert!(
             repository
                 .find_by_id(&new_task_4.task_id)
-                .run_async()
                 .await
                 .unwrap()
                 .is_some()
@@ -1571,7 +1554,6 @@ mod tests {
         // Verify the existing task was NOT overwritten
         let existing = repository
             .find_by_id(&task_id)
-            .run_async()
             .await
             .unwrap()
             .unwrap();
@@ -1590,7 +1572,7 @@ mod tests {
         let mut invalid_task = Task::new(task_id, "Invalid Task", timestamp);
         invalid_task.version = 2; // Invalid: new task should have version 1
 
-        let results = repository.save_bulk(&[invalid_task]).run_async().await;
+        let results = repository.save_bulk(&[invalid_task]).await;
 
         assert_eq!(results.len(), 1);
         assert!(results[0].is_err());
@@ -1603,7 +1585,7 @@ mod tests {
         }
 
         // Verify task was not saved
-        assert_eq!(repository.count().run_async().await.unwrap(), 0);
+        assert_eq!(repository.count().await.unwrap(), 0);
     }
 
     #[rstest]
@@ -1619,7 +1601,7 @@ mod tests {
 
         let tasks = vec![task_1.clone(), task_2.clone(), task_3.clone()];
 
-        let results = repository.save_bulk(&tasks).run_async().await;
+        let results = repository.save_bulk(&tasks).await;
 
         // Verify results: task_1 should succeed, task_2 should succeed, task_3 should fail
         assert_eq!(results.len(), 3);
@@ -1642,12 +1624,11 @@ mod tests {
         }
 
         // Verify total count (task_1 and task_2 saved, task_3 rejected)
-        assert_eq!(repository.count().run_async().await.unwrap(), 2);
+        assert_eq!(repository.count().await.unwrap(), 2);
 
         // Verify first task was saved
         let saved = repository
             .find_by_id(&task_id)
-            .run_async()
             .await
             .unwrap()
             .unwrap();
@@ -1663,7 +1644,7 @@ mod tests {
         // Pre-save a task for update
         let existing_task = test_task("Existing Task");
         let existing_task_id = existing_task.task_id.clone();
-        repository.save(&existing_task).run_async().await.unwrap();
+        repository.save(&existing_task).await.unwrap();
 
         // Create tasks: one valid new, one valid update, one invalid new (version != 1)
         let valid_new_task = test_task("Valid New Task");
@@ -1679,7 +1660,7 @@ mod tests {
             invalid_new_task.clone(),
         ];
 
-        let results = repository.save_bulk(&tasks).run_async().await;
+        let results = repository.save_bulk(&tasks).await;
 
         // Verify results
         assert_eq!(results.len(), 3);
@@ -1700,13 +1681,12 @@ mod tests {
         }
 
         // Verify count (1 existing updated + 1 valid new = 2 unique tasks)
-        assert_eq!(repository.count().run_async().await.unwrap(), 2);
+        assert_eq!(repository.count().await.unwrap(), 2);
 
         // Verify valid new task was saved
         assert!(
             repository
                 .find_by_id(&valid_new_task.task_id)
-                .run_async()
                 .await
                 .unwrap()
                 .is_some()
@@ -1715,7 +1695,6 @@ mod tests {
         // Verify existing task was updated
         let updated = repository
             .find_by_id(&existing_task_id)
-            .run_async()
             .await
             .unwrap()
             .unwrap();

@@ -1445,7 +1445,10 @@ impl<T> Traversable for Vec<T> {
         let capacity = async_ios.len();
 
         AsyncIO::new(move || async move {
-            let handles: Vec<_> = async_ios.into_iter().map(tokio::spawn).collect();
+            let handles: Vec<_> = async_ios
+                .into_iter()
+                .map(|async_io| tokio::spawn(async_io))
+                .collect();
 
             let mut results = Vec::with_capacity(capacity);
             let mut first_panic: Option<Box<dyn std::any::Any + Send>> = None;
@@ -3076,9 +3079,7 @@ mod property_tests {
 
             // Create a new runtime outside of any async context
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                tokio::runtime::Runtime::new()
-                    .unwrap()
-                    .block_on(async_io.run_async())
+                tokio::runtime::Runtime::new().unwrap().block_on(async_io)
             }));
 
             assert!(result.is_err()); // Should have panicked

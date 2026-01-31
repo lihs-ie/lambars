@@ -638,7 +638,6 @@ pub async fn get_task_history(
     let _task = state
         .task_repository
         .find_by_id(&task_id)
-        .run_async()
         .await
         .map_err(ApiErrorResponse::from)?
         .ok_or_else(|| ApiErrorResponse::not_found("Task not found"))?;
@@ -647,7 +646,6 @@ pub async fn get_task_history(
     let history_list = state
         .event_store
         .load_events(&task_id)
-        .run_async()
         .await
         .map_err(ApiErrorResponse::from)?;
 
@@ -740,7 +738,6 @@ pub async fn transform_task(
     let task = state
         .task_repository
         .find_by_id(&task_id)
-        .run_async()
         .await
         .map_err(ApiErrorResponse::from)?
         .ok_or_else(|| ApiErrorResponse::not_found("Task not found"))?;
@@ -768,7 +765,6 @@ pub async fn transform_task(
             state
                 .task_repository
                 .save(&task_to_save)
-                .run_async()
                 .await
                 .map_err(ApiErrorResponse::from)?;
 
@@ -856,7 +852,7 @@ pub async fn async_pipeline(
             continue;
         };
 
-        match state.task_repository.find_by_id(&task_id).run_async().await {
+        match state.task_repository.find_by_id(&task_id).await {
             Ok(Some(task)) => valid_tasks.push(task),
             Ok(None) => {
                 failed_results.push(PipelineTaskResult {
@@ -893,7 +889,7 @@ pub async fn async_pipeline(
     // Execute the AsyncIO computation
     // Note: Since we're using AsyncIO::pure internally, this is effectively synchronous,
     // but demonstrates the proper for_async! pattern that would work with real async operations
-    let batch_scores: Vec<(String, u32)> = scores_async.run_async().await;
+    let batch_scores: Vec<(String, u32)> = scores_async.await;
 
     // Build successful results from batch computation
     let mut results: Vec<PipelineTaskResult> = Vec::with_capacity(request.task_ids.len());
@@ -956,7 +952,7 @@ async fn process_single_task(state: &AppState, task_id_str: &str) -> PipelineTas
     };
 
     // Fetch task
-    let task = match state.task_repository.find_by_id(&task_id).run_async().await {
+    let task = match state.task_repository.find_by_id(&task_id).await {
         Ok(Some(task)) => task,
         Ok(None) => {
             return PipelineTaskResult {
@@ -1064,7 +1060,7 @@ impl TaskValidationInput {
 /// ```rust,ignore
 /// let inputs = tasks.iter().map(TaskValidationInput::from_task).collect();
 /// let scores_async = compute_batch_validation_scores_async(inputs);
-/// let scores = scores_async.run_async().await;
+/// let scores = scores_async.await;
 /// ```
 fn compute_batch_validation_scores_async(
     inputs: Vec<TaskValidationInput>,
@@ -1139,7 +1135,6 @@ pub async fn lazy_compute(
     let task = state
         .task_repository
         .find_by_id(&task_id)
-        .run_async()
         .await
         .map_err(ApiErrorResponse::from)?
         .ok_or_else(|| ApiErrorResponse::not_found("Task not found"))?;
@@ -1574,7 +1569,7 @@ mod tests {
         ];
 
         let scores_async = compute_batch_validation_scores_async(inputs);
-        let scores: Vec<(String, u32)> = scores_async.run_async().await;
+        let scores: Vec<(String, u32)> = scores_async.await;
 
         assert_eq!(scores.len(), 2);
         assert_eq!(scores[0].0, "task-1");

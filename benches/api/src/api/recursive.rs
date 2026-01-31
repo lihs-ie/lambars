@@ -237,7 +237,6 @@ pub async fn flatten_subtasks(
     let task = state
         .task_repository
         .find_by_id(&TaskId::from_uuid(task_id))
-        .run_async()
         .await
         .map_err(ApiErrorResponse::from)?
         .ok_or_else(|| ApiErrorResponse::not_found("Task not found"))?;
@@ -403,7 +402,6 @@ pub async fn resolve_dependencies(
         let task = state
             .task_repository
             .find_by_id(&TaskId::from_uuid(task_id))
-            .run_async()
             .await
             .map_err(ApiErrorResponse::from)?
             .ok_or_else(|| ApiErrorResponse::not_found(format!("Task not found: {task_id_str}")))?;
@@ -639,7 +637,6 @@ pub async fn aggregate_tree(
     let project = state
         .project_repository
         .find_by_id(&crate::domain::ProjectId::from_uuid(project_id))
-        .run_async()
         .await
         .map_err(ApiErrorResponse::from)?
         .ok_or_else(|| ApiErrorResponse::not_found("Project not found"))?;
@@ -649,7 +646,7 @@ pub async fn aggregate_tree(
     let mut failed_task_ids = Vec::new();
 
     for (task_id, _) in &project.tasks {
-        match state.task_repository.find_by_id(task_id).run_async().await {
+        match state.task_repository.find_by_id(task_id).await {
             Ok(Some(task)) => tasks.push(task),
             Ok(None) | Err(_) => failed_task_ids.push(task_id.to_string()),
         }

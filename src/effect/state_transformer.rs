@@ -684,7 +684,7 @@ where
     /// #[tokio::main]
     /// async fn main() {
     ///     let state: StateT<i32, AsyncIO<(i32, i32)>> = StateT::new(|s| AsyncIO::pure((s * 2, s + 1)));
-    ///     assert_eq!(state.eval_async(10).run_async().await, 20);
+    ///     assert_eq!(state.eval_async(10).await, 20);
     /// }
     /// ```
     pub fn eval_async(&self, initial_state: S) -> AsyncIO<A> {
@@ -705,7 +705,7 @@ where
     /// #[tokio::main]
     /// async fn main() {
     ///     let state: StateT<i32, AsyncIO<(i32, i32)>> = StateT::new(|s| AsyncIO::pure((s * 2, s + 1)));
-    ///     assert_eq!(state.exec_async(10).run_async().await, 11);
+    ///     assert_eq!(state.exec_async(10).await, 11);
     /// }
     /// ```
     pub fn exec_async(&self, initial_state: S) -> AsyncIO<S> {
@@ -722,7 +722,7 @@ where
     /// #[tokio::main]
     /// async fn main() {
     ///     let state: StateT<i32, AsyncIO<(String, i32)>> = StateT::pure_async_io("hello".to_string());
-    ///     assert_eq!(state.run(42).run_async().await, ("hello".to_string(), 42));
+    ///     assert_eq!(state.run(42).await, ("hello".to_string(), 42));
     /// }
     /// ```
     pub fn pure_async_io(value: A) -> Self
@@ -743,7 +743,7 @@ where
     /// async fn main() {
     ///     let state: StateT<i32, AsyncIO<(i32, i32)>> = StateT::new(|s| AsyncIO::pure((s, s + 1)));
     ///     let mapped = state.fmap_async_io(|v| v * 2);
-    ///     assert_eq!(mapped.run(10).run_async().await, (20, 11));
+    ///     assert_eq!(mapped.run(10).await, (20, 11));
     /// }
     /// ```
     pub fn fmap_async_io<B, F>(self, function: F) -> StateT<S, AsyncIO<(B, S)>>
@@ -774,7 +774,7 @@ where
     ///         StateT::new(move |s| AsyncIO::pure((v + s, s * 2)))
     ///     });
     ///     // Initial state 10: first (10, 11), then (10 + 11, 22) = (21, 22)
-    ///     assert_eq!(chained.run(10).run_async().await, (21, 22));
+    ///     assert_eq!(chained.run(10).await, (21, 22));
     /// }
     /// ```
     pub fn flat_map_async_io<B, F>(self, function: F) -> StateT<S, AsyncIO<(B, S)>>
@@ -804,7 +804,7 @@ where
     /// #[tokio::main]
     /// async fn main() {
     ///     let state: StateT<i32, AsyncIO<(i32, i32)>> = StateT::get_async_io();
-    ///     assert_eq!(state.run(42).run_async().await, (42, 42));
+    ///     assert_eq!(state.run(42).await, (42, 42));
     /// }
     /// ```
     #[must_use]
@@ -827,7 +827,7 @@ where
     /// async fn main() {
     ///     let state: StateT<i32, AsyncIO<((), i32)>> =
     ///         StateT::<i32, AsyncIO<((), i32)>>::put_async_io(100);
-    ///     assert_eq!(state.run(42).run_async().await, ((), 100));
+    ///     assert_eq!(state.run(42).await, ((), 100));
     /// }
     /// ```
     pub fn put_async_io(new_state: S) -> StateT<S, AsyncIO<((), S)>>
@@ -848,7 +848,7 @@ where
     /// async fn main() {
     ///     let state: StateT<i32, AsyncIO<((), i32)>> =
     ///         StateT::<i32, AsyncIO<((), i32)>>::modify_async_io(|s| s * 2);
-    ///     assert_eq!(state.run(21).run_async().await, ((), 42));
+    ///     assert_eq!(state.run(21).await, ((), 42));
     /// }
     /// ```
     pub fn modify_async_io<F>(modifier: F) -> StateT<S, AsyncIO<((), S)>>
@@ -887,7 +887,7 @@ where
     ///     let async_io = AsyncIO::pure(42);
     ///     #[allow(deprecated)]
     ///     let state: StateT<i32, AsyncIO<(i32, i32)>> = StateT::lift_async_io(async_io);
-    ///     let (result, final_state) = state.run(100).run_async().await;
+    ///     let (result, final_state) = state.run(100).await;
     ///     assert_eq!(result, 42);
     ///     assert_eq!(final_state, 100);
     /// }
@@ -936,7 +936,7 @@ where
     ///     let state: StateTTryLiftAsyncIO<String, i32> =
     ///         StateT::try_lift_async_io(async_io);
     ///
-    ///     let result = state.run("initial".to_string()).run_async().await;
+    ///     let result = state.run("initial".to_string()).await;
     ///     assert_eq!(result, Ok((42, "initial".to_string())));
     /// }
     /// ```
@@ -980,7 +980,7 @@ where
     /// async fn main() {
     ///     let state: StateT<i32, AsyncIO<(i32, i32)>> =
     ///         StateT::gets_async_io(|s: &i32| s * 2);
-    ///     let (result, final_state) = state.run(21).run_async().await;
+    ///     let (result, final_state) = state.run(21).await;
     ///     assert_eq!(result, 42);
     ///     assert_eq!(final_state, 21);
     /// }
@@ -1013,7 +1013,7 @@ where
     /// async fn main() {
     ///     let state: StateT<i32, AsyncIO<(String, i32)>> =
     ///         StateT::state_async_io(|s| (format!("was: {}", s), s + 1));
-    ///     let (result, final_state) = state.run(41).run_async().await;
+    ///     let (result, final_state) = state.run(41).await;
     ///     assert_eq!(result, "was: 41");
     ///     assert_eq!(final_state, 42);
     /// }
@@ -1162,7 +1162,7 @@ mod tests {
         ) {
             let async_io = AsyncIO::pure(value);
             let state: StateTTryLiftAsyncIO<String, i32> = StateT::try_lift_async_io(async_io);
-            let result = state.run(initial_state.to_string()).run_async().await;
+            let result = state.run(initial_state.to_string()).await;
             assert_eq!(result, expected);
         }
 
@@ -1174,10 +1174,10 @@ mod tests {
 
             let cloned = state.clone();
 
-            let result1 = state.run("state1".to_string()).run_async().await;
+            let result1 = state.run("state1".to_string()).await;
             assert_eq!(result1, Ok((42, "state1".to_string())));
 
-            let result2 = cloned.run("state2".to_string()).run_async().await;
+            let result2 = cloned.run("state2".to_string()).await;
             assert!(matches!(
                 result2,
                 Err(EffectError::AlreadyConsumed(AlreadyConsumedError {
@@ -1195,8 +1195,8 @@ mod tests {
             let state: StateTTryLiftAsyncIO<String, i32> = StateT::try_lift_async_io(async_io);
 
             let cloned = state.clone();
-            let _ = state.run("state".to_string()).run_async().await;
-            let result = cloned.run("state".to_string()).run_async().await;
+            let _ = state.run("state".to_string()).await;
+            let result = cloned.run("state".to_string()).await;
 
             match result {
                 Err(error) => {

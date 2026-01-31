@@ -806,7 +806,7 @@ where
     /// async fn main() {
     ///     let reader: ReaderT<i32, AsyncIO<i32>> = ReaderT::pure_async_io(42);
     ///     let async_io = reader.run(999);
-    ///     assert_eq!(async_io.run_async().await, 42);
+    ///     assert_eq!(async_io.await, 42);
     /// }
     /// ```
     pub fn pure_async_io(value: A) -> Self
@@ -832,7 +832,7 @@ where
     ///     let reader: ReaderT<i32, AsyncIO<i32>> = ReaderT::new(|environment| AsyncIO::pure(environment));
     ///     let mapped = reader.fmap_async_io(|value| value * 2);
     ///     let async_io = mapped.run(21);
-    ///     assert_eq!(async_io.run_async().await, 42);
+    ///     assert_eq!(async_io.await, 42);
     /// }
     /// ```
     pub fn fmap_async_io<B, F>(self, function: F) -> ReaderT<R, AsyncIO<B>>
@@ -867,7 +867,7 @@ where
     ///         ReaderT::new(move |environment| AsyncIO::pure(value + environment))
     ///     });
     ///     let async_io = chained.run(10);
-    ///     assert_eq!(async_io.run_async().await, 20);
+    ///     assert_eq!(async_io.await, 20);
     /// }
     /// ```
     pub fn flat_map_async_io<B, F>(self, function: F) -> ReaderT<R, AsyncIO<B>>
@@ -900,7 +900,7 @@ where
     /// async fn main() {
     ///     let reader: ReaderT<i32, AsyncIO<i32>> = ReaderT::ask_async_io();
     ///     let async_io = reader.run(42);
-    ///     assert_eq!(async_io.run_async().await, 42);
+    ///     assert_eq!(async_io.await, 42);
     /// }
     /// ```
     #[must_use]
@@ -929,7 +929,7 @@ where
     ///     let reader: ReaderT<i32, AsyncIO<i32>> = ReaderT::new(|environment| AsyncIO::pure(environment * 2));
     ///     let modified = ReaderT::local_async_io(|environment| environment + 10, reader);
     ///     let async_io = modified.run(5);
-    ///     assert_eq!(async_io.run_async().await, 30);
+    ///     assert_eq!(async_io.await, 30);
     /// }
     /// ```
     pub fn local_async_io<F>(modifier: F, computation: Self) -> Self
@@ -968,7 +968,7 @@ where
     ///     let async_io = AsyncIO::pure(42);
     ///     #[allow(deprecated)]
     ///     let reader: ReaderT<i32, AsyncIO<i32>> = ReaderT::lift_async_io(async_io);
-    ///     let result = reader.run(999).run_async().await;
+    ///     let result = reader.run(999).await;
     ///     assert_eq!(result, 42);
     /// }
     /// ```
@@ -1022,7 +1022,7 @@ where
     ///     let reader: ReaderTTryLiftAsyncIO<String, i32> =
     ///         ReaderT::try_lift_async_io(async_io);
     ///
-    ///     let result = reader.run("env".to_string()).run_async().await;
+    ///     let result = reader.run("env".to_string()).await;
     ///     assert_eq!(result, Ok(42));
     /// }
     /// ```
@@ -1073,7 +1073,7 @@ where
     /// async fn main() {
     ///     let reader: ReaderT<Config, AsyncIO<i32>> =
     ///         ReaderT::asks_async_io(|config: Config| config.multiplier * 2);
-    ///     let result = reader.run(Config { multiplier: 21 }).run_async().await;
+    ///     let result = reader.run(Config { multiplier: 21 }).await;
     ///     assert_eq!(result, 42);
     /// }
     /// ```
@@ -1213,7 +1213,7 @@ mod tests {
         async fn reader_lift_async_io_ignores_environment() {
             let async_io = AsyncIO::pure(42);
             let reader: ReaderT<i32, AsyncIO<i32>> = ReaderT::lift_async_io(async_io);
-            let result = reader.run(999).run_async().await;
+            let result = reader.run(999).await;
             assert_eq!(result, 42);
         }
 
@@ -1222,7 +1222,7 @@ mod tests {
         async fn reader_lift_async_io_preserves_value() {
             let async_io = AsyncIO::new(|| async { "hello".to_string() });
             let reader: ReaderT<(), AsyncIO<String>> = ReaderT::lift_async_io(async_io);
-            let result = reader.run(()).run_async().await;
+            let result = reader.run(()).await;
             assert_eq!(result, "hello");
         }
 
@@ -1233,10 +1233,7 @@ mod tests {
             let via_lift: ReaderT<(), AsyncIO<i32>> = ReaderT::lift_async_io(AsyncIO::pure(value));
             let via_pure: ReaderT<(), AsyncIO<i32>> = ReaderT::pure_async_io(value);
 
-            assert_eq!(
-                via_lift.run(()).run_async().await,
-                via_pure.run(()).run_async().await
-            );
+            assert_eq!(via_lift.run(()).await, via_pure.run(()).await);
         }
 
         #[rstest]
@@ -1249,7 +1246,7 @@ mod tests {
 
             let reader: ReaderT<Env, AsyncIO<i32>> =
                 ReaderT::asks_async_io(|environment: Env| environment.value * 2);
-            let result = reader.run(Env { value: 21 }).run_async().await;
+            let result = reader.run(Env { value: 21 }).await;
             assert_eq!(result, 42);
         }
 
@@ -1259,11 +1256,11 @@ mod tests {
             let projection = |x: i32| x * 3;
 
             let reader1: ReaderT<i32, AsyncIO<i32>> = ReaderT::asks_async_io(projection);
-            let result1 = reader1.run(10).run_async().await;
+            let result1 = reader1.run(10).await;
 
             let reader2: ReaderT<i32, AsyncIO<i32>> =
                 ReaderT::<i32, AsyncIO<i32>>::ask_async_io().fmap_async_io(projection);
-            let result2 = reader2.run(10).run_async().await;
+            let result2 = reader2.run(10).await;
 
             assert_eq!(result1, result2);
         }
@@ -1292,7 +1289,7 @@ mod tests {
                 let async_io = AsyncIO::pure(value);
                 let reader: ReaderTTryLiftAsyncIO<String, i32> =
                     ReaderT::try_lift_async_io(async_io);
-                let result = reader.run(environment.to_string()).run_async().await;
+                let result = reader.run(environment.to_string()).await;
                 assert_eq!(result, expected);
             }
 
@@ -1305,10 +1302,10 @@ mod tests {
 
                 let cloned = reader.clone();
 
-                let result1 = reader.run("env1".to_string()).run_async().await;
+                let result1 = reader.run("env1".to_string()).await;
                 assert_eq!(result1, Ok(42));
 
-                let result2 = cloned.run("env2".to_string()).run_async().await;
+                let result2 = cloned.run("env2".to_string()).await;
                 assert!(matches!(
                     result2,
                     Err(EffectError::AlreadyConsumed(AlreadyConsumedError {
@@ -1327,8 +1324,8 @@ mod tests {
                     ReaderT::try_lift_async_io(async_io);
 
                 let cloned = reader.clone();
-                let _ = reader.run("env".to_string()).run_async().await;
-                let result = cloned.run("env".to_string()).run_async().await;
+                let _ = reader.run("env".to_string()).await;
+                let result = cloned.run("env".to_string()).await;
 
                 match result {
                     Err(error) => {

@@ -2,9 +2,7 @@
 #![allow(deprecated)]
 //! AsyncIO State Machine Tests - Phase 2: impl Future
 //!
-//! These tests verify that AsyncIO can be directly awaited via impl Future,
-//! eliminating the need for run_async() in most cases while maintaining
-//! backward compatibility.
+//! These tests verify that AsyncIO can be directly awaited via impl Future.
 
 use lambars::effect::AsyncIO;
 use rstest::rstest;
@@ -22,7 +20,7 @@ use std::time::Duration;
 async fn test_pure_returns_immediately() {
     let async_io = AsyncIO::pure(42);
 
-    // Direct await without run_async()
+    // Direct await
     let result = async_io.await;
     assert_eq!(result, 42);
 }
@@ -119,7 +117,7 @@ async fn test_flat_map_maintains_laziness() {
     assert_eq!(result, 20);
 }
 
-/// Direct await should produce the same result as run_async().
+/// Direct await produces correct results.
 #[rstest]
 #[tokio::test]
 async fn test_impl_future_direct_await() {
@@ -144,28 +142,28 @@ async fn test_impl_future_direct_await() {
     assert_eq!(result, 10);
 }
 
-/// run_async() should continue to work for backward compatibility.
+/// Direct await works with various operations.
 #[rstest]
 #[tokio::test]
-async fn test_run_async_backward_compatible() {
+async fn test_direct_await_various_operations() {
     // Pure value
     let async_io = AsyncIO::pure(42);
-    let result = async_io.run_async().await;
+    let result = async_io.await;
     assert_eq!(result, 42);
 
     // With computation
     let async_io = AsyncIO::new(|| async { 5 * 5 });
-    let result = async_io.run_async().await;
+    let result = async_io.await;
     assert_eq!(result, 25);
 
     // With fmap
     let async_io = AsyncIO::pure(10).fmap(|x| x + 5);
-    let result = async_io.run_async().await;
+    let result = async_io.await;
     assert_eq!(result, 15);
 
     // With flat_map
     let async_io = AsyncIO::pure(3).flat_map(|x| AsyncIO::pure(x * 4));
-    let result = async_io.run_async().await;
+    let result = async_io.await;
     assert_eq!(result, 12);
 }
 

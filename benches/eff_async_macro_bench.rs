@@ -39,7 +39,7 @@ fn benchmark_chain_depth(criterion: &mut Criterion) {
                     a <= ExceptT::<String, _>::pure_async_io(black_box(1));
                     ExceptT::pure_async_io(a)
                 };
-                black_box(result.run_async().await)
+                black_box(result.run().await)
             })
         });
     });
@@ -49,7 +49,7 @@ fn benchmark_chain_depth(criterion: &mut Criterion) {
             runtime.block_on(async {
                 let result = ExceptT::<String, _>::pure_async_io(black_box(1))
                     .flat_map(ExceptT::pure_async_io);
-                black_box(result.run_async().await)
+                black_box(result.run().await)
             })
         });
     });
@@ -66,7 +66,7 @@ fn benchmark_chain_depth(criterion: &mut Criterion) {
                     e <= ExceptT::pure_async_io(d + 1);
                     ExceptT::pure_async_io(e)
                 };
-                black_box(result.run_async().await)
+                black_box(result.run().await)
             })
         });
     });
@@ -80,7 +80,7 @@ fn benchmark_chain_depth(criterion: &mut Criterion) {
                     .flat_map(|c| ExceptT::pure_async_io(c + 1))
                     .flat_map(|d| ExceptT::pure_async_io(d + 1))
                     .flat_map(ExceptT::pure_async_io);
-                black_box(result.run_async().await)
+                black_box(result.run().await)
             })
         });
     });
@@ -102,7 +102,7 @@ fn benchmark_chain_depth(criterion: &mut Criterion) {
                     j <= ExceptT::pure_async_io(i + 1);
                     ExceptT::pure_async_io(j)
                 };
-                black_box(result.run_async().await)
+                black_box(result.run().await)
             })
         });
     });
@@ -121,7 +121,7 @@ fn benchmark_chain_depth(criterion: &mut Criterion) {
                     .flat_map(|h| ExceptT::pure_async_io(h + 1))
                     .flat_map(|i| ExceptT::pure_async_io(i + 1))
                     .flat_map(ExceptT::pure_async_io);
-                black_box(result.run_async().await)
+                black_box(result.run().await)
             })
         });
     });
@@ -153,7 +153,7 @@ fn benchmark_chain_depth(criterion: &mut Criterion) {
                     t <= ExceptT::pure_async_io(s + 1);
                     ExceptT::pure_async_io(t)
                 };
-                black_box(result.run_async().await)
+                black_box(result.run().await)
             })
         });
     });
@@ -182,7 +182,7 @@ fn benchmark_chain_depth(criterion: &mut Criterion) {
                     .flat_map(|r| ExceptT::pure_async_io(r + 1))
                     .flat_map(|s| ExceptT::pure_async_io(s + 1))
                     .flat_map(ExceptT::pure_async_io);
-                black_box(result.run_async().await)
+                black_box(result.run().await)
             })
         });
     });
@@ -215,7 +215,7 @@ fn benchmark_pure_ratio(criterion: &mut Criterion) {
                     e <= ExceptT::pure_async_io(d + 1);
                     ExceptT::pure_async_io(e)
                 };
-                black_box(result.run_async().await)
+                black_box(result.run().await)
             })
         });
     });
@@ -229,7 +229,7 @@ fn benchmark_pure_ratio(criterion: &mut Criterion) {
                     .flat_map(|c| ExceptT::pure_async_io(c + 1))
                     .flat_map(|d| ExceptT::pure_async_io(d + 1))
                     .flat_map(ExceptT::pure_async_io);
-                black_box(result.run_async().await)
+                black_box(result.run().await)
             })
         });
     });
@@ -246,7 +246,7 @@ fn benchmark_pure_ratio(criterion: &mut Criterion) {
                     e <= ExceptT::pure_async_io(d + 1);
                     ExceptT::lift_async_io(AsyncIO::new(move || async move { e }))
                 };
-                black_box(result.run_async().await)
+                black_box(result.run().await)
             })
         });
     });
@@ -264,7 +264,7 @@ fn benchmark_pure_ratio(criterion: &mut Criterion) {
                     })
                     .flat_map(|d| ExceptT::pure_async_io(d + 1))
                     .flat_map(|e| ExceptT::lift_async_io(AsyncIO::new(move || async move { e })));
-                black_box(result.run_async().await)
+                black_box(result.run().await)
             })
         });
     });
@@ -282,7 +282,7 @@ fn benchmark_pure_ratio(criterion: &mut Criterion) {
                     e <= ExceptT::lift_async_io(AsyncIO::new(move || async move { d + 1 }));
                     ExceptT::lift_async_io(AsyncIO::new(move || async move { e }))
                 };
-                black_box(result.run_async().await)
+                black_box(result.run().await)
             })
         });
     });
@@ -299,7 +299,7 @@ fn benchmark_pure_ratio(criterion: &mut Criterion) {
                 .flat_map(|c| ExceptT::lift_async_io(AsyncIO::new(move || async move { c + 1 })))
                 .flat_map(|d| ExceptT::lift_async_io(AsyncIO::new(move || async move { d + 1 })))
                 .flat_map(|e| ExceptT::lift_async_io(AsyncIO::new(move || async move { e })));
-                black_box(result.run_async().await)
+                black_box(result.run().await)
             })
         });
     });
@@ -332,7 +332,7 @@ fn benchmark_error_path(criterion: &mut Criterion) {
                     e <= ExceptT::pure_async_io(d + 1);
                     ExceptT::pure_async_io(e)
                 };
-                black_box(result.run_async().await)
+                black_box(result.run().await)
             })
         });
     });
@@ -346,7 +346,7 @@ fn benchmark_error_path(criterion: &mut Criterion) {
                     .flat_map(|c| ExceptT::pure_async_io(c + 1))
                     .flat_map(|d| ExceptT::pure_async_io(d + 1))
                     .flat_map(ExceptT::pure_async_io);
-                black_box(result.run_async().await)
+                black_box(result.run().await)
             })
         });
     });
@@ -363,7 +363,7 @@ fn benchmark_error_path(criterion: &mut Criterion) {
                     e <= ExceptT::pure_async_io(d + 1);
                     ExceptT::pure_async_io(e)
                 };
-                black_box(result.run_async().await)
+                black_box(result.run().await)
             })
         });
     });
@@ -379,7 +379,7 @@ fn benchmark_error_path(criterion: &mut Criterion) {
                 .flat_map(|c| ExceptT::pure_async_io(c + 1))
                 .flat_map(|d| ExceptT::pure_async_io(d + 1))
                 .flat_map(ExceptT::pure_async_io);
-                black_box(result.run_async().await)
+                black_box(result.run().await)
             })
         });
     });
@@ -396,7 +396,7 @@ fn benchmark_error_path(criterion: &mut Criterion) {
                     e <= ExceptT::pure_async_io(c + 1);
                     ExceptT::pure_async_io(e)
                 };
-                black_box(result.run_async().await)
+                black_box(result.run().await)
             })
         });
     });
@@ -414,7 +414,7 @@ fn benchmark_error_path(criterion: &mut Criterion) {
                     })
                     .flat_map(|d: i32| ExceptT::pure_async_io(d + 1))
                     .flat_map(ExceptT::pure_async_io);
-                black_box(result.run_async().await)
+                black_box(result.run().await)
             })
         });
     });
@@ -444,7 +444,7 @@ fn benchmark_chain_depth_parameterized(criterion: &mut Criterion) {
                                     a <= ExceptT::<String, _>::pure_async_io(black_box(1));
                                     ExceptT::pure_async_io(a)
                                 };
-                                black_box(result.run_async().await)
+                                black_box(result.run().await)
                             }
                             5 => {
                                 let result = eff_async! {
@@ -455,7 +455,7 @@ fn benchmark_chain_depth_parameterized(criterion: &mut Criterion) {
                                     e <= ExceptT::pure_async_io(d + 1);
                                     ExceptT::pure_async_io(e)
                                 };
-                                black_box(result.run_async().await)
+                                black_box(result.run().await)
                             }
                             10 => {
                                 let result = eff_async! {
@@ -471,7 +471,7 @@ fn benchmark_chain_depth_parameterized(criterion: &mut Criterion) {
                                     j <= ExceptT::pure_async_io(i + 1);
                                     ExceptT::pure_async_io(j)
                                 };
-                                black_box(result.run_async().await)
+                                black_box(result.run().await)
                             }
                             20 => {
                                 let result = eff_async! {
@@ -497,7 +497,7 @@ fn benchmark_chain_depth_parameterized(criterion: &mut Criterion) {
                                     t <= ExceptT::pure_async_io(s + 1);
                                     ExceptT::pure_async_io(t)
                                 };
-                                black_box(result.run_async().await)
+                                black_box(result.run().await)
                             }
                             _ => unreachable!(),
                         }
@@ -516,7 +516,7 @@ fn benchmark_chain_depth_parameterized(criterion: &mut Criterion) {
                             1 => {
                                 let result = ExceptT::<String, _>::pure_async_io(black_box(1))
                                     .flat_map(ExceptT::pure_async_io);
-                                black_box(result.run_async().await)
+                                black_box(result.run().await)
                             }
                             5 => {
                                 let result = ExceptT::<String, _>::pure_async_io(black_box(1))
@@ -525,7 +525,7 @@ fn benchmark_chain_depth_parameterized(criterion: &mut Criterion) {
                                     .flat_map(|c| ExceptT::pure_async_io(c + 1))
                                     .flat_map(|d| ExceptT::pure_async_io(d + 1))
                                     .flat_map(ExceptT::pure_async_io);
-                                black_box(result.run_async().await)
+                                black_box(result.run().await)
                             }
                             10 => {
                                 let result = ExceptT::<String, _>::pure_async_io(black_box(1))
@@ -539,7 +539,7 @@ fn benchmark_chain_depth_parameterized(criterion: &mut Criterion) {
                                     .flat_map(|h| ExceptT::pure_async_io(h + 1))
                                     .flat_map(|i| ExceptT::pure_async_io(i + 1))
                                     .flat_map(ExceptT::pure_async_io);
-                                black_box(result.run_async().await)
+                                black_box(result.run().await)
                             }
                             20 => {
                                 let result = ExceptT::<String, _>::pure_async_io(black_box(1))
@@ -563,7 +563,7 @@ fn benchmark_chain_depth_parameterized(criterion: &mut Criterion) {
                                     .flat_map(|r| ExceptT::pure_async_io(r + 1))
                                     .flat_map(|s| ExceptT::pure_async_io(s + 1))
                                     .flat_map(ExceptT::pure_async_io);
-                                black_box(result.run_async().await)
+                                black_box(result.run().await)
                             }
                             _ => unreachable!(),
                         }

@@ -240,7 +240,6 @@ async fn test_demo_endpoints_use_mock_not_event_store() {
     let event_count = state
         .event_store
         .get_current_version(&task.task_id)
-        .run_async()
         .await
         .expect("Failed to get version");
     assert_eq!(event_count, 0, "EventStore should be empty");

@@ -240,7 +240,7 @@ mod async_tests {
             if x % 2 == 0;
             yield x
         };
-        assert_eq!(result.run_async().await, vec![2, 4]);
+        assert_eq!(result.await, vec![2, 4]);
     }
 
     /// Guard with AsyncIO bind
@@ -252,7 +252,7 @@ mod async_tests {
             if data > 20;
             yield data
         };
-        assert_eq!(result.run_async().await, vec![30, 40, 50]);
+        assert_eq!(result.await, vec![30, 40, 50]);
     }
 
     /// Multiple guards in for_async!
@@ -264,7 +264,7 @@ mod async_tests {
             if x > 10;
             yield x
         };
-        assert_eq!(result.run_async().await, vec![12, 14, 16, 18, 20]);
+        assert_eq!(result.await, vec![12, 14, 16, 18, 20]);
     }
 
     /// Guard with let binding in for_async!
@@ -276,7 +276,7 @@ mod async_tests {
             if squared > 10;
             yield squared
         };
-        assert_eq!(result.run_async().await, vec![16, 25]);
+        assert_eq!(result.await, vec![16, 25]);
     }
 
     /// Guard before AsyncIO bind
@@ -288,7 +288,7 @@ mod async_tests {
             data <~ AsyncIO::pure(x * 100);
             yield data
         };
-        assert_eq!(result.run_async().await, vec![100, 300, 500]);
+        assert_eq!(result.await, vec![100, 300, 500]);
     }
 
     /// Guard in nested iteration for_async!
@@ -300,7 +300,7 @@ mod async_tests {
             y <= vec![10, 20];
             yield x + y
         };
-        assert_eq!(result.run_async().await, vec![12, 22, 13, 23]);
+        assert_eq!(result.await, vec![12, 22, 13, 23]);
     }
 
     /// All elements filtered out in for_async!
@@ -311,7 +311,7 @@ mod async_tests {
             if x % 2 == 0;
             yield x
         };
-        assert!(result.run_async().await.is_empty());
+        assert!(result.await.is_empty());
     }
 
     /// Complex guard with async operations
@@ -327,6 +327,6 @@ mod async_tests {
         };
         // x=2: value=20 (<25) -> final=25
         // x=3: value=30 (>=25) -> filtered out
-        assert_eq!(result.run_async().await, vec![25]);
+        assert_eq!(result.await, vec![25]);
     }
 }

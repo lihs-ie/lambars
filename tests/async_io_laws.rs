@@ -29,10 +29,10 @@ proptest! {
         let runtime = tokio::runtime::Runtime::new().unwrap();
 
         let left_result = runtime.block_on(async {
-            AsyncIO::pure(value).flat_map(function).run_async().await
+            AsyncIO::pure(value).flat_map(function).await
         });
         let right_result = runtime.block_on(async {
-            function(value).run_async().await
+            function(value).await
         });
 
         prop_assert_eq!(left_result, right_result);
@@ -46,7 +46,7 @@ proptest! {
         let runtime = tokio::runtime::Runtime::new().unwrap();
 
         let left_result = runtime.block_on(async {
-            AsyncIO::pure(value).flat_map(AsyncIO::pure).run_async().await
+            AsyncIO::pure(value).flat_map(AsyncIO::pure).await
         });
         let right_result = value;
 
@@ -67,13 +67,11 @@ proptest! {
             AsyncIO::pure(value)
                 .flat_map(function1)
                 .flat_map(function2)
-                .run_async()
                 .await
         });
         let right_result = runtime.block_on(async {
             AsyncIO::pure(value)
                 .flat_map(move |x| function1(x).flat_map(function2))
-                .run_async()
                 .await
         });
 
@@ -94,7 +92,7 @@ proptest! {
         let runtime = tokio::runtime::Runtime::new().unwrap();
 
         let left_result = runtime.block_on(async {
-            AsyncIO::pure(value).fmap(|x| x).run_async().await
+            AsyncIO::pure(value).fmap(|x| x).await
         });
         let right_result = value;
 
@@ -114,14 +112,12 @@ proptest! {
         let left_result = runtime.block_on(async {
             AsyncIO::pure(value)
                 .fmap(move |x| function2(function1(x)))
-                .run_async()
                 .await
         });
         let right_result = runtime.block_on(async {
             AsyncIO::pure(value)
                 .fmap(function1)
                 .fmap(function2)
-                .run_async()
                 .await
         });
 
@@ -142,10 +138,10 @@ proptest! {
         let runtime = tokio::runtime::Runtime::new().unwrap();
 
         let left_result = runtime.block_on(async {
-            AsyncIO::pure(value).and_then(function).run_async().await
+            AsyncIO::pure(value).and_then(function).await
         });
         let right_result = runtime.block_on(async {
-            AsyncIO::pure(value).flat_map(function).run_async().await
+            AsyncIO::pure(value).flat_map(function).await
         });
 
         prop_assert_eq!(left_result, right_result);
@@ -159,7 +155,7 @@ proptest! {
         let runtime = tokio::runtime::Runtime::new().unwrap();
 
         let left_result = runtime.block_on(async {
-            AsyncIO::pure(a).map2(AsyncIO::pure(b), combine).run_async().await
+            AsyncIO::pure(a).map2(AsyncIO::pure(b), combine).await
         });
         let right_result = runtime.block_on(async {
             AsyncIO::pure(a)
@@ -167,7 +163,6 @@ proptest! {
                     let b_copy = b;
                     AsyncIO::pure(b_copy).fmap(move |y| combine(x, y))
                 })
-                .run_async()
                 .await
         });
 
@@ -180,10 +175,10 @@ proptest! {
         let runtime = tokio::runtime::Runtime::new().unwrap();
 
         let left_result = runtime.block_on(async {
-            AsyncIO::pure(a).product(AsyncIO::pure(b)).run_async().await
+            AsyncIO::pure(a).product(AsyncIO::pure(b)).await
         });
         let right_result = runtime.block_on(async {
-            AsyncIO::pure(a).map2(AsyncIO::pure(b), |x, y| (x, y)).run_async().await
+            AsyncIO::pure(a).map2(AsyncIO::pure(b), |x, y| (x, y)).await
         });
 
         prop_assert_eq!(left_result, right_result);
@@ -195,11 +190,11 @@ proptest! {
         let runtime = tokio::runtime::Runtime::new().unwrap();
 
         let left_result = runtime.block_on(async {
-            AsyncIO::pure(a).then(AsyncIO::pure(b)).run_async().await
+            AsyncIO::pure(a).then(AsyncIO::pure(b)).await
         });
         let right_result = runtime.block_on(async {
             let b_copy = b;
-            AsyncIO::pure(a).flat_map(move |_| AsyncIO::pure(b_copy)).run_async().await
+            AsyncIO::pure(a).flat_map(move |_| AsyncIO::pure(b_copy)).await
         });
 
         prop_assert_eq!(left_result, right_result);
@@ -212,12 +207,12 @@ proptest! {
 
 #[test]
 fn test_async_io_pure_is_referentially_transparent() {
-    // Multiple calls to run_async on equivalent AsyncIOs should give the same result
+    // Multiple calls to await on equivalent AsyncIOs should give the same result
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let value = 42;
 
-    let result1 = runtime.block_on(async { AsyncIO::pure(value).run_async().await });
-    let result2 = runtime.block_on(async { AsyncIO::pure(value).run_async().await });
+    let result1 = runtime.block_on(async { AsyncIO::pure(value).await });
+    let result2 = runtime.block_on(async { AsyncIO::pure(value).await });
 
     assert_eq!(result1, result2);
 }
@@ -230,14 +225,12 @@ fn test_async_io_chained_operations_are_referentially_transparent() {
         AsyncIO::pure(10)
             .fmap(|x| x * 2)
             .flat_map(|x| AsyncIO::pure(x + 5))
-            .run_async()
             .await
     });
     let result2 = runtime.block_on(async {
         AsyncIO::pure(10)
             .fmap(|x| x * 2)
             .flat_map(|x| AsyncIO::pure(x + 5))
-            .run_async()
             .await
     });
 
@@ -258,7 +251,6 @@ proptest! {
         let left_result = runtime.block_on(async {
             AsyncIO::pure(value)
                 .apply(AsyncIO::pure(identity_fn))
-                .run_async()
                 .await
         });
         let right_result = value;
@@ -276,11 +268,10 @@ proptest! {
         let left_result = runtime.block_on(async {
             AsyncIO::pure(value)
                 .apply(AsyncIO::pure(function))
-                .run_async()
                 .await
         });
         let right_result = runtime.block_on(async {
-            AsyncIO::pure(function(value)).run_async().await
+            AsyncIO::pure(function(value)).await
         });
 
         prop_assert_eq!(left_result, right_result);
@@ -315,7 +306,7 @@ async fn test_flat_map_chain_100() {
     }
 
     // Execute the chain
-    let result = async_io.run_async().await;
+    let result = async_io.await;
 
     // Verify the result is correct
     assert_eq!(result, CHAIN_DEPTH);
@@ -337,7 +328,7 @@ async fn test_fmap_chain_100() {
     }
 
     // Execute the chain
-    let result = async_io.run_async().await;
+    let result = async_io.await;
 
     // Verify the result is correct
     assert_eq!(result, CHAIN_DEPTH);
@@ -363,7 +354,7 @@ async fn test_mixed_chain_100() {
     }
 
     // Execute the chain
-    let result = async_io.run_async().await;
+    let result = async_io.await;
 
     // Verify the result is correct
     assert_eq!(result, CHAIN_DEPTH);
@@ -391,7 +382,7 @@ async fn test_deep_flat_map_chain_10000() {
     }
 
     // Execute the chain - this should not cause stack overflow
-    let result = async_io.run_async().await;
+    let result = async_io.await;
 
     // Verify the result is correct
     assert_eq!(result, CHAIN_DEPTH);
@@ -418,7 +409,7 @@ async fn test_deep_fmap_chain_10000() {
     }
 
     // Execute the chain - this should not cause stack overflow
-    let result = async_io.run_async().await;
+    let result = async_io.await;
 
     // Verify the result is correct
     assert_eq!(result, CHAIN_DEPTH);
@@ -449,7 +440,7 @@ async fn test_deep_mixed_chain_10000() {
     }
 
     // Execute the chain - this should not cause stack overflow
-    let result = async_io.run_async().await;
+    let result = async_io.await;
 
     // Verify the result is correct
     assert_eq!(result, CHAIN_DEPTH);
@@ -476,7 +467,7 @@ async fn test_deep_and_then_chain_10000() {
     }
 
     // Execute the chain - this should not cause stack overflow
-    let result = async_io.run_async().await;
+    let result = async_io.await;
 
     // Verify the result is correct
     assert_eq!(result, CHAIN_DEPTH);
@@ -503,7 +494,7 @@ async fn test_very_deep_flat_map_chain_50000() {
     }
 
     // Execute the chain - this should not cause stack overflow
-    let result = async_io.run_async().await;
+    let result = async_io.await;
 
     // Verify the result is correct
     assert_eq!(result, CHAIN_DEPTH);

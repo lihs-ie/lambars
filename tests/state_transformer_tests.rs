@@ -446,7 +446,7 @@ mod async_io_tests {
     async fn state_lift_async_io_preserves_state() {
         let async_io = AsyncIO::pure(42);
         let state: StateT<i32, AsyncIO<(i32, i32)>> = StateT::lift_async_io(async_io);
-        let (result, final_state) = state.run(100).run_async().await;
+        let (result, final_state) = state.run(100).await;
         assert_eq!(result, 42);
         assert_eq!(final_state, 100);
     }
@@ -457,7 +457,7 @@ mod async_io_tests {
     async fn state_lift_async_io_preserves_async_value() {
         let async_io = AsyncIO::new(|| async { "hello".to_string() });
         let state: StateT<(), AsyncIO<(String, ())>> = StateT::lift_async_io(async_io);
-        let (result, _) = state.run(()).run_async().await;
+        let (result, _) = state.run(()).await;
         assert_eq!(result, "hello");
     }
 
@@ -468,7 +468,7 @@ mod async_io_tests {
         let initial_state = 100;
         let async_io = AsyncIO::pure(42);
         let state: StateT<i32, AsyncIO<(i32, i32)>> = StateT::lift_async_io(async_io);
-        let final_state = state.exec_async(initial_state).run_async().await;
+        let final_state = state.exec_async(initial_state).await;
         assert_eq!(final_state, initial_state);
     }
 
@@ -480,7 +480,7 @@ mod async_io_tests {
     #[tokio::test]
     async fn state_gets_async_io_projects_value() {
         let state: StateT<i32, AsyncIO<(i32, i32)>> = StateT::gets_async_io(|s: &i32| s * 2);
-        let (result, final_state) = state.run(21).run_async().await;
+        let (result, final_state) = state.run(21).await;
         assert_eq!(result, 42);
         assert_eq!(final_state, 21);
     }
@@ -490,7 +490,7 @@ mod async_io_tests {
     async fn state_gets_async_io_does_not_modify_state() {
         let state: StateT<String, AsyncIO<(usize, String)>> =
             StateT::gets_async_io(|s: &String| s.len());
-        let (result, final_state) = state.run("hello".to_string()).run_async().await;
+        let (result, final_state) = state.run("hello".to_string()).await;
         assert_eq!(result, 5);
         assert_eq!(final_state, "hello");
     }
@@ -501,12 +501,12 @@ mod async_io_tests {
         let projection = |s: &i32| s * 2;
 
         let state1: StateT<i32, AsyncIO<(i32, i32)>> = StateT::gets_async_io(projection);
-        let (result1, _) = state1.run(21).run_async().await;
+        let (result1, _) = state1.run(21).await;
 
         let state2: StateT<i32, AsyncIO<(i32, i32)>> =
             StateT::<i32, AsyncIO<(i32, i32)>>::get_async_io()
                 .fmap_async_io(move |s| projection(&s));
-        let (result2, _) = state2.run(21).run_async().await;
+        let (result2, _) = state2.run(21).await;
 
         assert_eq!(result1, result2);
     }
@@ -520,7 +520,7 @@ mod async_io_tests {
     async fn state_state_async_io_transitions() {
         let state: StateT<i32, AsyncIO<(String, i32)>> =
             StateT::state_async_io(|s| (format!("was: {}", s), s + 1));
-        let (result, final_state) = state.run(41).run_async().await;
+        let (result, final_state) = state.run(41).await;
         assert_eq!(result, "was: 41");
         assert_eq!(final_state, 42);
     }
@@ -534,7 +534,7 @@ mod async_io_tests {
                 s.push(sum);
                 (sum, s)
             });
-        let (result, final_state) = state.run(vec![1, 2, 3]).run_async().await;
+        let (result, final_state) = state.run(vec![1, 2, 3]).await;
         assert_eq!(result, 6);
         assert_eq!(final_state, vec![1, 2, 3, 6]);
     }

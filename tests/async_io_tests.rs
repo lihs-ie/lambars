@@ -27,7 +27,7 @@ use std::time::Duration;
 async fn test_async_io_pure_creates_value() {
     // AsyncIO::pure は純粋な値をラップする
     let async_io = AsyncIO::pure(42);
-    let result = async_io.run_async().await;
+    let result = async_io.await;
     assert_eq!(result, 42);
 }
 
@@ -36,7 +36,7 @@ async fn test_async_io_pure_creates_value() {
 async fn test_async_io_pure_with_string() {
     // 文字列型でも動作することを確認
     let async_io = AsyncIO::pure("hello".to_string());
-    let result = async_io.run_async().await;
+    let result = async_io.await;
     assert_eq!(result, "hello");
 }
 
@@ -56,7 +56,7 @@ async fn test_async_io_pure_with_struct() {
     };
 
     let async_io = AsyncIO::pure(data.clone());
-    let result = async_io.run_async().await;
+    let result = async_io.await;
     assert_eq!(result, data);
 }
 
@@ -65,7 +65,7 @@ async fn test_async_io_pure_with_struct() {
 async fn test_async_io_new_with_async_closure() {
     // AsyncIO::new は非同期クロージャを受け取る
     let async_io = AsyncIO::new(|| async { 10 + 20 });
-    let result = async_io.run_async().await;
+    let result = async_io.await;
     assert_eq!(result, 30);
 }
 
@@ -77,7 +77,7 @@ async fn test_async_io_new_with_delay() {
         tokio::time::sleep(Duration::from_millis(10)).await;
         "delayed"
     });
-    let result = async_io.run_async().await;
+    let result = async_io.await;
     assert_eq!(result, "delayed");
 }
 
@@ -87,7 +87,7 @@ async fn test_async_io_from_future_basic() {
     // 既存の Future から AsyncIO を作成
     let future = async { 100 };
     let async_io = AsyncIO::from_future(future);
-    let result = async_io.run_async().await;
+    let result = async_io.await;
     assert_eq!(result, 100);
 }
 
@@ -122,8 +122,8 @@ async fn test_async_io_new_is_lazy() {
     // この時点では実行されていない
     assert!(!executed.load(Ordering::SeqCst));
 
-    // run_async で実行
-    let result = async_io.run_async().await;
+    // await で実行
+    let result = async_io.await;
     assert!(executed.load(Ordering::SeqCst));
     assert_eq!(result, 42);
 }
@@ -166,7 +166,7 @@ async fn test_async_io_fmap_is_lazy() {
     // fmap しただけでは実行されない
     assert!(!executed.load(Ordering::SeqCst));
 
-    let result = mapped.run_async().await;
+    let result = mapped.await;
     assert!(executed.load(Ordering::SeqCst));
     assert_eq!(result, 84);
 }
@@ -191,7 +191,7 @@ async fn test_async_io_flat_map_is_lazy() {
     // flat_map しただけでは実行されない
     assert!(!executed.load(Ordering::SeqCst));
 
-    let result = chained.run_async().await;
+    let result = chained.await;
     assert!(executed.load(Ordering::SeqCst));
     assert_eq!(result, 84);
 }
@@ -205,7 +205,7 @@ async fn test_async_io_flat_map_is_lazy() {
 async fn test_async_io_fmap_basic() {
     // 基本的な fmap 動作
     let async_io = AsyncIO::pure(21).fmap(|x| x * 2);
-    let result = async_io.run_async().await;
+    let result = async_io.await;
     assert_eq!(result, 42);
 }
 
@@ -217,7 +217,7 @@ async fn test_async_io_fmap_chain() {
         .fmap(|x| x * 3) // 6
         .fmap(|x| x + 4) // 10
         .fmap(|x| x * 5); // 50
-    let result = async_io.run_async().await;
+    let result = async_io.await;
     assert_eq!(result, 50);
 }
 
@@ -226,7 +226,7 @@ async fn test_async_io_fmap_chain() {
 async fn test_async_io_fmap_type_change() {
     // fmap で型変換
     let async_io = AsyncIO::pure(42).fmap(|x| format!("value: {}", x));
-    let result = async_io.run_async().await;
+    let result = async_io.await;
     assert_eq!(result, "value: 42");
 }
 
@@ -235,7 +235,7 @@ async fn test_async_io_fmap_type_change() {
 async fn test_async_io_fmap_identity() {
     // 恒等関数による fmap は値を変えない
     let async_io = AsyncIO::pure(42).fmap(|x| x);
-    let result = async_io.run_async().await;
+    let result = async_io.await;
     assert_eq!(result, 42);
 }
 
@@ -250,7 +250,7 @@ async fn test_async_io_map2_basic() {
     let io1 = AsyncIO::pure(10);
     let io2 = AsyncIO::pure(20);
     let combined = io1.map2(io2, |a, b| a + b);
-    let result = combined.run_async().await;
+    let result = combined.await;
     assert_eq!(result, 30);
 }
 
@@ -261,7 +261,7 @@ async fn test_async_io_map2_with_different_types() {
     let io1 = AsyncIO::pure(42);
     let io2 = AsyncIO::pure("hello".to_string());
     let combined = io1.map2(io2, |n, s| format!("{}: {}", s, n));
-    let result = combined.run_async().await;
+    let result = combined.await;
     assert_eq!(result, "hello: 42");
 }
 
@@ -271,7 +271,7 @@ async fn test_async_io_product_basic() {
     // product はタプルを返す
     let io1 = AsyncIO::pure(10);
     let io2 = AsyncIO::pure(20);
-    let result = io1.product(io2).run_async().await;
+    let result = io1.product(io2).await;
     assert_eq!(result, (10, 20));
 }
 
@@ -281,7 +281,7 @@ async fn test_async_io_product_tuple_type() {
     // product の型確認
     let io1 = AsyncIO::pure(1);
     let io2 = AsyncIO::pure("hello");
-    let result = io1.product(io2).run_async().await;
+    let result = io1.product(io2).await;
     assert_eq!(result, (1, "hello"));
 }
 
@@ -291,7 +291,7 @@ async fn test_async_io_apply_basic() {
     // apply の基本動作
     let function_io = AsyncIO::pure(|x: i32| x * 2);
     let value_io = AsyncIO::pure(21);
-    let result = value_io.apply(function_io).run_async().await;
+    let result = value_io.apply(function_io).await;
     assert_eq!(result, 42);
 }
 
@@ -304,7 +304,7 @@ async fn test_async_io_apply_basic() {
 async fn test_async_io_flat_map_basic() {
     // flat_map の基本動作
     let async_io = AsyncIO::pure(10).flat_map(|x| AsyncIO::pure(x * 2));
-    let result = async_io.run_async().await;
+    let result = async_io.await;
     assert_eq!(result, 20);
 }
 
@@ -316,7 +316,7 @@ async fn test_async_io_flat_map_chain() {
         .flat_map(|x| AsyncIO::pure(x + 1)) // 2
         .flat_map(|x| AsyncIO::pure(x * 3)) // 6
         .flat_map(|x| AsyncIO::pure(x + 4)); // 10
-    let result = async_io.run_async().await;
+    let result = async_io.await;
     assert_eq!(result, 10);
 }
 
@@ -346,7 +346,7 @@ async fn test_async_io_flat_map_with_effect() {
         })
     });
 
-    let result = async_io.run_async().await;
+    let result = async_io.await;
     assert_eq!(result, 20);
     assert_eq!(counter.load(Ordering::SeqCst), 2);
 }
@@ -358,8 +358,8 @@ async fn test_async_io_and_then_is_flat_map_alias() {
     let async_io1 = AsyncIO::pure(10).flat_map(|x| AsyncIO::pure(x + 5));
     let async_io2 = AsyncIO::pure(10).and_then(|x| AsyncIO::pure(x + 5));
 
-    let result1 = async_io1.run_async().await;
-    let result2 = async_io2.run_async().await;
+    let result1 = async_io1.await;
+    let result2 = async_io2.await;
     assert_eq!(result1, result2);
 }
 
@@ -368,7 +368,7 @@ async fn test_async_io_and_then_is_flat_map_alias() {
 async fn test_async_io_then_discards_first() {
     // then は最初の結果を無視する
     let async_io = AsyncIO::pure(10).then(AsyncIO::pure(20));
-    let result = async_io.run_async().await;
+    let result = async_io.await;
     assert_eq!(result, 20);
 }
 
@@ -388,7 +388,7 @@ async fn test_async_io_then_executes_first_for_side_effect() {
     })
     .then(AsyncIO::pure(42));
 
-    let result = async_io.run_async().await;
+    let result = async_io.await;
     assert_eq!(result, 42);
     assert!(executed.load(Ordering::SeqCst));
 }
@@ -408,7 +408,7 @@ mod conversion_tests {
         // IO を AsyncIO に変換
         let io = IO::pure(42);
         let async_io = io.to_async();
-        let result = async_io.run_async().await;
+        let result = async_io.await;
         assert_eq!(result, 42);
     }
 
@@ -418,7 +418,7 @@ mod conversion_tests {
         // 変換後も値が保持される
         let io = IO::new(|| "hello".to_string());
         let async_io = io.to_async();
-        let result = async_io.run_async().await;
+        let result = async_io.await;
         assert_eq!(result, "hello");
     }
 
@@ -438,8 +438,8 @@ mod conversion_tests {
         let async_io = io.to_async();
         assert_eq!(counter.load(Ordering::SeqCst), 1);
 
-        // run_async は単に結果を返すだけ
-        let result = async_io.run_async().await;
+        // await は単に結果を返すだけ
+        let result = async_io.await;
         assert_eq!(result, 42);
         assert_eq!(counter.load(Ordering::SeqCst), 1);
     }
@@ -512,7 +512,7 @@ async fn test_async_io_delay_async_waits() {
     // delay_async は指定時間待機する
     let start = std::time::Instant::now();
     let async_io = AsyncIO::delay_async(Duration::from_millis(50));
-    async_io.run_async().await;
+    async_io.await;
     let elapsed = start.elapsed();
     assert!(elapsed >= Duration::from_millis(45)); // 多少の誤差を許容
 }
@@ -533,7 +533,7 @@ async fn test_async_io_delay_async_is_lazy() {
 async fn test_async_io_timeout_completes_in_time() {
     // タイムアウト前に完了する場合
     let async_io = AsyncIO::pure(42).timeout(Duration::from_millis(100));
-    let result = async_io.run_async().await;
+    let result = async_io.await;
     assert_eq!(result, Some(42));
 }
 
@@ -543,7 +543,7 @@ async fn test_async_io_timeout_returns_none_on_timeout() {
     // タイムアウトした場合は None を返す
     let async_io =
         AsyncIO::delay_async(Duration::from_millis(200)).timeout(Duration::from_millis(50));
-    let result = async_io.run_async().await;
+    let result = async_io.await;
     assert_eq!(result, None);
 }
 
@@ -556,7 +556,7 @@ async fn test_async_io_race_returns_first_completed() {
     let slow = AsyncIO::delay_async(Duration::from_millis(100)).fmap(|_| "slow");
     let fast = AsyncIO::pure("fast");
 
-    let result = slow.race(fast).run_async().await;
+    let result = slow.race(fast).await;
     assert!(matches!(result, Either::Right("fast")));
 }
 
@@ -569,7 +569,7 @@ async fn test_async_io_race_with_immediate_value() {
     let io1 = AsyncIO::pure(1);
     let io2 = AsyncIO::pure(2);
 
-    let result = io1.race(io2).run_async().await;
+    let result = io1.race(io2).await;
     // 両方即座に完了するので、どちらかが返る
     assert!(matches!(result, Either::Left(1) | Either::Right(2)));
 }
@@ -579,7 +579,7 @@ async fn test_async_io_race_with_immediate_value() {
 async fn test_async_io_catch_async_on_success() {
     // 成功時は Ok を返す
     let async_io = AsyncIO::pure(42).catch_async(|_| "error".to_string());
-    let result = async_io.run_async().await;
+    let result = async_io.await;
     assert_eq!(result, Ok(42));
 }
 
@@ -594,7 +594,7 @@ async fn test_async_io_catch_async_recovers_panic() {
     })
     .catch_async(|_| "caught panic".to_string());
 
-    let result = async_io.run_async().await;
+    let result = async_io.await;
     assert_eq!(result, Err("caught panic".to_string()));
 }
 
@@ -634,7 +634,7 @@ async fn test_async_io_execution_order() {
         x + 10
     });
 
-    let result = async_io.run_async().await;
+    let result = async_io.await;
     assert_eq!(result, 30);
 
     let execution_order = order.lock().unwrap().clone();

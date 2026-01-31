@@ -317,7 +317,6 @@ pub async fn update_with_optics(
     let task = state
         .task_repository
         .find_by_id(&task_id)
-        .run_async()
         .await
         .map_err(ApiErrorResponse::from)?
         .ok_or_else(|| ApiErrorResponse::not_found(format!("Task {id} not found")))?;
@@ -330,7 +329,6 @@ pub async fn update_with_optics(
     state
         .task_repository
         .save(&updated_task)
-        .run_async()
         .await
         .map_err(ApiErrorResponse::from)?;
 
