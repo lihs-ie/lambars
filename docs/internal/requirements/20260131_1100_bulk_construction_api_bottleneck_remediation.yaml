@@ -1,0 +1,738 @@
+# Bulk Construction API ボトルネック修正 要件定義
+#
+# 概要:
+#   OrderedUniqueSet/PersistentVector の bulk construction API 追加後に検出された
+#   性能回帰、エラー率上昇、ベンチマーク不足を修正する。
+#
+# 設計方針:
+#   1. 正しさを優先し、性能最適化は正確性検証後に行う
+#   2. エラー率の原因を切り分け、機能不全と性能問題を分離する
+#   3. bulk construction API の効果を定量的に測定可能にする
+#
+# 参照:
+#   - docs/internal/done/requirements/20260131_0905_search_index_posting_list_bulk_build.yaml
+#   - docs/internal/done/requirements/20260130_1948_ordered_unique_set.yaml
+#   - profiling-analysis.yaml
+#   - profiling-results/iai-profiling-b33a5476ececec2ab445b5f24e6ee5c9a713f0c5/
+
+version: "1.0.0"
+name: "bulk_construction_api_bottleneck_remediation"
+description: |
+  コミット a6ece16 で OrderedUniqueSet と PersistentVector に bulk construction API
+  (from_sorted_iter, from_sorted_vec, from_vec) を追加した後のプロファイリングで
+  以下の問題が検出された:
+
+  1. PersistentVector IAI ベンチマークでの性能回帰（get_sequential_1000 +163.9%、
+     update_1000 +20.8%）
+  2. tasks_update / tasks_update_conflict API の高エラー率（41.5%, 41.4%）
+  3. 新規 bulk construction API のベンチマーク未追加
+
+  本要件は、これらの問題の原因分析と修正、および再発防止策を定義する。
+
+# 背景・動機
+background:
+  problem: |
+    Codex MCP による分析により、以下の原因が特定された:
+
+    1. PersistentVector の性能回帰:
+       - setup_vector_1000() が (0..1000).collect() を使用
+       - FromIterator の exact size 分岐で from_vec が選ばれる
+       - IAI が setup を測定に含める場合、構築経路の差が get/update の数字に混入
+       - get/update のホットパス自体は find_child_index で変更なし
+
+    2. tasks_update のエラー率 41%:
+       - HTTP ステータス分布が空で、error_rate の定義が不明確
+       - test_ids.lua は 10 件のみで、マルチスレッド下で version 競合が発生
+       - tasks_update.lua は 409 後の再試行を 1 回のみ実施
+       - 中〜高コンテンションでは 409 が大量発生するのは仕様通り
+       - SearchIndex の bulk construction とは無関係（PUT は apply_change 経路）
+
+    3. bulk construction API のベンチマーク不足:
+       - from_sorted_iter, from_sorted_vec, from_vec の性能測定がない
+       - 既存の collect() / insert ループとの比較ができない
+       - SearchIndex での改善効果が定量化できない
+
+  motivation: |
+    1. 正しさの検証: 41% エラー率が機能不全か仕様内かを切り分ける
+    2. 性能改善の可視化: bulk construction API の効果を定量的に測定する
+    3. 回帰の防止: ベンチマーク体制を整備し、将来の変更の影響を早期検出する
+
+  prior_art:
+    - name: "search_index_posting_list_bulk_build"
+      description: "SearchIndex のマージパスに bulk construction を導入したが、効果測定が不十分"
+    - name: "ordered_unique_set"
+      description: "OrderedUniqueSet を汎用化したが、単体ベンチマークがない"
+
+# 要件一覧
+requirements:
+  # ======================================================================
+  # 1. エラー率の切り分けと可視化
+  # ======================================================================
+  - id: "REQ-BOTTLENECK-001"
+    name: "tasks_update のエラー率の意味を明確化する"
+    priority: "P0 - Critical"
+    description: |
+      tasks_update / tasks_update_conflict の 41% エラー率が機能不全か、
+      409 競合による仕様内動作かを切り分ける。
+
+      Codex 分析結果:
+      - result_collector.lua は HTTP ステータス分布が取れない場合に
+        summary.errors.status（非2xx全部）で error_rate を計算
+      - test_ids.lua は 10 件のみで、マルチスレッド下で version 競合が発生
+      - tasks_update.lua は 409 後の再試行を 1 回のみ実施
+      - 中〜高コンテンションでは 409 が大量発生するのは仕様通り
+
+      原因が 409 競合である場合、これは機能不全ではなく、ベンチマーク設計上の
+      想定動作である。ただし、error_rate に 409 が混入すると、真のエラー（5xx）が
+      見えなくなるため、指標の分離が必要。
+
+    methods:
+      - name: "result_collector.lua の改善"
+        signature: "N/A (Lua script)"
+        description: |
+          HTTP ステータスコード分布を正しく集計し、以下を分離する:
+          - conflict_rate: 409 Conflict の割合（再試行前の初回レスポンス基準）
+          - error_rate: 5xx エラーの割合
+          - client_error_rate: 4xx（409 除く）の割合
+
+          これにより、競合と真のエラーを区別できるようにする。
+
+          SLO 判定基準:
+          - error_rate（5xx）が SLO 失敗判定の対象
+          - conflict_rate（409）は SLO 失敗判定から除外
+          - client_error_rate（4xx、409 除く）は SLO 失敗判定の対象
+            （例: 400 Bad Request, 404 Not Found はクライアント実装不具合）
+
+          制約:
+          - wrk のスレッド分離により、409 の集計が完全に正確でない可能性
+          - error_tracker.lua の既存制約を考慮し、近似値として扱う
+
+      - name: "test_ids.lua の ID プール拡大"
+        signature: "N/A (Lua script)"
+        description: |
+          tasks_update / tasks_update_conflict で使用する ID プールを拡大し、
+          競合率を調整可能にする。
+          - 現在: 10 件固定
+          - 提案: 環境変数で制御可能（ID_POOL_SIZE）
+          - tasks_update: 1000 件程度（競合を抑制）
+          - tasks_update_conflict: 10 件維持（競合テスト）
+
+          シナリオごとの設定方法:
+          - benches/api/scenarios/*.yaml で ID_POOL_SIZE を個別設定
+          - tasks_update.yaml: ID_POOL_SIZE=1000
+          - tasks_update_conflict.yaml: ID_POOL_SIZE=10
+          - デフォルト: 10（後方互換性）
+
+      - name: "tasks_update.lua の再試行回数拡大"
+        signature: "N/A (Lua script)"
+        description: |
+          409 後の再試行回数を増やし、最終的な成功率を向上させる。
+          - 現在: 1 回のみ
+          - 提案: 3-5 回（指数バックオフ付き）
+
+    implementations:
+      - type: "benches/api/benchmarks/scripts/result_collector.lua"
+        description: |
+          error_rate の計算ロジックを修正し、409 を conflict_rate に分離する。
+
+      - type: "benches/api/benchmarks/scripts/test_ids.lua"
+        description: |
+          ID_POOL_SIZE を環境変数から読み取り、シナリオごとに調整可能にする。
+
+      - type: "benches/api/benchmarks/scripts/tasks_update.lua"
+        description: |
+          再試行ロジックを追加し、409 発生時の最終成功率を向上させる。
+
+    validation:
+      - description: "tasks_update で conflict_rate < 5%, error_rate < 1%, client_error_rate < 1% を達成（近似値、wrk スレッド分離の制約あり）"
+      - description: "tasks_update_conflict で conflict_rate > 30% を維持（競合テスト）"
+      - description: "5xx エラーが error_rate に正しく反映される"
+      - description: "4xx（409 除く）が client_error_rate に正しく反映される"
+      - description: "409 は SLO 失敗判定から除外する運用を確立"
+
+    notes:
+      - "conflict_rate は再試行前の初回レスポンス基準で集計"
+      - "最終成功率は別途 success_rate として測定"
+      - "wrk の制約により、conflict_rate は近似値として扱う"
+      - "client_error_rate が閾値を超える場合、クライアント実装に不具合がある"
+
+  # ======================================================================
+  # 2. bulk construction API のベンチマーク追加
+  # ======================================================================
+  - id: "REQ-BOTTLENECK-002"
+    name: "bulk construction API の性能を測定する"
+    priority: "P1 - High"
+    description: |
+      from_sorted_iter, from_sorted_vec, from_vec の性能を測定し、
+      既存の collect() / insert ループとの比較を可能にする。
+
+      測定対象:
+      1. OrderedUniqueSet::from_sorted_iter vs fold + insert
+      2. OrderedUniqueSet::from_sorted_vec vs fold + insert
+      3. PersistentVector::from_vec vs collect()
+
+      データサイズ: 100, 1000, 10000, 100000
+      - Small 状態のテスト: 100 要素（8 件以下は trivial のため除外）
+      - Small/Large 境界値のテスト: 1000 要素（Large 状態として扱う）
+      - Large 状態のテスト: 10000, 100000 要素
+
+      期待される改善:
+      - from_sorted_iter/vec: O(n) vs O(n log n)（insert ループ）
+      - from_vec: ヒープ確保削減、Arc clone 削減
+
+      データ生成条件:
+      - OrderedUniqueSet: sorted + dedup 済みの Vec<i32> を生成（0..n）
+      - PersistentVector: 任意の Vec<i32>（0..n）
+
+    methods:
+      - name: "benches/ordered_unique_set_bench.rs"
+        signature: "N/A (new file)"
+        description: |
+          OrderedUniqueSet の bulk construction をベンチマーク。
+
+          ベンチマーク:
+          - from_sorted_iter_100 (100 要素、Small 状態)
+          - from_sorted_iter_1000 (1000 要素、Large 状態)
+          - from_sorted_iter_10000 (10000 要素、Large 状態)
+          - from_sorted_iter_100000 (100000 要素、Large 状態)
+          - from_sorted_vec_100 (100 要素)
+          - from_sorted_vec_1000 (1000 要素)
+          - from_sorted_vec_10000 (10000 要素)
+          - from_sorted_vec_100000 (100000 要素)
+          - fold_insert_100 (比較用)
+          - fold_insert_1000 (比較用)
+          - fold_insert_10000 (比較用)
+          - fold_insert_100000 (比較用)
+
+          データ生成:
+          - sorted + dedup 済みの Vec<i32> として (0..n).collect() を使用
+          - ベンチマーク測定時にこの Vec を使い回す
+
+      - name: "benches/persistent_vector_bench.rs への追加"
+        signature: "N/A (existing file)"
+        description: |
+          PersistentVector::from_vec のベンチマークを追加。
+
+          ベンチマーク:
+          - from_vec_100
+          - from_vec_1000
+          - from_vec_10000
+          - from_vec_100000
+          - collect_100 (比較用)
+          - collect_1000 (比較用)
+          - collect_10000 (比較用)
+          - collect_100000 (比較用)
+
+      - name: "benches/iai/ への追加"
+        signature: "N/A (IAI callgrind)"
+        description: |
+          IAI callgrind で命令数レベルの測定を追加。
+
+          ベンチマーク:
+          - ordered_unique_set_iai.rs (新規)
+          - persistent_vector_iai.rs (from_vec を追加)
+
+    implementations:
+      - type: "benches/ordered_unique_set_bench.rs"
+        description: |
+          criterion ベンチマークで from_sorted_iter/vec と fold + insert を比較。
+
+      - type: "benches/persistent_vector_bench.rs"
+        description: |
+          from_vec と collect() の性能差を測定。
+
+      - type: "benches/iai/ordered_unique_set_iai.rs"
+        description: |
+          IAI callgrind で命令数とキャッシュミスを測定。
+
+      - type: "benches/iai/persistent_vector_iai.rs"
+        description: |
+          from_vec のベンチマークを追加。
+
+    validation:
+      - description: "from_sorted_iter/vec が fold + insert より 2x 以上高速"
+      - description: "from_vec が collect() と同等以上の性能"
+      - description: "IAI で命令数削減を確認"
+
+  # ======================================================================
+  # 3. PersistentVector 性能回帰の原因特定
+  # ======================================================================
+  - id: "REQ-BOTTLENECK-003"
+    name: "PersistentVector の get/update 性能回帰を調査する"
+    priority: "P2 - Medium"
+    description: |
+      IAI ベンチマークで報告された get_sequential_1000 +163.9%、
+      update_1000 +20.8% の回帰を調査する。
+
+      Codex 分析結果:
+      - setup_vector_1000() が (0..1000).collect() を使用
+      - FromIterator の exact size 分岐で from_vec が選ばれる
+      - IAI が setup を測定に含める場合、構築経路の差が混入
+      - get/update のホットパス（find_child_index）は変更なし
+
+      調査観点:
+      1. IAI の比較ベースラインが正しいか
+      2. setup_vector_1000() の構築コストが測定に混入しているか
+      3. 回帰が実在するかの確認
+
+      重要: Codex 分析により、ホットパス自体に変更がないことが確認されているため、
+      find_child_index の最適化は本要件のスコープ外とする。
+      回帰が測定方法の問題である可能性が高いため、まず原因特定を優先する。
+
+    methods:
+      - name: "iai-callgrind の測定境界確認"
+        signature: "N/A"
+        description: |
+          iai-callgrind の #[bench::with_setup(...)] が setup コストを測定に含むかを実測確認する。
+
+          検証手順（Option A: 公式ドキュメント確認）:
+          - Cargo.toml で使用中の iai-callgrind バージョンを確認
+          - https://github.com/bheisler/iai-callgrind の該当バージョンの README を参照
+          - または crates.io のドキュメント: https://docs.rs/iai-callgrind/latest/
+          - #[bench::with_setup] が Ir（命令実行数）に setup を含めるか明記
+
+          検証手順（Option B: 実装ベンチで確認）:
+          - benches/iai/persistent_vector_iai.rs から get_sequential_1000 ベンチを複製
+          - 複製ベンチ A: 元の setup_vector_1000() を保持
+          - 複製ベンチ B: setup を削除し、static vec を事前準備（std::sync::OnceLock）
+          - 両ベンチを `cargo bench --bench persistent_vector_iai` で実行
+            （注: IAI ベンチは通常の criterion ではなく，iai-callgrind で実行される）
+          - 報告される Ir（命令実行数）を比較：
+            差分が 1000 要素分の Vec 確保（オーダー 10^4 程度）であれば setup 含有確定
+
+          測定対象指標: Ir（命令実行数）を採用
+          - iai-callgrind は決定的な測定を提供し、通常の Ir 揺らぎは < 1% （コンパイラ最適化による微小変動）
+          - 構築コスト（Vec::from_iter, Arc clone）は Ir に直結するため、Ir で検証可能
+          - Vec::from_iter(0..1000) の Ir はオーダー 10^4 〜 10^5 程度（環境・最適化レベルに依存）
+
+          重要: この確認なしに lazy_static 分離の妥当性が判断不可
+
+      - name: "git bisect で回帰コミット特定"
+        signature: "N/A"
+        description: |
+          前提: IAI の測定境界確認で setup が Ir に含まれることが確認されたら実施。
+
+          手順:
+          - 比較元: 407c67a（bulk construction 導入前、回帰報告前の最後のコミット）
+          - 比較先: a6ece16（bulk construction API 追加後）
+          - 環境固定:
+            - CPU ガバナ有効化（turbostat で確認）
+            - バックグラウンド負荷遮断（systemctl stop <unrelated-service>）
+            - ファイルキャッシュクリア（sync; echo 3 > /proc/sys/vm/drop_caches）
+
+          計測方法:
+          - 準備: 407c67a でのベースライン Ir を測定・記録
+            - `git checkout 407c67a && cargo bench --bench persistent_vector_iai --quiet 2>&1 | grep Ir`
+            - 出力例: `get_sequential_1000: Ir: 12345678`
+            - この値を base_ir_get_1000 として保存
+          - 各コミットで Ir を計測（same procedure）
+          - 対象ベンチ: get_sequential_1000, update_1000
+          - 計測スクリプト化（自動化必須）
+
+          合否判定アルゴリズム:
+          ```python
+          # コミット C での Ir 計測値から base_ir_get_1000 を計算
+          current_ir = measure_ir(commit_c, "get_sequential_1000")
+          regression_percent = ((current_ir - base_ir_get_1000) / base_ir_get_1000) * 100
+
+          # 判定
+          if regression_percent > 10:
+              return "BAD"  # 10% 以上悪化 -> git bisect bad
+          else:
+              return "GOOD"  # 10% 以内 -> git bisect good
+          ```
+
+          git bisect run の実装:
+          - benches/scripts/bisect_regression.sh を作成（bash）
+          - `git bisect run bash benches/scripts/bisect_regression.sh`
+          - script は以下を実施:
+            1. cargo bench --bench persistent_vector_iai --quiet 2>&1 の出力から Ir を抽出
+            2. get_sequential_1000 の Ir を取得
+            3. update_1000 の Ir を取得
+            4. 両ベンチについて (current_ir - base_ir) / base_ir > 0.10 ならば 1 (bad) で exit
+            5. そうでなければ 0 (good) で exit
+
+          具体例（benches/scripts/bisect_regression.sh）:
+          ```bash
+          #!/bin/bash
+          BASE_GET_1000=12345678  # 407c67a での計測値
+          BASE_UPDATE_1000=9876543
+
+          OUTPUT=$(cargo bench --bench persistent_vector_iai --quiet 2>&1)
+          CURRENT_GET_1000=$(echo "$OUTPUT" | grep "get_sequential_1000:" | grep -oP 'Ir: \K[0-9]+')
+          CURRENT_UPDATE_1000=$(echo "$OUTPUT" | grep "update_1000:" | grep -oP 'Ir: \K[0-9]+')
+
+          if (( CURRENT_GET_1000 == 0 || CURRENT_UPDATE_1000 == 0 )); then
+              echo "Failed to extract Ir from benchmark output"
+              exit 125  # skip this commit (bisect run の conventions)
+          fi
+
+          # 10% 以上の悪化をチェック（どちらかに当てはまれば bad）
+          GET_REGRESSION=$((( CURRENT_GET_1000 - BASE_GET_1000 ) * 100 / BASE_GET_1000))
+          UPDATE_REGRESSION=$((( CURRENT_UPDATE_1000 - BASE_UPDATE_1000 ) * 100 / BASE_UPDATE_1000))
+
+          if (( GET_REGRESSION > 10 || UPDATE_REGRESSION > 10 )); then
+              exit 1  # bad
+          else
+              exit 0  # good
+          fi
+          ```
+
+          実行方法:
+          ```
+          git bisect start 407c67a a6ece16
+          git bisect run bash benches/scripts/bisect_regression.sh
+          ```
+
+          Ir 計測の環境固定:
+          - CPU ガバナ設定（推奨、オプション）:
+            - callgrind は CPU clock ベースでなく命令数（Ir）を計測するため、
+              理論的にはガバナの影響は小さい
+            - ただし他の計測（キャッシュミスなど）への混入を避けるため推奨
+            - `echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor`
+          - キャッシュクリア（推奨、オプション）:
+            - VM の page cache による TLB hit が Ir に影響する可能性は低いが、
+              再現性向上のため各計測前に実施推奨
+            - `sync; echo 3 > /proc/sys/vm/drop_caches`（root 権限必要）
+          - バックグラウンド負荷排除（推奨）:
+            -他のプロセスが CPU 時間を消費すると callgrind の計測時間が延伸
+            - systemctl で不要なサービスを停止
+
+          iai-callgrind の Ir 計測精度:
+          - callgrind（Valgrind）は決定的な Ir 計測を提供
+          - 通常、同一環境での再測定は ≈ 0% 変動（コンパイラ / CPU 特性による微小変動 < 1%）
+          - 10% の閾値は「有意な変化」として保守的に設定
+
+          追加検証（bisect 完了後）:
+          - 特定されたコミットで FromIterator の exact size 分岐処理を確認
+          - src/persistent/vector.rs の from_iter 実装で、from_vec が呼び出されているか検証
+
+      - name: "std::sync::OnceLock による setup コスト分離"
+        signature: "N/A"
+        description: |
+          前提: IAI の測定境界確認で setup が Ir に含まれることが確認されたら実施。
+
+          実装選択:
+          - Rust 1.92.0（MSRV）は std::sync::OnceLock をサポート
+          - lazy_static は導入しない（依存関係削減、MSRV での利用可能な OnceLock を採用）
+
+          実装方法（OnceLock 使用）:
+          ```rust
+          use std::sync::OnceLock;
+          static LAZY_VEC: OnceLock<PersistentVector<i32>> = OnceLock::new();
+
+          fn init_lazy_vec() -> &'static PersistentVector<i32> {
+              LAZY_VEC.get_or_init(|| {
+                  PersistentVector::from_vec((0..1000).collect())
+              })
+          }
+          ```
+
+          ベンチマーク構造:
+          - 準備フェーズ: benchmark 実行開始前に `init_lazy_vec()` を呼び出し、初期化を強制完了
+            （init_lazy_vec() の呼び出しタイミングは cargo bench 起動後、最初のベンチより前）
+          - #[bench::with_setup(...)] の setup では init_lazy_vec().clone() を実行
+          - clone コスト（Arc increment/decrement）は Ir に含まれる（期待値: ~10 命令、環境由来で変動）
+          - Vec 確保（数 k 〜 10k 命令、環境由来）と From Iterator（数 10k 命令、環境由来）は
+            setup コストに分離され、ベンチ Ir には含まれない
+
+          初期化タイミングと Ir 管理:
+          - OnceLock は初回 get_or_init() で初期化される（Mutex acquire + data init + Mutex release）
+          - 初期化の Ir（オーダー: 100 命令程度、環境由来で変動）は最初の bench で発生する可能性
+          - これを避けるため、benches/iai/persistent_vector_iai.rs の iai_callgrind::main! マクロ前で
+            `init_lazy_vec()` を明示的に呼び出し、初期化を測定外で完了させる
+
+          実装例（benches/iai/persistent_vector_iai.rs）:
+          ```rust
+          use std::sync::OnceLock;
+          use iai_callgrind::{black_box, main};
+
+          static LAZY_VEC_1000: OnceLock<PersistentVector<i32>> = OnceLock::new();
+
+          fn init_lazy_vec_1000() -> &'static PersistentVector<i32> {
+              LAZY_VEC_1000.get_or_init(|| {
+                  PersistentVector::from_vec((0..1000).collect())
+              })
+          }
+
+          // iai_callgrind::main! マクロ前にウォームアップを実施
+          fn main() {
+              // 初期化を計測外で実施
+              init_lazy_vec_1000();
+              // 以降、iai_callgrind::main! で定義されたベンチが実行される
+          }
+
+          iai_callgrind::main! {
+              #[bench::with_setup(|| init_lazy_vec_1000().clone())]
+              fn get_sequential_1000(vec: PersistentVector<i32>) {
+                  for i in 0..1000 {
+                      let _ = black_box(vec.get(i));
+                  }
+              }
+          }
+          ```
+
+          - 以降のベンチ実行では OnceLock::get().clone() だけで測定対象となり、
+            clone の Arc increment/decrement は オーダー: 10 命令程度
+
+          複数サイズでのキャッシュ・分岐予測 bias 検出:
+          - static ベクトルはメモリ位置が固定となり、キャッシュ親和性が上がる可能性
+          - 実運用環境では毎回新規生成されるため、複数サイズでの傾向を確認
+
+          追加ベンチ（既存の setup 分離後に実装）:
+          - get_sequential_100, get_sequential_10000 を追加
+            （既存: get_sequential_1000）
+          - update_100, update_10000 を追加
+            （既存: update_1000）
+          - 各サイズで static vec を生成（OnceLock: LAZY_VEC_100, LAZY_VEC_1000, LAZY_VEC_10000）
+
+          bias 判定方法:
+          1. 各サイズで 407c67a（ベースライン）と a6ece16（現在）の Ir を計測
+          2. 各サイズごとに回帰率を計算: (current_ir - base_ir) / base_ir * 100
+          3. 回帰率が（サイズに依存した傾向 vs サイズに無関係な一貫性）で分析
+
+          bias 判定基準:
+          - サイズ 100, 1000, 10000 すべてで回帰率が < 10% または > 10% で一貫
+            -> キャッシュ親和性による bias 疑いは低い、ホットパス変更の可能性が高い
+          - サイズに応じて回帰率が変化（例：1000 のみ大きく悪化、100/10000 は < 10%）
+            -> キャッシュ親和性やメモリ効果（L3 キャッシュ容量との関係）を示唆
+          - 回帰率が size に比例（例：100 +5%, 1000 +50%, 10000 +500%）
+            -> per-element の不効率性を示唆（ホットパス最適化不足）
+
+          補助: 動的生成との比較（オプション、精度向上目的）:
+          - bench_get_dynamic_1000: ベンチ内で毎回 Vec を生成して get を実行
+          - bench_update_dynamic_1000: ベンチ内で毎回 Vec を生成して update を実行
+          - static ベクトルとの Ir 差分がサイズ依存でなければ、bias は最小
+
+      - name: "構築経路専用ベンチの追加"
+        signature: "N/A"
+        description: |
+          get/update の回帰とは別に、構築ベンチを追加して仮説（from_vec 経路混入）を検証。
+
+          新規ベンチの設計（IAI の with_setup が Ir に含まれる前提）:
+          ```rust
+          // with_setup での Vec 生成は Ir に含まれる（setup コスト分離対象外）
+          #[bench::with_setup(|| {
+              let vec = Vec::from_iter(0..1000);
+              vec.clone()
+          })]
+          fn bench_construct_from_vec(vec: Vec<i32>) {
+              let _ = iai_callgrind::black_box(PersistentVector::from_vec(vec));
+          }
+
+          #[bench::with_setup(|| {
+              let vec = Vec::from_iter(0..1000);
+              vec.clone()
+          })]
+          fn bench_construct_from_iter(vec: Vec<i32>) {
+              let _ = iai_callgrind::black_box(vec.into_iter().collect::<PersistentVector<_>>());
+          }
+          ```
+
+          測定境界の明確化（IAI with_setup が Ir に含まれる場合）:
+          - setup: Vec::from_iter(0..1000) + clone（Ir に含まれる）
+          - ベンチ本体: PersistentVector 構築（Ir に含まれる）
+          - 比較対象: from_vec vs from_iter による「PersistentVector 構築」の Ir 差分
+
+          実装ポイント:
+          - 両ベンチで同一 Vec を入力とするため、setup コストは相殺される
+          - 測定される差分は「Vec から PersistentVector への変換効率」
+          - 期待値：from_vec が from_iter より Ir が小さい（from_vec の最適化効果）
+
+          検証内容:
+          - Ir 差分が Codex 分析の「from_vec 経路混入」仮説と一致するかを確認
+          - 両ベンチの Ir 差分 < 10% なら Codex 分析（from_vec は既に最適）と判定
+          - Ir 差分 > 10% なら from_vec 経路での性能改善余地ありと判定
+
+    implementations:
+      - type: "benches/iai/persistent_vector_iai.rs"
+        description: |
+          - std::sync::OnceLock を使用した static ベクトル定義
+            （LAZY_VEC_100, LAZY_VEC_1000, LAZY_VEC_10000）
+          - main() 関数で計測前に init_lazy_vec() を呼び出し、初期化を強制完了
+          - 既存の get_sequential_1000 / update_1000 の setup を分離（clone のみ）
+          - サイズ別ベンチの追加（100, 1000, 10000）
+          - 構築経路専用ベンチの追加（bench_construct_from_vec vs bench_construct_from_iter）
+
+    validation:
+      - description: "iai-callgrind の GitHub/crates.io ドキュメント確認、or 実装ベンチで #[bench::with_setup] が Ir に setup を含めることを実測確認"
+      - description: "実装ベンチ（get_sequential_1000 setup あり vs なし）の Ir 差分が Vec::from_iter のコスト（オーダー 10^4）と一致"
+      - description: "git bisect で bisect_regression.sh を使用し、回帰コミット（Ir > 10%）を特定"
+      - description: "特定されたコミットの diff で FromIterator/from_vec 導入との関連性を検証"
+      - description: "OnceLock 초始化を main() で済ませた状態で、初回ベンチ後のウォームアップが stable（Ir 변동 < 1%）"
+      - description: "構築経路ベンチ（bench_construct_from_vec vs bench_construct_from_iter）で Ir 差分を測定、from_vec の効率化の有無を確認"
+      - description: "複数サイズ（100, 1000, 10000）での IAI 測定でサイズ別回帰率を記録、bias 判定（サイズ依存 vs 一貫性）を実施"
+      - description: "OnceLock 分離後の get_sequential_1000 / update_1000 で、baseline（407c67a）との Ir 比較を実施"
+      - description: "回帰の原因分類（setup 混入 vs ホットパス変更 vs キャッシュ親和性）を実施し、docs/internal/analysis/REQ-BOTTLENECK-003-analysis.yaml に記録"
+
+    notes:
+      - "find_child_index の最適化は本要件のスコープ外"
+      - "将来的な性能改善として EXT-003 に記載"
+      - "std::sync::OnceLock を採用（Rust 1.92.0 で利用可能、依存関係無し）"
+      - "iai-callgrind の Ir 計測は決定的であり、環境固定（CPU ガバナ等）が再現性に重要"
+      - "git bisect の 10% 閾値は iai-callgrind の計測精度（< 1% 再現性）を考慮した選定"
+      - "複数サイズ測定は static vec のキャッシュ親和性による bias を検出するための必須手順"
+      - "bisect_regression.sh は git bisect run で自動実行、exit code で合否判定"
+      - "OnceLock 初期化は main() で計測前に済ませ、以後は clone のみが Ir に含まれる"
+      - "回帰原因の特定結果は docs/internal/analysis/REQ-BOTTLENECK-003-analysis.yaml に記録"
+
+  # ======================================================================
+  # 4. SearchIndex での bulk construction 効果測定
+  # ======================================================================
+  - id: "REQ-BOTTLENECK-004"
+    name: "SearchIndex での bulk construction API の効果を測定する"
+    priority: "P1 - High"
+    description: |
+      benches/api/src/api/query.rs で使用している bulk construction API
+      （from_sorted_vec）の効果を、API ベンチマークで測定する。
+
+      対象 API:
+      - tasks_bulk (バルク挿入、SearchIndex::apply_changes を使用)
+      - tasks_search (検索、SearchIndex の iter_sorted を使用)
+
+      測定指標:
+      - レイテンシ（p50, p90, p99）
+      - スループット（rps）
+      - プロファイリング（flamegraph、hot functions）
+
+      比較:
+      - Before: fold + insert ループ（コミット 407c67a）
+      - After: from_sorted_vec（コミット a6ece16）
+
+    methods:
+      - name: "tasks_bulk のプロファイリング比較"
+        signature: "N/A"
+        description: |
+          git checkout で Before/After を切り替え、API ベンチマークを実行。
+
+          Before: 407c67a（bulk construction 導入前）
+          After: a6ece16（bulk construction 導入後）
+
+          測定環境の固定:
+          - データベース: 同一データ、同一スキーマ
+          - 負荷パターン: 同一 wrk スクリプト、同一コンテンション設定
+          - ハードウェア: 同一マシン（CPU/メモリ）
+          - OS 状態: ベンチマーク前に再起動してキャッシュクリア
+
+          測定内容:
+          - wrk によるスループット測定
+          - perf record によるプロファイリング（権限要: CAP_PERFMON または root）
+          - flamegraph での hot function 比較
+
+          期待される改善:
+          - TransientVector::push_back の削減
+          - Arc::drop_slow の削減
+          - malloc/cfree の削減
+
+          制約:
+          - perf は権限が必要（Docker 環境では --cap-add=SYS_ADMIN または --cap-add=CAP_PERFMON）
+          - /proc/sys/kernel/perf_event_paranoid を 1 以下に設定（検証専用環境で実施）
+          - 本番環境では perf を使用せず、flamegraph のみ（権限不要）
+          - 測定環境のばらつきを考慮し、5 回測定の中央値を採用
+
+          セキュリティ注意:
+          - perf のための権限緩和は検証専用環境でのみ実施
+          - 本番環境では perf を使用しない
+
+      - name: "tasks_search のレイテンシ比較"
+        signature: "N/A"
+        description: |
+          SearchIndex の iter_sorted を使用する tasks_search での効果を測定。
+
+          測定内容:
+          - p50, p90, p99 レイテンシ
+          - iter_sorted の呼び出し回数とコスト
+
+          注意点:
+          - iter_sorted は Large 状態で O(n log n) のソートが発生
+          - マージ頻度が高い場合は性能影響がある可能性
+
+    implementations:
+      - type: "benches/api/benchmarks/run.sh"
+        description: |
+          Before/After の切り替えとプロファイリングを自動化。
+
+      - type: "docs/internal/analysis/bulk_construction_effect.yaml"
+        description: |
+          測定結果を記録し、改善効果を可視化。
+
+    validation:
+      - description: "tasks_bulk で TransientVector::push_back が 50% 以上削減"
+      - description: "tasks_bulk で Arc::drop_slow が 30% 以上削減"
+      - description: "tasks_search のレイテンシが 10% 以上改善"
+
+# 非機能要件
+non_functional_requirements:
+  performance:
+    - "bulk construction API は既存の insert ループより 2x 以上高速であること（criterion ベンチマーク、10000 要素）"
+    - "PersistentVector の get/update は回帰前の性能を維持または改善すること（IAI ベンチマーク、setup コスト除外後）"
+    - "SearchIndex の iter_sorted は Large 状態で 1000 要素あたり 1ms 以内であること（測定環境: Intel Core i7, 16GB RAM, Linux）"
+
+  measurement_environment:
+    - "criterion ベンチマーク: cargo bench --bench <name>"
+    - "IAI ベンチマーク: cargo bench --bench <name> --features iai"
+    - "API ベンチマーク: Docker Compose 環境（benches/api/compose.ci.yaml）"
+    - "プロファイリング: perf + flamegraph（Linux のみ、権限要）"
+    - "測定回数: 5 回の中央値を採用（ばらつき考慮）"
+
+  compatibility:
+    - "既存の API 仕様を変更しないこと"
+    - "テストが全て通過すること"
+    - "clippy 警告がゼロであること"
+
+  testing:
+    - "bulk construction API の単体テストカバレッジ 100%"
+    - "proptest で sorted/dedup 前提条件の検証"
+    - "IAI ベンチマークで回帰検出を自動化"
+
+# 実装優先度
+implementation_priority:
+  phase_1_critical:
+    - id: "REQ-BOTTLENECK-001"
+      reason: "41% エラー率の切り分けが最優先（機能不全の可能性）"
+
+  phase_2_high:
+    - id: "REQ-BOTTLENECK-002"
+      reason: "bulk construction API の効果測定がないと改善検証不可"
+    - id: "REQ-BOTTLENECK-004"
+      reason: "SearchIndex での実効果を可視化"
+
+  phase_3_medium:
+    - id: "REQ-BOTTLENECK-003"
+      reason: "回帰が IAI の測定方法による可能性があるため、Phase 1/2 の結果を見て判断"
+
+# 将来の拡張
+future_extensions:
+  - id: "EXT-001"
+    name: "OrderedUniqueSet の Large 状態での iter_sorted キャッシュ"
+    description: |
+      Large 状態の iter_sorted は毎回 O(n log n) のソートが発生する。
+      頻繁にイテレートする場合、sorted vec をキャッシュすることで高速化可能。
+    rationale: |
+      現時点では SearchIndex のマージ時のみ使用し、頻度が低いため優先度低。
+      将来的に iter_sorted の呼び出し頻度が高くなった場合に検討。
+
+  - id: "EXT-002"
+    name: "PersistentVector の RRB-Tree 化"
+    description: |
+      現在の実装は Radix Balanced Tree で、concat が O(n) のコピーになる。
+      RRB-Tree に置き換えることで、concat/append を O(log n) に改善可能。
+    rationale: |
+      profiling-analysis.yaml で既に Issue 化済み。
+      concat が性能ボトルネックになった場合に優先度を上げる。
+
+  - id: "EXT-003"
+    name: "find_child_index の最適化"
+    description: |
+      通常ノードではビット演算で高速化し、RRB ノードのみ size_table を使用。
+      さらに、size_table の線形探索を SIMD で並列化することも検討可能。
+
+      最適化案:
+      - Phase 1: 通常ノード向けビット演算（target_index >> BITS_PER_LEVEL）
+      - Phase 2: SIMD による size_table 並列探索
+    rationale: |
+      Codex 分析により、現在のホットパス（find_child_index）は変更されていないことが
+      確認されている。性能回帰が測定方法の問題であることが判明した場合、
+      本最適化は不要となる可能性が高い。
+
+      将来的に get/update の性能改善が必要になった場合に検討する。

@@ -1,0 +1,765 @@
+# REQ-BOTTLENECK-004 分析結果
+#
+# SearchIndex での bulk construction API 効果測定の分析記録
+#
+# 参照:
+#   - docs/internal/requirements/20260131_1100_bulk_construction_api_bottleneck_remediation.yaml
+#   - benches/api/src/api/query.rs
+
+version: "1.0.0"
+created: "2026-01-31"
+updated: "2026-01-31"
+
+# ====================================================================
+# 1. 測定対象と目的
+# ====================================================================
+measurement_objective:
+  description: |
+    SearchIndex での bulk construction API（from_sorted_vec）の効果を測定し、
+    以下の観点で改善を定量化する:
+    1. TransientVector::push_back の削減
+    2. Arc::drop_slow の削減
+    3. malloc/cfree の削減
+    4. tasks_bulk のレイテンシ改善
+    5. tasks_search のレイテンシ改善
+
+  target_apis:
+    - name: "tasks_bulk"
+      description: "バルク挿入、SearchIndex::apply_changes を使用"
+      expected_improvement: "TransientVector::push_back 50% 削減、Arc::drop_slow 30% 削減"
+
+    - name: "tasks_search"
+      description: "検索、SearchIndex の iter_sorted を使用"
+      expected_improvement: "レイテンシ 10% 改善"
+
+  comparison:
+    before:
+      commit: "407c67a"
+      description: "Merge pull request #252（bulk construction 導入前）"
+      implementation: "fold + insert ループ"
+
+    after:
+      commit: "a6ece16"
+      description: "feat(persistent): add bulk construction APIs for OrderedUniqueSet and PersistentVector"
+      implementation: "from_sorted_vec（bulk construction API）"
+
+# ====================================================================
+# 2. 測定環境
+# ====================================================================
+measurement_environment:
+  hardware:
+    cpu: "TBD"  # 実測時に記録
+    memory: "TBD"  # 実測時に記録
+    os: "TBD"  # 実測時に記録
+    kernel: "TBD"  # 実測時に記録
+
+  software:
+    docker_version: "TBD"
+    postgres_version: "TBD"
+    redis_version: "TBD"
+    rust_version: "1.92.0"
+
+  environment_setup:
+    database:
+      - "同一データ、同一スキーマを使用"
+      - "ベンチマーク前に DB を再初期化（docker compose down && docker compose up）"
+
+    cache:
+      - "理想: ベンチマーク前にシステムを再起動してキャッシュをクリア"
+      - "代替案（再起動が困難な場合）: OS キャッシュをクリア（sync; echo 3 | sudo tee /proc/sys/vm/drop_caches）+ Docker コンテナ再起動（docker compose -f docker/compose.ci.yaml restart）"
+      - "測定精度を最大化するには再起動を推奨"
+
+    load_pattern:
+      - "同一 wrk スクリプト、同一コンテンション設定を使用"
+      - "benches/api/benchmarks/scenarios/*.yaml で定義"
+
+    cpu_governor:
+      - "CPU ガバナを performance に設定（推奨）"
+      - "echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor"
+
+    measurement_rounds:
+      - "5 回測定し、中央値を採用（ばらつき考慮）"
+      - "各測定間で 10 秒のウォームアップ期間を確保"
+
+  constraints:
+    perf_permissions:
+      - "perf record は権限が必要（CAP_PERFMON または root）"
+      - "Docker 環境では --cap-add=SYS_ADMIN または --cap-add=CAP_PERFMON"
+      - "/proc/sys/kernel/perf_event_paranoid を 1 以下に設定"
+      - "検証専用環境でのみ実施（本番環境では perf を使用しない）"
+
+    security_note:
+      - "perf のための権限緩和は検証専用環境でのみ実施"
+      - "本番環境では perf を使用しない"
+      - "代替手段（権限不要）: cargo flamegraph --root（CARGO_PROFILE_RELEASE_DEBUG=true で dwarf 情報を含める）"
+      - "cargo flamegraph は perf なしで動作し、--root で sudo 権限のみで実行可能"
+
+# ====================================================================
+# 3. 測定指標
+# ====================================================================
+measurement_metrics:
+  latency:
+    description: "API レスポンスタイムの分布"
+    metrics:
+      - name: "p50"
+        unit: "ms"
+        description: "中央値レイテンシ"
+      - name: "p90"
+        unit: "ms"
+        description: "90 パーセンタイルレイテンシ"
+      - name: "p99"
+        unit: "ms"
+        description: "99 パーセンタイルレイテンシ"
+
+    measurement_tool: "wrk（HTTP ベンチマークツール）"
+    measurement_script: "benches/api/benchmarks/run_benchmark.sh"
+
+  throughput:
+    description: "秒あたりのリクエスト処理数"
+    metrics:
+      - name: "rps"
+        unit: "requests/sec"
+        description: "スループット"
+
+    measurement_tool: "wrk"
+    measurement_script: "benches/api/benchmarks/run_benchmark.sh"
+
+  profiling:
+    description: "CPU プロファイリング結果"
+    metrics:
+      - name: "hot_functions"
+        unit: "% of total samples"
+        description: "ホットパス関数の CPU 時間占有率"
+        target_functions:
+          - "TransientVector::push_back"
+          - "Arc::drop_slow"
+          - "malloc/cfree"
+          - "OrderedUniqueSet::insert"
+          - "OrderedUniqueSet::from_sorted_vec"
+
+      - name: "flamegraph"
+        unit: "visual"
+        description: "CPU プロファイリングの可視化"
+        output_format: "SVG"
+
+    measurement_tool: "perf record + flamegraph（または cargo flamegraph）"
+    measurement_script: "手動実行（benches/scripts/profile_api.sh は将来の自動化オプション）"
+
+    constraints:
+      - "perf は Linux 環境でのみ利用可能"
+      - "権限が必要（CAP_PERFMON または root）"
+      - "Docker 環境では --cap-add=SYS_ADMIN または --cap-add=CAP_PERFMON"
+
+    alternative_without_perf:
+      - "cargo flamegraph --root --bin <target> を使用（CARGO_PROFILE_RELEASE_DEBUG=true で dwarf 情報を含める）"
+      - "権限: sudo のみ（perf の CAP_PERFMON より緩い）"
+      - "制約: API サーバーを直接起動する必要があり、wrk での負荷テストとの統合が困難"
+
+# ====================================================================
+# 4. 測定手順
+# ====================================================================
+measurement_procedure:
+  phase_1_baseline:
+    step: 1
+    description: "Before（407c67a）での測定"
+    steps:
+      - action: "git checkout 407c67a"
+        verification: "git log -1 --oneline で確認"
+
+      - action: "cargo build --release"
+        verification: "ビルド成功を確認"
+
+      - action: "Docker Compose で環境を起動"
+        command: "cd benches/api && docker compose -f docker/compose.ci.yaml up -d"
+        verification: "docker compose -f docker/compose.ci.yaml ps で全サービスが running を確認"
+        note: |
+          API サーバーはデフォルト設定で起動される。
+          run_benchmark.sh 実行時にシナリオファイルから環境変数が読み込まれ、
+          ベンチマーク結果のメタデータに記録される。
+          現状の手順では API サーバー自体の設定は変更されないが、
+          測定環境の固定という観点では同一条件が維持される。
+
+      - action: "データベースを初期化"
+        verification: "benches/api/docker/postgres/init.sql が適用されていることを確認"
+
+      - action: "profiling-results ディレクトリ作成"
+        command: "mkdir -p benches/api/benchmarks/profiling-results"
+        verification: "ディレクトリが存在することを確認"
+
+      - action: "flamegraph ツールのインストール（未インストールの場合）"
+        command: |
+          if ! command -v flamegraph &> /dev/null; then
+            cargo install flamegraph
+          fi
+        verification: "flamegraph コマンドが利用可能であることを確認"
+
+      - action: "ウォームアップ実行（10 秒）"
+        command: "wrk -t4 -c100 -d10s http://localhost:3002/tasks"
+
+      - action: "tasks_bulk ベンチマーク実行（5 回）"
+        command: |
+          cd benches/api
+          for i in {1..5}; do
+            ./benchmarks/run_benchmark.sh --scenario benchmarks/scenarios/tasks_bulk.yaml
+            # 結果を profiling-results にコピー（最新のタイムスタンプディレクトリから）
+            LATEST_RESULT=$(ls -td benchmarks/results/*/tasks_bulk 2>/dev/null | head -1)
+            if [ -n "${LATEST_RESULT}" ]; then
+              cp "${LATEST_RESULT}"/meta.json benchmarks/profiling-results/api-407c67a-tasks_bulk-run${i}-meta.json
+              cp "${LATEST_RESULT}"/meta_extended.json benchmarks/profiling-results/api-407c67a-tasks_bulk-run${i}-extended.json 2>/dev/null || true
+            fi
+          done
+        output: "benches/api/benchmarks/profiling-results/api-407c67a-tasks_bulk-run{1..5}-*.json"
+        note: "結果は benchmarks/results/<timestamp>/tasks_bulk/ に保存されるため、meta.json と meta_extended.json を profiling-results/ にコピー"
+
+      - action: "tasks_search ベンチマーク実行（5 回）"
+        command: |
+          cd benches/api
+          for i in {1..5}; do
+            ./benchmarks/run_benchmark.sh --scenario benchmarks/scenarios/tasks_search.yaml
+            # 結果を profiling-results にコピー（最新のタイムスタンプディレクトリから）
+            LATEST_RESULT=$(ls -td benchmarks/results/*/tasks_search 2>/dev/null | head -1)
+            if [ -n "${LATEST_RESULT}" ]; then
+              cp "${LATEST_RESULT}"/meta.json benchmarks/profiling-results/api-407c67a-tasks_search-run${i}-meta.json
+              cp "${LATEST_RESULT}"/meta_extended.json benchmarks/profiling-results/api-407c67a-tasks_search-run${i}-extended.json 2>/dev/null || true
+            fi
+          done
+        output: "benches/api/benchmarks/profiling-results/api-407c67a-tasks_search-run{1..5}-*.json"
+        note: "結果は benchmarks/results/<timestamp>/tasks_search/ に保存されるため、meta.json と meta_extended.json を profiling-results/ にコピー"
+
+      - action: "perf record でプロファイリング（tasks_search）"
+        command: "cd benches/api && perf record -F 99 -g -o benchmarks/profiling-results/perf-407c67a-tasks_search.data -- wrk -t8 -c100 -d60s -s benchmarks/scripts/tasks_search.lua http://localhost:3002"
+        output: "benches/api/benchmarks/profiling-results/perf-407c67a-tasks_search.data"
+        note: "iter_sorted の CPU 時間占有率とサンプル比率を測定（flamegraph で確認）。wrk パラメータはシナリオ（threads=8, connections=100）に合わせる"
+        prerequisites: |
+          - perf_event_paranoid を 1 以下に設定: echo 1 | sudo tee /proc/sys/kernel/perf_event_paranoid
+          - Docker 環境では --cap-add=CAP_PERFMON または --cap-add=SYS_ADMIN
+
+      - action: "flamegraph 生成（tasks_search）"
+        command: "cd benches/api/benchmarks/profiling-results && perf script -i perf-407c67a-tasks_search.data | flamegraph > flamegraph-407c67a-tasks_search.svg"
+        output: "benches/api/benchmarks/profiling-results/flamegraph-407c67a-tasks_search.svg"
+
+      - action: "perf record でプロファイリング（tasks_bulk）"
+        command: "cd benches/api && perf record -F 99 -g -o benchmarks/profiling-results/perf-407c67a-tasks_bulk.data -- wrk -t4 -c30 -d60s -s benchmarks/scripts/tasks_bulk.lua http://localhost:3002"
+        output: "benches/api/benchmarks/profiling-results/perf-407c67a-tasks_bulk.data"
+        note: "権限が必要（検証専用環境でのみ実施）。wrk パラメータはシナリオ（threads=4, connections=30）に合わせる"
+
+      - action: "flamegraph 生成（tasks_bulk）"
+        command: "cd benches/api/benchmarks/profiling-results && perf script -i perf-407c67a-tasks_bulk.data | flamegraph > flamegraph-407c67a-tasks_bulk.svg"
+        output: "benches/api/benchmarks/profiling-results/flamegraph-407c67a-tasks_bulk.svg"
+
+      - action: "Docker Compose 停止"
+        command: "cd benches/api && docker compose -f docker/compose.ci.yaml down"
+
+  phase_2_after:
+    step: 2
+    description: "After（a6ece16）での測定"
+    steps:
+      - action: "git checkout a6ece16"
+        verification: "git log -1 --oneline で確認"
+
+      - action: "cargo build --release"
+        verification: "ビルド成功を確認"
+
+      - action: "Docker Compose で環境を起動"
+        command: "cd benches/api && docker compose -f docker/compose.ci.yaml up -d"
+        verification: "docker compose -f docker/compose.ci.yaml ps で全サービスが running を確認"
+        note: |
+          API サーバーはデフォルト設定で起動される。
+          run_benchmark.sh 実行時にシナリオファイルから環境変数が読み込まれ、
+          ベンチマーク結果のメタデータに記録される。
+          現状の手順では API サーバー自体の設定は変更されないが、
+          測定環境の固定という観点では同一条件が維持される。
+
+      - action: "データベースを初期化"
+        verification: "benches/api/docker/postgres/init.sql が適用されていることを確認"
+
+      - action: "ウォームアップ実行（10 秒）"
+        command: "wrk -t4 -c100 -d10s http://localhost:3002/tasks"
+
+      - action: "tasks_bulk ベンチマーク実行（5 回）"
+        command: |
+          cd benches/api
+          for i in {1..5}; do
+            ./benchmarks/run_benchmark.sh --scenario benchmarks/scenarios/tasks_bulk.yaml
+            # 結果を profiling-results にコピー（最新のタイムスタンプディレクトリから）
+            LATEST_RESULT=$(ls -td benchmarks/results/*/tasks_bulk 2>/dev/null | head -1)
+            if [ -n "${LATEST_RESULT}" ]; then
+              cp "${LATEST_RESULT}"/meta.json benchmarks/profiling-results/api-a6ece16-tasks_bulk-run${i}-meta.json
+              cp "${LATEST_RESULT}"/meta_extended.json benchmarks/profiling-results/api-a6ece16-tasks_bulk-run${i}-extended.json 2>/dev/null || true
+            fi
+          done
+        output: "benches/api/benchmarks/profiling-results/api-a6ece16-tasks_bulk-run{1..5}-*.json"
+        note: "結果は benchmarks/results/<timestamp>/tasks_bulk/ に保存されるため、meta.json と meta_extended.json を profiling-results/ にコピー"
+
+      - action: "tasks_search ベンチマーク実行（5 回）"
+        command: |
+          cd benches/api
+          for i in {1..5}; do
+            ./benchmarks/run_benchmark.sh --scenario benchmarks/scenarios/tasks_search.yaml
+            # 結果を profiling-results にコピー（最新のタイムスタンプディレクトリから）
+            LATEST_RESULT=$(ls -td benchmarks/results/*/tasks_search 2>/dev/null | head -1)
+            if [ -n "${LATEST_RESULT}" ]; then
+              cp "${LATEST_RESULT}"/meta.json benchmarks/profiling-results/api-a6ece16-tasks_search-run${i}-meta.json
+              cp "${LATEST_RESULT}"/meta_extended.json benchmarks/profiling-results/api-a6ece16-tasks_search-run${i}-extended.json 2>/dev/null || true
+            fi
+          done
+        output: "benches/api/benchmarks/profiling-results/api-a6ece16-tasks_search-run{1..5}-*.json"
+        note: "結果は benchmarks/results/<timestamp>/tasks_search/ に保存されるため、meta.json と meta_extended.json を profiling-results/ にコピー"
+
+      - action: "perf record でプロファイリング（tasks_search）"
+        command: "cd benches/api && perf record -F 99 -g -o benchmarks/profiling-results/perf-a6ece16-tasks_search.data -- wrk -t8 -c100 -d60s -s benchmarks/scripts/tasks_search.lua http://localhost:3002"
+        output: "benches/api/benchmarks/profiling-results/perf-a6ece16-tasks_search.data"
+        note: "iter_sorted の CPU 時間占有率とサンプル比率を測定（flamegraph で確認）。wrk パラメータはシナリオ（threads=8, connections=100）に合わせる"
+
+      - action: "flamegraph 生成（tasks_search）"
+        command: "cd benches/api/benchmarks/profiling-results && perf script -i perf-a6ece16-tasks_search.data | flamegraph > flamegraph-a6ece16-tasks_search.svg"
+        output: "benches/api/benchmarks/profiling-results/flamegraph-a6ece16-tasks_search.svg"
+
+      - action: "perf record でプロファイリング（tasks_bulk）"
+        command: "cd benches/api && perf record -F 99 -g -o benchmarks/profiling-results/perf-a6ece16-tasks_bulk.data -- wrk -t4 -c30 -d60s -s benchmarks/scripts/tasks_bulk.lua http://localhost:3002"
+        output: "benches/api/benchmarks/profiling-results/perf-a6ece16-tasks_bulk.data"
+        note: "権限が必要（検証専用環境でのみ実施）。wrk パラメータはシナリオ（threads=4, connections=30）に合わせる"
+
+      - action: "flamegraph 生成（tasks_bulk）"
+        command: "cd benches/api/benchmarks/profiling-results && perf script -i perf-a6ece16-tasks_bulk.data | flamegraph > flamegraph-a6ece16-tasks_bulk.svg"
+        output: "benches/api/benchmarks/profiling-results/flamegraph-a6ece16-tasks_bulk.svg"
+
+      - action: "Docker Compose 停止"
+        command: "cd benches/api && docker compose -f docker/compose.ci.yaml down"
+
+  phase_3_analysis:
+    step: 3
+    description: "測定結果の分析と比較"
+    steps:
+      - action: "中央値を計算（5 回測定）"
+        description: "各指標で中央値を採用"
+
+      - action: "レイテンシ比較"
+        description: "p50, p90, p99 の Before/After 比較"
+
+      - action: "スループット比較"
+        description: "rps の Before/After 比較"
+
+      - action: "プロファイリング比較"
+        description: |
+          flamegraph での hot function の CPU 時間占有率を比較:
+          - tasks_bulk: TransientVector::push_back の削減率
+          - tasks_bulk: Arc::drop_slow の削減率
+          - tasks_bulk: malloc/cfree の削減率
+          - tasks_search: iter_sorted の CPU 時間占有率とサンプル比率
+          - tasks_search: iter_sorted の呼び出し頻度を flamegraph で定性的に評価（before/after 比較）
+
+      - action: "検証基準の判定"
+        description: |
+          以下の基準を満たすかを確認:
+          - tasks_bulk で TransientVector::push_back が 50% 以上削減
+          - tasks_bulk で Arc::drop_slow が 30% 以上削減
+          - tasks_search のレイテンシが 10% 以上改善
+
+# ====================================================================
+# 5. 測定結果（実測後に記録）
+# ====================================================================
+# 注記: 本ファイルは詳細な測定データを記録する。
+#
+# 要件定義との差異:
+#   - 要件定義は benches/api/benchmarks/run.sh と docs/internal/analysis/bulk_construction_effect.yaml を参照
+#   - 実際のファイル名は benches/api/benchmarks/run_benchmark.sh と本ファイル（REQ-BOTTLENECK-004-analysis.yaml）
+#   - 要件定義は benches/api/compose.ci.yaml を参照、実際は benches/api/docker/compose.ci.yaml
+#   - 本ドキュメントでは実際のパスを使用
+#   - 要件定義の更新は別 PR で対応予定（ファイル名の整合性を取る）
+#
+# サマリー記録:
+#   - 改善率と検証基準の合否は validation_results セクションに記録
+#   - 別ファイル（bulk_construction_effect.yaml）は作成せず、本ファイルに統合
+measurement_results:
+  tasks_bulk:
+    before:
+      commit: "407c67a"
+      latency:
+        p50: null  # 実測後に記録
+        p90: null
+        p99: null
+        unit: "ms"
+      throughput:
+        rps: null
+        unit: "requests/sec"
+      profiling:
+        hot_functions:
+          - name: "TransientVector::push_back"
+            percentage: null
+            unit: "% of total samples"
+          - name: "Arc::drop_slow"
+            percentage: null
+            unit: "% of total samples"
+          - name: "malloc/cfree"
+            percentage: null
+            unit: "% of total samples"
+        flamegraph: "benches/api/benchmarks/profiling-results/flamegraph-407c67a-tasks_bulk.svg"
+
+    after:
+      commit: "a6ece16"
+      latency:
+        p50: null
+        p90: null
+        p99: null
+        unit: "ms"
+      throughput:
+        rps: null
+        unit: "requests/sec"
+      profiling:
+        hot_functions:
+          - name: "TransientVector::push_back"
+            percentage: null
+            unit: "% of total samples"
+            note: "bulk construction により削減されることを期待（before との比較用）"
+          - name: "OrderedUniqueSet::from_sorted_vec"
+            percentage: null
+            unit: "% of total samples"
+            note: "bulk construction API の新規追加により出現"
+          - name: "Arc::drop_slow"
+            percentage: null
+            unit: "% of total samples"
+          - name: "malloc/cfree"
+            percentage: null
+            unit: "% of total samples"
+        flamegraph: "benches/api/benchmarks/profiling-results/flamegraph-a6ece16-tasks_bulk.svg"
+
+    improvement:
+      latency:
+        p50:
+          value: null
+          unit: "%"
+          calculation: "((after - before) / before) * 100"
+        p90:
+          value: null
+          unit: "%"
+          calculation: "((after - before) / before) * 100"
+        p99:
+          value: null
+          unit: "%"
+          calculation: "((after - before) / before) * 100"
+
+      throughput:
+        rps:
+          value: null
+          unit: "%"
+          calculation: "((after - before) / before) * 100"
+
+      profiling:
+        transient_vector_push_back_reduction:
+          value: null
+          unit: "%"
+          calculation: "((before - after) / before) * 100"
+          target: ">= 50%"
+
+        arc_drop_slow_reduction:
+          value: null
+          unit: "%"
+          calculation: "((before - after) / before) * 100"
+          target: ">= 30%"
+
+        malloc_cfree_reduction:
+          value: null
+          unit: "%"
+          calculation: "((before - after) / before) * 100"
+          note: "参考指標（必須ではない）"
+
+  tasks_search:
+    before:
+      commit: "407c67a"
+      latency:
+        p50: null
+        p90: null
+        p99: null
+        unit: "ms"
+      throughput:
+        rps: null
+        unit: "requests/sec"
+      profiling:
+        iter_sorted_cost:
+          percentage: null
+          unit: "% of total samples"
+          note: "iter_sorted の CPU 時間占有率（flamegraph で確認）"
+        iter_sorted_observation:
+          description: null
+          note: "flamegraph で iter_sorted のスタックフレームを目視確認し、呼び出し頻度を定性的に評価（サンプル比率ベース）"
+        flamegraph: "benches/api/benchmarks/profiling-results/flamegraph-407c67a-tasks_search.svg"
+
+    after:
+      commit: "a6ece16"
+      latency:
+        p50: null
+        p90: null
+        p99: null
+        unit: "ms"
+      throughput:
+        rps: null
+        unit: "requests/sec"
+      profiling:
+        iter_sorted_cost:
+          percentage: null
+          unit: "% of total samples"
+          note: "iter_sorted の CPU 時間占有率（flamegraph で確認）"
+        iter_sorted_observation:
+          description: null
+          note: "flamegraph で iter_sorted のスタックフレームを目視確認し、呼び出し頻度を定性的に評価（サンプル比率ベース）"
+        flamegraph: "benches/api/benchmarks/profiling-results/flamegraph-a6ece16-tasks_search.svg"
+
+    improvement:
+      latency:
+        p50:
+          value: null
+          unit: "%"
+          calculation: "((after - before) / before) * 100"
+          target: ">= 10%"
+        p90:
+          value: null
+          unit: "%"
+          calculation: "((after - before) / before) * 100"
+          target: ">= 10%"
+        p99:
+          value: null
+          unit: "%"
+          calculation: "((after - before) / before) * 100"
+          target: ">= 10%"
+
+      throughput:
+        rps:
+          value: null
+          unit: "%"
+          calculation: "((after - before) / before) * 100"
+          note: "参考指標（必須ではない）"
+
+      profiling:
+        iter_sorted_cost_reduction:
+          value: null
+          unit: "%"
+          calculation: "((before - after) / before) * 100"
+          note: "iter_sorted の CPU 時間占有率の削減率（参考指標、flamegraph のサンプル比率ベース）"
+
+        iter_sorted_observation_summary:
+          description: null
+          note: "before/after の flamegraph を比較し、iter_sorted の呼び出し頻度と性能影響の変化を定性的に評価"
+
+# ====================================================================
+# 6. 検証基準の判定
+# ====================================================================
+validation_results:
+  tasks_bulk_transient_vector_reduction:
+    status: "PENDING"  # 実測後に PASS/FAIL
+    target: "TransientVector::push_back が 50% 以上削減"
+    actual: null
+    pass_condition: ">= 50%"
+
+  tasks_bulk_arc_drop_reduction:
+    status: "PENDING"
+    target: "Arc::drop_slow が 30% 以上削減"
+    actual: null
+    pass_condition: ">= 30%"
+
+  tasks_search_latency_improvement:
+    status: "PENDING"
+    target: "tasks_search のレイテンシが 10% 以上改善"
+    actual: null
+    pass_condition: ">= 10%"
+
+  tasks_search_iter_sorted_analysis:
+    status: "PENDING"
+    target: "iter_sorted の CPU 時間占有率とサンプル比率を測定し、性能への影響を評価"
+    actual: null
+    note: |
+      参考指標（PASS/FAIL 判定には含めない）。
+      flamegraph のサンプル比率から iter_sorted の呼び出し頻度を定性的に評価。
+      Large 状態での O(n log n) ソートの影響を確認し、将来の最適化（EXT-001: iter_sorted キャッシュ）の必要性を判断。
+
+  overall_assessment:
+    status: "PENDING"
+    note: "全ての検証基準（tasks_bulk の 2 項目、tasks_search のレイテンシ 1 項目）を満たした場合に PASS"
+
+# ====================================================================
+# 7. 分析と考察
+# ====================================================================
+analysis:
+  improvement_factors:
+    description: |
+      実測後に、以下の観点で改善要因を分析:
+      1. bulk construction API による構築効率化
+      2. TransientVector::push_back の削減
+      3. Arc clone/drop の削減
+      4. ヒープ割当の削減
+
+    expected_improvements:
+      - factor: "O(n) bulk construction vs O(n log n) insert ループ"
+        description: "from_sorted_vec は O(n) で構築可能、insert ループは O(n log n)"
+
+      - factor: "TransientVector の reallocation 削減"
+        description: "bulk construction では事前にサイズが確定し、reallocation が不要"
+
+      - factor: "Arc clone/drop の削減"
+        description: "一度に大量の要素を Arc でラップするため、個別の clone/drop が削減"
+
+  degradation_analysis:
+    description: |
+      実測後に、改善が期待に満たなかった場合の原因を分析:
+      1. マージ頻度が低く、効果が限定的
+      2. iter_sorted の O(n log n) ソートが支配的
+      3. 他のボトルネック（DB I/O、ネットワーク）が支配的
+
+    mitigation:
+      - "マージ頻度を増やすシナリオで再測定"
+      - "iter_sorted のキャッシュ化（EXT-001）を検討"
+      - "DB I/O のプロファイリングで他のボトルネックを特定"
+
+  future_work:
+    - "OrderedUniqueSet の Large 状態での iter_sorted キャッシュ（EXT-001）"
+    - "PersistentVector の RRB-Tree 化（EXT-002）"
+    - "find_child_index の最適化（EXT-003）"
+
+# ====================================================================
+# 8. 測定結果の記録（実測後に追記）
+# ====================================================================
+raw_measurement_data:
+  description: "5 回の測定結果を全て記録（中央値計算のため）"
+
+  tasks_bulk_before:
+    round_1:
+      latency_p50: null
+      latency_p90: null
+      latency_p99: null
+      rps: null
+    round_2:
+      latency_p50: null
+      latency_p90: null
+      latency_p99: null
+      rps: null
+    round_3:
+      latency_p50: null
+      latency_p90: null
+      latency_p99: null
+      rps: null
+    round_4:
+      latency_p50: null
+      latency_p90: null
+      latency_p99: null
+      rps: null
+    round_5:
+      latency_p50: null
+      latency_p90: null
+      latency_p99: null
+      rps: null
+
+  tasks_bulk_after:
+    round_1:
+      latency_p50: null
+      latency_p90: null
+      latency_p99: null
+      rps: null
+    round_2:
+      latency_p50: null
+      latency_p90: null
+      latency_p99: null
+      rps: null
+    round_3:
+      latency_p50: null
+      latency_p90: null
+      latency_p99: null
+      rps: null
+    round_4:
+      latency_p50: null
+      latency_p90: null
+      latency_p99: null
+      rps: null
+    round_5:
+      latency_p50: null
+      latency_p90: null
+      latency_p99: null
+      rps: null
+
+  tasks_search_before:
+    round_1:
+      latency_p50: null
+      latency_p90: null
+      latency_p99: null
+      rps: null
+    round_2:
+      latency_p50: null
+      latency_p90: null
+      latency_p99: null
+      rps: null
+    round_3:
+      latency_p50: null
+      latency_p90: null
+      latency_p99: null
+      rps: null
+    round_4:
+      latency_p50: null
+      latency_p90: null
+      latency_p99: null
+      rps: null
+    round_5:
+      latency_p50: null
+      latency_p90: null
+      latency_p99: null
+      rps: null
+
+  tasks_search_after:
+    round_1:
+      latency_p50: null
+      latency_p90: null
+      latency_p99: null
+      rps: null
+    round_2:
+      latency_p50: null
+      latency_p90: null
+      latency_p99: null
+      rps: null
+    round_3:
+      latency_p50: null
+      latency_p90: null
+      latency_p99: null
+      rps: null
+    round_4:
+      latency_p50: null
+      latency_p90: null
+      latency_p99: null
+      rps: null
+    round_5:
+      latency_p50: null
+      latency_p90: null
+      latency_p99: null
+      rps: null
+
+# ====================================================================
+# 9. 次のステップ
+# ====================================================================
+next_steps:
+  - step: 1
+    action: "測定環境の構築と環境情報の記録"
+    status: "PENDING"
+    assignee: "TBD"
+
+  - step: 2
+    action: "Before（407c67a）での測定実施"
+    status: "PENDING"
+    assignee: "TBD"
+
+  - step: 3
+    action: "After（a6ece16）での測定実施"
+    status: "PENDING"
+    assignee: "TBD"
+
+  - step: 4
+    action: "測定結果の分析と比較"
+    status: "PENDING"
+    assignee: "TBD"
+
+  - step: 5
+    action: "検証基準の判定と本ファイルの更新"
+    status: "PENDING"
+    assignee: "TBD"
+
+  - step: 6
+    action: "改善が不十分な場合の追加調査"
+    status: "PENDING"
+    assignee: "TBD"
+    note: "検証基準を満たさなかった場合のみ実施"

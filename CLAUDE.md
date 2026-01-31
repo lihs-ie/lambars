@@ -17,6 +17,7 @@ docs/               # 仕様・設計ドキュメント（開発者向け）
 ├── internal/       # 内部設計
 │   ├── plans/          # タスクの実行計画（YYYYMMDD_HHMM_名前.yaml）
 │   ├── requirements/   # タスクの要件定義（YYYYMMDD_HHMM_名前.yaml）
+│   ├── analysis/       # 測定・分析結果（YYYYMMDD_名前.yaml, REQ-XXX-analysis.yaml）
 │   ├── deprecated/     # 廃止された設計
 │   ├── issues/         # 実装困難・後回しにしたものissue化したもの（YYYYMMDD_HHMM_名前.yaml）
 │   └── done/           # 実装完了済みの記録
