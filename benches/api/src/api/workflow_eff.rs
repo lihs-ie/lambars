@@ -116,7 +116,7 @@ pub async fn create_task_eff(
     };
 
     // Execute the effect and convert to HTTP response
-    match effect.await {
+    match effect.run().await {
         Ok((response, task)) => {
             // Step 6: Update search index with the new task (lock-free write via RCU)
             state.update_search_index(TaskChange::Add(task));
@@ -259,7 +259,7 @@ mod tests {
             tags: vec!["backend".to_string()],
         };
 
-        let result = validate_request_eff(&request).await;
+        let result = validate_request_eff(&request).run().await;
         assert!(result.is_ok());
 
         let validated = result.unwrap();
@@ -279,7 +279,7 @@ mod tests {
             tags: vec![],
         };
 
-        let result = validate_request_eff(&request).await;
+        let result = validate_request_eff(&request).run().await;
         assert!(result.is_err());
 
         let error = result.unwrap_err();
@@ -296,7 +296,7 @@ mod tests {
             tags: vec![String::new()],
         };
 
-        let result = validate_request_eff(&request).await;
+        let result = validate_request_eff(&request).run().await;
         assert!(result.is_err());
     }
 
@@ -307,8 +307,8 @@ mod tests {
     #[rstest]
     #[tokio::test]
     async fn test_generate_ids_eff_produces_unique_ids() {
-        let ids1 = generate_ids_eff().await.unwrap();
-        let ids2 = generate_ids_eff().await.unwrap();
+        let ids1 = generate_ids_eff().run().await.unwrap();
+        let ids2 = generate_ids_eff().run().await.unwrap();
 
         assert_ne!(ids1.task_id, ids2.task_id);
     }
@@ -375,7 +375,7 @@ mod tests {
             ExceptT::<ApiErrorResponse, AsyncIO<Result<i32, ApiErrorResponse>>>::pure_async_io(sum)
         };
 
-        let result = effect.await;
+        let result = effect.run().await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), 30);
     }
@@ -392,7 +392,7 @@ mod tests {
             ExceptT::<ApiErrorResponse, AsyncIO<Result<i32, ApiErrorResponse>>>::pure_async_io(x * 2)
         };
 
-        let result = effect.await;
+        let result = effect.run().await;
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().error.code, "TEST");
     }
