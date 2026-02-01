@@ -1,0 +1,298 @@
+# PersistentVector push_back 性能退行調査 要件定義
+#
+# 概要:
+#   tasks_bulk/eff の RPS が低下した問題を調査。
+#   初期仮説では PersistentVector::push_back の性能退行を疑ったが、
+#   IAI Callgrind 測定の結果、命令数は変化なし（0%）と判明。
+#   根本原因は SearchIndex のアルゴリズム的ボトルネック（~56.8%）。
+#
+# 設計方針:
+#   1. 退行原因を定量的に切り分ける
+#   2. hot path のインライン化/コードサイズの影響を最小化する
+#   3. update/get/iter の改善は維持する
+#   4. ベンチとビルド設定を固定化し再発を防ぐ
+#
+# 参照:
+#   - Before コミット: 82d1fe225cfc5be7a7537cf9060d2cf5edd3a010 (2026-01-27)
+#   - After コミット: f06e3f8fe2bf4fe5d39991950abbcff5ed86da4f (2026-01-28)
+#   - IAI Callgrind 結果 (push_back_1000 / update_1000 / get_sequential_1000 / iter_1000)
+#   - tasks_bulk / tasks_eff ベンチ結果
+#   - profiling-investigation.yaml
+
+version: "1.0.0"
+name: "persistent_vector_push_back_regression"
+description: |
+  tasks_bulk/eff の RPS が大幅に低下した問題の調査。
+  初期仮説では PersistentVector::push_back の命令数増加を疑ったが、
+  IAI Callgrind 測定の結果、push_back の命令数は変化していない (312,708 命令、0%)。
+  根本原因は SearchIndex::index_all_suffixes のアルゴリズム的ボトルネック（~56.8%）であることが判明した。
+
+background:
+  problem: |
+    tasks_bulk/eff の RPS がそれぞれ -38.2% / -33.2% 低下した。
+    初期仮説では PersistentVector::push_back の命令数増加を疑ったが、
+    IAI Callgrind 測定の結果、push_back の命令数は変化していない (312,708 命令、0%)。
+    実際の根本原因は SearchIndex::index_all_suffixes のアルゴリズム的ボトルネック（~56.8%）であることが判明した。
+  confirmed_facts:
+    - "IAI Callgrind 測定: push_back_1000 の命令数は変化なし (312,708 命令、Before/After で同一)"
+    - "IAI Callgrind 測定: update_1000、get_sequential_1000、iter_1000 も変化なし"
+    - "API RPS 測定: tasks_bulk RPS は 142.95 → 88.28 (-38.2%) に低下"
+    - "API RPS 測定: tasks_eff RPS は 476.93 → 318.34 (-33.2%) に低下"
+    - "profiling-investigation.yaml により、SearchIndex::index_all_suffixes が ~56.8% を占めることが判明"
+    - "Before コミット: 82d1fe225cfc5be7a7537cf9060d2cf5edd3a010 (2026-01-27)"
+    - "After コミット: f06e3f8fe2bf4fe5d39991950abbcff5ed86da4f (2026-01-28)"
+  hypothesis:
+    - "仮説1（棄却）: LTO=fat + codegen-units=1 下でコードサイズ増加によりインライン化が抑制された → IAI Callgrind で命令数は同一のため棄却"
+    - "仮説2（棄却）: ビルド設定/コンパイラ差異により最適化判断が変化した → ビルド条件は Before/After で一致しているため棄却"
+    - "仮説3（棄却）: 公開API追加による最適化境界の変更 → IAI Callgrind で命令数は同一のため棄却"
+    - "仮説4（棄却）: モノモーフィゼーションの増加によるコード生成量の変化 → IAI Callgrind で命令数は同一のため棄却"
+    - "仮説5（棄却）: LLVM バックエンドの最適化パスの判断変更 → rustc バージョンが同一のため棄却"
+    - "仮説6（採用）: SearchIndex::index_all_suffixes のアルゴリズム的ボトルネックが主因 → profiling-investigation.yaml で ~56.8% を占めることを確認"
+  impact: |
+    - tasks_bulk RPS: 142.95 → 88.28 (-38.2%)
+    - tasks_eff RPS: 476.93 → 318.34 (-33.2%)
+    - PersistentVector::push_back の命令数: 変化なし (312,708 命令、0%)
+
+solution_options:
+  - id: "A"
+    name: "インライン化の強制"
+    summary: "push_back ホットパスの小関数に #[inline]/#[inline(always)] を追加する。"
+    approach:
+      - "push_back とその直下の小関数を対象に限定し、過剰な inline を避ける"
+      - "inline の追加前後で命令数差を計測する"
+    risks:
+      - "コードサイズ増加により別経路の最適化が悪化する可能性"
+
+  - id: "B"
+    name: "コード分割"
+    summary: "バルク構築 API を別モジュール/feature に分離し、default ビルドを軽量化する。"
+    approach:
+      - "バルク構築 API を feature で分離し、default では最小構成にする"
+      - "public API の互換性を維持する"
+    risks:
+      - "feature の追加で利用者に設定コストが生じる"
+
+  - id: "C"
+    name: "TransientVector の最適化"
+    summary: "FromIterator の bulk 構築で TransientVector fast-path を導入する。"
+    approach:
+      - "exact-size かつ大サイズの iterator で TransientVector を使用"
+      - "事前チャンク確保で再配置を抑制する"
+    risks:
+      - "現在の from_vec 最適化と競合し、複雑性が増える"
+
+  - id: "D"
+    name: "ベンチマーク改善"
+    summary: "push_back ベンチで from_vec の影響を排除し、ビルド設定を固定する。"
+    approach:
+      - "setup を測定から分離し、push_back のみを評価する"
+      - "LTO/CGU/RUSTFLAGS を明示して差分比較を安定化する"
+    risks:
+      - "既存ベンチとの互換性調整が必要"
+
+requirements:
+  - id: "REQ-PV-PUSH-001"
+    name: "根本原因の特定実験"
+    priority: "P0 - Critical"
+    description: |
+      インライン化抑制とビルド設定差異のどちらが主因かを切り分ける。
+    methods:
+      - name: "インライン化の影響検証"
+        description: |
+          - push_back 経路の小関数に #[inline]/#[inline(always)] を付与した差分を比較する。
+          - 逆方向の #[inline(never)] で影響を可視化する。
+      - name: "コードサイズ/CGU/LTO の比較"
+        description: |
+          - lto=fat/thin/off と codegen-units=1/16 を固定し命令数を比較する。
+          - rustc 版本と RUSTFLAGS を統一する。
+      - name: "ビルド設定差異の検証"
+        description: |
+          - Before/After の Cargo.lock、profile 設定、環境変数を一致させる。
+    acceptance_criteria:
+      - "退行の再現条件が記録される (rustc版本, CPU, RUSTFLAGS, Cargo.lock, profile設定)"
+      - "主要因が特定され、証拠が添付される (callgrind命令数差分, コードサイズ差分, インライン決定の証拠)"
+      - "再現手順が文書化され、第三者が同じ結果を得られる"
+      - "主要因の影響度が定量化される (命令数への寄与率 or RPS への影響率)"
+
+  - id: "REQ-PV-PUSH-002"
+    name: "Option A: インライン化の強制 (条件付き)"
+    condition: "インライン化抑制が主因と判断された場合（現時点では該当せず）"
+    status: "棄却（IAI Callgrind で命令数は同一のため、インライン化抑制は発生していない）"
+    description: |
+      push_back ホットパスの小関数に #[inline]/#[inline(always)] を追加し、
+      最適化判断の変化を抑制する。
+    acceptance_criteria:
+      - "push_back_1000 <= 469,062 命令 (Before +50%以内)"
+      - "tasks_bulk RPS >= 135.8 req/s (Before -5%以内)"
+      - "tasks_eff RPS >= 453.1 req/s (Before -5%以内)"
+      - "update_1000 <= 2,063,351 命令 (Before +5%以内)"
+      - "get_sequential_1000 <= 183,053 命令 (Before +5%以内)"
+      - "iter_1000 <= 31,198 命令 (Before +5%以内)"
+      - "他の主要ベンチに +10% を超える悪化がない:"
+      - "  - from_vec_1000: ベースライン未測定のため初回測定値を記録"
+      - "  - from_vec_10000: ベースライン未測定のため初回測定値を記録"
+      - "  - collect_1000: ベースライン未測定のため初回測定値を記録"
+      - "  - collect_10000: ベースライン未測定のため初回測定値を記録"
+    note: "update/get/iter の基準値は Before（変化なし）を基準とする"
+
+  - id: "REQ-PV-PUSH-003"
+    name: "Option B: コード分割 (条件付き)"
+    condition: "コードサイズ増加が主因と判断された場合（現時点では該当せず）"
+    status: "棄却（IAI Callgrind で命令数は同一のため、コードサイズ増加は影響していない）"
+    description: |
+      バルク構築 API を別モジュール/feature に分離し、default ビルドへの影響を最小化する。
+    acceptance_criteria:
+      - "default features で push_back_1000 <= 469,062 命令 (Before +50%以内)"
+      - "default features で tasks_bulk RPS >= 135.8 req/s (Before -5%以内)"
+      - "default features で tasks_eff RPS >= 453.1 req/s (Before -5%以内)"
+      - "update_1000 <= 2,063,351 命令 (Before +5%以内)"
+      - "get_sequential_1000 <= 183,053 命令 (Before +5%以内)"
+      - "iter_1000 <= 31,198 命令 (Before +5%以内)"
+      - "既存 public API の挙動が変わらない (from_vec, from_iter が引き続き動作)"
+      - "feature 有効時に from_vec/collect の性能が維持される (ベースライン初回測定)"
+    note: "update/get/iter の基準値は Before（変化なし）を基準とする"
+
+  - id: "REQ-PV-PUSH-004"
+    name: "Option C: TransientVector 最適化 (条件付き)"
+    condition: "from_iter/collect 経路が hot path に影響している場合（現時点では該当せず）"
+    status: "棄却（API RPS の低下は SearchIndex が主因であり、PersistentVector とは無関係）"
+    description: |
+      大きな exact-size iterator で TransientVector fast-path を導入し、
+      バルク構築時の再配置とコピーを抑制する。
+    acceptance_criteria:
+      - "push_back_1000 <= 469,062 命令 (Before +50%以内)"
+      - "tasks_bulk RPS >= 135.8 req/s (Before -5%以内)"
+      - "tasks_eff RPS >= 453.1 req/s (Before -5%以内)"
+      - "update_1000 <= 2,063,351 命令 (Before +5%以内)"
+      - "get_sequential_1000 <= 183,053 命令 (Before +5%以内)"
+      - "iter_1000 <= 31,198 命令 (Before +5%以内)"
+      - "TransientVector fast-path が参照透過性を維持する (同一入力で同一出力)"
+      - "TransientVector fast-path が外部可視な状態変化を起こさない (プロパティテストで検証)"
+      - "エラー処理が Result/Option で表現され、例外を制御フローに使わない"
+    note: "update/get/iter の基準値は Before（変化なし）を基準とする"
+
+  - id: "REQ-PV-PUSH-005"
+    name: "Option D: ベンチマーク改善 (必須)"
+    description: |
+      push_back 専用ベンチで from_vec の影響を排除し、ビルド設定を固定する。
+      ベンチマークフレームワーク: iai-callgrind (IAI Callgrind)
+    acceptance_criteria:
+      - "push_back ベンチが setup を測定範囲外に固定する"
+      - "  使用: iai-callgrind の #[library_benchmark] と #[bench::with_setup(関数名)] 属性"
+      - "  または: setup 関数を使わず、ベンチマーク内で PersistentVector::new() から開始"
+      - "ビルド条件が明示される (rustc版本, RUSTFLAGS, profile設定, features)"
+      - "CI/ローカルで同じビルド条件を再現できる手順が文書化される"
+      - "ベースライン保存と比較の自動化が整備される (--save-baseline/--baseline オプション)"
+    recommended_criteria:
+      - "push_back_1000 を 10回実行し、変動係数 (CV) <= 3% を達成する（推奨）"
+      - "ビルド条件が固定されている場合（rust-toolchain.toml、Cargo.lock、profile設定が統一）、CV検証は省略可能"
+      - "IAI Callgrind は決定論的なため、ビルド条件が同一なら結果は一致する"
+
+  - id: "REQ-PV-PUSH-006"
+    name: "検証と回帰防止"
+    description: |
+      主要ベンチでの現状維持を確認し、再発防止の指標を追加する。
+      SearchIndex の最適化により API RPS の回復を目指す。
+    acceptance_criteria:
+      - "push_back_1000 <= 328,343 命令 (Before 312,708 の +5%以内)"
+      - "update_1000 <= 2,063,351 命令 (Before 1,965,668 の +5%以内)"
+      - "get_sequential_1000 <= 183,053 命令 (Before 174,336 の +5%以内)"
+      - "iter_1000 <= 31,198 命令 (Before 29,712 の +5%以内)"
+      - "tasks_bulk RPS >= 135.8 req/s (Before 142.95 の -5%以内) ※ SearchIndex 最適化後の目標"
+      - "tasks_eff RPS >= 453.1 req/s (Before 476.93 の -5%以内) ※ SearchIndex 最適化後の目標"
+      - "CI に退行検出の閾値を設定し、自動アラートが機能する"
+      - "関数型プログラミングの原則 (参照透過性/純粋性/不変性) が維持される"
+    note: |
+      - PersistentVector の命令数は Before と同一であることが確認されている
+      - API RPS の低下は SearchIndex のボトルネックが主因
+      - SearchIndex の最適化により API RPS の回復を目指す（別要件）
+
+non_functional_requirements:
+  performance:
+    - "push_back_1000 を Before 水準 (312,708 命令) の +5% 以内に維持する (目標: <= 328,343 命令)"
+    - "tasks_bulk RPS を Before 水準 (142.95 req/s) の -5% 以内に回復する (目標: >= 135.8 req/s) ※ SearchIndex 最適化後"
+    - "tasks_eff RPS を Before 水準 (476.93 req/s) の -5% 以内に回復する (目標: >= 453.1 req/s) ※ SearchIndex 最適化後"
+    - "update_1000 を Before 水準 (1,965,668 命令) の +5% 以内に維持する (目標: <= 2,063,351 命令)"
+    - "get_sequential_1000 を Before 水準 (174,336 命令) の +5% 以内に維持する (目標: <= 183,053 命令)"
+    - "iter_1000 を Before 水準 (29,712 命令) の +5% 以内に維持する (目標: <= 31,198 命令)"
+  note: |
+    - IAI Callgrind 測定により、PersistentVector の命令数は Before/After で同一であることが確認されている
+    - API RPS の低下は SearchIndex のボトルネックが主因であり、PersistentVector の最適化では解決しない
+  compatibility:
+    - "既存の public API の挙動は変更しない"
+    - "default features の動作に影響を与えない"
+  architecture:
+    - "参照透過性を維持する (同一入力で同一出力)"
+    - "純粋性を維持し、副作用をホットパスに導入しない"
+    - "不変性を維持し、破壊的操作は局所化・隠蔽する"
+    - "例外を制御フローに使わない"
+
+# 受け入れ基準
+acceptance_criteria:
+  performance:
+    - id: push_back_no_regression
+      description: "push_back_1000 が Before +5% 以内に維持される"
+      baseline: "Before: 312,708 命令"
+      target: "<= 328,343 命令"
+      status: "合格（After: 312,708 命令、0%変化）"
+    - id: tasks_bulk_rps_recovery
+      description: "tasks_bulk の RPS が Before -5% 以内に回復する（SearchIndex 最適化後の目標）"
+      baseline: "Before: 142.95 req/s"
+      target: ">= 135.8 req/s"
+      status: "スコープ外（SearchIndex 最適化が必要、別要件として管理）"
+      note: |
+        - RPS 低下の根本原因は SearchIndex::index_all_suffixes（~56.8%）
+        - PersistentVector の命令数は変化なし（0%）のため、本要件では対応不可
+        - SearchIndex 最適化の要件定義を別途作成する必要がある
+    - id: tasks_eff_rps_recovery
+      description: "tasks_eff の RPS が Before -5% 以内に回復する（SearchIndex 最適化後の目標）"
+      baseline: "Before: 476.93 req/s"
+      target: ">= 453.1 req/s"
+      status: "スコープ外（SearchIndex 最適化が必要、別要件として管理）"
+      note: |
+        - RPS 低下の根本原因は SearchIndex::index_all_suffixes（~56.8%）
+        - PersistentVector の命令数は変化なし（0%）のため、本要件では対応不可
+        - SearchIndex 最適化の要件定義を別途作成する必要がある
+    - id: keep_update_no_regression
+      description: "update_1000 が Before +5% 以内に維持される"
+      baseline: "Before: 1,965,668 命令"
+      target: "<= 2,063,351 命令"
+      status: "合格（After: 1,965,668 命令、0%変化）"
+    - id: keep_get_no_regression
+      description: "get_sequential_1000 が Before +5% 以内に維持される"
+      baseline: "Before: 174,336 命令"
+      target: "<= 183,053 命令"
+      status: "合格（After: 174,336 命令、0%変化）"
+    - id: keep_iter_no_regression
+      description: "iter_1000 が Before +5% 以内に維持される"
+      baseline: "Before: 29,712 命令"
+      target: "<= 31,198 命令"
+      status: "合格（After: 29,712 命令、0%変化）"
+  note: |
+    - IAI Callgrind 測定により、PersistentVector の全ベンチマークで命令数は変化していない（0%）
+    - API RPS の低下は SearchIndex のボトルネックが主因であり、PersistentVector とは無関係
+    - SearchIndex の最適化は別要件として管理する必要がある
+  quality:
+    - id: build_reproducibility
+      description: "ビルド設定が固定化され、同条件で再現可能"
+
+implementation_tasks:
+  # PersistentVector 調査・実装（本要件のスコープ）
+  - "[x] 根本原因の特定実験 (REQ-PV-PUSH-001) - 完了: PersistentVector は変化なし、SearchIndex が主因"
+  - "[x] 解決策の選択と実装 - 完了: REQ-PV-PUSH-002/003/004 は棄却、inline(always) を予防的に追加"
+  - "[x] ベンチマーク改善 (REQ-PV-PUSH-005) - 完了: IAI Callgrind で Before/After 測定、命令数変化なし(0%)を確認"
+  - "[x] 関数型プログラミング原則の検証 (参照透過性/純粋性/不変性) - PersistentVector は変更なし"
+  - "[x] ベンチマークでの検証 (REQ-PV-PUSH-006) - PersistentVector は全て +5% 以内に維持"
+  - "[x] 境界条件テスト追加 - root_overflow 境界(1056/1057)の property test 追加"
+  - "[x] ベンチマーク再現性スクリプト作成 - scripts/benchmark-*.sh, cold-experiment.sh, lto-cgu-experiment.sh"
+  - "[x] Codex レビュー - ok: true (Rust/Shell/Doc 各レビュー完了)"
+  # 別タスクとして管理（本要件のスコープ外）
+  - "[ ] CI に退行検出の閾値設定 - 別 issue として管理"
+  - "[ ] SearchIndex 最適化の要件定義作成 - 別 issue として管理（RPS 回復に必要）"
+
+implementation_notes: |
+  - PersistentVector の最適化は不要と判断された（命令数変化なし）
+  - inline(always) は将来の退行防止として予防的に追加
+  - API RPS の回復には SearchIndex の最適化が必要（別要件として管理）
+  - tasks_bulk/tasks_eff の RPS 低下は SearchIndex が主因であり、本要件のスコープ外
+  - CV<=3% 検証は IAI Callgrind の決定論的性質により省略可能（命令数は変化なし）

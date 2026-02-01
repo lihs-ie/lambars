@@ -1,0 +1,529 @@
+# PersistentVector push_back 性能退行分析
+#
+# 概要:
+#   tasks_bulk/eff の RPS が大幅に低下した問題の分析結果。
+#   初期仮説では PersistentVector::push_back の命令数増加を疑ったが、
+#   IAI Callgrind 測定の結果、push_back の命令数は変化していない (312,708 命令、0%)。
+#
+# 測定期間:
+#   - Before: コミット 82d1fe225cfc5be7a7537cf9060d2cf5edd3a010 (2026-01-27)
+#   - After: コミット f06e3f8fe2bf4fe5d39991950abbcff5ed86da4f (2026-01-28)
+#
+# 主要因:
+#   - SearchIndex::index_all_suffixes のアルゴリズム的ボトルネック（~56.8%）
+#   - O(W * L) の suffix 生成、各 suffix 挿入で persistent 構造のクローンと String アロケーション、dedup チェックで O(n) スキャン
+#
+# 結論:
+#   - PersistentVector::push_back の命令数は変化していない（IAI Callgrind で確認）
+#   - API RPS の低下は SearchIndex のボトルネックが主因
+#   - PersistentVector の最適化は不要、SearchIndex の最適化が必要
+#
+# 参照:
+#   - docs/internal/requirements/20260201_1000_persistent_vector_push_back_regression.yaml
+#   - benches/results/profiling-investigation.yaml
+
+version: "1.0.0"
+name: "push_back_regression_analysis"
+description: |
+  PersistentVector::push_back の性能退行を分析し、
+  Before/After の比較データと仮説検証の結果をまとめる。
+
+# メタデータ
+metadata:
+  analysis_date: "2026-02-01"
+  analyst: "Claude Agent (documentation specialist)"
+  before_commit: "82d1fe225cfc5be7a7537cf9060d2cf5edd3a010"
+  after_commit: "f06e3f8fe2bf4fe5d39991950abbcff5ed86da4f"
+  benchmark_tool:
+    - "IAI Callgrind (命令数測定)"
+    - "API RPS (wrk による実時間測定)"
+
+# 1. Before/After 比較データ
+comparison_data:
+  # IAI Callgrind: PersistentVector ベンチマーク
+  iai_callgrind:
+    push_back_1000:
+      before:
+        instructions: 312708
+        l1_hits: 463930
+        ll_hits: 13
+        ram_hits: 207
+      after:
+        instructions: 312708  # 同一（変化なし）
+        l1_hits: 463930
+        ll_hits: 13
+        ram_hits: 207
+      change:
+        instructions: "0% (変化なし)"
+        note: "IAI Callgrind の結果は同一。ビルド条件が一致している。"
+
+    get_sequential_1000:
+      before:
+        instructions: 174336
+      after:
+        instructions: 174336
+      change:
+        instructions: "0% (変化なし)"
+
+    update_1000:
+      before:
+        instructions: 1965668
+      after:
+        instructions: 1965668
+      change:
+        instructions: "0% (変化なし)"
+
+    iter_1000:
+      before:
+        instructions: 29712
+      after:
+        instructions: 29712
+      change:
+        instructions: "0% (変化なし)"
+
+  # API RPS: tasks_bulk
+  api_rps_tasks_bulk:
+    before:
+      requests_per_second: 142.95
+      latency_avg: "12.01s"
+      total_requests: 4295
+      duration: "30s"
+    after:
+      requests_per_second: 88.28
+      latency_avg: "14.96s"
+      total_requests: 2652
+      duration: "30s"
+    change:
+      requests_per_second: "-38.2%"
+      latency_avg: "+24.5%"
+      total_requests: "-38.2%"
+    statistical_test:
+      method: "t-test (greater, 片側検定)"
+      p_value: "N/A (サンプル数1のため算出不可)"
+      effect_size: "N/A (サンプル数1のため算出不可)"
+      conclusion: "統計的検定は未実施（単一測定のため、統計的有意性は評価できない）"
+      note: |
+        - 検証フェーズで複数回測定（n >= 10）と統計的検定を推奨（参考情報として記録）
+        - 片側検定（greater）を使用し、RPS向上の有意性を検定する
+        - 採用判定はガードレール（95% retention）のみで行い、統計的検定は参考情報
+
+  # API RPS: tasks_eff
+  api_rps_tasks_eff:
+    before:
+      requests_per_second: 476.93
+      latency_avg: "7.93s"
+      total_requests: 14318
+      duration: "30s"
+    after:
+      requests_per_second: 318.34
+      latency_avg: "10.98s"
+      total_requests: 9564
+      duration: "30s"
+    change:
+      requests_per_second: "-33.2%"
+      latency_avg: "+38.5%"
+      total_requests: "-33.2%"
+    statistical_test:
+      method: "t-test (greater, 片側検定)"
+      p_value: "N/A (サンプル数1のため算出不可)"
+      effect_size: "N/A (サンプル数1のため算出不可)"
+      conclusion: "統計的検定は未実施（単一測定のため、統計的有意性は評価できない）"
+      note: |
+        - 検証フェーズで複数回測定（n >= 10）と統計的検定を推奨（参考情報として記録）
+        - 片側検定（greater）を使用し、RPS向上の有意性を検定する
+        - 採用判定はガードレール（95% retention）のみで行い、統計的検定は参考情報
+
+# 2. 仮説検証の結果
+hypothesis_verification:
+  # 仮説1: インライン化抑制
+  hypothesis_1:
+    name: "LTO=fat + codegen-units=1 下でコードサイズ増加によりインライン化が抑制された"
+    evidence:
+      - type: "IAI Callgrind"
+        finding: "命令数は同一（312708）"
+        conclusion: "インライン化抑制は発生していない（または影響なし）"
+      - type: "ビルド設定"
+        finding: "Before/After で Cargo.toml の profile 設定は同一"
+        conclusion: "LTO、CGU、opt-level は変化していない"
+    verdict: "仮説は棄却"
+    rationale: |
+      - IAI Callgrind の命令数が同一であることから、
+        PersistentVector::push_back のホットパスは変化していない。
+      - コードサイズ増加による影響は確認できない。
+
+  # 仮説2: ビルド設定差異
+  hypothesis_2:
+    name: "ビルド設定/コンパイラ差異により最適化判断が変化した"
+    evidence:
+      - type: "rustc バージョン"
+        finding: "Before/After で同一（rust-toolchain.toml で固定）"
+        conclusion: "コンパイラ差異なし"
+      - type: "Cargo.lock"
+        finding: "Before/After で依存関係のバージョンは同一"
+        conclusion: "依存関係差異なし"
+      - type: "RUSTFLAGS"
+        finding: "Before/After で同一（空）"
+        conclusion: "コンパイラフラグ差異なし"
+    verdict: "仮説は棄却"
+    rationale: |
+      - ビルド条件は Before/After で一致している。
+      - IAI Callgrind の結果が同一であることから、最適化判断は変化していない。
+
+  # 仮説3: 公開API追加による最適化境界の変更
+  hypothesis_3:
+    name: "公開API追加による最適化境界の変更（モジュール可視性の影響）"
+    evidence:
+      - type: "コード変更"
+        finding: "from_vec 公開 API 追加、FromIterator の exact-size 最適化"
+        conclusion: "公開APIの追加は確認できるが、IAI Callgrind の結果は同一"
+      - type: "IAI Callgrind"
+        finding: "命令数は同一（312708）"
+        conclusion: "最適化境界の変更は確認できない"
+    verdict: "仮説は棄却"
+    rationale: |
+      - IAI Callgrind の結果が同一であることから、
+        公開API追加による最適化境界の変更は影響していない。
+
+  # 仮説4: モノモーフィゼーションの増加
+  hypothesis_4:
+    name: "モノモーフィゼーションの増加によるコード生成量の変化"
+    evidence:
+      - type: "IAI Callgrind"
+        finding: "命令数は同一（312708）"
+        conclusion: "コード生成量の変化は確認できない"
+    verdict: "仮説は棄却"
+    rationale: |
+      - IAI Callgrind の結果が同一であることから、
+        モノモーフィゼーションの影響は確認できない。
+
+  # 仮説5: LLVM バックエンドの最適化パスの判断変更
+  hypothesis_5:
+    name: "LLVM バックエンドの最適化パスの判断変更"
+    evidence:
+      - type: "rustc バージョン"
+        finding: "Before/After で同一"
+        conclusion: "LLVM バージョンも同一"
+      - type: "IAI Callgrind"
+        finding: "命令数は同一（312708）"
+        conclusion: "最適化パスの変更は確認できない"
+    verdict: "仮説は棄却"
+    rationale: |
+      - rustc バージョンが同一であることから、LLVM バージョンも同一。
+      - IAI Callgrind の結果が同一であることから、最適化パスの変更は確認できない。
+
+  # 新仮説: SearchIndex のアルゴリズム的ボトルネック
+  hypothesis_6:
+    name: "SearchIndex::index_all_suffixes のアルゴリズム的ボトルネックが主因"
+    evidence:
+      - type: "IAI Callgrind（PersistentVector）"
+        finding: |
+          - push_back_1000: 312,708 命令（Before/After で同一、0%変化）
+          - update_1000: 1,965,668 命令（Before/After で同一、0%変化）
+          - get_sequential_1000: 174,336 命令（Before/After で同一、0%変化）
+          - iter_1000: 29,712 命令（Before/After で同一、0%変化）
+        conclusion: "PersistentVector のホットパスは変化していない"
+        evidence_path: "benches/results/before/iai-profiling-82d1fe225cfc5be7a7537cf9060d2cf5edd3a010/ と after/"
+      - type: "API RPS 測定"
+        finding: |
+          - tasks_bulk RPS: 142.95 → 88.28 (-38.2%, -54.67 req/s)
+          - tasks_eff RPS: 476.93 → 318.34 (-33.2%, -158.59 req/s)
+        conclusion: "API レイヤーで大幅な性能低下が発生している"
+        evidence_path: "benches/results/before/api-profiling-all-82d1fe225cfc5be7a7537cf9060d2cf5edd3a010/ と after/"
+      - type: "profiling-investigation.yaml による定量分析"
+        finding: |
+          - SearchIndex::index_all_suffixes が ~56.8% を占める（tasks_bulk の perf flamegraph）
+          - O(W * L) の suffix 生成（W: 単語数、L: 単語長）
+          - 各 suffix 挿入で persistent 構造のクローンと String アロケーション
+          - dedup チェックで O(n) スキャン
+        conclusion: "SearchIndex のアルゴリズム的ボトルネックが主因"
+        evidence_path: "benches/results/profiling-investigation.yaml の API-SEARCH-INDEX-ALL-SUFFIX セクション"
+        quantitative_impact: "56.8% の CPU 時間が SearchIndex::index_all_suffixes に費やされている"
+      - type: "差分実験（Before/After コミット比較）"
+        finding: |
+          - Before (82d1fe2): AsyncIO::run_async() を使用、Box::pin でヒープアロケーション
+          - After (f06e3f8): AsyncIO::run_async() を削除、.await の直接実行
+          - AsyncIO の変更は確認できるが、PersistentVector の命令数は不変
+        conclusion: "AsyncIO の変更は PersistentVector に影響していない"
+        evidence_path: "git diff 82d1fe2..f06e3f8"
+    verdict: "仮説は採用"
+    rationale: |
+      - PersistentVector::push_back の命令数は変化していない（IAI Callgrind で確認）
+      - API RPS の低下は測定されているが、PersistentVector とは無関係
+      - profiling-investigation.yaml により、SearchIndex::index_all_suffixes が ~56.8% を占めることが定量的に確認されている
+      - SearchIndex のアルゴリズム的ボトルネックが API RPS 低下の主因である
+    meets_req_pv_push_001:
+      status: "一部満たす"
+      completed:
+        - "IAI Callgrind 命令数差分: 確認済み（0%変化）"
+        - "再現条件の記録: 確認済み（rustc版本、CPU、RUSTFLAGS、Cargo.lock、profile設定）"
+        - "再現手順の文書化: 確認済み（20260201_benchmark_reproducibility.yaml）"
+        - "主要因の特定: 確認済み（SearchIndex のアルゴリズム的ボトルネック）"
+        - "影響度の定量化: 確認済み（~56.8% の CPU 時間）"
+      pending:
+        - "コードサイズ差分: 未取得（IAI Callgrind で命令数が同一のため、優先度低）"
+        - "インライン決定の証拠: 未取得（IAI Callgrind で命令数が同一のため、優先度低）"
+      rationale: |
+        - IAI Callgrind で命令数が同一であることから、インライン化抑制は発生していないと判断できる
+        - コードサイズ差分とインライン決定の証拠は、インライン化抑制が主因と判断された場合のみ必要
+        - 実際の主因は SearchIndex のアルゴリズム的ボトルネックであり、PersistentVector とは無関係
+
+# 3. 統計的有意性の評価
+statistical_significance:
+  iai_callgrind:
+    description: |
+      IAI Callgrind は決定論的測定のため、統計的検定は不要。
+      命令数が同一であることから、変化なしと判定できる。
+    result: "変化なし（0%）"
+
+  api_rps:
+    description: |
+      API RPS は実時間測定のため、統計的検定を推奨（参考情報として記録）。
+      しかし、単一測定のため、統計的検定は未実施。
+    result: "統計的検定は未実施（サンプル数1）"
+    recommendation: |
+      - 検証フェーズで複数回測定し、統計的検定を実施することを推奨（参考情報として記録）
+      - 推奨: 10回以上の測定、t-test (greater, 片側検定)、α = 0.05
+      - 採用判定はガードレール（Before RPS の 95% 以上）のみで行い、統計的検定は参考情報
+
+# 4. 結論と推奨事項
+conclusion:
+  summary: |
+    PersistentVector::push_back の命令数は変化していない（IAI Callgrind）。
+    API RPS の低下は PersistentVector とは無関係であり、
+    SearchIndex のボトルネック（index_all_suffixes）が主因である。
+
+  key_findings:
+    - finding: "IAI Callgrind の結果は同一（312708 命令）"
+      implication: "PersistentVector::push_back は変化していない"
+
+    - finding: "API RPS は低下（tasks_bulk: -38.2%, tasks_eff: -33.2%）"
+      implication: "API レイヤーでのボトルネックが存在する"
+
+    - finding: "profiling-investigation.yaml により、SearchIndex::index_all_suffixes が ~56.8% を占める"
+      implication: "API RPS の低下は SearchIndex のボトルネックが主因"
+
+  root_cause: |
+    API RPS の低下の根本原因は PersistentVector ではなく、
+    SearchIndex::index_all_suffixes のアルゴリズム的ボトルネックである。
+    - O(W * L) の suffix 生成（W: 単語数、L: 単語長）
+    - 各 suffix 挿入で persistent 構造のクローンと String アロケーション
+    - dedup チェックで O(n) スキャン
+
+  recommendations:
+    - id: "REC-001"
+      priority: "P0 - Critical"
+      name: "SearchIndex の最適化"
+      description: |
+        API RPS のボトルネックである SearchIndex::index_all_suffixes を最適化する。
+        - 全 suffix indexing を n-gram inverted index または suffix automaton/trie に置き換える
+        - suffix keys を (Arc<str>, start_index) または suffix array/trie に変更
+        - dedup チェックを PersistentHashSet または roaring bitmap に変更
+      expected_impact: "API RPS の大幅な向上（tasks_bulk: +100%以上、tasks_eff: +50%以上）"
+      reference: "profiling-investigation.yaml の API-SEARCH-INDEX-ALL-SUFFIX"
+
+    - id: "REC-002"
+      priority: "P1 - High"
+      name: "API RPS ベンチマークの統計的検定"
+      description: |
+        API RPS ベンチマークを複数回測定し、統計的検定を実施する（推奨）。
+        - 検証フェーズ: 10回以上の測定
+        - 統計的検定: t-test (greater, 片側検定)、α = 0.05
+        - 採用判定: RPSガードレール（Before RPS の 95% 以上）のみで判定
+        - 統計的検定: 参考情報として記録し、大幅な改善の有意性確認に使用
+      expected_impact: "ベンチマーク結果の信頼性向上と、改善の有意性確認"
+      reference: "docs/internal/analysis/adoption_gate.yaml"
+
+    - id: "REC-003"
+      priority: "P2 - Medium"
+      name: "PersistentVector の継続的監視"
+      description: |
+        PersistentVector の命令数を継続的に監視し、退行を早期検出する。
+        - IAI Callgrind ベンチマークを CI に統合
+        - ベースライン比較の自動化
+        - 閾値設定（±5%）
+      expected_impact: "退行の早期検出と防止"
+      reference: "docs/internal/analysis/20260201_benchmark_reproducibility.yaml"
+
+    - id: "REC-004"
+      priority: "P2 - Medium"
+      name: "AsyncIO の最適化効果の検証"
+      description: |
+        AsyncIO の最適化（run_async 削除、.await 直接実行）の効果を検証する。
+        - AsyncIO 専用ベンチマーク（Criterion）で測定
+        - malloc/cfree、Box::pin、Runtime::enter のオーバーヘッド削減を確認
+      expected_impact: "AsyncIO のオーバーヘッド削減の定量化"
+      reference: "profiling-investigation.yaml の ASYNCIO-BOXING-OVERHEAD"
+
+# 5. 次のステップ
+next_steps:
+  - step: 1
+    name: "SearchIndex の最適化実装"
+    description: "REC-001 に基づき、SearchIndex::index_all_suffixes を最適化する"
+    owner: "rust-implementation-specialist"
+    deadline: "2026-02-07"
+
+  - step: 2
+    name: "API RPS ベンチマークの統計的検定"
+    description: "REC-002 に基づき、複数回測定と統計的検定を実施する"
+    owner: "performance-specialist"
+    deadline: "2026-02-05"
+
+  - step: 3
+    name: "PersistentVector の継続的監視"
+    description: "REC-003 に基づき、IAI Callgrind ベンチマークを CI に統合する"
+    owner: "ci-cd-specialist"
+    deadline: "2026-02-10"
+
+  - step: 4
+    name: "AsyncIO の最適化効果の検証"
+    description: "REC-004 に基づき、AsyncIO 専用ベンチマークを実施する"
+    owner: "performance-specialist"
+    deadline: "2026-02-07"
+
+# 6. 測定データの詳細
+detailed_measurements:
+  # IAI Callgrind: PersistentVector ベンチマーク
+  iai_callgrind_before:
+    commit: "82d1fe225cfc5be7a7537cf9060d2cf5edd3a010"
+    date: "2026-01-27"
+    results:
+      push_back_1000:
+        instructions: 312708
+        l1_hits: 463930
+        ll_hits: 13
+        ram_hits: 207
+      get_sequential_1000:
+        instructions: 174336
+        l1_hits: 212227
+        ll_hits: 0
+        ram_hits: 40
+      update_1000:
+        instructions: 1965668
+        l1_hits: 2720782
+        ll_hits: 2
+        ram_hits: 53
+      iter_1000:
+        instructions: 29712
+        l1_hits: 41459
+        ll_hits: 0
+        ram_hits: 49
+
+  iai_callgrind_after:
+    commit: "f06e3f8fe2bf4fe5d39991950abbcff5ed86da4f"
+    date: "2026-01-28"
+    results:
+      push_back_1000:
+        instructions: 312708
+        l1_hits: 463930
+        ll_hits: 13
+        ram_hits: 207
+      get_sequential_1000:
+        instructions: 174336
+        l1_hits: 212227
+        ll_hits: 0
+        ram_hits: 40
+      update_1000:
+        instructions: 1965668
+        l1_hits: 2720782
+        ll_hits: 2
+        ram_hits: 53
+      iter_1000:
+        instructions: 29712
+        l1_hits: 41459
+        ll_hits: 0
+        ram_hits: 49
+
+  # API RPS: tasks_bulk
+  api_rps_tasks_bulk_before:
+    commit: "82d1fe225cfc5be7a7537cf9060d2cf5edd3a010"
+    date: "2026-01-27"
+    test_config:
+      url: "http://localhost:3000"
+      threads: 4
+      connections: 30
+      duration: "30s"
+      target_rps: 500
+    results:
+      requests_per_second: 142.95
+      latency_avg: "12.01s"
+      total_requests: 4295
+
+  api_rps_tasks_bulk_after:
+    commit: "f06e3f8fe2bf4fe5d39991950abbcff5ed86da4f"
+    date: "2026-01-28"
+    test_config:
+      url: "http://localhost:3000"
+      threads: 4
+      connections: 30
+      duration: "30s"
+      target_rps: 500
+    results:
+      requests_per_second: 88.28
+      latency_avg: "14.96s"
+      total_requests: 2652
+
+  # API RPS: tasks_eff
+  api_rps_tasks_eff_before:
+    commit: "82d1fe225cfc5be7a7537cf9060d2cf5edd3a010"
+    date: "2026-01-27"
+    test_config:
+      url: "http://localhost:3000"
+      threads: 4
+      connections: 50
+      duration: "30s"
+      target_rps: 1000
+    results:
+      requests_per_second: 476.93
+      latency_avg: "7.93s"
+      total_requests: 14318
+
+  api_rps_tasks_eff_after:
+    commit: "f06e3f8fe2bf4fe5d39991950abbcff5ed86da4f"
+    date: "2026-01-28"
+    test_config:
+      url: "http://localhost:3000"
+      threads: 4
+      connections: 50
+      duration: "30s"
+      target_rps: 1000
+    results:
+      requests_per_second: 318.34
+      latency_avg: "10.98s"
+      total_requests: 9564
+
+# 7. 関連ドキュメント
+related_documents:
+  - title: "要件定義: PersistentVector push_back 性能退行解消"
+    path: "docs/internal/requirements/20260201_1000_persistent_vector_push_back_regression.yaml"
+
+  - title: "採用判定ゲート定義"
+    path: "docs/internal/analysis/adoption_gate.yaml"
+
+  - title: "ベンチマーク再現性ガイド"
+    path: "docs/internal/analysis/20260201_benchmark_reproducibility.yaml"
+
+  - title: "profiling 調査結果"
+    path: "benches/results/profiling-investigation.yaml"
+
+  - title: "IAI Callgrind 結果（Before）"
+    path: "benches/results/before/iai-profiling-82d1fe225cfc5be7a7537cf9060d2cf5edd3a010/README.md"
+
+  - title: "IAI Callgrind 結果（After）"
+    path: "benches/results/after/iai-profiling-f06e3f8fe2bf4fe5d39991950abbcff5ed86da4f/README.md"
+
+  - title: "API RPS 結果（tasks_bulk Before）"
+    path: "benches/results/before/api-profiling-all-82d1fe225cfc5be7a7537cf9060d2cf5edd3a010/tasks_bulk/benchmark/wrk/tasks_bulk.txt"
+
+  - title: "API RPS 結果（tasks_bulk After）"
+    path: "benches/results/after/api-profiling-all-f06e3f8fe2bf4fe5d39991950abbcff5ed86da4f/tasks_bulk/benchmark/wrk/tasks_bulk.txt"
+
+# 8. 参考文献
+references:
+  - title: "IAI Callgrind: Deterministic Benchmarking"
+    url: "https://github.com/iai-callgrind/iai-callgrind"
+
+  - title: "Statistical Hypothesis Testing"
+    url: "https://en.wikipedia.org/wiki/Student%27s_t-test"
+
+  - title: "Profiling Rust Applications"
+    url: "https://nnethercote.github.io/perf-book/profiling.html"

@@ -1,0 +1,387 @@
+# 採用判定ゲート定義
+#
+# 概要:
+#   性能最適化や実装変更を本番採用する際の統計的判定基準を定義する。
+#   2段階ゲート（探索/検証分離）、多重比較補正、RPSガードレールを含む。
+#
+# 設計方針:
+#   - 探索フェーズで候補を選定し、検証フェーズで統計的に判定する
+#   - 多重比較補正（Holm-Bonferroni）により偽陽性を抑制する
+#   - RPSガードレールで本番影響を防止する
+#
+# 適用対象:
+#   - ホットパスの最適化（インライン化、コード削減、アルゴリズム変更）
+#   - データ構造の変更（persistent構造、キャッシュ戦略）
+#   - ビルド設定の変更（LTO、CGU、inline閾値）
+#
+# 参照:
+#   - docs/internal/requirements/20260201_1000_persistent_vector_push_back_regression.yaml
+
+version: "1.0.0"
+name: "adoption_gate"
+description: |
+  性能最適化の採用判定ゲート定義。
+  2段階ゲート（探索/検証分離）、統計的検定、多重比較補正、RPSガードレールを含む。
+
+# ゲート構造: 探索 → 検証 の2段階
+gates:
+  # ゲート1: 探索フェーズ
+  # 目的: 改善候補を素早く選定する（低コスト、低確信）
+  exploration:
+    description: |
+      改善候補を素早く選定するための探索フェーズ。
+      - 低反復数で高速に判定
+      - p値は緩め（α = 0.10）
+      - 有望な候補を検証フェーズに送る
+
+    criteria:
+      # IAI Callgrind による命令数測定（決定論的）
+      iai_callgrind:
+        metric: "instructions"
+        repetitions: 1  # IAI は決定論的なので1回でOK
+        threshold:
+          type: "relative_change"
+          acceptable_range:
+            improvement: "-5%"   # 5%以上改善で候補
+            neutral: "±2%"       # ±2%以内は誤差範囲
+            regression: "+5%"    # 5%以上悪化は却下
+        decision:
+          - "改善（-5%以上）: 検証フェーズへ"
+          - "中立（±2%以内）: 却下（効果なし）"
+          - "悪化（+5%以上）: 却下"
+
+      # Criterion による実時間測定（統計的）
+      criterion:
+        metric: "mean_execution_time"
+        repetitions: 10  # 探索フェーズは10回
+        warmup: 3
+        statistical_test:
+          method: "t-test"  # Welch's t-test
+          alpha: 0.10       # 探索は緩め（10%）
+          alternative: "two-sided"
+        decision:
+          - "p < 0.10 かつ 改善 > 5%: 検証フェーズへ"
+          - "p >= 0.10 または 改善 < 5%: 却下（統計的有意性なし）"
+
+      # API RPS測定（実時間、高変動）
+      api_rps:
+        metric: "requests_per_second"
+        repetitions: 5   # 探索フェーズは5回
+        warmup: 1
+        statistical_test:
+          method: "t-test"
+          alpha: 0.10
+          alternative: "greater"  # 片側検定（RPS向上のみ）
+        decision:
+          - "p < 0.10 かつ RPS改善 > 5%: 検証フェーズへ"
+          - "p >= 0.10 または RPS改善 < 5%: 却下"
+        note: "要件定義の受け入れ基準は「Before -5%以内」（回復目標）。探索フェーズでは +5%以上の改善を期待"
+
+  # ゲート2: 検証フェーズ
+  # 目的: 探索で選定された候補を厳密に検証する（高コスト、高確信）
+  verification:
+    description: |
+      探索フェーズで選定された候補を厳密に検証する。
+      - 高反復数で統計的に厳密に判定
+      - p値は厳しめ（α = 0.05）
+      - 多重比較補正（Holm-Bonferroni）を適用
+      - RPSガードレールで本番影響を防止
+
+    criteria:
+      # IAI Callgrind による命令数測定（決定論的）
+      iai_callgrind:
+        metric: "instructions"
+        repetitions: 3  # 検証フェーズは3回（ビルド差異検出）
+        threshold:
+          type: "relative_change"
+          acceptable_range:
+            target_improvement: "-5%"   # 目標: 5%以上改善
+            neutral_tolerance: "±2%"    # 許容: ±2%以内
+            regression_limit: "+5%"     # 限界: 5%以上悪化は却下
+        decision:
+          - "改善（-5%以上）かつ 変動 < 2%: 採用"
+          - "中立（±2%以内）: 採用（悪化なし）"
+          - "悪化（+2%～+5%）: 保留（要調査）"
+          - "悪化（+5%以上）: 却下"
+
+      # Criterion による実時間測定（統計的）
+      criterion:
+        metric: "mean_execution_time"
+        repetitions: 100  # 検証フェーズは100回（マイクロベンチマーク用）
+        warmup: 10
+        statistical_test:
+          method: "t-test"  # Welch's t-test
+          alpha: 0.05       # 検証は厳しめ（5%）
+          alternative: "two-sided"
+          multiple_comparison_correction:
+            method: "holm-bonferroni"
+            family_size: null  # 実行時に指定（比較対象数）
+        decision:
+          - "p < 0.05（補正後）かつ 改善 > 5%: 採用"
+          - "p >= 0.05 または 改善 < 5%: 却下（統計的有意性なし）"
+        note: |
+          - Criterion は Rust のマイクロベンチマーク用ツール
+          - 実行時間が短い（ミリ秒単位）ため、100回以上の測定を推奨
+          - API RPS は実行時間が長い（秒単位）ため、10回で十分
+
+      # API RPS測定（実時間、高変動）
+      api_rps:
+        metric: "requests_per_second"
+        repetitions: 10  # 検証フェーズは10回
+        warmup: 2
+        statistical_test:
+          method: "t-test"
+          alpha: 0.05
+          alternative: "greater"  # 片側検定（RPS向上のみ）
+          multiple_comparison_correction:
+            method: "holm-bonferroni"
+            family_size: null
+        guardrail:
+          # RPSガードレール: 本番影響を防止する
+          type: "minimum_performance"
+          baseline_metric: "requests_per_second"
+          minimum_retention: "95%"  # ベースラインの95%以上を維持
+          description: |
+            本番環境での性能低下を防ぐための最低ライン。
+            - Before RPS の 95% 未満に低下した場合は即座に却下
+            - 統計的有意性とは独立に評価される
+        decision:
+          - "ガードレール満たす（RPS >= 95% baseline）: 採用"
+          - "ガードレール違反（RPS < 95% baseline）: 即座に却下"
+        statistical_test_role: |
+          - 統計的検定（p < 0.05）は参考情報として記録するが、採用判定の必須条件ではない
+          - ガードレール（95%）が最低ラインであり、これを満たせば「Before -5%以内」を達成
+          - 片側検定（greater）は RPS 向上の有意性を検定するが、-4%（96% retention）のケースでは p 値は高くなる
+          - このため、ガードレール条件のみで採用判定を行い、統計的検定は追加情報として扱う
+        note: |
+          - 要件定義の受け入れ基準は「Before -5%以内」（回復目標）
+          - ガードレール（95%）が最低ラインであり、これを満たせば採用可能
+          - RPS が -4% のケース（96% retention）はガードレールを満たすため採用可能
+          - 統計的検定は、大幅な改善（+10%以上）の有意性を確認する場合に有用
+
+# 多重比較補正: Holm-Bonferroni法
+multiple_comparison_correction:
+  method: "holm-bonferroni"
+  description: |
+    複数のベンチマークを同時に評価する場合、偽陽性（タイプIエラー）を
+    抑制するために Holm-Bonferroni 法を適用する。
+
+    手順:
+    1. 全てのp値を昇順にソート: p₁ ≤ p₂ ≤ ... ≤ pₘ
+    2. 各p値を補正閾値と比較:
+       - p₁ と α/m を比較
+       - p₂ と α/(m-1) を比較
+       - ...
+       - pₘ と α/1 を比較
+    3. 最初に閾値を超えた箇所以降は全て棄却
+
+    例（α = 0.05, m = 4）:
+    - p₁ = 0.01 < 0.05/4 = 0.0125 ✓ 採用
+    - p₂ = 0.015 < 0.05/3 = 0.0167 ✓ 採用
+    - p₃ = 0.04 > 0.05/2 = 0.025  ✗ 棄却
+    - p₄ = 0.06 > 0.05/1 = 0.05   ✗ 棄却
+
+  rationale: |
+    - 複数のベンチマークを同時に評価すると、偶然に有意差が出る確率が増える
+    - Bonferroni 法よりも検出力が高い（段階的に閾値を緩める）
+    - 保守的すぎず、実用的な補正方法
+
+# RPSガードレール詳細
+rps_guardrail:
+  description: |
+    API RPS ベンチマークに対する最低性能保証。
+    統計的有意性とは独立に、本番環境での性能低下を防ぐ。
+
+  baseline:
+    source: "before commit / previous release"
+    metric: "requests_per_second (mean)"
+    measurement: "10回の実行の平均値"
+
+  minimum_retention: "95%"
+
+  rationale: |
+    - 統計的に有意な改善があっても、絶対値で低下している場合は本番に影響する
+    - 5%のマージンは測定誤差とネットワーク変動を考慮した現実的な閾値
+    - ガードレール違反は即座に却下（リスク回避優先）
+
+  examples:
+    - case: "Before: 142.95 RPS, After: 150.00 RPS (+4.9%)"
+      guardrail: "150.00 > 142.95 * 0.95 = 135.80"
+      result: "ガードレール満たす（採用可能）"
+
+    - case: "Before: 142.95 RPS, After: 130.00 RPS (-9.1%)"
+      guardrail: "130.00 < 142.95 * 0.95 = 135.80"
+      result: "ガードレール違反（即座に却下）"
+
+# 採用判定フロー
+adoption_flow:
+  - step: 1
+    name: "探索フェーズ実行"
+    description: "低反復数で複数の候補を評価"
+    output: "有望な候補のリスト"
+
+  - step: 2
+    name: "検証フェーズ実行"
+    description: "高反復数で候補を厳密に評価"
+    output: "統計的検定結果（p値、効果量、信頼区間）"
+
+  - step: 3
+    name: "多重比較補正"
+    description: "Holm-Bonferroni 法でp値を補正"
+    output: "補正後のp値"
+
+  - step: 4
+    name: "RPSガードレール判定"
+    description: "API RPS が最低ライン（95%）を満たすか確認"
+    output: "ガードレール合格/不合格"
+
+  - step: 5
+    name: "総合判定"
+    description: "全ての条件を満たす候補を採用"
+    decision_criteria:
+      - "IAI Callgrind: 改善 ≥ 5% または 中立（±2%以内）"
+      - "Criterion: p < 0.05（補正後）かつ 改善 ≥ 5%"
+      - "API RPS: ガードレール満たす（Before の 95% 以上）"
+      - "全てのベンチマークで悪化（+5%以上）がない"
+    note: |
+      - 要件定義の受け入れ基準（Before -5%以内）はガードレール（95%）で保証される
+      - API RPS はガードレール条件のみで採用判定を行い、統計的検定は参考情報として記録
+      - 片側検定（greater）は大幅な改善の有意性確認に有用だが、小幅な低下（-4%等）のケースでは p 値が高くなるため、採用判定には使用しない
+
+# ベンチマーク種別ごとの適用例
+benchmark_specific_guidance:
+  iai_callgrind:
+    use_case: "命令数の決定論的測定（CPU性能評価）"
+    advantages:
+      - "ビルド条件が同じなら結果が一致する"
+      - "1回の実行で十分（統計的ばらつきなし）"
+      - "キャッシュ/メモリアクセスパターンも測定可能"
+    limitations:
+      - "実時間とは異なる（分岐予測、パイプラインストール未考慮）"
+      - "I/O、スレッド競合は測定できない"
+    adoption_criteria:
+      exploration: "改善 ≥ 5% で検証フェーズへ"
+      verification: "改善 ≥ 5% かつ 変動 < 2% で採用"
+
+  criterion:
+    use_case: "実時間測定（ウォールクロック性能評価）"
+    advantages:
+      - "本番環境に近い測定"
+      - "統計的検定で有意性を判定"
+      - "外れ値除去、ウォームアップ対応"
+    limitations:
+      - "ノイズが多い（CPU周波数、OS、他プロセス）"
+      - "高反復数が必要（100回以上推奨）"
+    adoption_criteria:
+      exploration: "p < 0.10 かつ 改善 ≥ 5% で検証フェーズへ"
+      verification: "p < 0.05（補正後）かつ 改善 ≥ 5% で採用"
+
+  api_rps:
+    use_case: "API スループット測定（本番環境想定）"
+    advantages:
+      - "本番に最も近い測定"
+      - "ネットワーク、並行処理、データベースI/O含む"
+    limitations:
+      - "ノイズが非常に多い（ネットワーク、DB、OS）"
+      - "セットアップコストが高い（Docker、DB、Redis）"
+    adoption_criteria:
+      exploration: "p < 0.10 かつ 改善 ≥ 5% で検証フェーズへ"
+      verification: "ガードレール満たす（Before の 95% 以上）で採用（統計的検定は参考情報）"
+      note: |
+        - 探索フェーズでは +5%以上の改善を期待
+        - 検証フェーズではガードレール（95%）が最低ラインであり、これのみで採用判定
+        - RPS が -4% のケース（96% retention）はガードレールを満たすため採用可能
+        - 統計的検定（p < 0.05）は大幅な改善の有意性確認に有用だが、採用判定の必須条件ではない
+
+# 統計的検定の詳細
+statistical_testing:
+  t_test:
+    method: "Welch's t-test"
+    description: |
+      2群の平均値が異なるかを検定する。
+      等分散性を仮定しない（Welch の補正）。
+    assumptions:
+      - "サンプルサイズ: n ≥ 10（探索）、n ≥ 10（API RPS 検証）、n ≥ 100（Criterion 検証）"
+      - "正規性: サンプルサイズが大きければ中心極限定理で緩和"
+      - "API RPS は実行時間が長い（秒単位）ため、n=10 でも十分な統計的検出力を持つ"
+      - "Criterion は実行時間が短い（ミリ秒単位）ため、n=100 以上を推奨"
+    null_hypothesis: "H₀: μ₁ = μ₂（2群の平均値は等しい）"
+    alternative_hypothesis:
+      two_sided: "H₁: μ₁ ≠ μ₂（平均値が異なる）"
+      greater: "H₁: μ₁ > μ₂（改善群の平均値が大きい）"
+    significance_level:
+      exploration: "α = 0.10"
+      verification: "α = 0.05"
+    decision:
+      - "p < α: 帰無仮説を棄却（改善あり）"
+      - "p ≥ α: 帰無仮説を棄却できない（改善なし）"
+
+  effect_size:
+    metric: "Cohen's d"
+    description: |
+      効果量: 改善の実質的な大きさを測定する。
+      d = (μ₁ - μ₂) / s_pooled
+    interpretation:
+      small: "d = 0.2（小さい効果）"
+      medium: "d = 0.5（中程度の効果）"
+      large: "d = 0.8（大きい効果）"
+    guidance: |
+      - p値が小さくても、効果量が小さければ実用的でない
+      - 効果量 ≥ 0.5 を推奨（中程度以上の改善）
+
+# CI/CD統合
+ci_cd_integration:
+  description: |
+    採用判定ゲートを CI/CD パイプラインに統合する。
+
+  workflow:
+    - stage: "PR作成時"
+      action: "探索フェーズを自動実行"
+      output: "改善候補の自動判定コメント"
+
+    - stage: "merge前"
+      action: "検証フェーズを自動実行"
+      output: "統計的検定結果、多重比較補正、ガードレール判定"
+
+    - stage: "merge後"
+      action: "ベースライン更新"
+      output: "次回比較用のベースライン保存"
+
+  tools:
+    - name: "iai-callgrind"
+      command: "cargo bench --bench persistent_vector_iai -- --save-baseline before"
+      command_compare: "cargo bench --bench persistent_vector_iai -- --baseline before"
+
+    - name: "criterion"
+      command: "cargo bench --bench persistent_vector_criterion -- --save-baseline before"
+      command_compare: "cargo bench --bench persistent_vector_criterion -- --baseline before"
+
+    - name: "API RPS"
+      command: "benches/api/scripts/run_benchmark.sh tasks_bulk --baseline before"
+
+  failure_actions:
+    - condition: "ガードレール違反"
+      action: "PR自動却下、アラート発行"
+
+    - condition: "検証フェーズ不合格"
+      action: "PR ブロック、手動レビュー要求"
+
+    - condition: "探索フェーズ不合格"
+      action: "警告コメント、merge可能（リスク低）"
+
+# 参考文献
+references:
+  - title: "Multiple Comparison Correction: Holm-Bonferroni Method"
+    url: "https://en.wikipedia.org/wiki/Holm%E2%80%93Bonferroni_method"
+
+  - title: "Statistical Hypothesis Testing: t-test"
+    url: "https://en.wikipedia.org/wiki/Student%27s_t-test"
+
+  - title: "Effect Size: Cohen's d"
+    url: "https://en.wikipedia.org/wiki/Effect_size#Cohen's_d"
+
+  - title: "IAI Callgrind: Deterministic Benchmarking"
+    url: "https://github.com/iai-callgrind/iai-callgrind"
+
+  - title: "Criterion.rs: Statistical Benchmarking"
+    url: "https://github.com/bheisler/criterion.rs"
