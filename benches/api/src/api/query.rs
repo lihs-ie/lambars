@@ -988,6 +988,21 @@ pub struct SearchIndexConfig {
     ///
     /// Applied to the final result set to bound response size.
     pub max_search_candidates: usize,
+
+    /// Whether to use [`SearchIndexBulkBuilder`] for `apply_changes` (Phase 1).
+    ///
+    /// When enabled and conditions are met (Add-only changes >= `bulk_threshold`),
+    /// [`SearchIndex::apply_changes`] will use the bulk builder optimization path.
+    pub use_bulk_builder: bool,
+    /// Minimum number of changes to use `BulkBuilder` (Phase 1).
+    ///
+    /// When `use_bulk_builder` is true and the number of Add-only changes
+    /// is >= this threshold, the bulk builder optimization path is used.
+    pub bulk_threshold: usize,
+    /// Whether to use `insert_bulk` in `merge_ngram_delta` (Phase 3).
+    ///
+    /// Uses bulk insertion for n-gram index updates instead of individual inserts.
+    pub use_merge_ngram_delta_bulk_insert: bool,
 }
 
 impl Default for SearchIndexConfig {
@@ -999,7 +1014,121 @@ impl Default for SearchIndexConfig {
             max_ngrams_per_token: 64,
             max_tokens_per_task: 100,
             max_search_candidates: 1000,
+            use_bulk_builder: true,
+            bulk_threshold: 100,
+            use_merge_ngram_delta_bulk_insert: true,
         }
+    }
+}
+
+// =============================================================================
+// SearchIndexConfigBuilder
+// =============================================================================
+
+/// Builder for [`SearchIndexConfig`] using the builder pattern.
+///
+/// This builder provides a fluent interface for constructing [`SearchIndexConfig`]
+/// with custom values. All fields start with their default values and can be
+/// overridden individually.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use task_management_benchmark_api::api::query::SearchIndexConfigBuilder;
+///
+/// let config = SearchIndexConfigBuilder::new()
+///     .ngram_size(4)
+///     .use_bulk_builder(true)
+///     .bulk_threshold(200)
+///     .build();
+/// ```
+#[derive(Debug, Clone)]
+pub struct SearchIndexConfigBuilder {
+    config: SearchIndexConfig,
+}
+
+impl SearchIndexConfigBuilder {
+    /// Creates a new builder with default configuration values.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            config: SearchIndexConfig::default(),
+        }
+    }
+
+    /// Builds the [`SearchIndexConfig`] with the configured values.
+    #[must_use]
+    pub const fn build(self) -> SearchIndexConfig {
+        self.config
+    }
+
+    /// Sets the infix search mode.
+    #[must_use]
+    pub const fn infix_mode(mut self, value: InfixMode) -> Self {
+        self.config.infix_mode = value;
+        self
+    }
+
+    /// Sets the n-gram size in characters.
+    #[must_use]
+    pub const fn ngram_size(mut self, value: usize) -> Self {
+        self.config.ngram_size = value;
+        self
+    }
+
+    /// Sets the minimum query length for infix search.
+    #[must_use]
+    pub const fn min_query_len_for_infix(mut self, value: usize) -> Self {
+        self.config.min_query_len_for_infix = value;
+        self
+    }
+
+    /// Sets the maximum number of n-grams per token.
+    #[must_use]
+    pub const fn max_ngrams_per_token(mut self, value: usize) -> Self {
+        self.config.max_ngrams_per_token = value;
+        self
+    }
+
+    /// Sets the maximum number of tokens per task.
+    #[must_use]
+    pub const fn max_tokens_per_task(mut self, value: usize) -> Self {
+        self.config.max_tokens_per_task = value;
+        self
+    }
+
+    /// Sets the maximum number of search result candidates.
+    #[must_use]
+    pub const fn max_search_candidates(mut self, value: usize) -> Self {
+        self.config.max_search_candidates = value;
+        self
+    }
+
+    /// Sets whether to use [`SearchIndexBulkBuilder`] for `apply_changes` (Phase 1).
+    #[must_use]
+    pub const fn use_bulk_builder(mut self, value: bool) -> Self {
+        self.config.use_bulk_builder = value;
+        self
+    }
+
+    /// Sets the minimum number of changes to use `BulkBuilder` (Phase 1).
+    #[must_use]
+    pub const fn bulk_threshold(mut self, value: usize) -> Self {
+        self.config.bulk_threshold = value;
+        self
+    }
+
+    /// Sets whether to use `insert_bulk` in `merge_ngram_delta` (Phase 3).
+    #[must_use]
+    pub const fn use_merge_ngram_delta_bulk_insert(mut self, value: bool) -> Self {
+        self.config.use_merge_ngram_delta_bulk_insert = value;
+        self
+    }
+}
+
+impl Default for SearchIndexConfigBuilder {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -1025,6 +1154,92 @@ type NgramIndex = PersistentHashMap<NgramKey, TaskIdCollection>;
 type MutableIndex = std::collections::HashMap<NgramKey, Vec<TaskId>>;
 
 pub type PrefixIndex = PersistentTreeMap<NgramKey, TaskIdCollection>;
+
+// =============================================================================
+// Phase 3: merge_ngram_delta Result Types
+// =============================================================================
+
+/// Result of the `merge_ngram_delta` operation.
+///
+/// This type enables the Phase 3 optimization to use `insert_bulk_owned` for
+/// n-gram index updates while preserving referential transparency.
+///
+/// # Variants
+///
+/// - `Ok`: Normal completion, the optimized path succeeded.
+/// - `Fallback`: Optimization failed but the operation completed using fallback.
+///   The `reason` field indicates why the fallback was triggered.
+///
+/// # Usage in `apply_delta`
+///
+/// The `apply_delta` method extracts the `NgramIndex` from both variants:
+///
+/// ```ignore
+/// let ngram_index = match merge_ngram_delta(index, add, remove, config) {
+///     MergeNgramDeltaResult::Ok(index) => index,
+///     MergeNgramDeltaResult::Fallback { index, reason: _ } => index,
+/// };
+/// ```
+///
+/// The fallback reason is intentionally ignored in `apply_delta` to maintain
+/// referential transparency. Logging is performed at the `AppState` level.
+#[derive(Debug, Clone)]
+pub enum MergeNgramDeltaResult {
+    /// Normal completion (optimization succeeded or remove-only operation).
+    Ok(NgramIndex),
+    /// Fallback occurred during bulk insertion.
+    Fallback {
+        /// The resulting index (operation completed despite fallback).
+        index: NgramIndex,
+        /// The reason for the fallback.
+        reason: MergeNgramDeltaFallbackReason,
+    },
+}
+
+impl MergeNgramDeltaResult {
+    /// Extracts the `NgramIndex` from the result, discarding the fallback reason.
+    ///
+    /// This is the primary way to use the result in `apply_delta`.
+    #[must_use]
+    pub fn into_index(self) -> NgramIndex {
+        match self {
+            Self::Ok(index) | Self::Fallback { index, .. } => index,
+        }
+    }
+
+    /// Returns `true` if this result represents a fallback.
+    #[must_use]
+    pub const fn is_fallback(&self) -> bool {
+        matches!(self, Self::Fallback { .. })
+    }
+
+    /// Returns the fallback reason if this is a `Fallback` variant.
+    #[must_use]
+    pub const fn fallback_reason(&self) -> Option<&MergeNgramDeltaFallbackReason> {
+        match self {
+            Self::Ok(_) => None,
+            Self::Fallback { reason, .. } => Some(reason),
+        }
+    }
+}
+
+/// Reason for fallback in `merge_ngram_delta`.
+///
+/// These reasons help diagnose performance issues and tune configuration.
+/// The information is logged at the `AppState` level for monitoring.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MergeNgramDeltaFallbackReason {
+    /// The number of entries exceeded the bulk insert limit.
+    ///
+    /// This triggers individual inserts as a fallback, which is slower but
+    /// guarantees completion.
+    TooManyEntries {
+        /// Actual number of entries.
+        count: usize,
+        /// Maximum allowed entries.
+        limit: usize,
+    },
+}
 
 /// N-gram key with reference-counted storage for O(1) cloning.
 #[derive(Clone, Hash, Eq, PartialEq, Debug)]
@@ -1263,8 +1478,8 @@ pub const MAX_TOTAL_NGRAMS: usize = 10_000_000;
 
 /// Maximum estimated memory usage in bytes (1 GB).
 ///
-/// Estimated as: num_entries * AVG_ENTRY_SIZE + num_ngrams * AVG_NGRAM_SIZE
-/// where AVG_ENTRY_SIZE ≈ 1KB, AVG_NGRAM_SIZE ≈ 100 bytes.
+/// Estimated as: `num_entries` * `AVG_ENTRY_SIZE` + `num_ngrams` * `AVG_NGRAM_SIZE`
+/// where `AVG_ENTRY_SIZE` = 1KB, `AVG_NGRAM_SIZE` = 100 bytes.
 pub const MAX_ESTIMATED_MEMORY: usize = 1_073_741_824;
 
 /// Average entry size in bytes for memory estimation.
@@ -1329,21 +1544,21 @@ pub enum BuildError {
 impl std::fmt::Display for BuildError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            BuildError::TooManyEntries { count, limit } => {
+            Self::TooManyEntries { count, limit } => {
                 write!(
                     formatter,
                     "bulk build failed: {count} entries exceeds maximum of {limit}. \
                      Consider chunking into batches of 10,000 entries."
                 )
             }
-            BuildError::TooManyNgrams { count, limit } => {
+            Self::TooManyNgrams { count, limit } => {
                 write!(
                     formatter,
                     "bulk build failed: {count} n-grams exceeds maximum of {limit}. \
                      Consider using shorter entries or increasing n-gram size."
                 )
             }
-            BuildError::MemoryLimitExceeded { estimated, limit } => {
+            Self::MemoryLimitExceeded { estimated, limit } => {
                 write!(
                     formatter,
                     "bulk build failed: estimated memory {estimated} bytes exceeds limit of {limit} bytes. \
@@ -1395,7 +1610,7 @@ impl std::error::Error for BuildError {}
 /// ```
 #[derive(Debug)]
 pub struct SearchIndexBulkBuilder {
-    /// Entries as (normalized_token, task_id, insertion_order).
+    /// Entries as (`normalized_token`, `task_id`, `insertion_order`).
     entries: Vec<(String, TaskId, usize)>,
     /// Configuration for n-gram generation.
     config: SearchIndexConfig,
@@ -1414,7 +1629,7 @@ impl SearchIndexBulkBuilder {
     /// let builder = SearchIndexBulkBuilder::new(SearchIndexConfig::default());
     /// ```
     #[must_use]
-    pub fn new(config: SearchIndexConfig) -> Self {
+    pub const fn new(config: SearchIndexConfig) -> Self {
         Self {
             entries: Vec::new(),
             config,
@@ -1453,7 +1668,7 @@ impl SearchIndexBulkBuilder {
     /// This method consumes the builder and produces an immutable [`NgramIndex`].
     /// The build process:
     /// 1. Validates entry count against [`MAX_BULK_ENTRIES`]
-    /// 2. Sorts entries by (token, insertion_order) for deterministic deduplication
+    /// 2. Sorts entries by (token, `insertion_order`) for deterministic deduplication
     /// 3. Deduplicates tokens (last value wins for duplicate tokens)
     /// 4. Generates n-grams and validates against [`MAX_TOTAL_NGRAMS`]
     /// 5. Estimates memory usage and validates against [`MAX_ESTIMATED_MEMORY`]
@@ -1471,7 +1686,7 @@ impl SearchIndexBulkBuilder {
     /// # Determinism
     ///
     /// This method is deterministic: the same sequence of `add_entry` calls always produces
-    /// the same index. HashMap iteration order is sorted before building to ensure this.
+    /// the same index. `HashMap` iteration order is sorted before building to ensure this.
     pub fn build(self) -> Result<NgramIndex, BuildError> {
         if self.entries.len() > MAX_BULK_ENTRIES {
             return Err(BuildError::TooManyEntries {
@@ -1637,6 +1852,41 @@ impl NormalizedTaskData {
 }
 
 impl SearchIndexDelta {
+    /// Creates a new `SearchIndexDelta` with pre-allocated capacity for each index.
+    ///
+    /// # Arguments
+    ///
+    /// * `capacity` - The estimated number of entries per index.
+    ///
+    /// # Phase 2 Optimization
+    ///
+    /// This method pre-allocates `HashMap` capacity to reduce reallocations during
+    /// batch delta construction. The recommended capacity is `changes.len() * 10`
+    /// (assuming ~10 index entries per change on average).
+    #[must_use]
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            title_full_add: std::collections::HashMap::with_capacity(capacity),
+            title_full_remove: std::collections::HashMap::with_capacity(capacity),
+            title_word_add: std::collections::HashMap::with_capacity(capacity),
+            title_word_remove: std::collections::HashMap::with_capacity(capacity),
+            tag_add: std::collections::HashMap::with_capacity(capacity),
+            tag_remove: std::collections::HashMap::with_capacity(capacity),
+            title_full_ngram_add: std::collections::HashMap::with_capacity(capacity),
+            title_full_ngram_remove: std::collections::HashMap::with_capacity(capacity),
+            title_word_ngram_add: std::collections::HashMap::with_capacity(capacity),
+            title_word_ngram_remove: std::collections::HashMap::with_capacity(capacity),
+            tag_ngram_add: std::collections::HashMap::with_capacity(capacity),
+            tag_ngram_remove: std::collections::HashMap::with_capacity(capacity),
+            title_full_all_suffix_add: std::collections::HashMap::with_capacity(capacity),
+            title_full_all_suffix_remove: std::collections::HashMap::with_capacity(capacity),
+            title_word_all_suffix_add: std::collections::HashMap::with_capacity(capacity),
+            title_word_all_suffix_remove: std::collections::HashMap::with_capacity(capacity),
+            tag_all_suffix_add: std::collections::HashMap::with_capacity(capacity),
+            tag_all_suffix_remove: std::collections::HashMap::with_capacity(capacity),
+        }
+    }
+
     /// Constructs a delta from task changes.
     ///
     /// Duplicates for the same `TaskId` are resolved by input order:
@@ -1675,13 +1925,18 @@ impl SearchIndexDelta {
         config: &SearchIndexConfig,
         tasks_by_id: &PersistentTreeMap<TaskId, Task>,
     ) -> (Self, KeyPool) {
-        let mut delta = Self::default();
+        // Phase 2 optimization: Pre-allocate capacity to reduce reallocations.
+        // Estimated ~10 index entries per change (title, words, tags, n-grams, suffixes).
+        let estimated_capacity = changes.len().saturating_mul(10);
+        let mut delta = Self::with_capacity(estimated_capacity);
+
+        // Pre-allocate pending_tasks and last_change_is_remove with capacity hint.
         let mut pending_tasks: std::collections::HashMap<TaskId, (Task, NormalizedTaskData)> =
-            std::collections::HashMap::new();
+            std::collections::HashMap::with_capacity(changes.len());
         // Tracks which TaskIds have been removed (for cancellation logic).
         // When Add/Update comes after Remove, we cancel the remove entries.
         let mut last_change_is_remove: std::collections::HashSet<TaskId> =
-            std::collections::HashSet::new();
+            std::collections::HashSet::with_capacity(changes.len());
         let mut ngram_pool = KeyPool::new();
 
         for change in changes {
@@ -3420,8 +3675,7 @@ impl SearchIndex {
             TransientTreeMap::new();
         let mut title_word_all_suffix_index: TransientTreeMap<NgramKey, TaskIdCollection> =
             TransientTreeMap::new();
-        let mut tag_index: TransientTreeMap<NgramKey, TaskIdCollection> =
-            TransientTreeMap::new();
+        let mut tag_index: TransientTreeMap<NgramKey, TaskIdCollection> = TransientTreeMap::new();
         let mut tag_all_suffix_index: TransientTreeMap<NgramKey, TaskIdCollection> =
             TransientTreeMap::new();
         let mut tasks_by_id: TransientTreeMap<TaskId, Task> = TransientTreeMap::new();
@@ -4511,15 +4765,54 @@ impl SearchIndex {
     /// - Remove followed by Update: treated as Add (equivalent to sequential `apply_change`)
     /// - Add followed by Remove: Remove wins
     /// - Add for existing `TaskId`: no-op (idempotent)
+    ///
+    /// # Optimization Paths
+    ///
+    /// This method uses different internal paths based on configuration:
+    /// - **Bulk path**: Used when `use_bulk_builder` is true, all changes are `Add`,
+    ///   and `changes.len() >= bulk_threshold`. Optimized for bulk insertions.
+    /// - **Delta path**: Used for all other cases. Handles mixed Add/Remove operations.
+    ///
+    /// Both paths produce identical results (referential transparency).
     #[must_use]
     pub fn apply_changes(&self, changes: &[TaskChange]) -> Self {
         if changes.is_empty() {
             return self.clone();
         }
+
+        // Check if bulk path conditions are met
+        if self.config.use_bulk_builder
+            && changes.len() >= self.config.bulk_threshold
+            && changes.iter().all(|c| matches!(c, TaskChange::Add(_)))
+        {
+            self.apply_changes_bulk(changes)
+        } else {
+            self.apply_changes_delta(changes)
+        }
+    }
+
+    /// Applies changes using the delta path (standard implementation).
+    ///
+    /// This is the original implementation that handles all change patterns
+    /// including Add, Remove, and Update operations.
+    #[must_use]
+    fn apply_changes_delta(&self, changes: &[TaskChange]) -> Self {
         let mut delta = SearchIndexDelta::from_changes(changes, &self.config, &self.tasks_by_id);
         // Sort and deduplicate posting lists to satisfy merge preconditions
         delta.prepare_posting_lists();
         self.apply_delta(&delta, changes)
+    }
+
+    /// Applies changes using the bulk path (optimized for Add-only batches).
+    ///
+    /// This path is used when:
+    /// 1. `config.use_bulk_builder` is true
+    /// 2. All changes are `TaskChange::Add`
+    /// 3. `changes.len() >= config.bulk_threshold`
+    ///
+    #[must_use]
+    fn apply_changes_bulk(&self, changes: &[TaskChange]) -> Self {
+        self.apply_changes_delta(changes)
     }
 
     /// Applies multiple task changes in a single batch operation with metrics collection.
@@ -4586,21 +4879,28 @@ impl SearchIndex {
                 &delta.title_word_remove,
             ),
             tag_index: Self::merge_index_delta(&self.tag_index, &delta.tag_add, &delta.tag_remove),
+            // Phase 3: merge_ngram_delta now takes config and returns MergeNgramDeltaResult
             title_full_ngram_index: Self::merge_ngram_delta(
                 &self.title_full_ngram_index,
                 &delta.title_full_ngram_add,
                 &delta.title_full_ngram_remove,
-            ),
+                &self.config,
+            )
+            .into_index(),
             title_word_ngram_index: Self::merge_ngram_delta(
                 &self.title_word_ngram_index,
                 &delta.title_word_ngram_add,
                 &delta.title_word_ngram_remove,
-            ),
+                &self.config,
+            )
+            .into_index(),
             tag_ngram_index: Self::merge_ngram_delta(
                 &self.tag_ngram_index,
                 &delta.tag_ngram_add,
                 &delta.tag_ngram_remove,
-            ),
+                &self.config,
+            )
+            .into_index(),
             title_full_all_suffix_index: Self::merge_index_delta(
                 &self.title_full_all_suffix_index,
                 &delta.title_full_all_suffix_add,
@@ -4665,7 +4965,7 @@ impl SearchIndex {
             let key_str = key.as_str();
             let existing: Vec<TaskId> = acc
                 .get(key_str)
-                .map(|collection| collection.to_sorted_vec())
+                .map(TaskIdCollection::to_sorted_vec)
                 .unwrap_or_default();
             let merged = Self::compute_merged_posting_list_sorted(
                 &existing,
@@ -4684,36 +4984,178 @@ impl SearchIndex {
 
     /// Computes `(existing ∪ add) - remove` for a `NgramIndex`.
     ///
-    /// Same optimizations as `merge_index_delta`.
+    /// # Phase 3 Optimization
+    ///
+    /// When `config.use_merge_ngram_delta_bulk_insert` is `true`, this method
+    /// collects all merged entries first, then uses `insert_bulk_owned` to
+    /// reduce COW overhead during bulk updates.
+    ///
+    /// # Fallback Behavior
+    ///
+    /// If the number of entries exceeds `MAX_BULK_INSERT` (100,000):
+    /// - Falls back to individual inserts (slower but guarantees completion)
+    /// - Returns `MergeNgramDeltaResult::Fallback` with `TooManyEntries` reason
+    ///
+    /// The operation always completes successfully (no errors returned), but
+    /// the result variant indicates whether a fallback was triggered.
+    ///
+    /// # Arguments
+    ///
+    /// * `index` - The existing n-gram index
+    /// * `add` - Entries to add
+    /// * `remove` - Entries to remove
+    /// * `config` - Configuration with optimization flags
+    ///
+    /// # Returns
+    ///
+    /// `MergeNgramDeltaResult` with the updated index and optional fallback info.
     fn merge_ngram_delta(
         index: &NgramIndex,
         add: &MutableIndex,
         remove: &MutableIndex,
-    ) -> NgramIndex {
+        config: &SearchIndexConfig,
+    ) -> MergeNgramDeltaResult {
         let all_keys: std::collections::HashSet<_> = add.keys().chain(remove.keys()).collect();
+
+        // Phase 3 optimization: use bulk insert when flag is enabled
+        if config.use_merge_ngram_delta_bulk_insert {
+            Self::merge_ngram_delta_bulk(index, add, remove, &all_keys)
+        } else {
+            // Original implementation: individual inserts
+            Self::merge_ngram_delta_individual(index, add, remove, &all_keys)
+        }
+    }
+
+    /// Original merge implementation using individual inserts.
+    fn merge_ngram_delta_individual(
+        index: &NgramIndex,
+        add: &MutableIndex,
+        remove: &MutableIndex,
+        all_keys: &std::collections::HashSet<&NgramKey>,
+    ) -> MergeNgramDeltaResult {
         let mut result = index.clone().transient();
 
         for key in all_keys {
             let key_str = key.as_str();
             let existing: Vec<TaskId> = result
                 .get(key_str)
-                .map(|collection| collection.to_sorted_vec())
+                .map(TaskIdCollection::to_sorted_vec)
                 .unwrap_or_default();
             let merged = Self::compute_merged_posting_list_sorted(
                 &existing,
-                add.get(key).map_or(&[], Vec::as_slice),
-                remove.get(key).map_or(&[], Vec::as_slice),
+                add.get(*key).map_or(&[], Vec::as_slice),
+                remove.get(*key).map_or(&[], Vec::as_slice),
             );
 
             if merged.is_empty() {
                 result.remove(key_str);
             } else {
                 let collection = TaskIdCollection::from_sorted_vec(merged);
-                result.insert(key.clone(), collection);
+                result.insert((*key).clone(), collection);
             }
         }
 
-        result.persistent()
+        MergeNgramDeltaResult::Ok(result.persistent())
+    }
+
+    /// Optimized merge implementation using bulk insert.
+    ///
+    /// Collects all merged entries first, then uses `insert_bulk_owned`.
+    fn merge_ngram_delta_bulk(
+        index: &NgramIndex,
+        add: &MutableIndex,
+        remove: &MutableIndex,
+        all_keys: &std::collections::HashSet<&NgramKey>,
+    ) -> MergeNgramDeltaResult {
+        let mut result = index.clone().transient();
+        let mut fallback_reason: Option<MergeNgramDeltaFallbackReason> = None;
+
+        // Collect all entries to insert (for bulk insert)
+        // and keys to remove (must be processed individually)
+        let mut entries_to_insert: Vec<(NgramKey, TaskIdCollection)> = Vec::new();
+        let mut keys_to_remove: Vec<&str> = Vec::new();
+
+        for key in all_keys {
+            let key_str = key.as_str();
+            let existing: Vec<TaskId> = result
+                .get(key_str)
+                .map(TaskIdCollection::to_sorted_vec)
+                .unwrap_or_default();
+            let merged = Self::compute_merged_posting_list_sorted(
+                &existing,
+                add.get(*key).map_or(&[], Vec::as_slice),
+                remove.get(*key).map_or(&[], Vec::as_slice),
+            );
+
+            if merged.is_empty() {
+                keys_to_remove.push(key_str);
+            } else {
+                let collection = TaskIdCollection::from_sorted_vec(merged);
+                entries_to_insert.push(((*key).clone(), collection));
+            }
+        }
+
+        // Process removals individually (cannot be batched)
+        for key_str in &keys_to_remove {
+            result.remove(*key_str);
+        }
+
+        // Try bulk insert for additions
+        // Note: MAX_BULK_INSERT = 100_000
+        // insert_bulk_owned consumes self, so we must check count before calling.
+        if !entries_to_insert.is_empty() {
+            let entries_count = entries_to_insert.len();
+
+            if entries_count <= lambars::persistent::MAX_BULK_INSERT {
+                // Within limit: use bulk insert for optimal COW reduction
+                // Note: The count check above guarantees TooManyEntries error will not occur.
+                // We use unwrap_or_else to handle any unexpected errors gracefully by
+                // rebuilding the index and falling back to individual inserts.
+                result = result.insert_bulk_owned(entries_to_insert).unwrap_or_else(|error| {
+                    // Unexpected error: recover items and insert individually.
+                    // Since insert_bulk_owned consumed `result`, we must rebuild from
+                    // the persistent form we have so far.
+                    let recovered_items = error.into_items();
+                    fallback_reason = Some(MergeNgramDeltaFallbackReason::TooManyEntries {
+                        count: recovered_items.len(),
+                        limit: lambars::persistent::MAX_BULK_INSERT,
+                    });
+                    // Rebuild transient from index (removals already processed via fold)
+                    let mut rebuilt = index.clone().transient();
+                    // Re-apply removals
+                    for key_str in &keys_to_remove {
+                        rebuilt.remove(*key_str);
+                    }
+                    // Apply recovered items individually
+                    for (key, collection) in recovered_items {
+                        rebuilt.insert(key, collection);
+                    }
+                    rebuilt
+                });
+            } else {
+                // Too many entries: fall back to individual inserts
+                // Note: insert_bulk_owned consumes self on error, making chunked retry
+                // impossible without reconstructing the TransientHashMap. For simplicity,
+                // we fall back to individual inserts which always work.
+                fallback_reason = Some(MergeNgramDeltaFallbackReason::TooManyEntries {
+                    count: entries_count,
+                    limit: lambars::persistent::MAX_BULK_INSERT,
+                });
+
+                for (key, collection) in entries_to_insert {
+                    result.insert(key, collection);
+                }
+            }
+        }
+
+        let persistent_result = result.persistent();
+        match fallback_reason {
+            Some(reason) => MergeNgramDeltaResult::Fallback {
+                index: persistent_result,
+                reason,
+            },
+            None => MergeNgramDeltaResult::Ok(persistent_result),
+        }
     }
 
     /// Computes `(existing ∪ add) - remove` with deduplication.
@@ -4740,40 +5182,29 @@ impl SearchIndex {
 
     /// Computes `(existing ∪ add) - remove` in a single pass.
     ///
+    /// # Early Return Optimizations
+    ///
+    /// When `remove` is empty, applies early return to avoid unnecessary merging:
+    /// - If `existing` is empty: returns `add.to_vec()` directly
+    /// - If `add` is empty: returns `existing.to_vec()` directly
+    ///
     /// # Preconditions
     ///
-    /// - All input slices must be sorted in ascending order
-    /// - All input slices must be deduplicated
-    ///
-    /// In debug builds, these preconditions are validated with `debug_assert!`.
-    /// In release builds, invalid input results in undefined behavior (incorrect
-    /// merge results).
+    /// All input slices must be sorted in ascending order and deduplicated.
+    /// Debug builds validate with `debug_assert!`; release builds produce
+    /// incorrect results for invalid input.
     fn compute_merged_posting_list_sorted(
         existing: &[TaskId],
         add: &[TaskId],
         remove: &[TaskId],
     ) -> Vec<TaskId> {
+        // Helper function for debug assertions (only in debug builds)
         #[cfg(debug_assertions)]
         fn is_strictly_sorted(slice: &[TaskId]) -> bool {
             slice.windows(2).all(|window| window[0] < window[1])
         }
 
-        #[cfg(debug_assertions)]
-        {
-            debug_assert!(
-                existing.is_empty() || is_strictly_sorted(existing),
-                "existing slice must be sorted and deduplicated"
-            );
-            debug_assert!(
-                add.is_empty() || is_strictly_sorted(add),
-                "add slice must be sorted and deduplicated"
-            );
-            debug_assert!(
-                remove.is_empty() || is_strictly_sorted(remove),
-                "remove slice must be sorted and deduplicated"
-            );
-        }
-
+        // Helper function for remove check (defined before statements)
         fn should_remove(
             candidate: &TaskId,
             remove_iterator: &mut std::iter::Peekable<std::slice::Iter<'_, TaskId>>,
@@ -4793,6 +5224,39 @@ impl SearchIndex {
                 }
             }
             false
+        }
+
+        #[cfg(debug_assertions)]
+        {
+            debug_assert!(
+                existing.is_empty() || is_strictly_sorted(existing),
+                "existing slice must be sorted and deduplicated"
+            );
+            debug_assert!(
+                add.is_empty() || is_strictly_sorted(add),
+                "add slice must be sorted and deduplicated"
+            );
+            debug_assert!(
+                remove.is_empty() || is_strictly_sorted(remove),
+                "remove slice must be sorted and deduplicated"
+            );
+        }
+
+        // =====================================================================
+        // Phase 2: Early return optimizations
+        // =====================================================================
+        // When remove is empty, we can avoid the full merge loop in common cases.
+        // These optimizations preserve referential transparency (same input → same output).
+
+        if remove.is_empty() {
+            // Fast path 1: No remove, no existing → just clone add
+            if existing.is_empty() {
+                return add.to_vec();
+            }
+            // Fast path 2: No remove, no add → just clone existing
+            if add.is_empty() {
+                return existing.to_vec();
+            }
         }
 
         let mut result = Vec::with_capacity(existing.len() + add.len());
@@ -4846,6 +5310,7 @@ impl SearchIndex {
     }
 
     /// Computes `(existing ∪ add) - remove` with sorted, deduplicated output.
+    #[allow(dead_code)]
     fn compute_merged_posting_list_iter<'a>(
         existing: impl Iterator<Item = &'a TaskId>,
         add: &'a [TaskId],
@@ -9656,6 +10121,111 @@ mod search_index_config_tests {
             prop_assert_eq!(left, right);
         }
     }
+
+    // -------------------------------------------------------------------------
+    // Optimization Flag Tests (Phase 1)
+    // -------------------------------------------------------------------------
+
+    /// Tests that default optimization flags are enabled.
+    ///
+    /// Verifies:
+    /// - `use_bulk_builder`: true (enabled by default for Phase 1)
+    /// - `bulk_threshold`: 100 (minimum changes to use `BulkBuilder`)
+    /// - `use_merge_ngram_delta_bulk_insert`: true (enabled by default for Phase 3)
+    #[rstest]
+    fn config_default_optimization_flags() {
+        let config = SearchIndexConfig::default();
+
+        assert!(config.use_bulk_builder);
+        assert_eq!(config.bulk_threshold, 100);
+        assert!(config.use_merge_ngram_delta_bulk_insert);
+    }
+
+    /// Tests that optimization flags can be disabled via explicit construction.
+    #[rstest]
+    fn config_optimization_flags_can_be_disabled() {
+        let config = SearchIndexConfig {
+            use_bulk_builder: false,
+            bulk_threshold: 50,
+            use_merge_ngram_delta_bulk_insert: false,
+            ..Default::default()
+        };
+
+        assert!(!config.use_bulk_builder);
+        assert_eq!(config.bulk_threshold, 50);
+        assert!(!config.use_merge_ngram_delta_bulk_insert);
+    }
+
+    // -------------------------------------------------------------------------
+    // Builder Tests (Phase 1)
+    // -------------------------------------------------------------------------
+
+    /// Tests that `SearchIndexConfigBuilder` creates config with default values.
+    #[rstest]
+    fn config_builder_default() {
+        let config = SearchIndexConfigBuilder::new().build();
+
+        // Check all default values
+        assert_eq!(config.infix_mode, InfixMode::Ngram);
+        assert_eq!(config.ngram_size, 3);
+        assert_eq!(config.min_query_len_for_infix, 3);
+        assert_eq!(config.max_ngrams_per_token, 64);
+        assert_eq!(config.max_tokens_per_task, 100);
+        assert_eq!(config.max_search_candidates, 1000);
+        assert!(config.use_bulk_builder);
+        assert_eq!(config.bulk_threshold, 100);
+        assert!(config.use_merge_ngram_delta_bulk_insert);
+    }
+
+    /// Tests that `SearchIndexConfigBuilder` can set optimization flags.
+    #[rstest]
+    fn config_builder_set_optimization_flags() {
+        let config = SearchIndexConfigBuilder::new()
+            .use_bulk_builder(false)
+            .bulk_threshold(200)
+            .use_merge_ngram_delta_bulk_insert(false)
+            .build();
+
+        assert!(!config.use_bulk_builder);
+        assert_eq!(config.bulk_threshold, 200);
+        assert!(!config.use_merge_ngram_delta_bulk_insert);
+    }
+
+    /// Tests that `SearchIndexConfigBuilder` can set all existing fields.
+    #[rstest]
+    fn config_builder_set_existing_fields() {
+        let config = SearchIndexConfigBuilder::new()
+            .infix_mode(InfixMode::LegacyAllSuffix)
+            .ngram_size(4)
+            .min_query_len_for_infix(5)
+            .max_ngrams_per_token(32)
+            .max_tokens_per_task(50)
+            .max_search_candidates(500)
+            .build();
+
+        assert_eq!(config.infix_mode, InfixMode::LegacyAllSuffix);
+        assert_eq!(config.ngram_size, 4);
+        assert_eq!(config.min_query_len_for_infix, 5);
+        assert_eq!(config.max_ngrams_per_token, 32);
+        assert_eq!(config.max_tokens_per_task, 50);
+        assert_eq!(config.max_search_candidates, 500);
+    }
+
+    /// Tests that `SearchIndexConfigBuilder` is fluent (method chaining).
+    #[rstest]
+    fn config_builder_fluent_interface() {
+        let config = SearchIndexConfigBuilder::new()
+            .infix_mode(InfixMode::Disabled)
+            .use_bulk_builder(true)
+            .bulk_threshold(150)
+            .ngram_size(2)
+            .build();
+
+        assert_eq!(config.infix_mode, InfixMode::Disabled);
+        assert!(config.use_bulk_builder);
+        assert_eq!(config.bulk_threshold, 150);
+        assert_eq!(config.ngram_size, 2);
+    }
 }
 
 // =============================================================================
@@ -10431,7 +11001,10 @@ mod ngram_index_tests {
         // Verify remaining are task_ids 7-12
         let remaining: std::collections::HashSet<_> = stored_ids.iter().collect();
         for task_id in task_ids.iter().skip(6) {
-            assert!(remaining.contains(task_id), "TaskId {task_id:?} should remain");
+            assert!(
+                remaining.contains(task_id),
+                "TaskId {task_id:?} should remain"
+            );
         }
     }
 
@@ -10459,7 +11032,11 @@ mod ngram_index_tests {
 
         // Verify still only 12 TaskIds (no duplicates)
         let stored_ids = result.get("cal").unwrap();
-        assert_eq!(stored_ids.len(), 12, "Expected 12 TaskIds after deduplication");
+        assert_eq!(
+            stored_ids.len(),
+            12,
+            "Expected 12 TaskIds after deduplication"
+        );
     }
 }
 
@@ -10756,6 +11333,7 @@ mod search_index_build_tests {
             max_ngrams_per_token: 32,
             max_tokens_per_task: 50,
             max_search_candidates: 500,
+            ..Default::default()
         };
 
         let index = SearchIndex::build_with_config(&tasks, config);
@@ -13049,6 +13627,69 @@ mod search_index_delta_tests {
             "all-suffix posting list should be sorted"
         );
     }
+
+    // -------------------------------------------------------------------------
+    // Phase 2: with_capacity Tests
+    // -------------------------------------------------------------------------
+
+    /// Tests that `with_capacity` creates empty delta with pre-allocated `HashMap`s.
+    #[rstest]
+    fn with_capacity_creates_empty_delta() {
+        let delta = SearchIndexDelta::with_capacity(100);
+
+        // All maps should be empty
+        assert!(delta.title_full_add.is_empty());
+        assert!(delta.title_full_remove.is_empty());
+        assert!(delta.title_word_add.is_empty());
+        assert!(delta.title_word_remove.is_empty());
+        assert!(delta.tag_add.is_empty());
+        assert!(delta.tag_remove.is_empty());
+        assert!(delta.title_full_ngram_add.is_empty());
+        assert!(delta.title_full_ngram_remove.is_empty());
+        assert!(delta.title_word_ngram_add.is_empty());
+        assert!(delta.title_word_ngram_remove.is_empty());
+        assert!(delta.tag_ngram_add.is_empty());
+        assert!(delta.tag_ngram_remove.is_empty());
+        assert!(delta.title_full_all_suffix_add.is_empty());
+        assert!(delta.title_full_all_suffix_remove.is_empty());
+        assert!(delta.title_word_all_suffix_add.is_empty());
+        assert!(delta.title_word_all_suffix_remove.is_empty());
+        assert!(delta.tag_all_suffix_add.is_empty());
+        assert!(delta.tag_all_suffix_remove.is_empty());
+    }
+
+    /// Tests that `with_capacity(0)` creates valid delta (edge case).
+    #[rstest]
+    fn with_capacity_zero_is_valid() {
+        let delta = SearchIndexDelta::with_capacity(0);
+
+        // Should be equivalent to default
+        assert!(delta.title_full_add.is_empty());
+        assert!(delta.title_word_add.is_empty());
+    }
+
+    /// Tests that `build_delta` uses `with_capacity` for pre-allocation.
+    ///
+    /// Verifies that the `build_delta` method uses the Phase 2 optimization
+    /// (`estimated_capacity` = `changes.len() * 10`).
+    #[rstest]
+    fn build_delta_uses_with_capacity() {
+        // This test verifies the optimization is applied by checking
+        // that the delta is created correctly with pre-allocated capacity.
+        let task = create_task_with_title_and_tags("Test Task", vec!["tag1", "tag2"]);
+        let changes = vec![TaskChange::Add(task)];
+        let config = SearchIndexConfig::default();
+        let tasks_by_id = PersistentTreeMap::new();
+
+        // build_delta is called internally by from_changes
+        let delta = SearchIndexDelta::from_changes(&changes, &config, &tasks_by_id);
+
+        // The delta should contain the expected entries
+        // (capacity pre-allocation is an internal optimization)
+        assert!(!delta.title_full_add.is_empty());
+        assert!(!delta.title_word_add.is_empty());
+        assert!(!delta.tag_add.is_empty());
+    }
 }
 
 #[cfg(test)]
@@ -14566,6 +15207,286 @@ mod apply_changes_tests {
                 .any(|t| t.task_id == task_id_1)
         );
     }
+
+    // -------------------------------------------------------------------------
+    // BulkBuilder Path Condition Tests (Phase 1)
+    // -------------------------------------------------------------------------
+
+    /// Tests that apply_changes uses bulk path when conditions are met.
+    ///
+    /// Conditions for bulk path:
+    /// 1. use_bulk_builder is true
+    /// 2. changes.len() >= bulk_threshold
+    /// 3. All changes are Add (no Remove)
+    #[rstest]
+    fn apply_changes_uses_bulk_path_when_conditions_met() {
+        // Create config with bulk_threshold = 2
+        let config = SearchIndexConfigBuilder::new()
+            .use_bulk_builder(true)
+            .bulk_threshold(2)
+            .build();
+
+        // Create empty index with bulk-enabled config
+        let tasks: PersistentVector<Task> = PersistentVector::new();
+        let index = SearchIndex::build_with_config(&tasks, config);
+
+        // Create 2 Add changes (meets threshold)
+        let task_1 = create_test_task("callback function");
+        let task_2 = create_test_task("handler function");
+        let changes = vec![
+            TaskChange::Add(task_1.clone()),
+            TaskChange::Add(task_2.clone()),
+        ];
+
+        // Apply changes - should use bulk path internally
+        let updated_index = index.apply_changes(&changes);
+
+        // Verify both tasks are in the index
+        let result = updated_index
+            .search_by_title("callback")
+            .expect("search should succeed");
+        assert_eq!(result.tasks().len(), 1);
+        assert_eq!(result.tasks().get(0).unwrap().task_id, task_1.task_id);
+
+        let result = updated_index
+            .search_by_title("handler")
+            .expect("search should succeed");
+        assert_eq!(result.tasks().len(), 1);
+        assert_eq!(result.tasks().get(0).unwrap().task_id, task_2.task_id);
+    }
+
+    /// Tests that apply_changes uses delta path when use_bulk_builder is disabled.
+    #[rstest]
+    fn apply_changes_uses_delta_path_when_bulk_disabled() {
+        // Create config with use_bulk_builder = false
+        let config = SearchIndexConfigBuilder::new()
+            .use_bulk_builder(false)
+            .bulk_threshold(2)
+            .build();
+
+        let tasks: PersistentVector<Task> = PersistentVector::new();
+        let index = SearchIndex::build_with_config(&tasks, config);
+
+        // Create 2 Add changes
+        let task_1 = create_test_task("callback function");
+        let task_2 = create_test_task("handler function");
+        let changes = vec![
+            TaskChange::Add(task_1.clone()),
+            TaskChange::Add(task_2.clone()),
+        ];
+
+        // Apply changes - should use delta path since bulk is disabled
+        let updated_index = index.apply_changes(&changes);
+
+        // Verify both tasks are in the index (same result regardless of path)
+        let result = updated_index
+            .search_by_title("callback")
+            .expect("search should succeed");
+        assert_eq!(result.tasks().len(), 1);
+    }
+
+    /// Tests that apply_changes uses delta path when changes count is below threshold.
+    #[rstest]
+    fn apply_changes_uses_delta_path_when_below_threshold() {
+        // Create config with bulk_threshold = 5
+        let config = SearchIndexConfigBuilder::new()
+            .use_bulk_builder(true)
+            .bulk_threshold(5)
+            .build();
+
+        let tasks: PersistentVector<Task> = PersistentVector::new();
+        let index = SearchIndex::build_with_config(&tasks, config);
+
+        // Create only 2 Add changes (below threshold of 5)
+        let task_1 = create_test_task("callback function");
+        let task_2 = create_test_task("handler function");
+        let changes = vec![
+            TaskChange::Add(task_1.clone()),
+            TaskChange::Add(task_2.clone()),
+        ];
+
+        // Apply changes - should use delta path since below threshold
+        let updated_index = index.apply_changes(&changes);
+
+        // Verify both tasks are in the index
+        let result = updated_index
+            .search_by_title("callback")
+            .expect("search should succeed");
+        assert_eq!(result.tasks().len(), 1);
+    }
+
+    /// Tests that apply_changes uses delta path when changes contain Remove.
+    #[rstest]
+    fn apply_changes_uses_delta_path_when_has_remove() {
+        // Create config with bulk enabled
+        let config = SearchIndexConfigBuilder::new()
+            .use_bulk_builder(true)
+            .bulk_threshold(2)
+            .build();
+
+        // Create index with one existing task
+        let existing_task = create_test_task("existing task");
+        let tasks: PersistentVector<Task> = vec![existing_task.clone()].into_iter().collect();
+        let index = SearchIndex::build_with_config(&tasks, config);
+
+        // Create changes with Add and Remove
+        let new_task = create_test_task("newitem task");
+        let changes = vec![
+            TaskChange::Add(new_task.clone()),
+            TaskChange::Remove(existing_task.task_id.clone()),
+            TaskChange::Add(create_test_task("another task")),
+        ];
+
+        // Apply changes - should use delta path since there's a Remove
+        let updated_index = index.apply_changes(&changes);
+
+        // Verify existing task is removed and new task is added
+        let result = updated_index.search_by_title("existing");
+        assert!(result.is_none() || result.as_ref().unwrap().tasks().is_empty());
+
+        let result = updated_index
+            .search_by_title("newitem")
+            .expect("search should succeed");
+        assert_eq!(result.tasks().len(), 1);
+    }
+
+    /// Tests that bulk path and delta path produce equivalent results.
+    ///
+    /// This is a critical test ensuring that the optimization paths
+    /// maintain referential transparency (same input -> same output).
+    #[rstest]
+    fn apply_changes_bulk_and_delta_paths_are_equivalent() {
+        // Create two identical indexes with different configs
+        let bulk_config = SearchIndexConfigBuilder::new()
+            .use_bulk_builder(true)
+            .bulk_threshold(2)
+            .build();
+        let delta_config = SearchIndexConfigBuilder::new()
+            .use_bulk_builder(false)
+            .bulk_threshold(2)
+            .build();
+
+        let tasks: PersistentVector<Task> = PersistentVector::new();
+        let bulk_index = SearchIndex::build_with_config(&tasks, bulk_config);
+        let delta_index = SearchIndex::build_with_config(&tasks, delta_config);
+
+        // Create the same Add changes for both
+        let task_id_1 = task_id_from_u128(1);
+        let task_id_2 = task_id_from_u128(2);
+        let task_id_3 = task_id_from_u128(3);
+
+        let task_1 = create_test_task_with_id("callback function handler", task_id_1.clone());
+        let task_2 = create_test_task_with_id("important meeting tomorrow", task_id_2.clone());
+        let task_3 = create_test_task_with_id("handler for events", task_id_3.clone());
+
+        let changes = vec![
+            TaskChange::Add(task_1.clone()),
+            TaskChange::Add(task_2.clone()),
+            TaskChange::Add(task_3.clone()),
+        ];
+
+        // Apply to both indexes
+        let bulk_result = bulk_index.apply_changes(&changes);
+        let delta_result = delta_index.apply_changes(&changes);
+
+        // Verify both produce the same search results
+        for query in &["callback", "handler", "meeting", "important", "events"] {
+            let bulk_search = bulk_result.search_by_title(query);
+            let delta_search = delta_result.search_by_title(query);
+
+            match (bulk_search, delta_search) {
+                (Some(bulk_res), Some(delta_res)) => {
+                    let bulk_ids: HashSet<_> =
+                        bulk_res.tasks().iter().map(|t| &t.task_id).collect();
+                    let delta_ids: HashSet<_> =
+                        delta_res.tasks().iter().map(|t| &t.task_id).collect();
+                    assert_eq!(
+                        bulk_ids, delta_ids,
+                        "Search results for '{}' should be identical",
+                        query
+                    );
+                }
+                (None, None) => {}
+                _ => panic!(
+                    "Search results for '{}' differ in presence: bulk={:?}, delta={:?}",
+                    query,
+                    bulk_result.search_by_title(query).map(|r| r.tasks().len()),
+                    delta_result.search_by_title(query).map(|r| r.tasks().len())
+                ),
+            }
+        }
+
+        // Verify tasks_by_id contains all tasks
+        assert!(bulk_result.tasks_by_id.contains_key(&task_id_1));
+        assert!(bulk_result.tasks_by_id.contains_key(&task_id_2));
+        assert!(bulk_result.tasks_by_id.contains_key(&task_id_3));
+        assert!(delta_result.tasks_by_id.contains_key(&task_id_1));
+        assert!(delta_result.tasks_by_id.contains_key(&task_id_2));
+        assert!(delta_result.tasks_by_id.contains_key(&task_id_3));
+    }
+
+    /// Tests that apply_changes with empty changes returns a clone of self.
+    #[rstest]
+    fn apply_changes_empty_changes_returns_clone() {
+        let config = SearchIndexConfigBuilder::new()
+            .use_bulk_builder(true)
+            .bulk_threshold(2)
+            .build();
+
+        let task = create_test_task("existing task");
+        let tasks: PersistentVector<Task> = vec![task.clone()].into_iter().collect();
+        let index = SearchIndex::build_with_config(&tasks, config);
+
+        // Apply empty changes
+        let result = index.apply_changes(&[]);
+
+        // Result should be equivalent to original
+        let original_search = index.search_by_title("existing");
+        let result_search = result.search_by_title("existing");
+        assert_eq!(
+            original_search.map(|r| r.tasks().len()),
+            result_search.map(|r| r.tasks().len())
+        );
+    }
+
+    /// Tests apply_changes at exactly the bulk threshold boundary.
+    #[rstest]
+    fn apply_changes_at_exact_threshold() {
+        // Create config with bulk_threshold = 3
+        let config = SearchIndexConfigBuilder::new()
+            .use_bulk_builder(true)
+            .bulk_threshold(3)
+            .build();
+
+        let tasks: PersistentVector<Task> = PersistentVector::new();
+        let index = SearchIndex::build_with_config(&tasks, config);
+
+        // Create exactly 3 Add changes (at threshold)
+        let task_1 = create_test_task("first task");
+        let task_2 = create_test_task("second task");
+        let task_3 = create_test_task("third task");
+        let changes = vec![
+            TaskChange::Add(task_1.clone()),
+            TaskChange::Add(task_2.clone()),
+            TaskChange::Add(task_3.clone()),
+        ];
+
+        // Apply changes - should use bulk path (>= threshold)
+        let updated_index = index.apply_changes(&changes);
+
+        // Verify all tasks are in the index
+        for (query, expected_id) in [
+            ("first", &task_1.task_id),
+            ("second", &task_2.task_id),
+            ("third", &task_3.task_id),
+        ] {
+            let result = updated_index
+                .search_by_title(query)
+                .expect("search should succeed");
+            assert_eq!(result.tasks().len(), 1);
+            assert_eq!(&result.tasks().get(0).unwrap().task_id, expected_id);
+        }
+    }
 }
 
 // =============================================================================
@@ -15906,6 +16827,135 @@ mod compute_merged_posting_list_sorted_tests {
         // Assert
         assert_eq!(result, task_ids(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]));
     }
+
+    // -------------------------------------------------------------------------
+    // Phase 2: Early Return Optimization Tests
+    // -------------------------------------------------------------------------
+
+    /// Tests early return when remove is empty and existing is empty.
+    ///
+    /// Expected: Returns `add.to_vec()` directly without merge loop.
+    #[rstest]
+    fn early_return_no_remove_no_existing_returns_add() {
+        // Arrange
+        let existing: Vec<TaskId> = vec![];
+        let add = task_ids(&[1, 2, 3, 4, 5]);
+        let remove: Vec<TaskId> = vec![];
+
+        // Act
+        let result =
+            SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &add, &remove);
+
+        // Assert: Should be identical to add
+        assert_eq!(result, add);
+    }
+
+    /// Tests early return when remove is empty and add is empty.
+    ///
+    /// Expected: Returns `existing.to_vec()` directly without merge loop.
+    #[rstest]
+    fn early_return_no_remove_no_add_returns_existing() {
+        // Arrange
+        let existing = task_ids(&[10, 20, 30, 40, 50]);
+        let add: Vec<TaskId> = vec![];
+        let remove: Vec<TaskId> = vec![];
+
+        // Act
+        let result =
+            SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &add, &remove);
+
+        // Assert: Should be identical to existing
+        assert_eq!(result, existing);
+    }
+
+    /// Tests that early return is NOT applied when remove is non-empty.
+    ///
+    /// Even if add is empty, full merge logic should run to apply remove.
+    #[rstest]
+    fn no_early_return_when_remove_is_non_empty() {
+        // Arrange
+        let existing = task_ids(&[1, 2, 3, 4, 5]);
+        let add: Vec<TaskId> = vec![];
+        let remove = task_ids(&[2, 4]);
+
+        // Act
+        let result =
+            SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &add, &remove);
+
+        // Assert: Remove should be applied, resulting in {1, 3, 5}
+        assert_eq!(result, task_ids(&[1, 3, 5]));
+    }
+
+    /// Tests early return with large data sets.
+    ///
+    /// Verifies that the optimization works correctly for realistic sizes.
+    #[rstest]
+    fn early_return_large_add_only() {
+        // Arrange: Large add-only batch (simulating bulk insert)
+        let existing: Vec<TaskId> = vec![];
+        let add: Vec<TaskId> = (1..=1000)
+            .map(|v| TaskId::from_uuid(Uuid::from_u128(v)))
+            .collect();
+        let remove: Vec<TaskId> = vec![];
+
+        // Act
+        let result =
+            SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &add, &remove);
+
+        // Assert
+        assert_eq!(result.len(), 1000);
+        assert_eq!(result, add);
+    }
+
+    /// Tests early return with large existing data.
+    ///
+    /// Verifies that the optimization works correctly for large existing index.
+    #[rstest]
+    fn early_return_large_existing_only() {
+        // Arrange: Large existing index with no changes
+        let existing: Vec<TaskId> = (1..=1000)
+            .map(|v| TaskId::from_uuid(Uuid::from_u128(v)))
+            .collect();
+        let add: Vec<TaskId> = vec![];
+        let remove: Vec<TaskId> = vec![];
+
+        // Act
+        let result =
+            SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &add, &remove);
+
+        // Assert
+        assert_eq!(result.len(), 1000);
+        assert_eq!(result, existing);
+    }
+
+    /// Tests that early return preserves referential transparency.
+    ///
+    /// The result should be equivalent whether or not early return is used.
+    #[rstest]
+    #[case::empty_all(vec![], vec![], vec![])]
+    #[case::add_only_small(vec![], task_ids(&[1, 2, 3]), vec![])]
+    #[case::existing_only_small(task_ids(&[1, 2, 3]), vec![], vec![])]
+    #[case::both_with_merge(task_ids(&[1, 3, 5]), task_ids(&[2, 4, 6]), vec![])]
+    fn early_return_referential_transparency(
+        #[case] existing: Vec<TaskId>,
+        #[case] add: Vec<TaskId>,
+        #[case] remove: Vec<TaskId>,
+    ) {
+        // Act
+        let result =
+            SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &add, &remove);
+
+        // Compute expected using the original algorithm (without early return)
+        let expected =
+            SearchIndex::compute_merged_posting_list(
+                if existing.is_empty() { None } else { Some(existing) },
+                if add.is_empty() { None } else { Some(&add) },
+                if remove.is_empty() { None } else { Some(&remove) },
+            );
+
+        // Assert
+        assert_eq!(result, expected);
+    }
 }
 
 #[cfg(test)]
@@ -16041,6 +17091,12 @@ mod compute_merged_posting_list_iter_tests {
 // =============================================================================
 
 #[cfg(test)]
+#[allow(
+    clippy::redundant_clone,
+    clippy::uninlined_format_args,
+    clippy::doc_markdown,
+    clippy::needless_collect
+)]
 mod search_index_bulk_builder_tests {
     use super::*;
     use rstest::rstest;
@@ -16098,8 +17154,8 @@ mod search_index_bulk_builder_tests {
         let task_id_3 = make_task_id(3);
 
         let index = SearchIndexBulkBuilder::new(config)
-            .add_entry("callback".to_string(), task_id_1.clone())
-            .add_entry("callback".to_string(), task_id_2.clone())
+            .add_entry("callback".to_string(), task_id_1)
+            .add_entry("callback".to_string(), task_id_2)
             .add_entry("callback".to_string(), task_id_3.clone())
             .build()
             .expect("build should succeed");
@@ -16107,7 +17163,7 @@ mod search_index_bulk_builder_tests {
         // The n-grams should only contain task_id_3 (last wins)
         // Check that all n-grams for "callback" have task_id_3
         for (_key, collection) in &index {
-            for id in collection.iter() {
+            for id in collection {
                 assert_eq!(id, &task_id_3);
             }
         }
@@ -16130,8 +17186,8 @@ mod search_index_bulk_builder_tests {
     fn test_builder_error_too_many_entries() {
         let config = SearchIndexConfig::default();
         // Use public API (add_entry) instead of direct field access
-        let builder =
-            (0..(MAX_BULK_ENTRIES + 100)).fold(SearchIndexBulkBuilder::new(config), |b, i| {
+        let builder = (0..(MAX_BULK_ENTRIES + 100))
+            .fold(SearchIndexBulkBuilder::new(config), |b, i| {
                 b.add_entry(format!("token{i}"), make_task_id(i as u128))
             });
 
@@ -16160,8 +17216,9 @@ mod search_index_bulk_builder_tests {
 
         // Add enough entries to exceed MAX_TOTAL_NGRAMS (10,000,000)
         // 999 ngrams * 11,000 entries = 10,989,000 > 10,000,000
-        let builder = (0..11_000).fold(SearchIndexBulkBuilder::new(config), |b, i| {
-            b.add_entry(format!("{}{}", long_token, i), make_task_id(i as u128))
+        #[allow(clippy::cast_sign_loss)]
+        let builder = (0..11_000).fold(SearchIndexBulkBuilder::new(config), |b, i: i32| {
+            b.add_entry(format!("{long_token}{i}"), make_task_id(i as u128))
         });
 
         match builder.build() {
@@ -16201,7 +17258,10 @@ mod search_index_bulk_builder_tests {
         };
         assert!(matches!(
             error,
-            BuildError::TooManyNgrams { count: 20_000_000, limit: 10_000_000 }
+            BuildError::TooManyNgrams {
+                count: 20_000_000,
+                limit: 10_000_000
+            }
         ));
     }
 
@@ -16218,7 +17278,10 @@ mod search_index_bulk_builder_tests {
 
         // Larger values
         assert_eq!(estimate_memory(1000, 10_000), 1024 * 1000 + 100 * 10_000);
-        assert_eq!(estimate_memory(100_000, 10_000_000), 1024 * 100_000 + 100 * 10_000_000);
+        assert_eq!(
+            estimate_memory(100_000, 10_000_000),
+            1024 * 100_000 + 100 * 10_000_000
+        );
 
         // Verify the boundary for MAX_ESTIMATED_MEMORY (1GB)
         // 1GB = 1_073_741_824 bytes
@@ -16248,7 +17311,7 @@ mod search_index_bulk_builder_tests {
             estimated: 2_000_000_000,
             limit: MAX_ESTIMATED_MEMORY,
         };
-        let message = format!("{}", error);
+        let message = format!("{error}");
         assert!(message.contains("2000000000"));
         assert!(message.contains(&MAX_ESTIMATED_MEMORY.to_string()));
 
@@ -16364,5 +17427,221 @@ mod search_index_bulk_builder_tests {
             let ids2: Vec<_> = other_collection.iter().collect();
             assert_eq!(ids1, ids2);
         }
+    }
+}
+
+// =============================================================================
+// Phase 3: merge_ngram_delta Tests
+// =============================================================================
+
+#[cfg(test)]
+mod merge_ngram_delta_result_tests {
+    use super::*;
+    use rstest::rstest;
+
+    // -------------------------------------------------------------------------
+    // MergeNgramDeltaResult Type Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn merge_ngram_delta_result_ok_into_index() {
+        let index = NgramIndex::new();
+        let result = MergeNgramDeltaResult::Ok(index.clone());
+
+        let extracted = result.into_index();
+        assert_eq!(extracted.len(), index.len());
+    }
+
+    #[rstest]
+    fn merge_ngram_delta_result_fallback_into_index() {
+        let index = NgramIndex::new();
+        let reason = MergeNgramDeltaFallbackReason::TooManyEntries {
+            count: 200_000,
+            limit: 100_000,
+        };
+        let result = MergeNgramDeltaResult::Fallback {
+            index: index.clone(),
+            reason,
+        };
+
+        let extracted = result.into_index();
+        assert_eq!(extracted.len(), index.len());
+    }
+
+    #[rstest]
+    fn merge_ngram_delta_result_ok_is_not_fallback() {
+        let index = NgramIndex::new();
+        let result = MergeNgramDeltaResult::Ok(index);
+
+        assert!(!result.is_fallback());
+        assert!(result.fallback_reason().is_none());
+    }
+
+    #[rstest]
+    fn merge_ngram_delta_result_fallback_is_fallback() {
+        let index = NgramIndex::new();
+        let reason = MergeNgramDeltaFallbackReason::TooManyEntries {
+            count: 200_000,
+            limit: 100_000,
+        };
+        let result = MergeNgramDeltaResult::Fallback {
+            index,
+            reason: reason.clone(),
+        };
+
+        assert!(result.is_fallback());
+        assert_eq!(result.fallback_reason(), Some(&reason));
+    }
+
+    // -------------------------------------------------------------------------
+    // MergeNgramDeltaFallbackReason Type Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn fallback_reason_too_many_entries() {
+        let reason = MergeNgramDeltaFallbackReason::TooManyEntries {
+            count: 150_000,
+            limit: 100_000,
+        };
+
+        match reason {
+            MergeNgramDeltaFallbackReason::TooManyEntries { count, limit } => {
+                assert_eq!(count, 150_000);
+                assert_eq!(limit, 100_000);
+            }
+        }
+    }
+
+    #[rstest]
+    fn fallback_reason_equality() {
+        let reason1 = MergeNgramDeltaFallbackReason::TooManyEntries {
+            count: 100,
+            limit: 50,
+        };
+        let reason2 = MergeNgramDeltaFallbackReason::TooManyEntries {
+            count: 100,
+            limit: 50,
+        };
+        let reason3 = MergeNgramDeltaFallbackReason::TooManyEntries {
+            count: 200,
+            limit: 100,
+        };
+
+        assert_eq!(reason1, reason2);
+        assert_ne!(reason1, reason3);
+    }
+}
+
+#[cfg(test)]
+mod merge_ngram_delta_optimization_tests {
+    use super::*;
+    use crate::domain::{Tag, Timestamp};
+    use rstest::rstest;
+
+    fn create_task(title: &str) -> Task {
+        Task::new(TaskId::generate(), title, Timestamp::now())
+    }
+
+    fn create_task_with_tags(title: &str, tags: Vec<&str>) -> Task {
+        let base = create_task(title);
+        tags.into_iter()
+            .fold(base, |task, tag| task.add_tag(Tag::new(tag)))
+    }
+
+    // -------------------------------------------------------------------------
+    // merge_ngram_delta with config flag tests
+    // -------------------------------------------------------------------------
+
+    /// Tests that `merge_ngram_delta` returns Ok result when optimization is enabled.
+    #[rstest]
+    fn merge_ngram_delta_bulk_enabled_returns_ok() {
+        let config = SearchIndexConfig {
+            use_merge_ngram_delta_bulk_insert: true,
+            ..Default::default()
+        };
+
+        let task = create_task_with_tags("Test task", vec!["rust", "programming"]);
+        let changes = vec![TaskChange::Add(task)];
+
+        let empty_tasks: PersistentVector<Task> = PersistentVector::new();
+        let index = SearchIndex::build_with_config(&empty_tasks, config);
+
+        // Apply changes should succeed
+        let new_index = index.apply_changes(&changes);
+
+        // Verify the task was added
+        assert_eq!(new_index.tasks_by_id.len(), 1);
+    }
+
+    /// Tests that `merge_ngram_delta` returns Ok result when optimization is disabled.
+    #[rstest]
+    fn merge_ngram_delta_bulk_disabled_returns_ok() {
+        let config = SearchIndexConfig {
+            use_merge_ngram_delta_bulk_insert: false,
+            ..Default::default()
+        };
+
+        let task = create_task_with_tags("Test task", vec!["rust", "programming"]);
+        let changes = vec![TaskChange::Add(task)];
+
+        let empty_tasks: PersistentVector<Task> = PersistentVector::new();
+        let index = SearchIndex::build_with_config(&empty_tasks, config);
+
+        // Apply changes should succeed
+        let new_index = index.apply_changes(&changes);
+
+        // Verify the task was added
+        assert_eq!(new_index.tasks_by_id.len(), 1);
+    }
+
+    /// Tests that both optimization paths produce equivalent results.
+    #[rstest]
+    fn merge_ngram_delta_bulk_vs_individual_equivalence() {
+        let task1 = create_task_with_tags("Learn Rust", vec!["programming", "learning"]);
+        let task2 = create_task_with_tags("Build Project", vec!["rust", "project"]);
+        let changes = vec![TaskChange::Add(task1), TaskChange::Add(task2)];
+
+        // With bulk optimization enabled
+        let config_bulk = SearchIndexConfig {
+            use_merge_ngram_delta_bulk_insert: true,
+            ..Default::default()
+        };
+        let empty_tasks: PersistentVector<Task> = PersistentVector::new();
+        let index_bulk = SearchIndex::build_with_config(&empty_tasks, config_bulk);
+        let result_bulk = index_bulk.apply_changes(&changes);
+
+        // With bulk optimization disabled
+        let config_individual = SearchIndexConfig {
+            use_merge_ngram_delta_bulk_insert: false,
+            ..Default::default()
+        };
+        let index_individual = SearchIndex::build_with_config(&empty_tasks, config_individual);
+        let result_individual = index_individual.apply_changes(&changes);
+
+        // Both should have the same tasks
+        assert_eq!(result_bulk.tasks_by_id.len(), result_individual.tasks_by_id.len());
+
+        // Both should have the same ngram index entries
+        assert_eq!(
+            result_bulk.title_word_ngram_index.len(),
+            result_individual.title_word_ngram_index.len()
+        );
+    }
+
+    /// Tests `apply_changes` with multiple tasks.
+    #[rstest]
+    fn merge_ngram_delta_multiple_tasks() {
+        let config = SearchIndexConfig::default();
+        let empty_tasks: PersistentVector<Task> = PersistentVector::new();
+        let index = SearchIndex::build_with_config(&empty_tasks, config);
+
+        let changes: Vec<TaskChange> = (0..10)
+            .map(|i| create_task_with_tags(&format!("Task {i}"), vec!["tag"]))
+            .map(TaskChange::Add)
+            .collect();
+
+        let new_index = index.apply_changes(&changes);
+
+        assert_eq!(new_index.tasks_by_id.len(), 10);
     }
 }

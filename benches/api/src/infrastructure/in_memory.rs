@@ -730,11 +730,7 @@ mod tests {
         assert!(update_result.is_ok());
 
         // Verify the update
-        let found = repository
-            .find_by_id(&task_id)
-            .await
-            .unwrap()
-            .unwrap();
+        let found = repository.find_by_id(&task_id).await.unwrap().unwrap();
         assert_eq!(found.title, "Updated Title");
         assert_eq!(found.version, 2);
     }
@@ -905,11 +901,7 @@ mod tests {
         assert!(update_result.is_ok());
 
         // Verify the update
-        let found = repository
-            .find_by_id(&project_id)
-            .await
-            .unwrap()
-            .unwrap();
+        let found = repository.find_by_id(&project_id).await.unwrap().unwrap();
         assert_eq!(found.name, "Updated Name");
         assert_eq!(found.version, 2);
     }
@@ -954,10 +946,7 @@ mod tests {
         assert!(delete_result.unwrap());
 
         // Verify deletion
-        let find_result = repository
-            .find_by_id(&project_id)
-            .await
-            .unwrap();
+        let find_result = repository.find_by_id(&project_id).await.unwrap();
         assert!(find_result.is_none());
     }
 
@@ -1047,10 +1036,7 @@ mod tests {
         assert!(result.is_ok());
 
         // Verify current version
-        let version = store
-            .get_current_version(&task_id)
-            .await
-            .unwrap();
+        let version = store.get_current_version(&task_id).await.unwrap();
         assert_eq!(version, 1);
     }
 
@@ -1067,10 +1053,7 @@ mod tests {
         }
 
         // Verify current version
-        let version = store
-            .get_current_version(&task_id)
-            .await
-            .unwrap();
+        let version = store.get_current_version(&task_id).await.unwrap();
         assert_eq!(version, 3);
 
         // Verify event count
@@ -1146,10 +1129,7 @@ mod tests {
         }
 
         // Load events from version 2 (should get events 3, 4, 5)
-        let history = store
-            .load_events_from_version(&task_id, 2)
-            .await
-            .unwrap();
+        let history = store.load_events_from_version(&task_id, 2).await.unwrap();
         assert_eq!(history.event_count(), 3);
 
         // Verify versions
@@ -1172,10 +1152,7 @@ mod tests {
         }
 
         // Load events from version 0 (should get all events)
-        let history = store
-            .load_events_from_version(&task_id, 0)
-            .await
-            .unwrap();
+        let history = store.load_events_from_version(&task_id, 0).await.unwrap();
         assert_eq!(history.event_count(), 3);
     }
 
@@ -1192,10 +1169,7 @@ mod tests {
         }
 
         // Load events from version 10 (should get no events)
-        let history = store
-            .load_events_from_version(&task_id, 10)
-            .await
-            .unwrap();
+        let history = store.load_events_from_version(&task_id, 10).await.unwrap();
         assert!(history.is_empty());
     }
 
@@ -1205,10 +1179,7 @@ mod tests {
         let store = InMemoryEventStore::new();
         let task_id = TaskId::generate();
 
-        let version = store
-            .get_current_version(&task_id)
-            .await
-            .unwrap();
+        let version = store.get_current_version(&task_id).await.unwrap();
         assert_eq!(version, 0);
     }
 
@@ -1224,10 +1195,7 @@ mod tests {
             store.append(&event, i - 1).await.unwrap();
         }
 
-        let version = store
-            .get_current_version(&task_id)
-            .await
-            .unwrap();
+        let version = store.get_current_version(&task_id).await.unwrap();
         assert_eq!(version, 3);
     }
 
@@ -1341,10 +1309,7 @@ mod tests {
         }
 
         // Load events from version 2 (should get events 3, 4, 5 in oldest-first order)
-        let history = store
-            .load_events_from_version(&task_id, 2)
-            .await
-            .unwrap();
+        let history = store.load_events_from_version(&task_id, 2).await.unwrap();
         let versions: Vec<u64> = history.iter().map(|event| event.version).collect();
 
         // Verify oldest-first order: 3, 4, 5
@@ -1437,11 +1402,7 @@ mod tests {
         assert_eq!(repository.count().await.unwrap(), 1);
 
         // Verify the task was saved correctly
-        let found = repository
-            .find_by_id(&task_id)
-            .await
-            .unwrap()
-            .unwrap();
+        let found = repository.find_by_id(&task_id).await.unwrap().unwrap();
         assert_eq!(found.title, "Single Task");
     }
 
@@ -1465,11 +1426,7 @@ mod tests {
 
         // Verify each task was saved correctly
         for (index, task_id) in task_ids.iter().enumerate() {
-            let found = repository
-                .find_by_id(task_id)
-                .await
-                .unwrap()
-                .unwrap();
+            let found = repository.find_by_id(task_id).await.unwrap().unwrap();
             assert_eq!(found.title, format!("Task {index}"));
         }
     }
@@ -1552,11 +1509,7 @@ mod tests {
         );
 
         // Verify the existing task was NOT overwritten
-        let existing = repository
-            .find_by_id(&task_id)
-            .await
-            .unwrap()
-            .unwrap();
+        let existing = repository.find_by_id(&task_id).await.unwrap().unwrap();
         assert_eq!(existing.title, "Existing Task");
         assert_eq!(existing.version, 1);
     }
@@ -1627,11 +1580,7 @@ mod tests {
         assert_eq!(repository.count().await.unwrap(), 2);
 
         // Verify first task was saved
-        let saved = repository
-            .find_by_id(&task_id)
-            .await
-            .unwrap()
-            .unwrap();
+        let saved = repository.find_by_id(&task_id).await.unwrap().unwrap();
         assert_eq!(saved.title, "First Task");
         assert_eq!(saved.version, 1);
     }

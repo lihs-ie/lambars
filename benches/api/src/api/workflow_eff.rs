@@ -183,12 +183,7 @@ fn save_task_eff(
 ) -> HandlerEffect<()> {
     ExceptT::new(AsyncIO::new(move || {
         let repository = repository.clone();
-        async move {
-            repository
-                .save(&task)
-                .await
-                .map_err(ApiErrorResponse::from)
-        }
+        async move { repository.save(&task).await.map_err(ApiErrorResponse::from) }
     }))
 }
 

@@ -1585,11 +1585,7 @@ mod tests {
         assert!(update_result.is_ok());
 
         // Verify the update
-        let found = repository
-            .find_by_id(&task_id)
-            .await
-            .unwrap()
-            .unwrap();
+        let found = repository.find_by_id(&task_id).await.unwrap().unwrap();
         assert_eq!(found.title, "Updated Title");
         assert_eq!(found.version, 2);
 
@@ -1778,10 +1774,7 @@ mod tests {
         assert_eq!(history.len(), 1);
 
         // Check version
-        let version = event_store
-            .get_current_version(&task_id)
-            .await
-            .unwrap();
+        let version = event_store.get_current_version(&task_id).await.unwrap();
         assert_eq!(version, 1);
 
         // Cleanup
@@ -1874,10 +1867,7 @@ mod tests {
         let task_id = TaskId::generate();
 
         // Get version for non-existent task
-        let version = event_store
-            .get_current_version(&task_id)
-            .await
-            .unwrap();
+        let version = event_store.get_current_version(&task_id).await.unwrap();
         assert_eq!(version, 0);
     }
 }

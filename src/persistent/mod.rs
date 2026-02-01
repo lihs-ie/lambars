@@ -138,6 +138,7 @@ mod vector;
 
 pub use deque::PersistentDeque;
 pub use hashmap::BulkInsertError;
+pub use hashmap::BulkInsertErrorWithItems;
 pub use hashmap::MAX_BULK_INSERT;
 pub use hashmap::PersistentHashMap;
 pub use hashmap::PersistentHashMapIntoIterator;
