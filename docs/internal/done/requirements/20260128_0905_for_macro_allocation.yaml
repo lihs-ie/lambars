@@ -1,0 +1,289 @@
+# for_! マクロ割当削減 要件定義
+#
+# 概要:
+#   for_! マクロ展開で発生する Vec 拡張と FlatMap の割当を削減し、
+#   内包表記の実行速度を向上させる。
+#
+# 設計方針:
+#   1. size_hint を利用して容量を先読みする
+#   2. 小さな出力は SmallVec に格納し、ヒープ確保を抑制する
+#   3. マクロ展開結果の意味は完全互換とする
+#
+# 参照:
+#   - benches/results/before/criterion-profiling-all-*/criterion-profiling-*-for_macro_bench
+#   - benches/results/after/criterion-profiling-all-*/criterion-profiling-*-for_macro_bench
+#   - benches/for_macro_bench.rs
+#   - src/compose/for_macro.rs (対象マクロ定義)
+
+version: "1.0.0"
+name: "for_macro_allocation"
+description: |
+  for_! マクロの展開が Vec::spec_extend と FlatMap を多用しており、
+  realloc が支配的になっている。容量見積りと SmallVec を導入し、
+  メモリ再配置を削減する。
+
+background:
+  problem: |
+    for_macro_bench で Vec の拡張と realloc が上位に現れ、
+    内包表記の性能が伸びない。
+  motivation: |
+    マクロの使い勝手を維持しつつ、性能を大幅に改善する。
+  prior_art:
+    - name: "Vec::with_capacity"
+      description: "size_hint を利用した事前確保。"
+
+requirements:
+  # ======================================================================
+  # 1. 収集先の容量計画
+  # ======================================================================
+  - id: "REQ-FOR-MACRO-001"
+    name: "size_hint を事前計算して Vec の容量を先読みする"
+    description: |
+      - マクロ展開で最終的に collect する場合、可能な限り size_hint を利用して capacity を見積もる。
+      - 単一イテレーション（`x <= xs; yield expr`）の場合は Clone して size_hint を取得し、
+        最適な容量でメモリを確保する。
+      - ネストしたイテレーション・ガード付きの場合は、マクロの制約により内側の式を事前評価できないため、
+        イテレータ自身の size_hint（外側のみ）を使用する。
+
+    methods:
+      - name: "collect_with_hint"
+        signature: "pub fn collect_with_hint<T, I: Iterator<Item = T>>(lower: usize, upper: Option<usize>, iter: I) -> Vec<T>"
+        description: |
+          - size_hint を元に最適な収集戦略を選択する。
+          - upper が判明している場合:
+            - min(upper, MAX_REASONABLE_CAPACITY) を容量として Vec::with_capacity を直接使用。
+            - SmallVec → Vec のコピーコストを回避し、過大な事前割当を防止。
+          - upper が不明の場合:
+            - stack_safe 判定: sizeof(T) * 128 <= L1_CACHE_SIZE をチェック。
+            - stack_safe == false の場合は Vec を使用（スタックオーバーフロー回避）。
+            - lower == 0 の場合は Vec を使用（スタック肥大化を回避）。
+            - lower > threshold の場合は Vec::with_capacity を使用。
+            - stack_safe && 0 < lower <= threshold の場合のみ SmallVec を使用（スタック割当の恩恵を受ける）。
+
+      - name: "collect_from_iter"
+        signature: "pub fn collect_from_iter<T, I: Iterator<Item = T>>(iter: I) -> Vec<T>"
+        description: |
+          - イテレータ自身の size_hint を取得し、collect_with_hint へ委譲する。
+          - Clone が不要なケース（ネストしたイテレーション、ガード付き）で使用される。
+
+      - name: "collect_with_capacity (deprecated)"
+        signature: "pub fn collect_with_capacity<T, I: Iterator<Item = T>>(capacity: usize, iter: I) -> Vec<T>"
+        description: |
+          - v0.1.x 互換のためのエイリアス。collect_with_hint(capacity, Some(capacity), iter) を呼び出す。
+          - v0.2.0 以降は collect_with_hint の使用を推奨。
+
+      - name: "collect_small"
+        signature: "pub fn collect_small<T, I: Iterator<Item = T>>(iter: I) -> Vec<T>"
+        description: |
+          - イテレータ自身の size_hint を取得し、collect_with_hint へ委譲する。
+          - should_use_smallvec の判定に基づき、適切な戦略（SmallVec または Vec）を選択する。
+          - 名前は「小さなコレクション向け」を示唆するが、実際には size_hint に基づく最適な戦略を使用する。
+
+      - name: "combined_size_hint"
+        signature: "pub fn combined_size_hint(hints: &[SizeHint]) -> usize"
+        description: |
+          - 複数の size_hint を合成して最終的な容量を計算する（手動使用向け）。
+          - lower: saturating_mul でオーバーフローを防止（usize::MAX で飽和）。
+          - upper: checked_mul でオーバーフローを検出（失敗時は None）。
+          - upper が判明している場合はそれを使用、不明な場合は lower にフォールバック。
+          - 注: combined_size_hint 自体は MAX_REASONABLE_CAPACITY を適用しない（計算のみ）。
+          - collect_with_hint に渡す際に MAX_REASONABLE_CAPACITY が適用される。
+
+    implementations:
+      - type: "Macro internal rules"
+        description: |
+          - `@hint` ルールで単一イテレーションの size_hint を計算する。
+          - ネストしたイテレーションでは (0, None) を返す（マクロの制約により内側の式が評価できないため）。
+          - 公開エントリーポイントで Clone + @hint + collect_with_hint を使用（単一イテレーション）。
+          - ネストしたイテレーション・ガードでは collect_from_iter を使用（Clone 不要）。
+
+  # ======================================================================
+  # 2. SmallVec の利用
+  # ======================================================================
+  - id: "REQ-FOR-MACRO-002"
+    name: "小さな出力は SmallVec に格納する"
+    description: |
+      - 出力件数が閾値以下の場合は SmallVec<[T; 128]> を使用する。
+      - SmallVec の inline 容量は固定で 128 要素。
+      - 閾値（SmallVec を使用する要素数の上限）は要素サイズに応じて動的に計算される（L1 キャッシュサイズ 32KB を基準）。
+      - 大きな要素ではスタック安全性のため閾値が自動的に下がり、SmallVec の使用が制限される。
+
+    rationale: |
+      - SmallVec<[T; 128]> を採用する理由:
+        - inline 容量を固定することで、コンパイル時に型が決定される。
+        - const generics で動的に変更すると複雑性が増すため、固定値を採用。
+      - 閾値の動的計算（compute_smallvec_threshold）:
+        - L1 キャッシュサイズ（32KB）を基準に、要素サイズで閾値を計算する（min(32KB / sizeof(T), 128)）。
+        - 小さな要素（i32: 4 bytes）では 128 要素（理論上限 8192 だが上限で制限）。
+        - 大きな要素では自動的に閾値が下がる（例: 1KB 要素では 32 要素）。
+      - スタック安全性チェック（stack_safe）:
+        - sizeof(T) * 128 <= 32KB を満たす場合のみ SmallVec を使用可能。
+        - 具体的には要素サイズが 256 bytes 以下（32KB / 128 = 256）で stack_safe が true。
+        - 257 bytes 以上の要素では stack_safe が false となり、SmallVec が完全に無効化される。
+        - 閾値とスタック安全性の2段階チェックでスタックオーバーフローを確実に回避。
+      - into_vec() のコピーコストを最小化:
+        - upper が判明している場合は Vec を直接使用（コピーなし）。
+        - lower == 0 の場合は Vec を使用（スタック肥大化を回避）。
+        - 0 < lower <= threshold のみ SmallVec を使用（スタック割当の恩恵を受ける）。
+
+    methods:
+      - name: "compute_smallvec_threshold"
+        signature: "pub const fn compute_smallvec_threshold<T>() -> usize"
+        description: |
+          - 要素サイズに基づいて SmallVec を使用する要素数の上限（閾値）を計算する純粋関数。
+          - 計算式: min(L1_CACHE_SIZE / sizeof(T), SMALLVEC_INLINE_CAPACITY)
+          - SmallVec の inline 容量は固定で 128 要素だが、大きな要素では閾値を下げて使用を制限。
+          - 例: i32 (4 bytes) → 128 要素、1KB 要素 → 32 要素
+          - ZST（ゼロサイズ型）の場合は size 1 として扱い、ゼロ除算を回避。
+
+    implementations:
+      - type: "collect_with_hint strategy"
+        description: |
+          - upper が判明している場合: Vec::with_capacity を直接使用（SmallVec を経由しない）。
+          - upper が不明の場合:
+            - stack_safe チェック（sizeof(T) * 128 <= 32KB）を実施。
+            - !stack_safe || lower == 0 || lower > threshold: Vec を使用。
+            - stack_safe && 0 < lower <= threshold: SmallVec::with_capacity を使用し、最後に into_vec()。
+          - 注: 大きな要素（257 bytes 以上）では stack_safe が false となり、SmallVec が完全に無効化される。
+
+  # ======================================================================
+  # 3. 追加機能
+  # ======================================================================
+  - id: "REQ-FOR-MACRO-003"
+    name: "型エイリアスと純粋関数による参照透過性の保証"
+    description: |
+      - SizeHint 型エイリアスで size_hint の型を明示する。
+      - 純粋関数（compute_smallvec_threshold, combined_size_hint）で参照透過性を保証する。
+      - 注: SizeHint は型エイリアスのため、lower <= upper などの制約は型レベルで保証されない。
+
+    methods:
+      - name: "SizeHint"
+        signature: "pub type SizeHint = (usize, Option<usize>)"
+        description: |
+          - Iterator::size_hint() と同じ形式で容量見積りを表現する型エイリアス。
+          - ドキュメントレベルでの意図明確化を目的とする。
+
+    implementations:
+      - type: "Type-safe API design"
+        description: |
+          - 関数シグネチャで SizeHint を使用し、意図を明確化する。
+          - 型制約は実装されないが、コードの可読性を向上させる。
+
+non_functional_requirements:
+  performance:
+    - target: "for_macro_bench の realloc 呼び出し回数を 70% 以上削減する。"
+      measurement: "cargo bench --bench for_macro_bench でプロファイリング結果を比較する。"
+      baseline: "benches/results/before/criterion-profiling-all-*/criterion-profiling-*-for_macro_bench"
+      achieved: "benches/results/after/criterion-profiling-all-*/criterion-profiling-*-for_macro_bench"
+    - target: "10k 要素の内包表記で 20% 以上の速度改善を達成する。"
+      measurement: |
+        - "cargo bench --bench for_macro_bench -- 'comprehension_10000' で測定する。"
+        - before と after のベンチマーク結果を比較し、改善率を算出する。
+        - Criterion の mean（平均実行時間）を使用して改善率を計算する。
+        - 改善率 = (before_mean - after_mean) / before_mean * 100
+      environment: "M1 Mac, Rust 1.92.0, release ビルド"
+      baseline: "benches/results/before/criterion-profiling-all-*/criterion-profiling-*-for_macro_bench"
+      achieved: "benches/results/after/criterion-profiling-all-*/criterion-profiling-*-for_macro_bench"
+      note: "具体的な数値はベンチマーク結果ディレクトリ内の criterion レポート（estimates.json の mean 値）を参照"
+    - target: "upper が判明しているケースでは SmallVec → Vec のコピーコストを完全に排除する。"
+      verification: "単一イテレーションで Vec::with_capacity を直接使用することで達成。"
+    - target: "lower == 0 のケースでは Vec を使用し、スタック肥大化を回避する。"
+      verification: "filter/flat_map ケースで SmallVec を回避することで達成。"
+
+  compatibility:
+    - "生成される順序・内容は既存と一致する。"
+    - "v0.2.0 の破壊的変更として、単一イテレーションで Clone を要求する。"
+    - "ネストしたイテレーションとガードでは Clone 不要（後方互換性維持）。"
+
+  testing:
+    - "size_hint 合成の境界値テストを追加する（オーバーフロー、空スライス、ゼロ下限など）。"
+    - "SmallVec 経由でも結果が一致することを比較する。"
+    - "compute_smallvec_threshold の純粋性を検証する（同じ型で同じ結果）。"
+    - "lower == 0 のケースで Vec パスが使用されることを検証する。"
+    - "upper が判明しているケースで Vec が直接使用されることを検証する。"
+
+  verification_status:
+    - achieved: true
+      test_location: "tests/for_macro_tests.rs および src/compose/for_macro.rs::tests"
+      test_coverage: |
+        - rstest を使用した境界値テスト（オーバーフロー、空スライス、ゼロ下限）
+        - 純粋性テスト（compute_smallvec_threshold の参照透過性）
+        - 容量戦略テスト（upper 判明、lower == 0、threshold 超過、threshold 以下）
+      performance_verification:
+        - benchmark: "cargo bench --bench for_macro_bench"
+        - baseline: "benches/results/before/criterion-profiling-all-82d1fe225cfc5be7a7537cf9060d2cf5edd3a010"
+        - results: "benches/results/after/criterion-profiling-all-f06e3f8fe2bf4fe5d39991950abbcff5ed86da4f"
+        - note: "詳細なパフォーマンス改善率は各ベンチマーク結果ディレクトリ内の summary を参照"
+
+implementation_details:
+  constants:
+    - name: "SMALLVEC_INLINE_CAPACITY"
+      value: 128
+      rationale: |
+        - SmallVec<[T; 128]> の inline 容量を固定で 128 要素とする。
+        - 小さな要素（i32: 4 bytes）では 512 bytes、大きな要素（u64: 8 bytes）では 1024 bytes のスタック使用量。
+        - compute_smallvec_threshold で要素サイズに応じて閾値を動的計算し、大きな要素では使用を制限。
+        - 例: 1KB 要素では閾値が 32 に下がり、実際には 32 要素までしか SmallVec を使用しない。
+        - 固定値により型が単純化され、const generics の複雑性を回避できる。
+
+    - name: "L1_CACHE_SIZE"
+      value: "32 * 1024"
+      rationale: |
+        - 保守的な見積もりで、現代の大半の CPU で動作する。
+        - compute_smallvec_threshold の計算基準として使用。
+
+    - name: "MAX_REASONABLE_CAPACITY"
+      value: "1024 * 1024"
+      rationale: |
+        - 1,048,576 要素（1024 * 1024）を上限とし、過大な事前割当を防止する。
+        - 注意: 要素数の上限であり、バイト数の上限ではない（大きな要素では 1MB を超える可能性がある）。
+        - collect_with_hint の upper 使用時に適用され、メモリ枯渇やパフォーマンス低下を回避する。
+        - combined_size_hint の計算結果には適用されず、使用者が明示的に制限する必要がある。
+
+  macro_rules:
+    - name: "@hint"
+      purpose: "単一イテレーションの size_hint を事前計算する内部ルール"
+      limitations: |
+        - ネストしたイテレーションでは (0, None) を返す。
+        - 内側の式がループ変数を参照する場合、@hint 評価時にスコープ外となるため。
+        - 公開エントリーポイントで Clone + @hint を使用することで対処。
+
+    - name: "@iter"
+      purpose: "純粋なイテレータチェーンを構築する内部ルール"
+      characteristics: |
+        - flat_map でネストを表現し、中間 Vec 割当を排除。
+        - EitherIter でガードを表現し、size_hint を保持。
+
+  public_entry_points:
+    - pattern: "単一イテレーション（`x <= xs; yield expr`）"
+      strategy: "Clone + @hint + collect_with_hint"
+      rationale: |
+        - size_hint を事前計算し、最適な容量で事前割当。
+        - Clone コストは事前割当による realloc 削減で相殺される。
+
+    - pattern: "ネストしたイテレーション・ガード"
+      strategy: "collect_from_iter（Clone 不要）"
+      rationale: |
+        - @hint が (0, None) を返すため、Clone しても無駄。
+        - イテレータ自身の size_hint を使用する方が効率的。
+
+future_extensions:
+  - id: "EXT-FOR-MACRO-001"
+    name: "FlatMap 排除の展開"
+    description: |
+      FlatMap を使わず明示的 for ループ展開へ切り替え、
+      さらに iterator オーバーヘッドを削減する。
+    rationale: |
+      まずは容量計画と SmallVec による改善で効果を測定する。
+    status: "検討中"
+
+  - id: "EXT-FOR-MACRO-002"
+    name: "combined_size_hint のマクロ統合"
+    description: |
+      現在は手動使用向けの関数として提供されているが、
+      マクロ展開で自動的に使用できるようにする。
+    limitations: |
+      - 内側のコレクション式がループ変数を参照する場合、
+        @hint 評価時にスコープ外となるため、現在は実現困難。
+      - マクロの制約を克服する新しいアプローチが必要。
+    status: "将来検討"
