@@ -258,7 +258,7 @@
 //!    pre-allocation when possible.
 //!
 //! 3. **`collect_with_hint`**: Collects the iterator using pre-computed `size_hint`.
-//!    Uses [`should_use_smallvec`] to determine allocation strategy: `SmallVec` for
+//!    Uses `should_use_smallvec` to determine allocation strategy: `SmallVec` for
 //!    small results when conditions are met, `Vec::with_capacity` otherwise.
 //!
 //! For single iterations (`; yield expr` only), the macro uses Clone + `@hint` to
@@ -274,7 +274,7 @@
 //! - **No intermediate Vec**: Nested iterations use pure iterator chains without
 //!   allocating intermediate collections.
 //! - **Single allocation**: Results are collected once at the end.
-//! - **SmallVec optimization**: Uses stack allocation when [`should_use_smallvec`] returns true
+//! - **SmallVec optimization**: Uses stack allocation when `should_use_smallvec` returns true
 //!   (small element size, unknown upper bound, and known positive lower bound).
 //! - **Pre-allocation**: Clone is used only for single-level iterations to compute
 //!   size_hint before iteration. Nested iterations and guards use `collect_from_iter`
