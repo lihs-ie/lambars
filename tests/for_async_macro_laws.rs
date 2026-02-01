@@ -4,6 +4,7 @@
 //! and follows expected properties.
 
 #![cfg(feature = "async")]
+#![allow(deprecated)]
 
 use lambars::effect::AsyncIO;
 use lambars::for_;
@@ -31,7 +32,7 @@ proptest! {
             for_async! {
                 x <= elements.clone();
                 yield f(x)
-            }.run_async().await
+            }.await
         });
 
         prop_assert_eq!(sync_result, async_result);
@@ -59,7 +60,7 @@ proptest! {
                 x <= xs.clone();
                 y <= ys_clone2.clone();
                 yield (x, y)
-            }.run_async().await
+            }.await
         });
 
         prop_assert_eq!(sync_result, async_result);
@@ -84,7 +85,7 @@ proptest! {
                 x <= elements.clone();
                 doubled <~ AsyncIO::pure(f(x));
                 yield doubled
-            }.run_async().await
+            }.await
         });
 
         prop_assert_eq!(direct_result, async_result);
@@ -100,7 +101,7 @@ proptest! {
             for_async! {
                 x <= empty;
                 yield x * 2
-            }.run_async().await
+            }.await
         });
 
         prop_assert!(result.is_empty());
@@ -117,7 +118,7 @@ proptest! {
             for_async! {
                 x <= elements_clone;
                 yield x.wrapping_mul(2)
-            }.run_async().await
+            }.await
         });
 
         // With let binding
@@ -126,7 +127,7 @@ proptest! {
                 x <= elements.clone();
                 let doubled = x.wrapping_mul(2);
                 yield doubled
-            }.run_async().await
+            }.await
         });
 
         prop_assert_eq!(without_let, with_let);
@@ -147,7 +148,7 @@ proptest! {
                 _x <= xs;
                 _y <= ys_clone.clone();
                 yield ()
-            }.run_async().await
+            }.await
         });
 
         prop_assert_eq!(result.len(), expected_len);

@@ -600,7 +600,6 @@ pub async fn batch_update_field(
     let tasks = state
         .task_repository
         .list(Pagination::new(0, 1000))
-        .run_async()
         .await
         .map_err(|_| ApiErrorResponse::internal_error("Repository error"))?
         .items;
@@ -677,7 +676,6 @@ pub async fn update_optional(
     let task = state
         .task_repository
         .find_by_id(&task_id)
-        .run_async()
         .await
         .map_err(|_| ApiErrorResponse::internal_error("Repository error"))?
         .ok_or_else(|| {
@@ -786,7 +784,6 @@ pub async fn update_filtered(
     let tasks = state
         .task_repository
         .list(Pagination::new(0, 1000))
-        .run_async()
         .await
         .map_err(|_| ApiErrorResponse::internal_error("Repository error"))?
         .items;
@@ -847,7 +844,6 @@ pub async fn nested_access(
     let tasks = state
         .task_repository
         .list(Pagination::new(0, 1000))
-        .run_async()
         .await
         .map_err(|_| ApiErrorResponse::internal_error("Repository error"))?
         .items;

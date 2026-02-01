@@ -125,12 +125,11 @@ async fn test_cached_task_repository_read_through_miss() {
     cleanup_test_keys(&pool, &task_id).await;
 
     // Save directly to primary (bypassing cache)
-    primary.save(&task).run_async().await.unwrap();
+    primary.save(&task).await.unwrap();
 
     // First read - should be a cache miss
     let result = cached_repository
         .find_by_id_with_status(&task_id)
-        .run_async()
         .await
         .unwrap();
 
@@ -150,7 +149,6 @@ async fn test_cached_task_repository_read_through_miss() {
     // Second read - should be a cache hit
     let result = cached_repository
         .find_by_id_with_status(&task_id)
-        .run_async()
         .await
         .unwrap();
 
@@ -193,12 +191,11 @@ async fn test_cached_task_repository_read_through_hit() {
     cleanup_test_keys(&pool, &task_id).await;
 
     // Save through cached repository (this writes to both primary and cache)
-    cached_repository.save(&task).run_async().await.unwrap();
+    cached_repository.save(&task).await.unwrap();
 
     // Read - should be a cache hit
     let result = cached_repository
         .find_by_id_with_status(&task_id)
-        .run_async()
         .await
         .unwrap();
 
@@ -248,10 +245,10 @@ async fn test_cached_task_repository_write_through() {
     cleanup_test_keys(&pool, &task_id).await;
 
     // Save through cached repository
-    cached_repository.save(&task).run_async().await.unwrap();
+    cached_repository.save(&task).await.unwrap();
 
     // Verify in primary
-    let primary_result = primary.find_by_id(&task_id).run_async().await.unwrap();
+    let primary_result = primary.find_by_id(&task_id).await.unwrap();
     assert!(primary_result.is_some());
     assert_eq!(primary_result.as_ref().unwrap().version, 1);
 
@@ -269,12 +266,11 @@ async fn test_cached_task_repository_write_through() {
 
     cached_repository
         .save(&updated_task)
-        .run_async()
         .await
         .unwrap();
 
     // Verify primary has updated version
-    let primary_result = primary.find_by_id(&task_id).run_async().await.unwrap();
+    let primary_result = primary.find_by_id(&task_id).await.unwrap();
     assert!(primary_result.is_some());
     assert_eq!(primary_result.as_ref().unwrap().version, 2);
 
@@ -332,7 +328,7 @@ async fn test_cache_key_version_invalidation() {
     cleanup_test_keys(&pool, &task_id).await;
 
     // Save initial version
-    cached_repository.save(&task).run_async().await.unwrap();
+    cached_repository.save(&task).await.unwrap();
 
     // Verify v1 exists
     let mut connection = pool.get().await.unwrap();
@@ -344,7 +340,6 @@ async fn test_cache_key_version_invalidation() {
     let updated_task = task.clone().increment_version();
     cached_repository
         .save(&updated_task)
-        .run_async()
         .await
         .unwrap();
 
@@ -397,13 +392,12 @@ async fn test_redis_failure_fallback() {
     // Create and save task to primary only
     let task = create_test_task("Fallback test");
     let task_id = task.task_id.clone();
-    primary.save(&task).run_async().await.unwrap();
+    primary.save(&task).await.unwrap();
 
     // Read through cached repository - should fall back to primary
     // and return Bypass status due to Redis connection failure
     let result = cached_repository
         .find_by_id_with_status(&task_id)
-        .run_async()
         .await
         .unwrap();
 
@@ -450,16 +444,15 @@ async fn test_cache_disabled_bypass() {
     cleanup_test_keys(&pool, &task_id).await;
 
     // Save through cached repository (should write to primary only)
-    cached_repository.save(&task).run_async().await.unwrap();
+    cached_repository.save(&task).await.unwrap();
 
     // Verify task is in primary
-    let primary_result = primary.find_by_id(&task_id).run_async().await.unwrap();
+    let primary_result = primary.find_by_id(&task_id).await.unwrap();
     assert!(primary_result.is_some());
 
     // Read through cached repository - should bypass cache
     let result = cached_repository
         .find_by_id_with_status(&task_id)
-        .run_async()
         .await
         .unwrap();
 
@@ -517,7 +510,7 @@ async fn test_cache_disabled_invalidates_on_write() {
     cleanup_test_keys(&pool, &task_id).await;
 
     // Save with cache enabled (populates cache)
-    enabled_repository.save(&task).run_async().await.unwrap();
+    enabled_repository.save(&task).await.unwrap();
 
     // Verify cache is populated
     let mut connection = pool.get().await.unwrap();
@@ -533,7 +526,6 @@ async fn test_cache_disabled_invalidates_on_write() {
     let updated_task = task.clone().increment_version();
     disabled_repository
         .save(&updated_task)
-        .run_async()
         .await
         .unwrap();
 
@@ -547,7 +539,6 @@ async fn test_cache_disabled_invalidates_on_write() {
     // Re-enable cache and read - should be a cache miss
     let result = enabled_repository
         .find_by_id_with_status(&task_id)
-        .run_async()
         .await
         .unwrap();
 

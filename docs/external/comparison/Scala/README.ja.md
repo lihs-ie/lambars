@@ -1608,7 +1608,7 @@ async fn example() {
         .flat_map_async_io(|url| ReaderT::pure_async_io(format!("Fetching: {}", url)));
 
     let config = AppConfig { api_url: "https://api.example.com".to_string() };
-    let result = computation.run_async_io(config).run_async().await;
+    let result = computation.run_async_io(config).await;
     // result = "Fetching: https://api.example.com"
 }
 ```

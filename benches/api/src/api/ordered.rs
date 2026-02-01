@@ -334,7 +334,6 @@ pub async fn tasks_by_deadline(
     let tasks = state
         .task_repository
         .list(pagination)
-        .run_async()
         .await
         .map_err(ApiErrorResponse::from)?;
 
@@ -511,7 +510,6 @@ pub async fn tasks_timeline(
     let tasks = state
         .task_repository
         .list(pagination)
-        .run_async()
         .await
         .map_err(ApiErrorResponse::from)?;
 
@@ -627,7 +625,6 @@ pub async fn projects_leaderboard(
     let projects = state
         .project_repository
         .list(pagination)
-        .run_async()
         .await
         .map_err(ApiErrorResponse::from)?;
 

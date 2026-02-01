@@ -822,7 +822,6 @@ pub async fn dashboard(
                 state
                     .task_repository
                     .list(Pagination::new(0, 100))
-                    .run_async()
                     .await
                     .map(|paginated| create_task_summaries(&paginated.items))
                     .map_err(|_| DashboardComponentError::TasksFailed {
@@ -1005,7 +1004,6 @@ pub async fn compute_parallel(
     let task = state
         .task_repository
         .find_by_id(&task_id)
-        .run_async()
         .await
         .map_err(|_| ApiErrorResponse::internal_error("Repository error"))?
         .ok_or_else(|| {

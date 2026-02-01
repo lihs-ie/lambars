@@ -488,7 +488,7 @@ async fn search_in_database(
 ) -> Option<(Task, String)> {
     // Get tasks with pagination (simplified search)
     let pagination = Pagination::new(0, 100);
-    let result = repository.list(pagination).run_async().await.ok()?;
+    let result = repository.list(pagination).await.ok()?;
 
     result
         .items
@@ -508,7 +508,6 @@ async fn search_in_external(state: &AppState, query: &str) -> Option<(Task, Stri
     let result = state
         .task_repository
         .list(pagination)
-        .run_async()
         .await
         .ok()?;
 
@@ -522,7 +521,6 @@ async fn search_in_external(state: &AppState, query: &str) -> Option<(Task, Stri
     let external_result = state
         .external_source
         .fetch_task_data(&matching_task.task_id)
-        .run_async()
         .await;
 
     match external_result {
@@ -628,7 +626,6 @@ pub async fn resolve_config(
     let repository = Arc::clone(&state.task_repository);
     let task = repository
         .find_by_id(&id)
-        .run_async()
         .await
         .map_err(|e| ApiErrorResponse::internal_error(e.to_string()))?
         .ok_or_else(|| ApiErrorResponse::not_found(format!("Task not found: {task_id}")))?;
@@ -772,7 +769,7 @@ pub async fn filter_conditional(
     let repository = Arc::clone(&state.task_repository);
     let mut tasks = Vec::new();
     for task_id in &task_ids {
-        if let Ok(Some(task)) = repository.find_by_id(task_id).run_async().await {
+        if let Ok(Some(task)) = repository.find_by_id(task_id).await {
             tasks.push(task);
         }
     }
@@ -991,7 +988,6 @@ async fn fetch_from_primary(
 ) -> Result<SourceData, SourceError> {
     let task = repository
         .find_by_id(task_id)
-        .run_async()
         .await
         .map_err(|error| SourceError::from_repository_error("primary", &error))?
         .ok_or_else(|| {
@@ -1019,7 +1015,6 @@ async fn fetch_from_external_source(
 ) -> Result<SourceData, SourceError> {
     let external_data = source
         .fetch_task_data(task_id)
-        .run_async()
         .await
         .map_err(|error| SourceError::from_external_error(source_name, &error))?
         .ok_or_else(|| {
@@ -1107,7 +1102,6 @@ pub async fn first_available(
     let pagination = Pagination::new(0, 1000);
     let result = repository
         .list(pagination)
-        .run_async()
         .await
         .map_err(|e| ApiErrorResponse::internal_error(e.to_string()))?;
     let all_tasks = result.items;

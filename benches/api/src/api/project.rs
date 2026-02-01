@@ -733,7 +733,6 @@ pub async fn create_project_handler(
     state
         .project_repository
         .save(&project)
-        .run_async()
         .await
         .map_err(ApiErrorResponse::from)?;
 
@@ -775,7 +774,6 @@ pub async fn get_project_handler(
     let cache_result = state
         .project_repository
         .find_by_id_with_status(&project_id)
-        .run_async()
         .await?;
 
     let cache_status = cache_result.cache_status;
@@ -829,7 +827,6 @@ pub async fn get_project_progress_handler(
     let project = state
         .project_repository
         .find_by_id(&project_id)
-        .run_async()
         .await?
         .ok_or_else(|| ApiErrorResponse::not_found("Project not found"))?;
 
@@ -892,7 +889,6 @@ pub async fn get_project_stats_handler(
     let project = state
         .project_repository
         .find_by_id(&project_id)
-        .run_async()
         .await?
         .ok_or_else(|| ApiErrorResponse::not_found("Project not found"))?;
 
@@ -1717,7 +1713,6 @@ mod handler_tests {
         state
             .project_repository
             .save(&project)
-            .run_async()
             .await
             .expect("Failed to save project");
 
@@ -1797,7 +1792,6 @@ mod handler_tests {
         state
             .project_repository
             .save(&project)
-            .run_async()
             .await
             .expect("Failed to save project");
 
@@ -1833,7 +1827,6 @@ mod handler_tests {
         state
             .project_repository
             .save(&project)
-            .run_async()
             .await
             .expect("Failed to save project");
 
@@ -1870,7 +1863,6 @@ mod handler_tests {
         state
             .project_repository
             .save(&project)
-            .run_async()
             .await
             .expect("Failed to save project");
 
@@ -1899,7 +1891,6 @@ mod handler_tests {
         state
             .project_repository
             .save(&project)
-            .run_async()
             .await
             .expect("Failed to save project");
 
@@ -1964,7 +1955,6 @@ mod handler_tests {
         state
             .project_repository
             .save(&project)
-            .run_async()
             .await
             .expect("Failed to save project");
 
@@ -2014,7 +2004,6 @@ mod handler_tests {
         state
             .project_repository
             .save(&project)
-            .run_async()
             .await
             .expect("Failed to save project");
 

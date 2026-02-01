@@ -4,6 +4,7 @@
 //! lambars components and in real-world scenarios.
 
 #![cfg(feature = "async")]
+#![allow(deprecated)]
 
 use lambars::eff_async;
 use lambars::effect::AsyncIO;
@@ -25,7 +26,7 @@ async fn test_with_eff_async() {
         let sum: i32 = data_list.iter().sum();
         AsyncIO::pure(sum)
     };
-    assert_eq!(result.run_async().await, 60);
+    assert_eq!(result.await, 60);
 }
 
 #[tokio::test]
@@ -41,7 +42,7 @@ async fn test_for_async_in_eff_async_chain() {
         };
         AsyncIO::pure(list2)
     };
-    assert_eq!(result.run_async().await, vec![10, 20]);
+    assert_eq!(result.await, vec![10, 20]);
 }
 
 #[tokio::test]
@@ -56,7 +57,7 @@ async fn test_nested_for_async_in_eff_async() {
         AsyncIO::pure(total)
     };
     // 11 + 21 + 12 + 22 = 66
-    assert_eq!(result.run_async().await, 66);
+    assert_eq!(result.await, 66);
 }
 
 // =============================================================================
@@ -71,7 +72,7 @@ async fn test_with_persistent_vector() {
         x <= items;
         yield x * 2
     };
-    assert_eq!(result.run_async().await, vec![2, 4, 6]);
+    assert_eq!(result.await, vec![2, 4, 6]);
 }
 
 #[tokio::test]
@@ -84,7 +85,7 @@ async fn test_persistent_vector_iteration() {
         doubled <~ AsyncIO::pure(x * 2);
         yield doubled
     };
-    assert_eq!(result.run_async().await, vec![2, 4, 6]);
+    assert_eq!(result.await, vec![2, 4, 6]);
 }
 
 // =============================================================================
@@ -104,7 +105,7 @@ async fn test_chained_for_async() {
         };
         AsyncIO::pure(list2)
     };
-    assert_eq!(result.run_async().await, vec![10, 20]);
+    assert_eq!(result.await, vec![10, 20]);
 }
 
 #[tokio::test]
@@ -121,7 +122,7 @@ async fn test_multiple_for_async_independent() {
         let combined: Vec<_> = list1.into_iter().chain(list2.into_iter()).collect();
         AsyncIO::pure(combined)
     };
-    assert_eq!(result.run_async().await, vec![1, 2, 3, 10, 20, 30]);
+    assert_eq!(result.await, vec![1, 2, 3, 10, 20, 30]);
 }
 
 // =============================================================================
@@ -146,7 +147,7 @@ async fn test_data_processing_pipeline() {
         yield processed
     };
 
-    assert_eq!(result.run_async().await, vec!["DATA_1", "DATA_2", "DATA_3"]);
+    assert_eq!(result.await, vec!["DATA_1", "DATA_2", "DATA_3"]);
 }
 
 #[tokio::test]
@@ -162,7 +163,7 @@ async fn test_conditional_async_processing() {
         yield processed
     };
 
-    assert_eq!(result.run_async().await, vec![4, 8, 10]);
+    assert_eq!(result.await, vec![4, 8, 10]);
 }
 
 #[tokio::test]
@@ -196,7 +197,7 @@ async fn test_complex_data_transformation() {
     };
 
     assert_eq!(
-        result.run_async().await,
+        result.await,
         vec![
             "User1: Post1 by 1",
             "User1: Post2 by 1",
@@ -216,7 +217,7 @@ async fn test_single_element_collection() {
         x <= vec![42];
         yield x
     };
-    assert_eq!(result.run_async().await, vec![42]);
+    assert_eq!(result.await, vec![42]);
 }
 
 #[tokio::test]
@@ -229,7 +230,7 @@ async fn test_deeply_nested_iteration() {
         yield a + b + c + d
     };
     assert_eq!(
-        result.run_async().await,
+        result.await,
         vec![1111, 1211, 1121, 1221, 1112, 1212, 1122, 1222]
     );
 }
@@ -247,7 +248,7 @@ async fn test_fmap_after_for_async() {
             .join(", ")
     });
 
-    assert_eq!(result.run_async().await, "2, 4, 6");
+    assert_eq!(result.await, "2, 4, 6");
 }
 
 #[tokio::test]
@@ -263,5 +264,5 @@ async fn test_and_then_after_for_async() {
         }
     });
 
-    assert_eq!(result.run_async().await, vec![3, 5, 7]);
+    assert_eq!(result.await, vec![3, 5, 7]);
 }

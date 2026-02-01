@@ -139,7 +139,6 @@ pub async fn create_and_save_task(state: &AppState, title: &str) -> Task {
     state
         .task_repository
         .save(&task)
-        .run_async()
         .await
         .expect("Failed to save task");
 
@@ -153,7 +152,6 @@ pub async fn create_and_save_task(state: &AppState, title: &str) -> Task {
     state
         .event_store
         .append(&event, 0)
-        .run_async()
         .await
         .expect("Failed to append event");
 
@@ -179,7 +177,6 @@ pub async fn create_task_with_status_priority(
     state
         .task_repository
         .save(&task)
-        .run_async()
         .await
         .expect("Failed to save task");
 
@@ -193,7 +190,6 @@ pub async fn save_task_without_events(state: &AppState, task: &Task) {
     state
         .task_repository
         .save(task)
-        .run_async()
         .await
         .expect("Failed to save task");
 }

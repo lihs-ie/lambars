@@ -1,0 +1,697 @@
+# AsyncIO 非 boxing 実行パス 実装計画
+#
+# 要件定義: docs/internal/requirements/20260128_0905_async_io_unboxed_execution.yaml
+# バージョン: 1.3.0
+#
+# 変更履歴:
+#   - v1.3.0: Codex 3回目レビュー（ok: true）の minor/suggestion 指摘に基づき以下を修正
+#     - mod.rs 内の #[cfg(test)] モジュールも対象であることを明記
+#     - benches での #[allow(deprecated)] 付与方針を詳細化
+#     - COMPAT-002/004 の検証項目を追加
+#   - v1.2.0: Codex 2回目レビュー指摘に基づき以下を修正
+#     - TASK-004 の表を try_run_blocking 専用に明記し、run_blocking の panic 条件を追加
+#     - TASK-007 を追加（既存の run_async() 呼び出しに #[allow(deprecated)] を付与）
+#     - affected_files を詳細化
+#   - v1.1.0: Codex 1回目レビュー指摘に基づき以下を修正
+#     - TASK-004 (as_future) を削除（要件範囲外のため）
+#     - TASK-005 に unknown flavor / block_in_place 例外条件を追加
+#     - deprecated の since バージョンをプレースホルダに変更
+#     - TASK-006 から direct_await_with_fmap_chain テストを削除（スコープ外）
+#   - v1.0.0: 初版作成
+
+version: "1.3.0"
+name: "async_io_unboxed_execution_implementation_plan"
+requirement_reference: "20260128_0905_async_io_unboxed_execution.yaml"
+description: |
+  AsyncIO の run_async() を deprecated とし、直接 await を推奨する実装計画。
+  runtime::run_blocking の設計意図をドキュメントに明記する。
+
+# ==============================================================================
+# 実装概要
+# ==============================================================================
+
+implementation_overview:
+  goal: |
+    1. run_async() に #[deprecated] 属性を付与
+    2. run_async() の doc コメントに代替例と移行手順を記載
+    3. モジュールドキュメントを直接 await 推奨に更新
+    4. runtime モジュールのドキュメントに enter/exit 最適化の設計意図を明記
+    5. 移行テスト（TEST-001, TEST-002）を追加
+    6. CHANGELOG に移行ガイドを記載
+    7. 既存の run_async() 呼び出しに #[allow(deprecated)] を付与
+
+  affected_files:
+    rust_implementation:
+      - path: "src/effect/async_io/mod.rs"
+        changes:
+          - "run_async() に #[deprecated] 属性を追加"
+          - "run_async() の doc コメントを更新"
+          - "モジュールレベルの doc コメントを更新"
+      - path: "src/effect/async_io/runtime.rs"
+        changes:
+          - "モジュールドキュメントに enter/exit 最適化の設計意図を追記"
+
+    existing_code_migration:
+      description: |
+        既存の run_async() 呼び出しに #[allow(deprecated)] を付与する。
+        将来的に直接 await への移行を検討するが、今回のスコープでは
+        deprecated 警告を抑制するのみとする。
+      summary:
+        tests: "12 files, 200 occurrences"
+        src: "10 files, 277 occurrences"
+        benches: "33 files, 430 occurrences"
+      affected_directories:
+        - path: "tests/"
+          files:
+            - "async_io_tests.rs (36 occurrences)"
+            - "async_io_laws.rs (31 occurrences)"
+            - "for_async_macro_tests.rs (25 occurrences)"
+            - "async_io_control_flow_tests.rs (22 occurrences)"
+            - "async_io_transformer_tests.rs (19 occurrences)"
+            - "eff_async_macro_tests.rs (17 occurrences)"
+            - "for_async_macro_integration.rs (14 occurrences)"
+            - "state_transformer_tests.rs (9 occurrences)"
+            - "for_guard_tests.rs (8 occurrences)"
+            - "for_pattern_guard_tests.rs (8 occurrences)"
+            - "for_async_macro_laws.rs (7 occurrences)"
+            - "async_io_state_machine_tests.rs (4 occurrences)"
+        - path: "src/"
+          files:
+            - "effect/async_io/mod.rs (77 occurrences - doc examples and #[cfg(test)] module)"
+            - "compose/pipe_async_macro.rs (47 occurrences)"
+            - "typeclass/traversable.rs (39 occurrences)"
+            - "effect/except_transformer.rs (35 occurrences)"
+            - "effect/reader_transformer.rs (20 occurrences)"
+            - "effect/state_transformer.rs (17 occurrences)"
+            - "compose/for_async_macro.rs (17 occurrences)"
+            - "effect/writer_transformer.rs (15 occurrences)"
+            - "effect/eff_async_macro.rs (9 occurrences)"
+            - "effect/io.rs (1 occurrence)"
+        - path: "benches/"
+          note: "33 files, 430 occurrences - benchmark code"
+
+    test_implementation:
+      - path: "tests/async_io_unboxed_execution_tests.rs"
+        changes:
+          - "TEST-001: 直接 await と run_async の結果一致テスト"
+          - "TEST-002: run_blocking に AsyncIO を直接渡すテスト"
+
+    documentation:
+      - path: "CHANGELOG.md"
+        changes:
+          - "Unreleased セクションに移行ガイドを追加"
+
+# ==============================================================================
+# 実装タスク詳細
+# ==============================================================================
+
+tasks:
+  # ============================================================================
+  # REQ-ASYNCIO-UNBOXED-001: 直接 await の推奨と run_async の deprecated 化
+  # ============================================================================
+  - id: "TASK-001"
+    category: "rust"
+    name: "run_async() に #[deprecated] 属性を追加"
+    requirement: "REQ-ASYNCIO-UNBOXED-001"
+    description: |
+      run_async() メソッドに #[deprecated] 属性を追加し、
+      直接 await を推奨するメッセージを設定する。
+    file: "src/effect/async_io/mod.rs"
+    implementation_details:
+      location: "run_async メソッド定義（約 767 行目）"
+      version_note: |
+        since バージョンは実際のリリース時に決定する。
+        実装時は要件定義と同様にプレースホルダを使用するか、
+        リリース担当者と調整の上で決定する。
+      before: |
+        #[must_use]
+        pub fn run_async(self) -> Pin<Box<dyn Future<Output = A> + Send>>
+        where
+            A: Send,
+        {
+            Box::pin(self)
+        }
+      after: |
+        #[must_use]
+        #[deprecated(
+            since = "TBD",
+            note = "Use direct await instead: `async_io.await`. \
+                    See migration guide in CHANGELOG.md. \
+                    If you need to suppress this warning temporarily, \
+                    use #[allow(deprecated)]."
+        )]
+        pub fn run_async(self) -> Pin<Box<dyn Future<Output = A> + Send>>
+        where
+            A: Send,
+        {
+            Box::pin(self)
+        }
+    acceptance_criteria:
+      - "run_async() に #[deprecated] 属性が付与されていること"
+      - "#[allow(deprecated)] なしで run_async() を呼び出すとコンパイラ警告が出ること"
+    estimated_lines: 10
+
+  - id: "TASK-002"
+    category: "rust"
+    name: "run_async() の doc コメントを更新"
+    requirement: "REQ-ASYNCIO-UNBOXED-001"
+    description: |
+      run_async() の doc コメントに以下を追加:
+      - deprecated であることの明記
+      - 代替パターン（直接 await）
+      - 移行手順
+      - #[allow(deprecated)] の使用方法
+    file: "src/effect/async_io/mod.rs"
+    implementation_details:
+      location: "run_async メソッドの doc コメント（約 738-765 行目）"
+      content: |
+        /// Executes the `AsyncIO` action and returns a pinned, boxed Future.
+        ///
+        /// # Deprecated
+        ///
+        /// This method is **deprecated**.
+        /// Use direct await instead: `async_io.await`.
+        ///
+        /// ## Reason for Deprecation
+        ///
+        /// `run_async()` internally uses `Box::pin`, which causes a heap allocation
+        /// even for `AsyncIO::pure`. Direct await avoids this overhead for pure values.
+        ///
+        /// ## Migration Guide
+        ///
+        /// ### In async context
+        ///
+        /// ```rust,ignore
+        /// // Before (deprecated)
+        /// let result = AsyncIO::pure(42).run_async().await;
+        ///
+        /// // After (recommended)
+        /// let result = AsyncIO::pure(42).await;
+        /// ```
+        ///
+        /// ### In sync context
+        ///
+        /// ```rust,ignore
+        /// use lambars::effect::async_io::runtime;
+        ///
+        /// // Before (deprecated)
+        /// let result = runtime::run_blocking(AsyncIO::pure(42).run_async());
+        ///
+        /// // After (recommended)
+        /// let result = runtime::run_blocking(AsyncIO::pure(42));
+        /// ```
+        ///
+        /// ## Suppressing the Warning
+        ///
+        /// If you need to suppress this warning temporarily during migration:
+        ///
+        /// ```rust,ignore
+        /// #[allow(deprecated)]
+        /// let result = AsyncIO::pure(42).run_async().await;
+        /// ```
+        ///
+        /// For projects using `deny(warnings)`, add `#[allow(deprecated)]` to
+        /// the specific call site or module during the migration period.
+        ///
+        /// # Examples
+        ///
+        /// ```rust,ignore
+        /// use lambars::effect::AsyncIO;
+        ///
+        /// #[tokio::main]
+        /// async fn main() {
+        ///     // Recommended: Direct await
+        ///     let result = AsyncIO::pure(42).await;
+        ///     assert_eq!(result, 42);
+        /// }
+        /// ```
+    acceptance_criteria:
+      - "doc コメントに deprecated であることが明記されていること"
+      - "代替パターンが記載されていること"
+      - "移行手順が async/sync 両方のケースで記載されていること"
+      - "#[allow(deprecated)] の使用方法が記載されていること"
+    estimated_lines: 60
+
+  - id: "TASK-003"
+    category: "rust"
+    name: "モジュールドキュメントを直接 await 推奨に更新"
+    requirement: "REQ-ASYNCIO-UNBOXED-001"
+    description: |
+      モジュールレベルの doc コメントで run_async() の使用例を
+      直接 await に更新し、推奨パターンであることを明記する。
+    file: "src/effect/async_io/mod.rs"
+    implementation_details:
+      location: "モジュール doc コメント（1-173 行目）"
+      changes:
+        - section: "## impl `Future`"
+          description: |
+            既存の例を更新し、直接 await を推奨として強調する。
+            run_async() は deprecated として残す旨を追記。
+          before: |
+            //! ```rust,ignore
+            //! use lambars::effect::AsyncIO;
+            //!
+            //! #[tokio::main]
+            //! async fn main() {
+            //!     // Direct await (recommended)
+            //!     let result = AsyncIO::pure(42).await;
+            //!     assert_eq!(result, 42);
+            //!
+            //!     // Or use run_async() for backward compatibility
+            //!     let result = AsyncIO::pure(42).run_async().await;
+            //!     assert_eq!(result, 42);
+            //! }
+            //! ```
+          after: |
+            //! ```rust,ignore
+            //! use lambars::effect::AsyncIO;
+            //!
+            //! #[tokio::main]
+            //! async fn main() {
+            //!     // Recommended: Direct await (no heap allocation for Pure state)
+            //!     let result = AsyncIO::pure(42).await;
+            //!     assert_eq!(result, 42);
+            //!
+            //!     // Deprecated: run_async() causes heap allocation via Box::pin
+            //!     // See migration guide in CHANGELOG.md
+            //!     #[allow(deprecated)]
+            //!     let result = AsyncIO::pure(42).run_async().await;
+            //!     assert_eq!(result, 42);
+            //! }
+            //! ```
+        - section: "Performance note"
+          description: |
+            Pure 状態の直接 await が heap 割り当てを行わない設計保証を追記。
+    acceptance_criteria:
+      - "モジュール doc コメントで直接 await が推奨として記載されていること"
+      - "run_async() が deprecated であることが例示とともに記載されていること"
+    estimated_lines: 30
+
+  # ============================================================================
+  # REQ-ASYNCIO-UNBOXED-002: runtime::run_blocking の設計意図ドキュメント
+  # ============================================================================
+  - id: "TASK-004"
+    category: "rust"
+    name: "runtime モジュールドキュメントに enter/exit 最適化の設計意図を追記"
+    requirement: "REQ-ASYNCIO-UNBOXED-002"
+    description: |
+      runtime モジュールのドキュメントに enter/exit 最適化の設計意図を明記する。
+      既存の実装が最適であることを説明し、将来の保守者が意図を理解できるようにする。
+      要件の enter_exit_conditions に基づき、unknown flavor と block_in_place の
+      例外条件についても記載する。
+    file: "src/effect/async_io/runtime.rs"
+    implementation_details:
+      location: "モジュール doc コメント（1-104 行目）"
+      changes:
+        - section: "Enter/Exit Optimization Design"
+          description: |
+            以下の内容を追記:
+            1. 現在の実装が最適である理由
+            2. enter/exit の呼び出し条件
+            3. unknown flavor の扱い（UnsupportedRuntimeFlavor）
+            4. block_in_place の例外条件（LocalSet/disallow_block_in_place）
+            5. 将来の変更者への注意事項
+            6. try_run_blocking と run_blocking の戻り値/panic 条件の違い
+          content: |
+            //! # Enter/Exit Optimization Design
+            //!
+            //! The `run_blocking` and `try_run_blocking` functions are designed to minimize
+            //! `Runtime::enter()` and `EnterGuard::drop()` overhead.
+            //!
+            //! ## `try_run_blocking` Return Values
+            //!
+            //! | Context | Implementation | Enter/Exit | Return Value |
+            //! |---------|----------------|------------|--------------|
+            //! | Outside runtime | `global().block_on()` | 1 enter (internal) | `Ok(T)` |
+            //! | Multi-thread runtime | `block_in_place() + handle.block_on()` | 0 explicit | `Ok(T)` |
+            //! | Current-thread runtime | N/A | N/A | `Err(CurrentThreadRuntime)` |
+            //! | Unknown runtime flavor | N/A | N/A | `Err(UnsupportedRuntimeFlavor)` |
+            //!
+            //! ## `run_blocking` Behavior
+            //!
+            //! `run_blocking` is a convenience wrapper that calls `try_run_blocking` and
+            //! panics on error:
+            //!
+            //! | Context | Behavior |
+            //! |---------|----------|
+            //! | Outside runtime | Returns `T` |
+            //! | Multi-thread runtime | Returns `T` |
+            //! | Current-thread runtime | **Panics** |
+            //! | Unknown runtime flavor | **Panics** |
+            //!
+            //! ## Design Rationale
+            //!
+            //! - **No explicit `Runtime::enter()`**: The implementation avoids calling
+            //!   `Runtime::enter()` directly. When inside a runtime, `block_in_place`
+            //!   reuses the existing runtime context.
+            //!
+            //! - **Handle::try_current() for detection**: Instead of maintaining separate
+            //!   TLS state, we use tokio's built-in `Handle::try_current()` to detect
+            //!   whether we're inside a runtime.
+            //!
+            //! - **Preserve caller's context**: When inside a runtime, we use the current
+            //!   handle rather than the global runtime to preserve tracing spans,
+            //!   metrics, and other runtime-specific settings.
+            //!
+            //! - **Forward compatibility**: Unknown runtime flavors (e.g., new flavors
+            //!   added in future tokio versions) return `BlockingError::UnsupportedRuntimeFlavor`
+            //!   instead of panicking (in `try_run_blocking`).
+            //!
+            //! ## block_in_place Exceptions (Multi-thread Runtime)
+            //!
+            //! Even in a multi-thread runtime, `block_in_place` will **panic** in:
+            //!
+            //! - Inside `tokio::task::LocalSet::run_until()`
+            //! - In any context where `disallow_block_in_place` is enabled
+            //!
+            //! This is a tokio constraint and is documented but not handled by this module.
+            //! Callers must ensure they are not in these restricted contexts.
+            //!
+            //! ## Maintenance Notes
+            //!
+            //! When modifying this module, ensure:
+            //! 1. `Handle::try_current()` branching is preserved
+            //! 2. Multi-thread: `block_in_place` -> `current_handle.block_on` flow
+            //! 3. Outside runtime: `global().block_on()` only
+            //! 4. No explicit `Runtime::enter()` calls are added
+            //! 5. Unknown flavors return `UnsupportedRuntimeFlavor` (not panic) in try_run_blocking
+    acceptance_criteria:
+      - "enter/exit 最適化の設計意図がドキュメントに記載されていること"
+      - "try_run_blocking の戻り値が表形式で記載されていること"
+      - "run_blocking の panic 条件が別表で記載されていること"
+      - "UnsupportedRuntimeFlavor の扱いが記載されていること"
+      - "block_in_place の例外条件（LocalSet/disallow_block_in_place）が記載されていること"
+      - "将来の保守者向けの注意事項が記載されていること"
+    estimated_lines: 60
+
+  # ============================================================================
+  # TEST-001, TEST-002: テスト追加
+  # ============================================================================
+  - id: "TASK-005"
+    category: "rust"
+    name: "TEST-001/TEST-002 のテストファイルを作成"
+    requirement: "TEST-001, TEST-002"
+    description: |
+      直接 await と run_async の結果一致テスト（TEST-001）と
+      run_blocking に AsyncIO を直接渡すテスト（TEST-002）を追加する。
+      要件のスコープに基づき、TEST-001/TEST-002 のみを実装する。
+    file: "tests/async_io_unboxed_execution_tests.rs"
+    implementation_details:
+      tests:
+        - name: "direct_await_and_run_async_produce_same_result"
+          description: "TEST-001: 直接 await と run_async の結果一致テスト"
+          requirement_reference: "TEST-001"
+          code: |
+            #[rstest]
+            #[tokio::test(flavor = "multi_thread")]
+            async fn direct_await_and_run_async_produce_same_result() {
+                // Direct await (recommended)
+                let direct = AsyncIO::pure(42).await;
+
+                // run_async (deprecated, use #[allow(deprecated)] to suppress warning)
+                #[allow(deprecated)]
+                let boxed = AsyncIO::pure(42).run_async().await;
+
+                assert_eq!(direct, boxed);
+                assert_eq!(direct, 42);
+            }
+        - name: "run_blocking_accepts_async_io_directly"
+          description: "TEST-002: run_blocking に AsyncIO を直接渡すテスト"
+          requirement_reference: "TEST-002"
+          code: |
+            #[rstest]
+            fn run_blocking_accepts_async_io_directly() {
+                // AsyncIO を直接渡す（推奨）
+                let direct = runtime::run_blocking(AsyncIO::pure(42));
+
+                // run_async 経由（deprecated）
+                #[allow(deprecated)]
+                let via_run_async = runtime::run_blocking(AsyncIO::pure(42).run_async());
+
+                assert_eq!(direct, 42);
+                assert_eq!(direct, via_run_async);
+            }
+    acceptance_criteria:
+      - "TEST-001 が multi_thread flavor で実行されること"
+      - "TEST-002 がランタイム外から実行されること"
+      - "deprecated メソッドの呼び出しに #[allow(deprecated)] が付与されていること"
+      - "全テストがパスすること"
+    estimated_lines: 50
+
+  # ============================================================================
+  # ドキュメント: CHANGELOG 更新
+  # ============================================================================
+  - id: "TASK-006"
+    category: "documentation"
+    name: "CHANGELOG に移行ガイドを追加"
+    requirement: "REQ-ASYNCIO-UNBOXED-001, COMPAT-003"
+    description: |
+      CHANGELOG.md の Unreleased セクションに移行ガイドを追加する。
+      run_async() のみを対象とし、as_future() は要件範囲外のため含めない。
+    file: "CHANGELOG.md"
+    implementation_details:
+      location: "## [Unreleased] セクション"
+      content: |
+        ### Deprecated
+
+        - **effect**: `AsyncIO::run_async()` is now deprecated. Use direct await instead:
+          - Async context: `async_io.await` instead of `async_io.run_async().await`
+          - Sync context: `runtime::run_blocking(async_io)` instead of `runtime::run_blocking(async_io.run_async())`
+
+        ### Migration Guide
+
+        #### AsyncIO Direct Await Migration
+
+        `AsyncIO::run_async()` has been deprecated because it always uses `Box::pin`,
+        causing heap allocation even for pure values. Since `AsyncIO` implements `Future`,
+        you can await it directly.
+
+        **In async context:**
+
+        ```rust
+        // Before (deprecated)
+        let result = AsyncIO::pure(42).run_async().await;
+
+        // After (recommended - no heap allocation for Pure state)
+        let result = AsyncIO::pure(42).await;
+        ```
+
+        **In sync context:**
+
+        ```rust
+        use lambars::effect::async_io::runtime;
+
+        // Before (deprecated)
+        let result = runtime::run_blocking(AsyncIO::pure(42).run_async());
+
+        // After (recommended)
+        let result = runtime::run_blocking(AsyncIO::pure(42));
+        ```
+
+        **Suppressing warnings during migration:**
+
+        If your project uses `deny(warnings)`, you can temporarily suppress
+        the deprecation warning:
+
+        ```rust
+        #[allow(deprecated)]
+        let result = AsyncIO::pure(42).run_async().await;
+        ```
+    acceptance_criteria:
+      - "Deprecated セクションに run_async() が記載されていること"
+      - "Migration Guide セクションに移行手順が記載されていること"
+      - "async context と sync context の両方の移行例が記載されていること"
+      - "#[allow(deprecated)] の使用方法が記載されていること"
+    estimated_lines: 40
+
+  # ============================================================================
+  # 既存コードの deprecated 警告対応
+  # ============================================================================
+  - id: "TASK-007"
+    category: "rust"
+    name: "既存の run_async() 呼び出しに #[allow(deprecated)] を付与"
+    requirement: "COMPAT-001"
+    description: |
+      既存の run_async() 呼び出しに #[allow(deprecated)] を付与し、
+      deny(warnings) 環境でのビルドエラーを防ぐ。
+
+      対応方針:
+      - テストファイル: テストモジュールまたは関数レベルで #[allow(deprecated)] を付与
+      - src/ 内のコード:
+        - 各呼び出し箇所または関数/モジュールレベルで #[allow(deprecated)] を付与
+        - mod.rs 内の #[cfg(test)] モジュールも対象（doc examples だけでなく実行コードも含む）
+      - benches/ 内のコード:
+        - 可能な限り run_async を含むベンチモジュール単位または該当箇所に限定して付与
+        - ファイル全体への付与は最小限に抑え、run_async 以外の deprecated が隠れないようにする
+        - TODO: 将来的に直接 await への移行時に再整理する
+      - doc examples: doc コメント内の例は既に ignore 属性があるため影響なし
+
+      注意:
+      - 将来的に直接 await への移行を検討するが、今回のスコープでは警告抑制のみ
+      - 大量の変更を伴うため、機械的な置換で対応可能
+    files:
+      tests:
+        - "tests/async_io_tests.rs"
+        - "tests/async_io_laws.rs"
+        - "tests/for_async_macro_tests.rs"
+        - "tests/async_io_control_flow_tests.rs"
+        - "tests/async_io_transformer_tests.rs"
+        - "tests/eff_async_macro_tests.rs"
+        - "tests/for_async_macro_integration.rs"
+        - "tests/state_transformer_tests.rs"
+        - "tests/for_guard_tests.rs"
+        - "tests/for_pattern_guard_tests.rs"
+        - "tests/for_async_macro_laws.rs"
+        - "tests/async_io_state_machine_tests.rs"
+      src:
+        - "src/effect/async_io/mod.rs"
+        - "src/compose/pipe_async_macro.rs"
+        - "src/typeclass/traversable.rs"
+        - "src/effect/except_transformer.rs"
+        - "src/effect/reader_transformer.rs"
+        - "src/effect/state_transformer.rs"
+        - "src/compose/for_async_macro.rs"
+        - "src/effect/writer_transformer.rs"
+        - "src/effect/eff_async_macro.rs"
+        - "src/effect/io.rs"
+      benches:
+        note: |
+          33 files in benches/ directory.
+          Apply #[allow(deprecated)] to specific bench functions or modules containing run_async,
+          avoiding file-level #[allow(deprecated)] where possible.
+    acceptance_criteria:
+      - "cargo check が通ること"
+      - "cargo clippy --all-features --all-targets -- -D warnings が通ること"
+      - "cargo test が通ること"
+      - "すべての run_async() 呼び出しが #[allow(deprecated)] でカバーされていること"
+    estimated_changes:
+      tests: "12 files"
+      src: "10 files"
+      benches: "33 files"
+
+# ==============================================================================
+# 実装順序
+# ==============================================================================
+
+implementation_order:
+  description: |
+    以下の順序で実装を行う。
+    1. まず deprecated 属性を追加（TASK-001）
+    2. 既存コードに #[allow(deprecated)] を付与（TASK-007）してビルドを維持
+    3. その他のドキュメント更新とテスト追加
+  phases:
+    - phase: 1
+      name: "deprecated 属性追加"
+      tasks:
+        - "TASK-001: run_async() に #[deprecated] 属性を追加"
+    - phase: 2
+      name: "既存コードの警告対応"
+      tasks:
+        - "TASK-007: 既存の run_async() 呼び出しに #[allow(deprecated)] を付与"
+      note: |
+        TASK-001 の直後に実行し、ビルドが壊れる期間を最小化する。
+        可能であれば TASK-001 と TASK-007 を同一コミットにまとめる。
+    - phase: 3
+      name: "ドキュメント更新"
+      tasks:
+        - "TASK-002: run_async() の doc コメントを更新"
+        - "TASK-003: モジュールドキュメントを更新"
+        - "TASK-004: runtime モジュールドキュメントを更新"
+        - "TASK-006: CHANGELOG に移行ガイドを追加"
+    - phase: 4
+      name: "テスト実装"
+      tasks:
+        - "TASK-005: TEST-001/TEST-002 のテストファイルを作成"
+
+# ==============================================================================
+# 依存関係
+# ==============================================================================
+
+dependencies:
+  internal:
+    - task: "TASK-007"
+      depends_on:
+        - "TASK-001"
+      reason: "#[allow(deprecated)] は deprecated 属性が付与された後に必要"
+    - task: "TASK-005"
+      depends_on:
+        - "TASK-001"
+        - "TASK-007"
+      reason: "テストは deprecated 属性と警告抑制が完了した後に追加"
+  external:
+    - name: "rstest"
+      version: "0.24.0"
+      reason: "テストフレームワーク"
+    - name: "tokio"
+      version: "1.x"
+      reason: "async runtime for tests"
+
+# ==============================================================================
+# 検証項目
+# ==============================================================================
+
+verification:
+  pre_implementation:
+    - "要件定義 v1.8.0 の内容を確認"
+    - "既存の run_async() 使用箇所を確認（tests: 200, src: 277, benches: 430）"
+  post_implementation:
+    - "cargo check が通ること"
+    - "cargo clippy --all-features --all-targets -- -D warnings が通ること"
+    - "cargo test が通ること（#[allow(deprecated)] 付きのテストを含む）"
+    - "cargo doc --no-deps が通ること"
+    - "#[allow(deprecated)] なしで run_async() を呼び出すと警告が出ること"
+    - "COMPAT-002: run_async() の戻り型が変更されていないこと（Pin<Box<dyn Future<Output = A> + Send>>）"
+    - "COMPAT-004: runtime::run_blocking が公開 API として維持されていること"
+
+# ==============================================================================
+# リスクと対策
+# ==============================================================================
+
+risks:
+  - id: "RISK-001"
+    description: "既存テストが deprecated 警告でビルドエラーになる"
+    mitigation: |
+      TASK-007 で既存の run_async() 呼び出しに #[allow(deprecated)] を追加する。
+      TASK-001 と TASK-007 を同一コミットにまとめることで、
+      ビルドが壊れる期間を排除する。
+    status: "対応タスク追加済み（TASK-007）"
+
+  - id: "RISK-002"
+    description: "ライブラリユーザーのコードが警告を出すようになる"
+    mitigation: |
+      - CHANGELOG に移行ガイドを記載
+      - run_async() の doc コメントに移行手順を記載
+      - #[allow(deprecated)] の使用方法を案内
+
+  - id: "RISK-003"
+    description: "大量のファイル変更が必要（55+ files）"
+    mitigation: |
+      - 機械的な置換で対応可能
+      - モジュールレベルの #[allow(deprecated)] を優先し、変更箇所を最小化
+      - 各ディレクトリごとにコミットを分けて追跡可能性を確保
+
+# ==============================================================================
+# スコープ外の項目
+# ==============================================================================
+
+out_of_scope:
+  - id: "OOS-001"
+    description: "as_future() の deprecated 化"
+    reason: |
+      要件定義 REQ-ASYNCIO-UNBOXED-001 には as_future() の deprecated 化が
+      含まれていない。as_future() は run_async() を内部で使用しているが、
+      互換性への影響を最小化するため、今回のスコープには含めない。
+      将来的に別途要件定義を行う可能性がある。
+
+  - id: "OOS-002"
+    description: "fmap/flat_map チェーンのテスト"
+    reason: |
+      要件定義のスコープでは fmap/flat_map チェーンの最適化は除外されている。
+      TEST-001 と TEST-002 のみが要件で定義されている。
+
+  - id: "OOS-003"
+    description: "既存コードの直接 await への移行"
+    reason: |
+      今回のスコープでは #[allow(deprecated)] による警告抑制のみを行う。
+      直接 await への移行は将来の改善として検討する。
+      移行が必要な箇所は affected_files で記録済み。

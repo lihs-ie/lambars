@@ -371,7 +371,6 @@ pub async fn save_task_with_event(
     state
         .task_repository
         .save(task)
-        .run_async()
         .await
         .map_err(ApiErrorResponse::from)?;
 
@@ -379,7 +378,6 @@ pub async fn save_task_with_event(
     match state
         .event_store
         .append(&event, expected_version)
-        .run_async()
         .await
     {
         Ok(()) => Ok(SaveTaskResult::success()),
@@ -500,7 +498,6 @@ pub async fn write_events_sequentially(
         match state
             .event_store
             .append(&event, expected_version)
-            .run_async()
             .await
         {
             Ok(()) => {
@@ -553,7 +550,6 @@ pub async fn save_task_with_events(
     state
         .task_repository
         .save(task)
-        .run_async()
         .await
         .map_err(ApiErrorResponse::from)?;
 

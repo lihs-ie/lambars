@@ -1,0 +1,482 @@
+# AsyncIO 非 boxing 実行パス 要件定義
+#
+# 概要:
+#   AsyncIO の実行で発生する Box/trait object を削減し、
+#   malloc/cfree と drop のオーバーヘッドを抑制する。
+#
+# 設計方針:
+#   1. 既存 API 互換を維持しつつ、直接 await を推奨する
+#   2. 純粋計算（Pure 状態）は割当ゼロで通過する
+#   3. ランタイムの enter/exit は既存実装で最適化済み
+#
+# 参照:
+#   - src/effect/async_io/mod.rs
+#   - src/effect/async_io/runtime.rs
+#   - benches/results/criterion-profiling-all-*/effect_bench/top_functions.txt
+#
+# 変更履歴:
+#   - v1.8.0: Codex 8回目レビュー指摘に基づき以下を修正
+#     - REQ-002 に multi-thread runtime の block_in_place 制約を追記
+#     - REQ-002 に UnsupportedRuntimeFlavor を追加
+#   - v1.7.0: Codex 7回目レビュー指摘に基づき以下を修正
+#     - AsyncIO が Future を実装していることを前提条件として明記
+#     - REQ-002 の BlockingError 戻り値型を明記
+#     - PERF-001 の対象範囲を明確化（AsyncIO 自身のみ、value は対象外）
+#     - TEST-002 追加（run_blocking に AsyncIO を直接渡すテスト）
+#   - v1.6.0: Codex 6回目レビュー指摘に基づき以下を修正
+#     - TEST-001 の対象条件を限定（async context 限定）
+#     - 同期コンテキスト向けの移行手順を追加
+#     - PERF-001 の対象を AsyncIO::pure 生成時も含めるよう拡張
+#   - v1.5.0: Codex 5回目レビュー指摘に基づき以下を修正
+#     - TEST-002 を削除（deprecated 検証は実装時の手動確認に変更）
+#     - REQ-002 の enter/exit 条件を明文化
+#     - PERF-001 をコードパス分析による設計保証に変更（測定不要）
+#   - v1.4.0: Codex 4回目レビュー指摘に基づき以下を修正
+#     - TEST-001/TEST-002 の衝突を解消（#[allow(deprecated)] 方針を明記）
+#     - REQ-002 のコードパス分析の観測方法を明確化
+#     - PERF-001 の対象範囲を限定
+#     - COMPAT-003 の記載場所を明確化
+#   - v1.3.0: Codex 3回目レビュー指摘に基づき以下を修正
+#     - PERF-001 の検証方法を明確化（コードパス分析に限定）
+#     - スコープと性能条件の整合性を修正
+#     - REQ-002 のテスト方針を追加
+#   - v1.2.0: Codex 2回目レビュー指摘に基づき以下を修正
+#     - deprecated 検証方法を CI の deny(warnings) に明確化
+#     - 割当 0 保証の測定条件を明確化
+#     - REQ-002 の受け入れ基準を追加
+#     - 互換性方針に deprecated 利用者向け案内を追加
+#     - 割当削減の対象範囲を明確化
+#   - v1.1.0: Codex 1回目レビュー指摘に基づき以下を修正
+#     - REQ-001: run_async は deprecated として残し、改名しない
+#     - REQ-002: small-box 要件を削除し、将来拡張へ移動
+#     - REQ-003: TLS による runtime id 管理は不要と判断し削除
+
+version: "1.8.0"
+name: "async_io_unboxed_execution"
+description: |
+  AsyncIO の run_async が常に Box::pin を行うことで
+  malloc/cfree が支配的になっている。
+  非 boxing 経路（直接 await）を推奨し、Pure 状態の割当を削減する。
+
+preconditions:
+  - id: "PRECOND-001"
+    description: "AsyncIO<A> は Future<Output = A> を実装している"
+    verification: |
+      src/effect/async_io/mod.rs で以下の実装が存在する:
+      ```rust
+      impl<A> Future for AsyncIO<A> {
+          type Output = A;
+          fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> { ... }
+      }
+      ```
+    note: |
+      この前提条件により、AsyncIO は直接 await 可能であり、
+      runtime::run_blocking に直接渡すことができる。
+
+background:
+  problem: |
+    AsyncIOState は Box<dyn Future> と Box<dyn FnOnce> を多用しており、
+    effect_bench で malloc/cfree が上位を占める。
+    特に run_async() は AsyncIO が既に Future を実装しているにも関わらず
+    Box::pin を行うため、不要な heap 割り当てが発生している。
+  motivation: |
+    ライブラリの基盤性能を向上させ、短い AsyncIO チェーンの性能を改善する。
+  prior_art:
+    - name: "AsyncIO implements Future"
+      description: |
+        AsyncIO 自体は Future を実装しており、Box::pin を使わずに
+        直接 await 可能。この既存機能を活用する。
+
+scope:
+  included:
+    - "AsyncIO::pure(value).await の実行パス（async context 内）"
+    - "直接 await による実行の推奨"
+    - "run_async() の deprecated 化"
+  excluded:
+    - "AsyncIO::pure から始まる fmap/flat_map チェーンの割当最適化"
+    - "AsyncIO::new や from_future で作成された Defer 状態のチェーン"
+    - "Defer 状態は型消去のため Box が必須であり、今回の対象外"
+  note: |
+    fmap/flat_map チェーンの割当最適化は、Pure 状態に対する操作が
+    即時評価（既存実装）であることを前提とし、別途検討が必要。
+    今回は run_async() の deprecated 化と直接 await の推奨に焦点を当てる。
+
+requirements:
+  # ======================================================================
+  # 1. 直接 await の推奨とドキュメント整備
+  # ======================================================================
+  - id: "REQ-ASYNCIO-UNBOXED-001"
+    name: "直接 await を推奨し、run_async を deprecated とする"
+    description: |
+      AsyncIO は既に Future を実装しているため、直接 await が可能。
+      run_async() は Box::pin を行うため非推奨とし、
+      直接 await を推奨するようドキュメントを整備する。
+
+      API 変更方針:
+      - run_async() は既存互換のため残す（破壊的変更を避ける）
+      - run_async() に #[deprecated] 属性を付与する
+      - ドキュメントと例を直接 await に更新する
+
+      deprecated による影響への対応:
+      - CHANGELOG に移行ガイドを記載する
+      - 移行期間中は #[allow(deprecated)] で警告を抑制可能であることを明記
+      - deny(warnings) を使用するプロジェクト向けに移行手順を案内
+
+    methods:
+      - name: "AsyncIO::run_async (deprecated)"
+        signature: "#[deprecated(since = \"x.x.x\", note = \"Use direct await instead: `async_io.await`\")] pub fn run_async(self) -> Pin<Box<dyn Future<Output = A> + Send>>"
+        description: |
+          - 既存互換のため残すが、deprecated とする。
+          - 代わりに直接 await を使用することを推奨。
+          - doc コメントに代替例を明記する。
+        examples:
+          - description: "非推奨: run_async を使用"
+            code: |
+              // 非推奨: Box::pin によるヒープ割り当てが発生
+              #[allow(deprecated)]
+              let value = AsyncIO::pure(42).run_async().await;
+          - description: "推奨: 直接 await を使用"
+            code: |
+              // 推奨: Box::pin なしで実行（Pure 状態は割当 0）
+              let value = AsyncIO::pure(42).await;
+              assert_eq!(value, 42);
+
+    implementations:
+      - type: "AsyncIO"
+        description: |
+          - run_async() に #[deprecated(since = "x.x.x", note = "...")] を追加。
+          - run_async() の doc コメントに代替パターンと移行手順を記載。
+          - モジュールドキュメントを更新し、直接 await を推奨パターンとして記載。
+          - 既存の例を直接 await に更新。
+
+    acceptance_criteria:
+      - "run_async() に #[deprecated] 属性が付与されていること"
+      - "モジュールドキュメントで直接 await が推奨として記載されていること"
+      - "run_async() の doc コメントに代替例と移行手順が記載されていること"
+      - "CHANGELOG に移行ガイドが記載されていること"
+
+    migration_guide:
+      async_context:
+        description: "async 関数・ブロック内での移行"
+        before: |
+          async fn example() -> i32 {
+              AsyncIO::pure(42).run_async().await
+          }
+        after: |
+          async fn example() -> i32 {
+              AsyncIO::pure(42).await
+          }
+      sync_context:
+        description: "同期関数内での移行（await が使用できない場合）"
+        precondition: "AsyncIO は Future を実装しているため、直接渡すことができる"
+        before: |
+          fn example() -> i32 {
+              runtime::run_blocking(AsyncIO::pure(42).run_async())
+          }
+        after: |
+          fn example() -> i32 {
+              runtime::run_blocking(AsyncIO::pure(42))
+          }
+        note: |
+          runtime::run_blocking<F, T>(future: F) -> T where F: Future<Output = T>
+          AsyncIO<A>: Future<Output = A> であるため、直接渡すことができる。
+          runtime::run_blocking は公開 API として維持される。
+
+    deprecated_verification:
+      description: |
+        deprecated 属性が正しく機能していることの確認方法。
+      method: |
+        実装時に以下を手動確認する:
+        1. run_async() に #[deprecated] 属性が付与されていること（コードレビュー）
+        2. #[allow(deprecated)] なしで run_async() を呼び出すと
+           コンパイラが警告を出力すること（cargo build で確認）
+      note: |
+        自動テストでの deprecated 検証は複雑（compile-fail テスト等が必要）なため、
+        実装時の手動確認で十分とする。
+        CI では既存テストが #[allow(deprecated)] を付与して通過することで、
+        間接的に deprecated が機能していることを確認できる。
+
+  # ======================================================================
+  # 2. ランタイム enter/exit 最適化（既存実装の確認）
+  # ======================================================================
+  - id: "REQ-ASYNCIO-UNBOXED-002"
+    name: "runtime::run_blocking の enter/exit 最適化を確認する"
+    description: |
+      現在の runtime::run_blocking 実装を確認し、
+      既に最適化されていることを検証する。
+
+      現在の実装:
+      - Handle::try_current() で現在のランタイムを検出
+      - multi-thread runtime 内では block_in_place を使用
+      - ランタイム外では global().block_on を使用
+      - enter/exit の多重呼び出しは既に回避されている
+
+      追加作業:
+      - 現在の実装が最適であることをドキュメントに明記。
+      - 不要な最適化要件は削除。
+
+    methods:
+      - name: "runtime::run_blocking"
+        signature: "pub fn run_blocking<F, T>(future: F) -> T where F: Future<Output = T>"
+        description: |
+          - 現在の実装は既に enter/exit を最小化している。
+          - Handle::try_current() による検出で再入を適切に処理。
+          - 追加の TLS 管理は不要。
+          - 公開 API として維持し、同期コンテキストからの利用をサポートする。
+      - name: "runtime::try_run_blocking"
+        signature: "pub fn try_run_blocking<F, T>(future: F) -> Result<T, BlockingError> where F: Future<Output = T>"
+        description: |
+          - run_blocking のエラーハンドリング版。
+          - current-thread runtime 内では Err(BlockingError::CurrentThreadRuntime) を返す。
+
+    implementations:
+      - type: "runtime"
+        description: |
+          現在の実装を維持。追加の最適化は不要。
+          ドキュメントに最適化の設計意図を明記する。
+
+    enter_exit_conditions:
+      description: |
+        enter/exit 呼び出しの許可/禁止条件を以下に明文化する。
+        これらの条件は runtime::run_blocking および runtime::try_run_blocking に適用される。
+      conditions:
+        - context: "ランタイム外からの呼び出し"
+          allowed: "global().block_on() による 1 回の enter"
+          prohibited: "追加の enter/exit 呼び出し"
+          rationale: "global runtime の block_on は内部で 1 回 enter する"
+          return_value:
+            try_run_blocking: "Ok(T)"
+            run_blocking: "T"
+        - context: "multi-thread runtime 内からの呼び出し（通常）"
+          allowed: "block_in_place() + current_handle.block_on()"
+          prohibited: "Runtime::enter() の明示的呼び出し"
+          rationale: "block_in_place は既存の runtime context を使用するため enter 不要"
+          return_value:
+            try_run_blocking: "Ok(T)"
+            run_blocking: "T"
+          exception: |
+            以下のコンテキストでは block_in_place が panic する:
+            - LocalSet::run_until() 内
+            - disallow_block_in_place が有効なコンテキスト
+            これは tokio の制約であり、要件では対処しない（ドキュメントに記載）。
+        - context: "current-thread runtime 内からの呼び出し"
+          allowed: "BlockingError::CurrentThreadRuntime を返す"
+          prohibited: "block_in_place() の呼び出し"
+          rationale: "current-thread runtime では block_in_place がサポートされない"
+          return_value:
+            try_run_blocking: "Err(BlockingError::CurrentThreadRuntime)"
+            run_blocking: "panic"
+        - context: "未知の runtime flavor 内からの呼び出し"
+          allowed: "BlockingError::UnsupportedRuntimeFlavor を返す"
+          prohibited: "不明な flavor での block_in_place 呼び出し"
+          rationale: "将来の tokio バージョンで新しい flavor が追加された場合の前方互換性"
+          return_value:
+            try_run_blocking: "Err(BlockingError::UnsupportedRuntimeFlavor)"
+            run_blocking: "panic"
+
+    acceptance_criteria:
+      - "runtime モジュールのドキュメントに enter/exit 最適化の設計意図が記載されていること"
+      - "enter_exit_conditions で定義された条件を満たすこと（コードレビューで確認）"
+
+    testing:
+      description: |
+        enter/exit の退行を検知するためのテスト方針。
+        既存の単体テストで各コードパスの動作は検証済み。
+      existing_tests:
+        description: |
+          runtime モジュールには既に以下のテストが存在する:
+          - try_run_blocking_from_outside_runtime: ランタイム外からの呼び出し
+          - try_run_blocking_inside_multi_thread_runtime: multi-thread runtime 内
+          - try_run_blocking_inside_current_thread_runtime: current-thread runtime 内
+        verification: |
+          これらのテストが各コードパスの動作を検証している。
+          block_in_place / global().block_on の使用は、
+          テストの成功（パニックしない、正しい結果を返す）で間接的に確認される。
+      additional_verification:
+        - name: "コードレビュー"
+          description: |
+            runtime モジュールを変更する際は、enter_exit_conditions を参照し、
+            以下を確認すること:
+            - Handle::try_current() による分岐が維持されていること
+            - multi-thread runtime: block_in_place -> current_handle.block_on の流れ
+            - ランタイム外: global().block_on の呼び出し
+            - 追加の Runtime::enter() がないこと
+
+non_functional_requirements:
+  performance:
+    description: |
+      パフォーマンス要件の測定条件と対象範囲を以下に定義する。
+    requirements:
+      - id: "PERF-001"
+        description: "AsyncIO::pure(value) の生成と await は AsyncIO 自身の heap 割り当てを行わない"
+        design_guarantee:
+          description: |
+            これは測定による検証ではなく、設計による保証である。
+            AsyncIO::pure の生成と Pure 状態の poll 実装は、
+            AsyncIO 構造体自身に関して heap 割り当て API を呼び出すコードパスが存在しない。
+          scope: |
+            以下の全てを対象とする:
+            1. AsyncIO::pure(value) の生成
+            2. AsyncIO::pure(value).await の実行における
+               AsyncIOState::Pure の poll ブランチ
+
+            対象外:
+            - await 展開時の Future trait 内部動作
+            - value 自体の heap 割り当て（例: Box<T> を value として渡す場合）
+          verification:
+            generation: |
+              AsyncIO::pure の実装を確認する:
+              ```rust
+              pub fn pure(value: A) -> Self {
+                  Self {
+                      state: AsyncIOState::Pure { value: Some(value) },
+                  }
+              }
+              ```
+              この実装は struct の初期化のみであり、AsyncIO 自身の heap 割り当てを行わない。
+            poll: |
+              AsyncIOStateProj::Pure ブランチを確認する:
+              ```rust
+              AsyncIOStateProj::Pure { value } => {
+                  let result = value.take().expect("...");
+                  this.state.set(AsyncIOState::Completed);
+                  return Poll::Ready(result);
+              }
+              ```
+              この実装は AsyncIO 自身の heap 割り当てを行わない。
+        note: |
+          allocator 計測による測定は以下の理由で採用しない:
+          - テスト基盤への依存が大きい
+          - CI 環境差異の影響を受けやすい
+          - Pure 状態の生成と poll は単純な実装であり、コードレビューで十分確認可能
+
+          value 自体が heap 割り当てを伴う型（Box<T>, Vec<T> 等）の場合、
+          その割り当ては value の型に依存し、本要件の対象外である。
+      - id: "PERF-002"
+        description: "run_async() 経由の実行は従来通り Box::pin を行う（互換性維持）"
+        measurement:
+          method: "コードレビュー"
+          criteria: "run_async() の実装が Box::pin(self) であること"
+  compatibility:
+    requirements:
+      - id: "COMPAT-001"
+        description: "run_async() は deprecated として残し、既存コードを破壊しない"
+        details: |
+          - 関数シグネチャの変更なし
+          - 戻り値の型変更なし
+          - 動作の変更なし
+      - id: "COMPAT-002"
+        description: "公開 API の戻り型変更は行わない"
+      - id: "COMPAT-003"
+        description: "deny(warnings) 利用者向けの移行案内"
+        details: |
+          以下の場所に記載する:
+          1. CHANGELOG: 移行ガイドとして記載
+          2. run_async() の doc コメント: 代替方法と #[allow(deprecated)] の案内
+        acceptance_criteria:
+          - "CHANGELOG に移行ガイドが記載されていること"
+          - "run_async() の doc コメントに #[allow(deprecated)] の使用方法が記載されていること"
+      - id: "COMPAT-004"
+        description: "runtime::run_blocking は公開 API として維持する"
+        details: |
+          同期コンテキストから AsyncIO を実行するための手段として、
+          runtime::run_blocking を公開 API として維持する。
+          run_async() の deprecated 化に伴い、移行先として案内する。
+  testing:
+    requirements:
+      - id: "TEST-001"
+        description: "直接 await と run_async の結果一致テストを追加する"
+        scope: |
+          async context（tokio::test）内でのテストに限定する。
+          current-thread runtime での run_blocking の動作は
+          REQ-ASYNCIO-UNBOXED-002 の既存テストでカバーされている。
+        method: |
+          rstest による単体テスト。
+          run_async を使用するテストには #[allow(deprecated)] を付与して
+          deprecated 警告を抑制する。
+        example: |
+          #[rstest]
+          #[tokio::test(flavor = "multi_thread")]
+          async fn direct_await_and_run_async_produce_same_result() {
+              let direct = AsyncIO::pure(42).await;
+              #[allow(deprecated)]
+              let boxed = AsyncIO::pure(42).run_async().await;
+              assert_eq!(direct, boxed);
+          }
+        note: |
+          このテストは multi_thread flavor で実行する。
+          current-thread runtime では run_async + await と direct await の
+          動作は同一だが、runtime::run_blocking の動作が異なる
+          （BlockingError を返す）。これは別の要件（REQ-002）でカバー済み。
+      - id: "TEST-002"
+        description: "run_blocking に AsyncIO を直接渡すテストを追加する"
+        scope: |
+          同期コンテキスト（ランタイム外）から run_blocking に
+          AsyncIO を直接渡す新しい経路のテスト。
+        method: |
+          rstest による単体テスト。
+          run_async 経由と直接渡しの結果が一致することを確認する。
+        example: |
+          #[rstest]
+          fn run_blocking_accepts_async_io_directly() {
+              // AsyncIO を直接渡す（推奨）
+              let direct = runtime::run_blocking(AsyncIO::pure(42));
+
+              // run_async 経由（deprecated）
+              #[allow(deprecated)]
+              let via_run_async = runtime::run_blocking(AsyncIO::pure(42).run_async());
+
+              assert_eq!(direct, 42);
+              assert_eq!(direct, via_run_async);
+          }
+        note: |
+          このテストはランタイム外から実行する。
+          AsyncIO が Future を実装していることを活用した新しい経路をテストする。
+
+future_extensions:
+  - id: "EXT-ASYNCIO-001"
+    name: "Typed AsyncIO"
+    description: |
+      AsyncIO を型パラメータ化し、完全に Box を排除した
+      型安全なステートマシンへ移行する。
+    rationale: |
+      現時点では大きな破壊的変更となるため、互換性維持を優先する。
+
+  - id: "EXT-ASYNCIO-002"
+    name: "Small-box 最適化"
+    description: |
+      AsyncIOState の内部状態で使用する Box<dyn Future> と
+      Box<dyn FnOnce> を small-box 化し、短い Future/Closure を
+      インライン格納する。
+
+      技術的課題:
+      - 現在の dyn Future/dyn FnOnce は型消去されている。
+      - 型消去のまま small-box するには vtable 付き smallbox か、
+        AsyncIOState のジェネリック化が必要。
+      - Pin 安全性: inline 格納した future の poll 後移動を防ぐ
+        self-pin 機構が必要で、unsafe 最小化と両立が困難。
+      - 128B のインライン容量は AsyncIOState のサイズ膨張を招き、
+        状態遷移のコピー/スタック負荷が増えて逆効果になり得る。
+
+      実施条件:
+      - 効果測定とサイズ上限の検証が完了していること。
+      - Pin 安全性の設計が確立していること。
+    rationale: |
+      技術的課題が多く、効果も不確定なため将来拡張とする。
+
+  - id: "EXT-ASYNCIO-003"
+    name: "fmap/flat_map チェーンの割当最適化"
+    description: |
+      AsyncIO::pure から始まる fmap/flat_map チェーンにおいて、
+      Pure 状態を維持したまま割当を最小化する。
+
+      現状:
+      - Pure 状態に対する fmap/flat_map は即時評価される（既存実装）
+      - 即時評価のため、チェーン自体での追加割当は発生しない
+      - ただし、flat_map で Defer 状態の AsyncIO を返す場合は Box が必要
+
+      検討事項:
+      - チェーン全体の割当パターンの分析
+      - 即時評価と遅延評価のトレードオフ
+    rationale: |
+      今回のスコープ外。別途要件定義で検討する。

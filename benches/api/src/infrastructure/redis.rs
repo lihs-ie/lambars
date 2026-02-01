@@ -88,8 +88,8 @@ fn timestamp_to_score(timestamp: &Timestamp) -> f64 {
 /// let repository = RedisTaskRepository::from_url("redis://localhost:6379")?;
 /// let task = Task::new(TaskId::generate(), "My Task", Timestamp::now());
 ///
-/// repository.save(&task).run_async().await?;
-/// let found = repository.find_by_id(&task.task_id).run_async().await?;
+/// repository.save(&task).await?;
+/// let found = repository.find_by_id(&task.task_id).await?;
 /// ```
 #[derive(Debug, Clone)]
 pub struct RedisTaskRepository {
@@ -652,8 +652,8 @@ impl TaskRepository for RedisTaskRepository {
 /// let repository = RedisProjectRepository::from_url("redis://localhost:6379")?;
 /// let project = Project::new(ProjectId::generate(), "My Project", Timestamp::now());
 ///
-/// repository.save(&project).run_async().await?;
-/// let found = repository.find_by_id(&project.project_id).run_async().await?;
+/// repository.save(&project).await?;
+/// let found = repository.find_by_id(&project.project_id).await?;
 /// ```
 #[derive(Debug, Clone)]
 pub struct RedisProjectRepository {
@@ -1032,11 +1032,11 @@ mod tests {
         let task_id = task.task_id.clone();
 
         // Save the task
-        let save_result = repository.save(&task).run_async().await;
+        let save_result = repository.save(&task).await;
         assert!(save_result.is_ok());
 
         // Find the task
-        let find_result = repository.find_by_id(&task_id).run_async().await;
+        let find_result = repository.find_by_id(&task_id).await;
         assert!(find_result.is_ok());
         let found_task = find_result.unwrap();
         assert!(found_task.is_some());
@@ -1052,17 +1052,16 @@ mod tests {
         let task_id = task.task_id.clone();
 
         // Save the original task
-        repository.save(&task).run_async().await.unwrap();
+        repository.save(&task).await.unwrap();
 
         // Update the task with incremented version
         let updated_task = test_task_with_id(task_id.clone(), "Updated Title").increment_version();
-        let update_result = repository.save(&updated_task).run_async().await;
+        let update_result = repository.save(&updated_task).await;
         assert!(update_result.is_ok());
 
         // Verify the update
         let found = repository
             .find_by_id(&task_id)
-            .run_async()
             .await
             .unwrap()
             .unwrap();
@@ -1079,11 +1078,11 @@ mod tests {
         let task_id = task.task_id.clone();
 
         // Save the original task
-        repository.save(&task).run_async().await.unwrap();
+        repository.save(&task).await.unwrap();
 
         // Try to save with same version (should fail)
         let conflicting_task = test_task_with_id(task_id, "Conflicting Task");
-        let result = repository.save(&conflicting_task).run_async().await;
+        let result = repository.save(&conflicting_task).await;
 
         assert!(result.is_err());
         match result.unwrap_err() {
@@ -1104,15 +1103,15 @@ mod tests {
         let task_id = task.task_id.clone();
 
         // Save the task
-        repository.save(&task).run_async().await.unwrap();
+        repository.save(&task).await.unwrap();
 
         // Delete the task
-        let delete_result = repository.delete(&task_id).run_async().await;
+        let delete_result = repository.delete(&task_id).await;
         assert!(delete_result.is_ok());
         assert!(delete_result.unwrap());
 
         // Verify deletion
-        let find_result = repository.find_by_id(&task_id).run_async().await.unwrap();
+        let find_result = repository.find_by_id(&task_id).await.unwrap();
         assert!(find_result.is_none());
     }
 
@@ -1123,7 +1122,7 @@ mod tests {
         let repository = RedisTaskRepository::from_url("redis://localhost:6379").unwrap();
         let task_id = TaskId::generate();
 
-        let result = repository.delete(&task_id).run_async().await;
+        let result = repository.delete(&task_id).await;
         assert!(result.is_ok());
         assert!(!result.unwrap());
     }
@@ -1135,16 +1134,16 @@ mod tests {
         let repository = RedisTaskRepository::from_url("redis://localhost:6379").unwrap();
 
         // Count before adding tasks
-        let initial_count = repository.count().run_async().await.unwrap();
+        let initial_count = repository.count().await.unwrap();
 
         // Add some tasks
         for i in 0..3 {
             let task = test_task(&format!("Task {i}"));
-            repository.save(&task).run_async().await.unwrap();
+            repository.save(&task).await.unwrap();
         }
 
         // Verify count increased
-        let final_count = repository.count().run_async().await.unwrap();
+        let final_count = repository.count().await.unwrap();
         assert!(final_count >= initial_count + 3);
     }
 
@@ -1157,11 +1156,11 @@ mod tests {
         let project_id = project.project_id.clone();
 
         // Save the project
-        let save_result = repository.save(&project).run_async().await;
+        let save_result = repository.save(&project).await;
         assert!(save_result.is_ok());
 
         // Find the project
-        let find_result = repository.find_by_id(&project_id).run_async().await;
+        let find_result = repository.find_by_id(&project_id).await;
         assert!(find_result.is_ok());
         let found_project = find_result.unwrap();
         assert!(found_project.is_some());
@@ -1177,11 +1176,11 @@ mod tests {
         let project_id = project.project_id.clone();
 
         // Save the original project
-        repository.save(&project).run_async().await.unwrap();
+        repository.save(&project).await.unwrap();
 
         // Try to save with same version (should fail)
         let conflicting_project = test_project_with_id(project_id, "Conflicting Project");
-        let result = repository.save(&conflicting_project).run_async().await;
+        let result = repository.save(&conflicting_project).await;
 
         assert!(result.is_err());
         match result.unwrap_err() {
@@ -1202,17 +1201,16 @@ mod tests {
         let project_id = project.project_id.clone();
 
         // Save the project
-        repository.save(&project).run_async().await.unwrap();
+        repository.save(&project).await.unwrap();
 
         // Delete the project
-        let delete_result = repository.delete(&project_id).run_async().await;
+        let delete_result = repository.delete(&project_id).await;
         assert!(delete_result.is_ok());
         assert!(delete_result.unwrap());
 
         // Verify deletion
         let find_result = repository
             .find_by_id(&project_id)
-            .run_async()
             .await
             .unwrap();
         assert!(find_result.is_none());
@@ -1227,12 +1225,12 @@ mod tests {
         // Save some projects
         for i in 0..5 {
             let project = test_project(&format!("Project {i}"));
-            repository.save(&project).run_async().await.unwrap();
+            repository.save(&project).await.unwrap();
         }
 
         // Get first page
         let pagination = Pagination::new(0, 2);
-        let result = repository.list(pagination).run_async().await.unwrap();
+        let result = repository.list(pagination).await.unwrap();
         assert_eq!(result.items.len(), 2);
         assert!(result.total >= 5);
     }

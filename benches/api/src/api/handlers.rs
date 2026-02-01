@@ -329,7 +329,6 @@ impl AppState {
         let all_tasks = repositories
             .task_repository
             .list(Pagination::all())
-            .run_async()
             .await?;
 
         // Build the search index from all tasks (pure function)
@@ -608,7 +607,6 @@ async fn backfill_existing_tasks(
         // Idempotency check: skip tasks that already have events
         let current_version = event_store
             .get_current_version(&task.task_id)
-            .run_async()
             .await?;
 
         if current_version > 0 {
@@ -627,7 +625,7 @@ async fn backfill_existing_tasks(
         );
 
         // Attempt to append with optimistic locking (expected_version=0)
-        match event_store.append(&event, 0).run_async().await {
+        match event_store.append(&event, 0).await {
             Ok(()) => {
                 backfilled_count += 1;
                 tracing::debug!(task_id = %task.task_id, "Backfilled task");
@@ -871,7 +869,6 @@ pub async fn get_task(
     let cache_result = state
         .task_repository
         .find_by_id_with_status(&task_id)
-        .run_async()
         .await
         .map_err(ApiErrorResponse::from)?;
 
@@ -1004,7 +1001,6 @@ pub async fn delete_task(
     let deleted = state
         .task_repository
         .delete(&task_id)
-        .run_async()
         .await
         .map_err(ApiErrorResponse::from)?;
 
@@ -1370,7 +1366,6 @@ mod tests {
         state
             .task_repository
             .save(&task)
-            .run_async()
             .await
             .expect("Failed to save task");
 
@@ -1687,12 +1682,10 @@ mod tests {
         // Verify events were created
         let version1 = event_store
             .get_current_version(&task1.task_id)
-            .run_async()
             .await
             .unwrap();
         let version2 = event_store
             .get_current_version(&task2.task_id)
-            .run_async()
             .await
             .unwrap();
         assert_eq!(version1, 1);
@@ -1714,7 +1707,7 @@ mod tests {
             Timestamp::now(),
             1,
         );
-        event_store.append(&event, 0).run_async().await.unwrap();
+        event_store.append(&event, 0).await.unwrap();
 
         let tasks = vec![task1.clone(), task2.clone()];
 
@@ -1730,7 +1723,6 @@ mod tests {
         // Verify task1 still has only 1 event (not duplicated)
         let version1 = event_store
             .get_current_version(&task1.task_id)
-            .run_async()
             .await
             .unwrap();
         assert_eq!(version1, 1);
@@ -1769,7 +1761,6 @@ mod tests {
         state
             .task_repository
             .save(&task)
-            .run_async()
             .await
             .expect("Failed to save task");
 
@@ -1811,7 +1802,6 @@ mod tests {
         state
             .task_repository
             .save(&task)
-            .run_async()
             .await
             .expect("Failed to save task");
 
@@ -1823,7 +1813,6 @@ mod tests {
         let find_result = state
             .task_repository
             .find_by_id(&task_id)
-            .run_async()
             .await
             .expect("Failed to find task");
         assert!(find_result.is_none());
@@ -2367,7 +2356,6 @@ mod tests {
         let found_task = state
             .task_repository
             .find_by_id(&task_id)
-            .run_async()
             .await
             .expect("Repository should not fail")
             .expect("Task should be found in repository");

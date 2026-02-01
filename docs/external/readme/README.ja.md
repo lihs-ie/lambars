@@ -758,15 +758,15 @@ let async_io = AsyncIO::pure(10)
     .fmap(|x| x * 2)
     .flat_map(|x| AsyncIO::pure(x + 1));
 
-// 非同期で実行
-let result = async_io.run_async().await;
+// 非同期で実行（直接 await - 推奨）
+let result = async_io.await;
 assert_eq!(result, 21);
 
 // 同期 IO を非同期に変換
 use lambars::effect::IO;
 let sync_io = IO::pure(42);
 let async_io = sync_io.to_async();
-let result = async_io.run_async().await;
+let result = async_io.await;
 assert_eq!(result, 42);
 ```
 
@@ -784,7 +784,7 @@ async fn example() {
         y <= AsyncIO::pure(10);
         let z = x + y;
         AsyncIO::pure(z * 2)
-    }.run_async().await;
+    }.await;
 
     assert_eq!(result, 30);
 }
@@ -981,7 +981,7 @@ use lambars::effect::AsyncIO;
 async fn example() {
     let reader_t = ReaderT::<i32, AsyncIO<i32>>::ask_async_io()
         .flat_map_async_io(|env| ReaderT::pure_async_io(env * 2));
-    let result = reader_t.run_async_io(21).run_async().await;
+    let result = reader_t.run_async_io(21).await;
     assert_eq!(result, 42);
 }
 ```
@@ -1059,7 +1059,7 @@ async fn example() {
         url <= urls;
         yield url.to_uppercase()
     };
-    let uppercase_urls = result.run_async().await;
+    let uppercase_urls = result.await;
     assert_eq!(uppercase_urls, vec!["HTTP://A.COM", "HTTP://B.COM"]);
 
     // <~ 演算子を使用した AsyncIO 束縛
@@ -1068,7 +1068,7 @@ async fn example() {
         doubled <~ AsyncIO::pure(x * 2);  // <~ は AsyncIO からバインド
         yield doubled + 1
     };
-    let values = result.run_async().await;
+    let values = result.await;
     assert_eq!(values, vec![3, 5, 7]);
 
     // 非同期を伴うネストしたイテレーション
@@ -1080,7 +1080,7 @@ async fn example() {
         sum <~ AsyncIO::pure(x + y);
         yield sum
     };
-    let cartesian = result.run_async().await;
+    let cartesian = result.await;
     assert_eq!(cartesian, vec![11, 21, 12, 22]);
 }
 ```

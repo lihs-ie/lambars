@@ -457,7 +457,7 @@ pub async fn fetch_batch(
     let repository = Arc::clone(&state.task_repository);
     let fetch_io = build_parallel_fetch_io(repository, task_ids);
 
-    let results: Vec<Result<Task, BatchOpError>> = fetch_io.run_async().await;
+    let results: Vec<Result<Task, BatchOpError>> = fetch_io.await;
 
     // Collect errors or successful tasks - return first error with appropriate status code
     let mut tasks = Vec::new();
@@ -491,7 +491,7 @@ fn build_parallel_fetch_io(
     task_ids.traverse_async_io_parallel(move |task_id| {
         let repo = Arc::clone(&repository);
         AsyncIO::new(move || async move {
-            match repo.find_by_id(&task_id).run_async().await {
+            match repo.find_by_id(&task_id).await {
                 Ok(Some(task)) => Ok(task),
                 Ok(None) => Err(BatchOpError::NotFound {
                     task_id: task_id.to_string(),
@@ -577,7 +577,7 @@ pub async fn collect_optional(
     let repository = Arc::clone(&state.task_repository);
     let fetch_io = build_parallel_fetch_io(repository, task_ids);
 
-    let results: Vec<Result<Task, BatchOpError>> = fetch_io.run_async().await;
+    let results: Vec<Result<Task, BatchOpError>> = fetch_io.await;
 
     // Collect errors or successful tasks - return first error with appropriate status code
     let mut tasks = Vec::new();
@@ -686,7 +686,7 @@ pub async fn execute_sequential(
     let execution_io = build_sequential_execution_io(repository, operations);
 
     // All operations return OperationResult, failures are represented as success=false
-    let results: Vec<OperationResult> = execution_io.run_async().await;
+    let results: Vec<OperationResult> = execution_io.await;
     let processed_count = results.len();
 
     Ok(JsonResponse(ExecuteSequentialResponse {
@@ -763,7 +763,7 @@ async fn execute_update_status(
     };
 
     // Fetch task
-    let task = match repository.find_by_id(&id).run_async().await {
+    let task = match repository.find_by_id(&id).await {
         Ok(Some(task)) => task,
         Ok(None) => {
             return OperationResult {
@@ -785,7 +785,7 @@ async fn execute_update_status(
 
     // Update and save
     let updated = task.with_status(status);
-    if let Err(error) = repository.save(&updated).run_async().await {
+    if let Err(error) = repository.save(&updated).await {
         return OperationResult {
             task_id,
             operation_type,
@@ -837,7 +837,7 @@ async fn execute_update_priority(
     };
 
     // Fetch task
-    let task = match repository.find_by_id(&id).run_async().await {
+    let task = match repository.find_by_id(&id).await {
         Ok(Some(task)) => task,
         Ok(None) => {
             return OperationResult {
@@ -859,7 +859,7 @@ async fn execute_update_priority(
 
     // Update and save
     let updated = task.with_priority(priority);
-    if let Err(error) = repository.save(&updated).run_async().await {
+    if let Err(error) = repository.save(&updated).await {
         return OperationResult {
             task_id,
             operation_type,
@@ -898,7 +898,7 @@ async fn execute_add_tag(
     };
 
     // Fetch task
-    let task = match repository.find_by_id(&id).run_async().await {
+    let task = match repository.find_by_id(&id).await {
         Ok(Some(task)) => task,
         Ok(None) => {
             return OperationResult {
@@ -920,7 +920,7 @@ async fn execute_add_tag(
 
     // Update and save
     let updated = task.add_tag(Tag::new(tag.clone()));
-    if let Err(error) = repository.save(&updated).run_async().await {
+    if let Err(error) = repository.save(&updated).await {
         return OperationResult {
             task_id,
             operation_type,
@@ -1002,7 +1002,7 @@ pub async fn enrich_batch(
         include_project,
     );
 
-    let results: Vec<Result<EnrichedTaskDto, BatchOpError>> = enrich_io.run_async().await;
+    let results: Vec<Result<EnrichedTaskDto, BatchOpError>> = enrich_io.await;
 
     // Collect errors or successful results - return first error with appropriate status code
     let mut enriched_tasks = Vec::new();
@@ -1037,7 +1037,7 @@ fn build_parallel_enrich_io(
 
         AsyncIO::new(move || async move {
             // Fetch task
-            let task = match task_repo.find_by_id(&task_id).run_async().await {
+            let task = match task_repo.find_by_id(&task_id).await {
                 Ok(Some(task)) => task,
                 Ok(None) => {
                     return Err(BatchOpError::NotFound {

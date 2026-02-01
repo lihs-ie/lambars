@@ -24,7 +24,7 @@
 //! let repositories = factory.create().await?;
 //!
 //! // Use the repositories
-//! let task = repositories.task_repository.find_by_id(&task_id).run_async().await?;
+//! let task = repositories.task_repository.find_by_id(&task_id).await?;
 //! ```
 
 use std::env;
@@ -1021,11 +1021,11 @@ mod tests {
         let repositories = factory.create().await.unwrap();
 
         // Verify we can call methods on the repositories
-        let count = repositories.task_repository.count().run_async().await;
+        let count = repositories.task_repository.count().await;
         assert!(count.is_ok());
         assert_eq!(count.unwrap(), 0);
 
-        let project_count = repositories.project_repository.count().run_async().await;
+        let project_count = repositories.project_repository.count().await;
         assert!(project_count.is_ok());
         assert_eq!(project_count.unwrap(), 0);
     }
@@ -1272,7 +1272,7 @@ mod tests {
 
         // Verify the repositories are functional
         let repositories = result.unwrap();
-        let count = repositories.task_repository.count().run_async().await;
+        let count = repositories.task_repository.count().await;
         assert!(count.is_ok());
     }
 
