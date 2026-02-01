@@ -73,6 +73,17 @@ const MASK: u64 = (BRANCHING_FACTOR - 1) as u64;
 #[allow(dead_code)]
 const MAX_DEPTH: usize = 13;
 
+/// Maximum number of entries allowed in a single bulk insert operation.
+///
+/// This limit prevents memory spikes and ensures predictable performance.
+/// For larger datasets, callers should chunk the data into smaller batches.
+///
+/// # Recommended Chunk Size
+///
+/// When the input exceeds this limit, consider chunking into batches of 10,000
+/// entries for optimal performance while staying well within limits.
+pub const MAX_BULK_INSERT: usize = 100_000;
+
 // =============================================================================
 // Hash computation
 // =============================================================================
@@ -2193,6 +2204,72 @@ where
 }
 
 // =============================================================================
+// BulkInsertError Definition
+// =============================================================================
+
+/// Error type for bulk insertion operations on [`TransientHashMap`].
+///
+/// This error is returned when a bulk insert operation fails due to input
+/// size constraints designed to prevent memory spikes and ensure predictable
+/// performance.
+///
+/// # Handling
+///
+/// When receiving this error, callers should:
+/// 1. Split the input into smaller chunks (recommended: 10,000 entries per chunk)
+/// 2. Call `insert_bulk` multiple times with smaller batches
+///
+/// # Example
+///
+/// ```rust
+/// use lambars::persistent::{TransientHashMap, BulkInsertError, MAX_BULK_INSERT};
+///
+/// let large_data: Vec<(i32, i32)> = (0..200_000).map(|i| (i, i * 2)).collect();
+///
+/// // For large datasets, chunk the data to avoid TooManyEntries error
+/// const CHUNK_SIZE: usize = 10_000;
+/// let mut transient: TransientHashMap<i32, i32> = TransientHashMap::new();
+/// for chunk in large_data.chunks(CHUNK_SIZE) {
+///     transient = transient.insert_bulk(chunk.to_vec()).unwrap();
+/// }
+///
+/// assert_eq!(transient.len(), 200_000);
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BulkInsertError {
+    /// The number of entries exceeds the maximum allowed limit.
+    ///
+    /// # Fields
+    ///
+    /// * `count` - The number of entries observed before early termination.
+    ///   Due to early cutoff at `MAX_BULK_INSERT + 1`, this may not reflect
+    ///   the total number of entries in the input iterator.
+    /// * `limit` - The maximum allowed number of entries ([`MAX_BULK_INSERT`])
+    TooManyEntries {
+        /// The number of entries observed (capped at `MAX_BULK_INSERT + 1`).
+        count: usize,
+        /// The maximum allowed number of entries.
+        limit: usize,
+    },
+}
+
+impl std::fmt::Display for BulkInsertError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TooManyEntries { count, limit } => {
+                write!(
+                    formatter,
+                    "bulk insert failed: {count} entries exceeds maximum of {limit}. \
+                     Consider chunking into batches of 10,000 entries."
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for BulkInsertError {}
+
+// =============================================================================
 // TransientHashMap Definition
 // =============================================================================
 
@@ -3017,6 +3094,131 @@ impl<K: Clone + Hash + Eq, V: Clone> TransientHashMap<K, V> {
         for (key, value) in iter {
             self.insert(key, value);
         }
+    }
+
+    /// Inserts multiple key-value pairs in a single batch operation.
+    ///
+    /// This method is optimized for bulk insertions, providing better performance
+    /// than calling `insert` repeatedly for large datasets. It consumes `self`
+    /// and returns a new `TransientHashMap` with all entries inserted.
+    ///
+    /// # Duplicate Key Handling
+    ///
+    /// When the same key appears multiple times in the input:
+    /// - **Last value wins**: The value from the last occurrence is kept
+    /// - This matches the semantics of calling `insert` sequentially
+    /// - The input order is preserved during processing
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(BulkInsertError::TooManyEntries)` if the input exceeds
+    /// [`MAX_BULK_INSERT`] (100,000 entries). To prevent memory spikes, the
+    /// iterator is only consumed up to `MAX_BULK_INSERT + 1` elements.
+    ///
+    /// # Purity Assumption
+    ///
+    /// This method assumes that `items` is a pure data source (e.g., `Vec`, slice iterator).
+    /// If the iterator has side effects (e.g., I/O operations), the early termination
+    /// at `MAX_BULK_INSERT + 1` may leave those side effects partially executed.
+    /// For side-effecting iterators, collect into a `Vec` first and pass the `Vec`.
+    ///
+    /// # Complexity
+    ///
+    /// O(N * log32 M) where N is the number of items and M is the map size.
+    ///
+    /// # Examples
+    ///
+    /// ## Basic Usage
+    ///
+    /// ```rust
+    /// use lambars::persistent::TransientHashMap;
+    ///
+    /// let transient: TransientHashMap<String, i32> = TransientHashMap::new();
+    /// let transient = transient
+    ///     .insert_bulk(vec![
+    ///         ("one".to_string(), 1),
+    ///         ("two".to_string(), 2),
+    ///         ("three".to_string(), 3),
+    ///     ])
+    ///     .unwrap();
+    ///
+    /// assert_eq!(transient.len(), 3);
+    /// assert_eq!(transient.get("one"), Some(&1));
+    /// ```
+    ///
+    /// ## Duplicate Keys (Last Value Wins)
+    ///
+    /// ```rust
+    /// use lambars::persistent::TransientHashMap;
+    ///
+    /// let transient: TransientHashMap<String, i32> = TransientHashMap::new();
+    /// let transient = transient
+    ///     .insert_bulk(vec![
+    ///         ("key".to_string(), 1),
+    ///         ("key".to_string(), 2),
+    ///         ("key".to_string(), 3),
+    ///     ])
+    ///     .unwrap();
+    ///
+    /// assert_eq!(transient.len(), 1);
+    /// assert_eq!(transient.get("key"), Some(&3)); // Last value wins
+    /// ```
+    ///
+    /// ## Method Chaining with `persistent()`
+    ///
+    /// ```rust
+    /// use lambars::persistent::PersistentHashMap;
+    ///
+    /// let map: PersistentHashMap<String, i32> = PersistentHashMap::new()
+    ///     .transient()
+    ///     .insert_bulk(vec![
+    ///         ("a".to_string(), 1),
+    ///         ("b".to_string(), 2),
+    ///     ])
+    ///     .unwrap()
+    ///     .persistent();
+    ///
+    /// assert_eq!(map.len(), 2);
+    /// ```
+    ///
+    /// ## Handling Large Inputs
+    ///
+    /// ```rust
+    /// use lambars::persistent::{TransientHashMap, BulkInsertError, MAX_BULK_INSERT};
+    ///
+    /// fn insert_with_chunking(
+    ///     mut transient: TransientHashMap<i32, i32>,
+    ///     data: Vec<(i32, i32)>,
+    /// ) -> TransientHashMap<i32, i32> {
+    ///     const CHUNK_SIZE: usize = 10_000;
+    ///     for chunk in data.chunks(CHUNK_SIZE) {
+    ///         transient = transient.insert_bulk(chunk.to_vec()).unwrap();
+    ///     }
+    ///     transient
+    /// }
+    /// ```
+    pub fn insert_bulk<I>(mut self, items: I) -> Result<Self, BulkInsertError>
+    where
+        I: IntoIterator<Item = (K, V)>,
+    {
+        let items_vec: Vec<(K, V)> = items.into_iter().take(MAX_BULK_INSERT + 1).collect();
+
+        if items_vec.len() > MAX_BULK_INSERT {
+            return Err(BulkInsertError::TooManyEntries {
+                count: items_vec.len(),
+                limit: MAX_BULK_INSERT,
+            });
+        }
+
+        if !items_vec.is_empty() {
+            self.capacity_hint = self.capacity_hint.saturating_add(items_vec.len());
+        }
+
+        for (key, value) in items_vec {
+            self.insert(key, value);
+        }
+
+        Ok(self)
     }
 
     /// Converts this transient map into a persistent map.
@@ -4676,6 +4878,225 @@ mod transient_hashmap_tests {
         // Verify that capacity_hint can be retrieved (even if not used currently)
         let transient: TransientHashMap<String, i32> = TransientHashMap::with_capacity_hint(500);
         assert_eq!(transient.capacity_hint(), 500);
+    }
+
+    // =========================================================================
+    // insert_bulk Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_insert_bulk_basic() {
+        let transient: TransientHashMap<String, i32> = TransientHashMap::new();
+        let result = transient.insert_bulk(vec![
+            ("one".to_string(), 1),
+            ("two".to_string(), 2),
+            ("three".to_string(), 3),
+        ]);
+
+        let transient = result.expect("insert_bulk should succeed");
+        assert_eq!(transient.len(), 3);
+        assert_eq!(transient.get("one"), Some(&1));
+        assert_eq!(transient.get("two"), Some(&2));
+        assert_eq!(transient.get("three"), Some(&3));
+    }
+
+    #[rstest]
+    fn test_insert_bulk_empty() {
+        let transient: TransientHashMap<String, i32> = TransientHashMap::new();
+        let result = transient.insert_bulk(Vec::<(String, i32)>::new());
+
+        let transient = result.expect("insert_bulk with empty input should succeed");
+        assert!(transient.is_empty());
+    }
+
+    #[rstest]
+    fn test_insert_bulk_duplicate_keys_last_wins() {
+        let transient: TransientHashMap<String, i32> = TransientHashMap::new();
+        let result = transient.insert_bulk(vec![
+            ("key".to_string(), 1),
+            ("key".to_string(), 2),
+            ("key".to_string(), 3),
+        ]);
+
+        let transient = result.expect("insert_bulk should succeed");
+        assert_eq!(transient.len(), 1);
+        assert_eq!(transient.get("key"), Some(&3)); // Last value wins
+    }
+
+    #[rstest]
+    fn test_insert_bulk_with_existing_entries() {
+        let mut transient: TransientHashMap<String, i32> = TransientHashMap::new();
+        transient.insert("existing".to_string(), 100);
+
+        let transient = transient
+            .insert_bulk(vec![("one".to_string(), 1), ("two".to_string(), 2)])
+            .expect("insert_bulk should succeed");
+
+        assert_eq!(transient.len(), 3);
+        assert_eq!(transient.get("existing"), Some(&100));
+        assert_eq!(transient.get("one"), Some(&1));
+        assert_eq!(transient.get("two"), Some(&2));
+    }
+
+    #[rstest]
+    fn test_insert_bulk_overwrites_existing_key() {
+        let mut transient: TransientHashMap<String, i32> = TransientHashMap::new();
+        transient.insert("key".to_string(), 100);
+
+        let transient = transient
+            .insert_bulk(vec![("key".to_string(), 999)])
+            .expect("insert_bulk should succeed");
+
+        assert_eq!(transient.len(), 1);
+        assert_eq!(transient.get("key"), Some(&999)); // Bulk overwrites existing
+    }
+
+    #[rstest]
+    fn test_insert_bulk_chaining() {
+        let transient: TransientHashMap<String, i32> = TransientHashMap::new();
+        let transient = transient
+            .insert_bulk(vec![("a".to_string(), 1)])
+            .expect("first insert_bulk should succeed")
+            .insert_bulk(vec![("b".to_string(), 2)])
+            .expect("second insert_bulk should succeed")
+            .insert_bulk(vec![("c".to_string(), 3)])
+            .expect("third insert_bulk should succeed");
+
+        assert_eq!(transient.len(), 3);
+        assert_eq!(transient.get("a"), Some(&1));
+        assert_eq!(transient.get("b"), Some(&2));
+        assert_eq!(transient.get("c"), Some(&3));
+    }
+
+    #[rstest]
+    fn test_insert_bulk_to_persistent() {
+        let persistent = TransientHashMap::new()
+            .insert_bulk(vec![("a".to_string(), 1), ("b".to_string(), 2)])
+            .expect("insert_bulk should succeed")
+            .persistent();
+
+        assert_eq!(persistent.len(), 2);
+        assert_eq!(persistent.get("a"), Some(&1));
+        assert_eq!(persistent.get("b"), Some(&2));
+    }
+
+    #[rstest]
+    fn test_insert_bulk_from_persistent_transient_persistent() {
+        let original: PersistentHashMap<String, i32> =
+            std::iter::once(("existing".to_string(), 100)).collect();
+
+        let result = original
+            .transient()
+            .insert_bulk(vec![("new1".to_string(), 1), ("new2".to_string(), 2)])
+            .expect("insert_bulk should succeed")
+            .persistent();
+
+        assert_eq!(result.len(), 3);
+        assert_eq!(result.get("existing"), Some(&100));
+        assert_eq!(result.get("new1"), Some(&1));
+        assert_eq!(result.get("new2"), Some(&2));
+    }
+
+    #[rstest]
+    fn test_insert_bulk_large_dataset() {
+        let transient: TransientHashMap<i32, i32> = TransientHashMap::new();
+        let data: Vec<(i32, i32)> = (0..10_000).map(|i| (i, i * 2)).collect();
+
+        let transient = transient
+            .insert_bulk(data)
+            .expect("insert_bulk should succeed");
+
+        assert_eq!(transient.len(), 10_000);
+        for i in 0..10_000 {
+            assert_eq!(transient.get(&i), Some(&(i * 2)));
+        }
+    }
+
+    #[rstest]
+    fn test_insert_bulk_error_too_many_entries() {
+        let transient: TransientHashMap<usize, usize> = TransientHashMap::new();
+        let data = (0..(MAX_BULK_INSERT + 100)).map(|i| (i, i));
+
+        match transient.insert_bulk(data) {
+            Err(BulkInsertError::TooManyEntries { count, limit }) => {
+                assert_eq!(count, MAX_BULK_INSERT + 1);
+                assert_eq!(limit, MAX_BULK_INSERT);
+            }
+            Ok(_) => panic!("Expected TooManyEntries error"),
+        }
+    }
+
+    #[rstest]
+    fn test_insert_bulk_at_limit() {
+        const LIMIT: usize = 1000;
+        let transient: TransientHashMap<usize, usize> = TransientHashMap::new();
+        let data: Vec<(usize, usize)> = (0..LIMIT).map(|i| (i, i * 2)).collect();
+
+        let result = transient
+            .insert_bulk(data)
+            .expect("should succeed at limit");
+        assert_eq!(result.len(), LIMIT);
+    }
+
+    #[rstest]
+    fn test_insert_bulk_updates_capacity_hint() {
+        let transient: TransientHashMap<String, i32> = TransientHashMap::with_capacity_hint(100);
+
+        let transient = transient
+            .insert_bulk(vec![
+                ("a".to_string(), 1),
+                ("b".to_string(), 2),
+                ("c".to_string(), 3),
+            ])
+            .expect("insert_bulk should succeed");
+
+        // capacity_hint should be updated to 100 + 3 = 103
+        assert_eq!(transient.capacity_hint(), 103);
+    }
+
+    #[rstest]
+    fn test_insert_bulk_equivalence_with_sequential_insert() {
+        // Property: insert_bulk(items) should be equivalent to
+        // items.fold(map, |m, (k, v)| { m.insert(k, v); m })
+
+        let items = vec![
+            ("a".to_string(), 1),
+            ("b".to_string(), 2),
+            ("a".to_string(), 3), // Duplicate key
+            ("c".to_string(), 4),
+        ];
+
+        // Via insert_bulk
+        let via_bulk = TransientHashMap::new()
+            .insert_bulk(items.clone())
+            .expect("insert_bulk should succeed")
+            .persistent();
+
+        // Via sequential insert
+        let mut via_sequential = TransientHashMap::new();
+        for (key, value) in items {
+            via_sequential.insert(key, value);
+        }
+        let via_sequential = via_sequential.persistent();
+
+        // Both should have the same entries
+        assert_eq!(via_bulk.len(), via_sequential.len());
+        for (key, value) in &via_bulk {
+            assert_eq!(via_sequential.get(key), Some(value));
+        }
+    }
+
+    #[rstest]
+    fn test_bulk_insert_error_display() {
+        let error = BulkInsertError::TooManyEntries {
+            count: 150_000,
+            limit: 100_000,
+        };
+        let message = format!("{error}");
+        assert!(message.contains("150000"));
+        assert!(message.contains("100000"));
+        assert!(message.contains("bulk insert failed"));
+        assert!(message.contains("10,000"));
     }
 }
 

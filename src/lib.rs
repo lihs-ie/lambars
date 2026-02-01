@@ -42,6 +42,8 @@
 #![allow(clippy::redundant_closure_for_method_calls)]
 // Note: proptest generates large arrays in property tests for nested types
 #![cfg_attr(test, allow(clippy::large_stack_arrays))]
+// Note: Some test functions may allocate large stack frames due to proptest's closure expansion
+#![cfg_attr(test, allow(clippy::large_stack_frames))]
 
 // Re-export paste crate for use in define_effect! macro
 #[doc(hidden)]

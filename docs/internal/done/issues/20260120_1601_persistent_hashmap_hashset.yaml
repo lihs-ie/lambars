@@ -52,7 +52,7 @@ deferred_features:
           - name: "Transient ビルダーのデフォルト化"
             description: |
               collect/insert API で必ず Transient を経由:
-              let mut t = map.transient(); for (k,v) in iter { t.insert_mut(k,v); } t.freeze()
+              let mut t = map.transient(); for (k,v) in iter { t.insert_mut(k,v); } t.persistent()
               - freeze() で初めて Arc 共有を作る
               - insert_mut は可変参照のみで完結し、clone/Arc::new を禁止
           - name: "衝突バケット最適化"

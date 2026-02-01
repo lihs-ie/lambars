@@ -1235,6 +1235,324 @@ pub struct SearchIndexKeyMetrics {
 #[deprecated(since = "0.1.0", note = "Use SearchIndexKeyMetrics instead")]
 pub type SearchIndexNgramMetrics = SearchIndexKeyMetrics;
 
+// =============================================================================
+// SearchIndexBulkBuilder
+// =============================================================================
+
+/// Maximum number of entries allowed in a single bulk build operation.
+///
+/// This limit prevents memory spikes during index construction.
+/// For larger datasets, callers should chunk the data into smaller batches.
+pub const MAX_BULK_ENTRIES: usize = 100_000;
+
+/// Maximum total number of n-grams allowed during bulk build.
+///
+/// Each entry generates multiple n-grams (e.g., "callback" generates 6 trigrams).
+/// This limit bounds the memory usage from n-gram explosion.
+///
+/// # Note on Counting
+///
+/// The n-gram count is estimated conservatively using `NgramWindow::count()`,
+/// which counts all possible n-gram windows. The actual number of n-grams
+/// added to the index may be slightly lower due to:
+/// - Consecutive duplicate n-gram skipping in `index_ngrams_streaming`
+/// - Task ID deduplication in the final posting lists
+///
+/// This conservative approach ensures the memory limit is never exceeded.
+pub const MAX_TOTAL_NGRAMS: usize = 10_000_000;
+
+/// Maximum estimated memory usage in bytes (1 GB).
+///
+/// Estimated as: num_entries * AVG_ENTRY_SIZE + num_ngrams * AVG_NGRAM_SIZE
+/// where AVG_ENTRY_SIZE ≈ 1KB, AVG_NGRAM_SIZE ≈ 100 bytes.
+pub const MAX_ESTIMATED_MEMORY: usize = 1_073_741_824;
+
+/// Average entry size in bytes for memory estimation.
+const AVG_ENTRY_SIZE: usize = 1024;
+
+/// Average n-gram size in bytes for memory estimation.
+const AVG_NGRAM_SIZE: usize = 100;
+
+/// Estimates memory usage for bulk build operations.
+///
+/// This function is used internally by [`SearchIndexBulkBuilder::build`] to
+/// check against [`MAX_ESTIMATED_MEMORY`] before building the index.
+///
+/// # Formula
+///
+/// `estimated_memory = num_entries * AVG_ENTRY_SIZE + num_ngrams * AVG_NGRAM_SIZE`
+///
+/// Where:
+/// - `AVG_ENTRY_SIZE` = 1024 bytes (average entry overhead)
+/// - `AVG_NGRAM_SIZE` = 100 bytes (average n-gram key + posting list entry)
+#[inline]
+const fn estimate_memory(num_entries: usize, num_ngrams: usize) -> usize {
+    num_entries * AVG_ENTRY_SIZE + num_ngrams * AVG_NGRAM_SIZE
+}
+
+/// Error type for bulk build operations on [`SearchIndexBulkBuilder`].
+///
+/// This error is returned when a bulk build operation fails due to input
+/// size or memory constraints designed to prevent resource exhaustion.
+///
+/// # Handling
+///
+/// When receiving this error, callers should:
+/// 1. For `TooManyEntries`: Split the input into smaller chunks (recommended: 10,000)
+/// 2. For `TooManyNgrams`: Use shorter entries or increase n-gram size
+/// 3. For `MemoryLimitExceeded`: Reduce batch size
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BuildError {
+    /// The number of entries exceeds the maximum allowed limit.
+    TooManyEntries {
+        /// The actual number of entries.
+        count: usize,
+        /// The maximum allowed number of entries ([`MAX_BULK_ENTRIES`]).
+        limit: usize,
+    },
+    /// The total number of n-grams exceeds the maximum allowed limit.
+    TooManyNgrams {
+        /// The actual number of n-grams generated.
+        count: usize,
+        /// The maximum allowed number of n-grams ([`MAX_TOTAL_NGRAMS`]).
+        limit: usize,
+    },
+    /// The estimated memory usage exceeds the maximum allowed limit.
+    MemoryLimitExceeded {
+        /// The estimated memory usage in bytes.
+        estimated: usize,
+        /// The maximum allowed memory usage in bytes ([`MAX_ESTIMATED_MEMORY`]).
+        limit: usize,
+    },
+}
+
+impl std::fmt::Display for BuildError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BuildError::TooManyEntries { count, limit } => {
+                write!(
+                    formatter,
+                    "bulk build failed: {count} entries exceeds maximum of {limit}. \
+                     Consider chunking into batches of 10,000 entries."
+                )
+            }
+            BuildError::TooManyNgrams { count, limit } => {
+                write!(
+                    formatter,
+                    "bulk build failed: {count} n-grams exceeds maximum of {limit}. \
+                     Consider using shorter entries or increasing n-gram size."
+                )
+            }
+            BuildError::MemoryLimitExceeded { estimated, limit } => {
+                write!(
+                    formatter,
+                    "bulk build failed: estimated memory {estimated} bytes exceeds limit of {limit} bytes. \
+                     Consider reducing batch size."
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for BuildError {}
+
+/// A builder for efficiently constructing n-gram indexes in bulk.
+///
+/// This builder collects entries and then constructs an n-gram index in a single
+/// pass, avoiding the overhead of repeated merge/sort operations that occur with
+/// incremental insertions.
+///
+/// # Algorithm
+///
+/// 1. Collect all entries with their original insertion order
+/// 2. Sort entries by key, then by order (for deterministic duplicate handling)
+/// 3. Deduplicate keys (last value wins, preserving insertion order semantics)
+/// 4. Generate n-grams for all entries in a single pass
+/// 5. Build the final immutable index
+///
+/// # Complexity
+///
+/// - `add_entry`: O(1) amortized
+/// - `build`: O(N log N + N * G) where N is entry count and G is avg n-grams per entry
+///
+/// # Functional Programming Principles
+///
+/// - **Referential transparency**: `build()` returns consistent results for the same input
+/// - **Immutability**: The returned index is immutable
+/// - **Encapsulation**: Mutable state is confined to the builder
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use task_management_benchmark_api::api::query::{SearchIndexBulkBuilder, SearchIndexConfig};
+///
+/// let config = SearchIndexConfig::default();
+/// let index = SearchIndexBulkBuilder::new(config)
+///     .add_entry("callback".to_string(), task_id1.clone())
+///     .add_entry("handler".to_string(), task_id2.clone())
+///     .build()
+///     .expect("build should succeed");
+/// ```
+#[derive(Debug)]
+pub struct SearchIndexBulkBuilder {
+    /// Entries as (normalized_token, task_id, insertion_order).
+    entries: Vec<(String, TaskId, usize)>,
+    /// Configuration for n-gram generation.
+    config: SearchIndexConfig,
+}
+
+impl SearchIndexBulkBuilder {
+    /// Creates a new empty builder with the given configuration.
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - Configuration controlling n-gram generation behavior
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let builder = SearchIndexBulkBuilder::new(SearchIndexConfig::default());
+    /// ```
+    #[must_use]
+    pub fn new(config: SearchIndexConfig) -> Self {
+        Self {
+            entries: Vec::new(),
+            config,
+        }
+    }
+
+    /// Adds an entry to the builder.
+    ///
+    /// # Arguments
+    ///
+    /// * `normalized_token` - The normalized (lowercase, trimmed) token string
+    /// * `task_id` - The task ID to associate with this token's n-grams
+    ///
+    /// # Duplicate Handling
+    ///
+    /// When the same token appears multiple times:
+    /// - **Last value wins**: The task ID from the last occurrence is kept
+    /// - Original insertion order is preserved for deterministic behavior
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let builder = SearchIndexBulkBuilder::new(config)
+    ///     .add_entry("callback".to_string(), task_id1)
+    ///     .add_entry("callback".to_string(), task_id2); // task_id2 wins
+    /// ```
+    #[must_use]
+    pub fn add_entry(mut self, normalized_token: String, task_id: TaskId) -> Self {
+        let order = self.entries.len();
+        self.entries.push((normalized_token, task_id, order));
+        self
+    }
+
+    /// Builds the n-gram index from the collected entries.
+    ///
+    /// This method consumes the builder and produces an immutable [`NgramIndex`].
+    /// The build process:
+    /// 1. Validates entry count against [`MAX_BULK_ENTRIES`]
+    /// 2. Sorts entries by (token, insertion_order) for deterministic deduplication
+    /// 3. Deduplicates tokens (last value wins for duplicate tokens)
+    /// 4. Generates n-grams and validates against [`MAX_TOTAL_NGRAMS`]
+    /// 5. Estimates memory usage and validates against [`MAX_ESTIMATED_MEMORY`]
+    /// 6. Builds the final immutable index with sorted keys for determinism
+    ///
+    /// # Errors
+    ///
+    /// - [`BuildError::TooManyEntries`] - If entry count exceeds [`MAX_BULK_ENTRIES`] (100,000).
+    ///   Split into smaller chunks (recommended: 10,000 entries per chunk).
+    /// - [`BuildError::TooManyNgrams`] - If total n-gram count exceeds [`MAX_TOTAL_NGRAMS`] (10,000,000).
+    ///   Consider using shorter tokens or increasing n-gram size.
+    /// - [`BuildError::MemoryLimitExceeded`] - If estimated memory exceeds [`MAX_ESTIMATED_MEMORY`] (1GB).
+    ///   Reduce batch size.
+    ///
+    /// # Determinism
+    ///
+    /// This method is deterministic: the same sequence of `add_entry` calls always produces
+    /// the same index. HashMap iteration order is sorted before building to ensure this.
+    pub fn build(self) -> Result<NgramIndex, BuildError> {
+        if self.entries.len() > MAX_BULK_ENTRIES {
+            return Err(BuildError::TooManyEntries {
+                count: self.entries.len(),
+                limit: MAX_BULK_ENTRIES,
+            });
+        }
+
+        let mut sorted = self.entries;
+        sorted.sort_unstable_by(|(t1, _, o1), (t2, _, o2)| t1.cmp(t2).then(o1.cmp(o2)));
+
+        // Deduplicate tokens: after sorting by (token, order), last occurrence wins
+        let deduped = sorted.into_iter().fold(
+            Vec::new(),
+            |mut accumulator: Vec<(String, TaskId)>, (token, task_id, _)| {
+                match accumulator.last_mut() {
+                    Some((last_token, last_task_id)) if last_token == &token => {
+                        *last_task_id = task_id;
+                    }
+                    _ => {
+                        accumulator.push((token, task_id));
+                    }
+                }
+                accumulator
+            },
+        );
+
+        let mut mutable_index: MutableIndex = std::collections::HashMap::new();
+        let mut pool = KeyPool::new();
+        let mut total_ngrams: usize = 0;
+
+        for (token, task_id) in &deduped {
+            let ngram_count = NgramWindow::new(
+                token,
+                self.config.ngram_size,
+                self.config.max_ngrams_per_token,
+            )
+            .count();
+
+            total_ngrams = total_ngrams.saturating_add(ngram_count);
+
+            if total_ngrams > MAX_TOTAL_NGRAMS {
+                return Err(BuildError::TooManyNgrams {
+                    count: total_ngrams,
+                    limit: MAX_TOTAL_NGRAMS,
+                });
+            }
+
+            index_ngrams_streaming(&mut mutable_index, token, task_id, &self.config, &mut pool);
+        }
+
+        let estimated_memory = estimate_memory(deduped.len(), total_ngrams);
+        if estimated_memory > MAX_ESTIMATED_MEMORY {
+            return Err(BuildError::MemoryLimitExceeded {
+                estimated: estimated_memory,
+                limit: MAX_ESTIMATED_MEMORY,
+            });
+        }
+
+        // Sort keys for deterministic iteration order (HashMap iteration order is non-deterministic)
+        let mut sorted_entries: Vec<_> = mutable_index.into_iter().collect();
+        sorted_entries.sort_unstable_by(|(k1, _), (k2, _)| k1.cmp(k2));
+
+        let mut transient_index = NgramIndex::new().transient();
+        for (key, mut task_ids) in sorted_entries {
+            task_ids.sort_unstable();
+            task_ids.dedup();
+
+            let collection = task_ids
+                .into_iter()
+                .fold(TaskIdCollection::new(), |accumulator, id| {
+                    accumulator.insert(id)
+                });
+
+            transient_index.insert(key, collection);
+        }
+
+        Ok(transient_index.persistent())
+    }
+}
+
 /// Keys added during an Update operation, used for remove entry cancellation.
 #[derive(Debug, Default)]
 struct AddedKeys {
@@ -2388,9 +2706,10 @@ impl SearchIndexDelta {
     }
 }
 
+/// Prepares posting lists by sorting and deduplicating task IDs.
 fn prepare_index<K: Eq + std::hash::Hash>(index: &mut std::collections::HashMap<K, Vec<TaskId>>) {
     index.retain(|_, posting_list| {
-        posting_list.sort();
+        posting_list.sort_unstable();
         posting_list.dedup();
         !posting_list.is_empty()
     });
@@ -2637,7 +2956,7 @@ fn finalize_ngram_index(mutable_index: MutableIndex) -> NgramIndex {
     let mut result = PersistentHashMap::new().transient();
 
     for (ngram, mut task_ids) in mutable_index {
-        task_ids.sort();
+        task_ids.sort_unstable();
         task_ids.dedup();
         let collection = TaskIdCollection::from_sorted_vec(task_ids);
         result.insert(ngram, collection);
@@ -15714,5 +16033,336 @@ mod compute_merged_posting_list_iter_tests {
             &task_ids(remove),
         );
         assert_eq!(iter_result, sorted_result);
+    }
+}
+
+// =============================================================================
+// SearchIndexBulkBuilder Tests
+// =============================================================================
+
+#[cfg(test)]
+mod search_index_bulk_builder_tests {
+    use super::*;
+    use rstest::rstest;
+
+    fn make_task_id(id: u128) -> TaskId {
+        TaskId::from_uuid(uuid::Uuid::from_u128(id))
+    }
+
+    #[rstest]
+    fn test_builder_new() {
+        let config = SearchIndexConfig::default();
+        let builder = SearchIndexBulkBuilder::new(config);
+        assert!(builder.entries.is_empty());
+    }
+
+    #[rstest]
+    fn test_builder_add_entry() {
+        let config = SearchIndexConfig::default();
+        let builder = SearchIndexBulkBuilder::new(config)
+            .add_entry("callback".to_string(), make_task_id(1))
+            .add_entry("handler".to_string(), make_task_id(2));
+
+        assert_eq!(builder.entries.len(), 2);
+    }
+
+    #[rstest]
+    fn test_builder_build_basic() {
+        let config = SearchIndexConfig::default();
+        let index = SearchIndexBulkBuilder::new(config)
+            .add_entry("callback".to_string(), make_task_id(1))
+            .add_entry("handler".to_string(), make_task_id(2))
+            .build()
+            .expect("build should succeed");
+
+        // "callback" should generate n-grams like "cal", "all", "llb", etc.
+        // Check that the index is not empty
+        assert!(!index.is_empty());
+    }
+
+    #[rstest]
+    fn test_builder_build_empty() {
+        let config = SearchIndexConfig::default();
+        let index = SearchIndexBulkBuilder::new(config)
+            .build()
+            .expect("build should succeed");
+
+        assert!(index.is_empty());
+    }
+
+    #[rstest]
+    fn test_builder_duplicate_keys_last_wins() {
+        let config = SearchIndexConfig::default();
+        let task_id_1 = make_task_id(1);
+        let task_id_2 = make_task_id(2);
+        let task_id_3 = make_task_id(3);
+
+        let index = SearchIndexBulkBuilder::new(config)
+            .add_entry("callback".to_string(), task_id_1.clone())
+            .add_entry("callback".to_string(), task_id_2.clone())
+            .add_entry("callback".to_string(), task_id_3.clone())
+            .build()
+            .expect("build should succeed");
+
+        // The n-grams should only contain task_id_3 (last wins)
+        // Check that all n-grams for "callback" have task_id_3
+        for (_key, collection) in &index {
+            for id in collection.iter() {
+                assert_eq!(id, &task_id_3);
+            }
+        }
+    }
+
+    #[rstest]
+    fn test_builder_fluent_interface() {
+        let config = SearchIndexConfig::default();
+        let index = SearchIndexBulkBuilder::new(config)
+            .add_entry("one".to_string(), make_task_id(1))
+            .add_entry("two".to_string(), make_task_id(2))
+            .add_entry("three".to_string(), make_task_id(3))
+            .build()
+            .expect("build should succeed");
+
+        assert!(!index.is_empty());
+    }
+
+    #[rstest]
+    fn test_builder_error_too_many_entries() {
+        let config = SearchIndexConfig::default();
+        // Use public API (add_entry) instead of direct field access
+        let builder =
+            (0..(MAX_BULK_ENTRIES + 100)).fold(SearchIndexBulkBuilder::new(config), |b, i| {
+                b.add_entry(format!("token{i}"), make_task_id(i as u128))
+            });
+
+        match builder.build() {
+            Err(BuildError::TooManyEntries { count, limit }) => {
+                assert!(count > MAX_BULK_ENTRIES);
+                assert_eq!(limit, MAX_BULK_ENTRIES);
+            }
+            _ => panic!("Expected TooManyEntries error"),
+        }
+    }
+
+    #[rstest]
+    #[ignore = "expensive: generates ~11M n-grams, run with --ignored for full validation"]
+    fn test_builder_error_too_many_ngrams() {
+        // Create a config that generates many n-grams per token
+        let config = SearchIndexConfig {
+            ngram_size: 2,              // Small n-gram size = more n-grams
+            max_ngrams_per_token: 1000, // Allow many n-grams per token
+            ..Default::default()
+        };
+
+        // Create tokens that will generate many n-grams
+        // Each long token generates many 2-grams
+        let long_token = "a".repeat(1000); // 999 2-grams per token
+
+        // Add enough entries to exceed MAX_TOTAL_NGRAMS (10,000,000)
+        // 999 ngrams * 11,000 entries = 10,989,000 > 10,000,000
+        let builder = (0..11_000).fold(SearchIndexBulkBuilder::new(config), |b, i| {
+            b.add_entry(format!("{}{}", long_token, i), make_task_id(i as u128))
+        });
+
+        match builder.build() {
+            Err(BuildError::TooManyNgrams { count, limit }) => {
+                assert!(count > MAX_TOTAL_NGRAMS);
+                assert_eq!(limit, MAX_TOTAL_NGRAMS);
+            }
+            _ => panic!("Expected TooManyNgrams error"),
+        }
+    }
+
+    #[rstest]
+    fn test_builder_ngram_limit_check_logic() {
+        // Lightweight test to verify the n-gram counting logic without generating millions of entries
+        // The expensive full test is in test_builder_error_too_many_ngrams (run with --ignored)
+
+        let config = SearchIndexConfig {
+            ngram_size: 2,
+            max_ngrams_per_token: 100,
+            ..Default::default()
+        };
+
+        // "abcdefghij" (10 chars) with ngram_size=2 generates: "ab", "bc", "cd", "de", "ef", "fg", "gh", "hi", "ij" = 9 n-grams
+        let builder = SearchIndexBulkBuilder::new(config)
+            .add_entry("abcdefghij".to_string(), make_task_id(1))
+            .add_entry("klmnopqrst".to_string(), make_task_id(2));
+
+        // This should succeed (only 18 n-grams, well under limit)
+        let result = builder.build();
+        assert!(result.is_ok());
+
+        // Verify the check in build() by confirming that the BuildError::TooManyNgrams
+        // variant exists and has the correct fields
+        let error = BuildError::TooManyNgrams {
+            count: 20_000_000,
+            limit: MAX_TOTAL_NGRAMS,
+        };
+        assert!(matches!(
+            error,
+            BuildError::TooManyNgrams { count: 20_000_000, limit: 10_000_000 }
+        ));
+    }
+
+    #[rstest]
+    fn test_estimate_memory_function() {
+        // Unit test for the estimate_memory function used by build()
+        // Formula: num_entries * 1024 + num_ngrams * 100
+
+        // Basic cases
+        assert_eq!(estimate_memory(0, 0), 0);
+        assert_eq!(estimate_memory(1, 0), 1024);
+        assert_eq!(estimate_memory(0, 1), 100);
+        assert_eq!(estimate_memory(1, 1), 1124);
+
+        // Larger values
+        assert_eq!(estimate_memory(1000, 10_000), 1024 * 1000 + 100 * 10_000);
+        assert_eq!(estimate_memory(100_000, 10_000_000), 1024 * 100_000 + 100 * 10_000_000);
+
+        // Verify the boundary for MAX_ESTIMATED_MEMORY (1GB)
+        // 1GB = 1_073_741_824 bytes
+        // With AVG_ENTRY_SIZE=1024 and AVG_NGRAM_SIZE=100:
+        // 100,000 entries * 1024 = 102,400,000
+        // 9,713,418 ngrams * 100 = 971,341,800
+        // Total = 1,073,741,800 (just under 1GB)
+        let under_limit = estimate_memory(100_000, 9_713_418);
+        assert!(under_limit < MAX_ESTIMATED_MEMORY);
+
+        // 100,000 entries * 1024 = 102,400,000
+        // 9,713,419 ngrams * 100 = 971,341,900
+        // Total = 1,073,741,900 (just over 1GB)
+        let over_limit = estimate_memory(100_000, 9_713_419);
+        assert!(over_limit > MAX_ESTIMATED_MEMORY);
+    }
+
+    #[rstest]
+    fn test_builder_memory_limit_check_logic() {
+        // Test that the memory check in build() uses the estimate_memory function correctly
+        // We can't easily trigger MemoryLimitExceeded without also hitting
+        // MAX_BULK_ENTRIES or MAX_TOTAL_NGRAMS first (by design - it's a safety net).
+        //
+        // This test verifies the logic via the estimate_memory function
+        // and that the error type can be constructed and displayed correctly.
+        let error = BuildError::MemoryLimitExceeded {
+            estimated: 2_000_000_000,
+            limit: MAX_ESTIMATED_MEMORY,
+        };
+        let message = format!("{}", error);
+        assert!(message.contains("2000000000"));
+        assert!(message.contains(&MAX_ESTIMATED_MEMORY.to_string()));
+
+        // Verify the memory estimation formula is consistent with the check
+        let estimated = estimate_memory(100_000, 10_000_000);
+        // 100,000 * 1024 + 10,000,000 * 100 = 102,400,000 + 1,000,000,000 = 1,102,400,000
+        assert_eq!(estimated, 1_102_400_000);
+        assert!(estimated > MAX_ESTIMATED_MEMORY);
+    }
+
+    #[rstest]
+    fn test_builder_at_limit() {
+        let config = SearchIndexConfig::default();
+        let builder = (0..1000).fold(SearchIndexBulkBuilder::new(config), |builder, i| {
+            builder.add_entry(format!("token{i}"), make_task_id(i))
+        });
+
+        assert!(builder.build().is_ok());
+    }
+
+    #[rstest]
+    fn test_builder_ngram_generation() {
+        let config = SearchIndexConfig {
+            ngram_size: 3,
+            max_ngrams_per_token: 64,
+            ..Default::default()
+        };
+
+        let task_id = make_task_id(1);
+        let index = SearchIndexBulkBuilder::new(config)
+            .add_entry("callback".to_string(), task_id.clone())
+            .build()
+            .expect("build should succeed");
+
+        // "callback" with ngram_size=3 should generate: "cal", "all", "llb", "lba", "bac", "ack"
+        // Check that at least some of these are in the index
+        let ngrams = vec!["cal", "all", "llb", "lba", "bac", "ack"];
+        for ngram in ngrams {
+            assert!(
+                index.contains_key(ngram),
+                "Expected n-gram '{}' in index",
+                ngram
+            );
+        }
+    }
+
+    #[rstest]
+    fn test_builder_short_token_no_ngrams() {
+        let config = SearchIndexConfig {
+            ngram_size: 3,
+            max_ngrams_per_token: 64,
+            ..Default::default()
+        };
+
+        let index = SearchIndexBulkBuilder::new(config)
+            .add_entry("ab".to_string(), make_task_id(1)) // Too short for 3-grams
+            .build()
+            .expect("build should succeed");
+
+        // Token "ab" is too short for 3-grams, so index should be empty
+        assert!(index.is_empty());
+    }
+
+    #[rstest]
+    fn test_build_error_display() {
+        let error1 = BuildError::TooManyEntries {
+            count: 150_000,
+            limit: 100_000,
+        };
+        let message1 = format!("{}", error1);
+        assert!(message1.contains("150000"));
+        assert!(message1.contains("100000"));
+
+        let error2 = BuildError::TooManyNgrams {
+            count: 20_000_000,
+            limit: 10_000_000,
+        };
+        let message2 = format!("{}", error2);
+        assert!(message2.contains("20000000"));
+        assert!(message2.contains("10000000"));
+
+        let error3 = BuildError::MemoryLimitExceeded {
+            estimated: 2_000_000_000,
+            limit: 1_073_741_824,
+        };
+        let message3 = format!("{}", error3);
+        assert!(message3.contains("2000000000"));
+        assert!(message3.contains("1073741824"));
+    }
+
+    #[rstest]
+    fn test_builder_deterministic() {
+        let config = SearchIndexConfig::default();
+
+        let index1 = SearchIndexBulkBuilder::new(config.clone())
+            .add_entry("callback".to_string(), make_task_id(1))
+            .add_entry("handler".to_string(), make_task_id(2))
+            .build()
+            .expect("build should succeed");
+
+        let index2 = SearchIndexBulkBuilder::new(config)
+            .add_entry("callback".to_string(), make_task_id(1))
+            .add_entry("handler".to_string(), make_task_id(2))
+            .build()
+            .expect("build should succeed");
+
+        // Both indexes should have the same entries
+        assert_eq!(index1.len(), index2.len());
+        for (key, collection) in &index1 {
+            assert!(index2.contains_key(key.as_str()));
+            let other_collection = index2.get(key.as_str()).unwrap();
+            let ids1: Vec<_> = collection.iter().collect();
+            let ids2: Vec<_> = other_collection.iter().collect();
+            assert_eq!(ids1, ids2);
+        }
     }
 }

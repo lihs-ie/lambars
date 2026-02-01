@@ -455,3 +455,192 @@ proptest! {
         prop_assert_eq!(map1 == map2, map2 == map1);
     }
 }
+
+// =============================================================================
+// TransientHashMap::insert_bulk Laws
+// =============================================================================
+
+use lambars::persistent::TransientHashMap;
+
+proptest! {
+    /// insert_bulk is equivalent to folding insert over the items.
+    ///
+    /// For any sequence of (key, value) pairs:
+    /// ```
+    /// insert_bulk(items) == items.fold(map, |m, (k, v)| { m.insert(k, v); m })
+    /// ```
+    #[test]
+    fn prop_insert_bulk_equivalence_with_fold(
+        entries in arbitrary_entries()
+    ) {
+        // Via insert_bulk
+        let via_bulk = TransientHashMap::new()
+            .insert_bulk(entries.clone())
+            .expect("insert_bulk should succeed within limits")
+            .persistent();
+
+        // Via sequential insert (fold)
+        let mut via_fold = TransientHashMap::new();
+        for (key, value) in entries {
+            via_fold.insert(key, value);
+        }
+        let via_fold = via_fold.persistent();
+
+        // Both should produce the same map
+        prop_assert_eq!(via_bulk, via_fold);
+    }
+}
+
+proptest! {
+    /// insert_bulk duplicate key handling: last value wins.
+    ///
+    /// When the same key appears multiple times, the last value is kept.
+    #[test]
+    fn prop_insert_bulk_last_value_wins(
+        key in arbitrary_key(),
+        values in prop::collection::vec(arbitrary_value(), 2..10)
+    ) {
+        let entries: Vec<(String, i32)> = values
+            .iter()
+            .map(|&v| (key.clone(), v))
+            .collect();
+
+        let last_value = values.last().copied().expect("values is not empty");
+
+        let result = TransientHashMap::new()
+            .insert_bulk(entries)
+            .expect("insert_bulk should succeed")
+            .persistent();
+
+        prop_assert_eq!(result.len(), 1);
+        prop_assert_eq!(result.get(&key), Some(&last_value));
+    }
+}
+
+proptest! {
+    /// insert_bulk is deterministic: same input produces same output.
+    ///
+    /// For the same sequence of entries, insert_bulk always produces the same map.
+    #[test]
+    fn prop_insert_bulk_deterministic(
+        entries in arbitrary_entries()
+    ) {
+        let result1 = TransientHashMap::new()
+            .insert_bulk(entries.clone())
+            .expect("first insert_bulk should succeed")
+            .persistent();
+
+        let result2 = TransientHashMap::new()
+            .insert_bulk(entries)
+            .expect("second insert_bulk should succeed")
+            .persistent();
+
+        prop_assert_eq!(result1, result2);
+    }
+}
+
+proptest! {
+    /// insert_bulk preserves existing entries when not overwritten.
+    ///
+    /// Existing entries in the transient map are preserved if their keys
+    /// do not appear in the bulk insert.
+    #[test]
+    fn prop_insert_bulk_preserves_existing(
+        existing_entries in arbitrary_entries(),
+        bulk_entries in arbitrary_entries()
+    ) {
+        // Build a map with existing entries (last value wins for duplicates)
+        let mut transient = TransientHashMap::new();
+        for (key, value) in &existing_entries {
+            transient.insert(key.clone(), *value);
+        }
+
+        // Build expected values from existing entries (last value for each key)
+        let existing_map: std::collections::HashMap<_, _> = existing_entries
+            .iter()
+            .cloned()
+            .collect();
+
+        // Insert bulk entries
+        let result = transient
+            .insert_bulk(bulk_entries.clone())
+            .expect("insert_bulk should succeed")
+            .persistent();
+
+        // All bulk entries should be present (last value for duplicates)
+        let bulk_map: std::collections::HashMap<_, _> = bulk_entries
+            .iter()
+            .cloned()
+            .collect();
+        for (key, value) in &bulk_map {
+            prop_assert_eq!(result.get(key), Some(value));
+        }
+
+        // Existing entries not in bulk should be preserved
+        for (key, value) in &existing_map {
+            if !bulk_map.contains_key(key) {
+                prop_assert_eq!(result.get(key), Some(value));
+            }
+        }
+    }
+}
+
+proptest! {
+    /// insert_bulk then persistent produces valid PersistentHashMap.
+    ///
+    /// The resulting map should satisfy all PersistentHashMap invariants.
+    #[test]
+    fn prop_insert_bulk_persistent_roundtrip(
+        entries in arbitrary_entries()
+    ) {
+        let map = TransientHashMap::new()
+            .insert_bulk(entries.clone())
+            .expect("insert_bulk should succeed")
+            .persistent();
+
+        // Verify all unique keys are present
+        let expected_keys: std::collections::HashSet<_> = entries
+            .iter()
+            .map(|(k, _)| k.clone())
+            .collect();
+
+        let actual_keys: std::collections::HashSet<_> = map.keys().cloned().collect();
+
+        // Length should match unique key count
+        prop_assert_eq!(map.len(), expected_keys.len());
+
+        // All expected keys should be present
+        prop_assert_eq!(actual_keys, expected_keys);
+    }
+}
+
+proptest! {
+    /// insert_bulk chaining is equivalent to single insert_bulk with concatenated entries.
+    ///
+    /// ```
+    /// map.insert_bulk(a).insert_bulk(b) == map.insert_bulk(a ++ b)
+    /// ```
+    #[test]
+    fn prop_insert_bulk_chaining_equivalence(
+        entries1 in prop::collection::vec(arbitrary_entry(), 0..25),
+        entries2 in prop::collection::vec(arbitrary_entry(), 0..25)
+    ) {
+        // Via chaining
+        let via_chaining = TransientHashMap::new()
+            .insert_bulk(entries1.clone())
+            .expect("first insert_bulk should succeed")
+            .insert_bulk(entries2.clone())
+            .expect("second insert_bulk should succeed")
+            .persistent();
+
+        // Via single call with concatenated entries
+        let mut combined = entries1;
+        combined.extend(entries2);
+        let via_single = TransientHashMap::new()
+            .insert_bulk(combined)
+            .expect("insert_bulk should succeed")
+            .persistent();
+
+        prop_assert_eq!(via_chaining, via_single);
+    }
+}

@@ -1678,6 +1678,7 @@ Available AsyncIO methods:
 | `map.filter { case (k, v) => p(k, v) }`               | `PersistentHashMap::keep_if`    | Keep matching entries                       |
 | `map.filterNot { case (k, v) => p(k, v) }`            | `PersistentHashMap::delete_if`  | Remove matching entries                     |
 | `map.partition { case (k, v) => p(k, v) }`            | `PersistentHashMap::partition`  | Split by predicate                          |
+| `Map(entries: _*)`                                    | `transient().insert_bulk(entries)?.persistent()` | Bulk construction from iterable            |
 
 ### Code Examples
 
@@ -1771,6 +1772,22 @@ let value: Option<&i32> = map.get("a");
 
 let removed = map.remove("a");
 // removed.get("a") = None
+
+// Bulk insert (similar to Map(entries: _*) in Scala)
+use lambars::persistent::BulkInsertError;
+
+let entries = vec![
+    ("key1".to_string(), 1),
+    ("key2".to_string(), 2),
+    ("key3".to_string(), 3),
+];
+
+let map_bulk: Result<PersistentHashMap<String, i32>, BulkInsertError> =
+    PersistentHashMap::new()
+        .transient()
+        .insert_bulk(entries)
+        .map(|t| t.persistent());
+// Efficient bulk construction, reduces copy-on-write overhead
 ```
 
 ---
