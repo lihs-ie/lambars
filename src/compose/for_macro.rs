@@ -258,8 +258,8 @@
 //!    pre-allocation when possible.
 //!
 //! 3. **`collect_with_hint`**: Collects the iterator using pre-computed `size_hint`.
-//!    Uses `SmallVec` for small results (<=128 elements) and `Vec::with_capacity`
-//!    for larger results.
+//!    Uses `should_use_smallvec` to determine allocation strategy: `SmallVec` for
+//!    small results when conditions are met, `Vec::with_capacity` otherwise.
 //!
 //! For single iterations (`; yield expr` only), the macro uses Clone + `@hint` to
 //! compute exact size_hint for pre-allocation. For nested iterations and guards,
@@ -274,7 +274,8 @@
 //! - **No intermediate Vec**: Nested iterations use pure iterator chains without
 //!   allocating intermediate collections.
 //! - **Single allocation**: Results are collected once at the end.
-//! - **SmallVec optimization**: Small results (<=128 elements) use stack allocation.
+//! - **SmallVec optimization**: Uses stack allocation when `should_use_smallvec` returns true
+//!   (small element size, unknown upper bound, and known positive lower bound).
 //! - **Pre-allocation**: Clone is used only for single-level iterations to compute
 //!   size_hint before iteration. Nested iterations and guards use `collect_from_iter`
 //!   which avoids Clone overhead.
@@ -336,7 +337,10 @@
 
 use smallvec::SmallVec;
 
-/// `SmallVec` inline capacity for `for_!` macro (128 elements = 1KB for L1 cache).
+/// `SmallVec` inline capacity for `for_!` macro (128 elements).
+///
+/// Note: Actual memory usage depends on element size. For `i32` (4 bytes), this is 512 bytes.
+/// For `u64` (8 bytes), this is 1KB. Stack safety is ensured by [`should_use_smallvec`].
 pub const SMALLVEC_INLINE_CAPACITY: usize = 128;
 
 /// Size hint type alias for iterator capacity estimation.
@@ -518,7 +522,7 @@ const MAX_REASONABLE_CAPACITY: usize = 1024 * 1024;
 ///
 /// 32KB is a conservative estimate that works across most modern CPUs.
 /// This is a fixed value to maintain referential transparency.
-const L1_CACHE_SIZE: usize = 32 * 1024;
+pub const L1_CACHE_SIZE: usize = 32 * 1024;
 
 /// Compute the `SmallVec` usage threshold based on element size.
 ///
@@ -574,14 +578,77 @@ pub const fn compute_smallvec_threshold<T>() -> usize {
     }
 }
 
+/// Determine whether to use `SmallVec` for the given size hint and element type.
+///
+/// This is a pure function that returns `true` if `SmallVec` should be used,
+/// `false` if `Vec` should be used directly.
+///
+/// # Decision Criteria
+///
+/// Returns `true` (use `SmallVec`) only when ALL conditions are met:
+/// 1. `upper` is `None` (unknown upper bound)
+/// 2. `lower > 0` (known minimum size)
+/// 3. `lower <= threshold` (element-size-aware threshold)
+/// 4. Stack is safe (`size_of::<T>() * SMALLVEC_INLINE_CAPACITY <= L1_CACHE_SIZE`)
+///
+/// # Examples
+///
+/// ```
+/// use lambars::compose::for_macro::should_use_smallvec;
+///
+/// // Small element with known lower bound: use SmallVec
+/// assert!(should_use_smallvec::<i32>(10, None));
+///
+/// // Known upper bound: use Vec directly
+/// assert!(!should_use_smallvec::<i32>(10, Some(10)));
+///
+/// // Large element (4KB): avoid SmallVec due to stack safety
+/// #[repr(C)]
+/// struct Large4KB { _data: [u8; 4096] }
+/// assert!(!should_use_smallvec::<Large4KB>(1, None));
+/// ```
+#[inline]
+#[must_use]
+pub const fn should_use_smallvec<T>(lower: usize, upper: Option<usize>) -> bool {
+    // If upper is known, use Vec directly
+    if upper.is_some() {
+        return false;
+    }
+
+    // If lower is 0, use Vec (unknown size from filter/flat_map)
+    if lower == 0 {
+        return false;
+    }
+
+    // Stack safety check
+    let element_size = std::mem::size_of::<T>();
+    let inline_buffer_size = element_size.saturating_mul(SMALLVEC_INLINE_CAPACITY);
+    if inline_buffer_size > L1_CACHE_SIZE {
+        return false;
+    }
+
+    // Threshold check
+    let threshold = compute_smallvec_threshold::<T>();
+    lower <= threshold
+}
+
 /// Collect iterator with pre-computed `size_hint` for optimized allocation.
 ///
 /// # Strategy
 ///
+/// Uses [`should_use_smallvec`] to determine the allocation strategy:
+///
 /// 1. **`upper` is known**: Use `Vec::with_capacity` directly (avoids `SmallVec` → `Vec` copy)
 /// 2. **`upper` is unknown, `lower` == 0**: Use `Vec` (unknown size, avoid stack bloat)
-/// 3. **`upper` is unknown, `lower` > threshold**: Use `Vec::with_capacity` directly
-/// 4. **`upper` is unknown, `0 < lower <= threshold`**: Use `SmallVec` for stack allocation benefits
+/// 3. **`upper` is unknown, element is stack-unsafe**: Use `Vec` (avoid stack overflow)
+/// 4. **`upper` is unknown, `lower` > threshold**: Use `Vec::with_capacity` directly
+/// 5. **Otherwise**: Use `SmallVec` for stack allocation benefits
+///
+/// # Stack Safety
+///
+/// For large element types where `size_of::<T>() * SMALLVEC_INLINE_CAPACITY > L1_CACHE_SIZE`,
+/// `Vec` is always used to prevent stack overflow. This protects against 4KB+ elements
+/// that would create 512KB+ inline buffers.
 ///
 /// # Threshold Calculation
 ///
@@ -593,7 +660,8 @@ pub const fn compute_smallvec_threshold<T>() -> usize {
 ///
 /// - Eliminates `into_vec()` copy for most cases where `upper` is known
 /// - Falls back to `Vec` when `lower == 0` to avoid stack bloat for unknown sizes
-/// - Preserves `SmallVec` stack allocation benefits only when `lower` is known and small
+/// - Falls back to `Vec` for stack-unsafe element types
+/// - Preserves `SmallVec` stack allocation benefits only when conditions are met
 /// - Uses `with_capacity` on `SmallVec` to minimize reallocation during `extend`
 #[inline]
 pub fn collect_with_hint<T, I: Iterator<Item = T>>(
@@ -601,35 +669,27 @@ pub fn collect_with_hint<T, I: Iterator<Item = T>>(
     upper: Option<usize>,
     iter: I,
 ) -> Vec<T> {
-    if let Some(u) = upper {
+    if should_use_smallvec::<T>(lower, upper) {
+        // Small collection expected with known lower bound and stack-safe element size:
+        // use SmallVec for stack allocation benefits.
+        // Use with_capacity(lower) to minimize reallocation during extend.
+        let capacity = lower.max(1);
+        let mut buf: SmallVec<[T; SMALLVEC_INLINE_CAPACITY]> = SmallVec::with_capacity(capacity);
+        buf.extend(iter);
+        buf.into_vec()
+    } else if let Some(u) = upper {
         // upper is known: use Vec directly to avoid SmallVec → Vec copy overhead
         let capacity = u.min(MAX_REASONABLE_CAPACITY);
         let mut result = Vec::with_capacity(capacity);
         result.extend(iter);
         result
     } else {
-        // upper is unknown: decide based on element-size-aware threshold
-        let threshold = compute_smallvec_threshold::<T>();
-        // lower == 0 means size_hint is (0, None) - typically from filter/flat_map.
-        // In this case, fall back to Vec to avoid:
-        // 1. Stack bloat from SmallVec's inline buffer when actual size is unknown
-        // 2. Potential stack overflow for large element types
-        // 3. SmallVec → Vec copy overhead if the collection grows beyond inline capacity
-        if lower == 0 || lower > threshold {
-            // Unknown size or large collection expected: use Vec directly
-            let capacity = lower.max(16); // Minimum 16 to avoid under-allocation for unknown sizes
-            let mut result = Vec::with_capacity(capacity);
-            result.extend(iter);
-            result
-        } else {
-            // Small collection expected with known lower bound: use SmallVec for stack allocation benefits
-            // Use with_capacity(lower) to minimize reallocation during extend
-            let capacity = lower.max(1);
-            let mut buf: SmallVec<[T; SMALLVEC_INLINE_CAPACITY]> =
-                SmallVec::with_capacity(capacity);
-            buf.extend(iter);
-            buf.into_vec()
-        }
+        // Unknown size, large collection expected, or stack unsafe: use Vec directly
+        // Minimum 16 to avoid under-allocation for unknown sizes
+        let capacity = lower.max(16);
+        let mut result = Vec::with_capacity(capacity);
+        result.extend(iter);
+        result
     }
 }
 
@@ -637,6 +697,57 @@ pub fn collect_with_hint<T, I: Iterator<Item = T>>(
 #[inline]
 pub fn collect_from_iter<T, I: Iterator<Item = T>>(iter: I) -> Vec<T> {
     let (lower, upper) = iter.size_hint();
+    collect_with_hint(lower, upper, iter)
+}
+
+/// Collect iterator with pre-allocated capacity.
+///
+/// Creates a `Vec` with the specified capacity and extends it with the iterator's elements.
+/// This is useful when you know the expected size in advance.
+///
+/// # Capacity Limit
+///
+/// The actual capacity is capped at `MAX_REASONABLE_CAPACITY` (1,048,576 elements).
+/// Note: This is an element count limit, not a byte limit. For large element types,
+/// the actual memory usage may exceed 1MB. If you need to collect more elements or
+/// require precise memory control, use standard `Vec::from_iter` or manually manage capacity.
+///
+/// # Example
+///
+/// ```rust
+/// use lambars::compose::for_macro::collect_with_capacity;
+///
+/// let result = collect_with_capacity(100, 0..100);
+/// assert_eq!(result.len(), 100);
+/// assert!(result.capacity() >= 100);
+/// ```
+#[inline]
+pub fn collect_with_capacity<T, I: Iterator<Item = T>>(capacity: usize, iter: I) -> Vec<T> {
+    collect_with_hint(capacity, Some(capacity), iter)
+}
+
+/// Collect iterator optimized for small collections.
+///
+/// Uses `SmallVec` for stack allocation when below threshold (based on element size and L1 cache).
+/// Falls back to `Vec` for larger collections.
+///
+/// # Strategy
+///
+/// Uses [`should_use_smallvec`] to determine allocation strategy. See that function
+/// for the complete decision criteria.
+///
+/// # Example
+///
+/// ```rust
+/// use lambars::compose::for_macro::collect_small;
+///
+/// let result = collect_small(0..10);
+/// assert_eq!(result.len(), 10);
+/// ```
+#[inline]
+pub fn collect_small<T, I: Iterator<Item = T>>(iter: I) -> Vec<T> {
+    let (lower, upper) = iter.size_hint();
+    // Delegate to collect_with_hint which uses should_use_smallvec internally
     collect_with_hint(lower, upper, iter)
 }
 
@@ -2005,5 +2116,104 @@ mod tests {
             yield x + y
         };
         assert_eq!(result, vec![11, 21, 12, 22]);
+    }
+
+    // =========================================================================
+    // collect_with_capacity alias tests
+    // =========================================================================
+
+    use super::collect_with_capacity;
+
+    #[rstest]
+    fn test_collect_with_capacity_basic() {
+        let result = collect_with_capacity(100, 0..100);
+        assert_eq!(result.len(), 100);
+        assert!(result.capacity() >= 100);
+    }
+
+    #[rstest]
+    fn test_collect_with_capacity_empty() {
+        let result: Vec<i32> = collect_with_capacity(0, std::iter::empty());
+        assert!(result.is_empty());
+    }
+
+    #[rstest]
+    fn test_collect_with_capacity_small() {
+        let result = collect_with_capacity(10, 0..10);
+        assert_eq!(result, (0..10).collect::<Vec<_>>());
+    }
+
+    #[rstest]
+    fn test_collect_with_capacity_large() {
+        let result = collect_with_capacity(1000, 0..1000);
+        assert_eq!(result.len(), 1000);
+    }
+
+    #[rstest]
+    fn test_collect_with_capacity_referential_transparency() {
+        // Same input always produces same output
+        let result1 = collect_with_capacity(50, 0..50);
+        let result2 = collect_with_capacity(50, 0..50);
+        assert_eq!(result1, result2);
+    }
+
+    // =========================================================================
+    // collect_small alias tests
+    // =========================================================================
+
+    use super::collect_small;
+
+    #[rstest]
+    fn test_collect_small_basic() {
+        let result = collect_small(0..10);
+        assert_eq!(result.len(), 10);
+    }
+
+    #[rstest]
+    fn test_collect_small_empty() {
+        let result: Vec<i32> = collect_small(std::iter::empty());
+        assert!(result.is_empty());
+    }
+
+    #[rstest]
+    fn test_collect_small_below_threshold() {
+        // 50 elements (below typical threshold)
+        let result = collect_small(0..50);
+        assert_eq!(result, (0..50).collect::<Vec<_>>());
+    }
+
+    #[rstest]
+    fn test_collect_small_above_threshold() {
+        // 1000 elements (above typical threshold)
+        let result = collect_small(0..1000);
+        assert_eq!(result.len(), 1000);
+    }
+
+    #[rstest]
+    fn test_collect_small_with_filter() {
+        // Filter has size_hint (0, Some(n))
+        let result = collect_small((0..100).filter(|x| x % 2 == 0));
+        assert_eq!(result.len(), 50);
+    }
+
+    #[rstest]
+    fn test_collect_small_referential_transparency() {
+        // Same input always produces same output
+        let result1 = collect_small(0..25);
+        let result2 = collect_small(0..25);
+        assert_eq!(result1, result2);
+    }
+
+    #[rstest]
+    fn test_collect_small_with_large_elements() {
+        // Large elements have lower threshold
+        #[derive(Clone)]
+        #[repr(C)]
+        struct LargeStruct {
+            _data: [u8; 1024],
+        }
+        let result: Vec<LargeStruct> =
+            collect_small((0..10).map(|_| LargeStruct { _data: [0; 1024] }));
+        assert_eq!(result.len(), 10);
     }
 }
