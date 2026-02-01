@@ -649,6 +649,7 @@ impl<T> Node<T> {
     ///
     /// For `Branch` nodes, returns the last value in the size table (total cumulative size).
     /// For `Leaf` nodes, returns the number of elements in the leaf.
+    #[inline]
     fn subtree_size(&self) -> usize {
         match self {
             Self::Branch { size_table, .. } => size_table.last().copied().unwrap_or(0),
@@ -1180,6 +1181,8 @@ impl<T: Clone> PersistentVector<T> {
     /// assert_eq!(vector.len(), 3);
     /// assert_eq!(vector.get(2), Some(&3));
     /// ```
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
     #[must_use]
     pub fn push_back(&self, element: T) -> Self {
         if self.tail.is_full() {
@@ -1294,6 +1297,8 @@ impl<T: Clone> PersistentVector<T> {
     }
 
     /// Pushes the current tail into the root and creates a new tail with the element.
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
     fn push_tail_to_root(&self, element: T) -> Self {
         // Convert TailChunk to Leaf node
         let tail_leaf = Node::leaf_from_tail_chunk(self.tail.as_ref());
@@ -1343,6 +1348,8 @@ impl<T: Clone> PersistentVector<T> {
     }
 
     /// Creates a new path from root to the leaf.
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
     fn new_path(level: usize, node: Node<T>) -> Node<T> {
         if level == 0 {
             node
@@ -1367,6 +1374,8 @@ impl<T: Clone> PersistentVector<T> {
     ///
     /// Uses `size_table` to determine the correct child index for push operations,
     /// which supports both regular and relaxed (RRB) tree structures correctly.
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
     fn push_tail_into_node(
         node: &ReferenceCounter<Node<T>>,
         level: usize,
@@ -1461,6 +1470,8 @@ impl<T: Clone> PersistentVector<T> {
     ///
     /// For level 0, capacity is `BRANCHING_FACTOR` (leaf level).
     /// For level 5, capacity is `BRANCHING_FACTOR^2`, etc.
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
     #[allow(clippy::cast_possible_truncation)]
     const fn max_capacity_at_level(level: usize) -> usize {
         // level 0 (leaf): 32
@@ -4074,6 +4085,7 @@ impl<T: Clone> TransientVector<T> {
     /// transient.push_back(3);
     /// assert_eq!(transient.len(), 3);
     /// ```
+    #[inline]
     pub fn push_back(&mut self, element: T) {
         if self.tail.is_full() {
             // Tail is full, push tail to root and create new tail
@@ -4119,6 +4131,7 @@ impl<T: Clone> TransientVector<T> {
     }
 
     /// Pushes the current tail into the root tree.
+    #[inline]
     fn push_tail_to_root(&mut self) {
         let old_tail = std::mem::replace(&mut self.tail, TailChunk::new());
         let tail_leaf = Node::leaf_from_chunk(old_tail.into_leaf_chunk());
@@ -4154,6 +4167,7 @@ impl<T: Clone> TransientVector<T> {
     }
 
     /// Creates a new path from root to the leaf.
+    #[inline]
     fn new_path(level: usize, node: Node<T>) -> Node<T> {
         if level == 0 {
             node

@@ -1,0 +1,551 @@
+# ベンチマーク再現性ガイド
+#
+# 概要:
+#   ベンチマーク結果の再現性を確保するためのガイド。
+#   ビルド条件の固定、環境変数設定、CI/ローカルでの再現手順、派生シード管理を含む。
+#
+# 目的:
+#   - ベンチマーク結果の一貫性を保つ
+#   - CI と ローカル環境で同じ結果を得られるようにする
+#   - Before/After 比較の信頼性を高める
+#
+# 対象:
+#   - IAI Callgrind ベンチマーク（決定論的）
+#   - Criterion ベンチマーク（統計的）
+#   - API RPS ベンチマーク（実時間）
+#
+# 参照:
+#   - docs/internal/requirements/20260201_1000_persistent_vector_push_back_regression.yaml
+#   - docs/internal/analysis/adoption_gate.yaml
+
+version: "1.0.0"
+name: "benchmark_reproducibility"
+description: |
+  ベンチマーク結果の再現性を確保するためのガイド。
+  ビルド条件、環境変数、実行手順、シード管理を定義する。
+
+# 1. ビルド条件の固定
+build_configuration:
+  description: |
+    Rust コンパイラのビルド設定を固定し、Before/After 比較の一貫性を保つ。
+
+  rust_version:
+    requirement: "固定バージョンを使用する"
+    method: "rust-toolchain.toml で指定"
+    example: |
+      # rust-toolchain.toml
+      [toolchain]
+      channel = "1.92.0"
+      components = ["rustfmt", "clippy"]
+      profile = "default"
+    verification: "rustc --version で確認"
+    note: |
+      - CI と ローカルで同じバージョンを使用する
+      - マイナーバージョンまで固定（1.92.0）
+      - Before/After で異なるバージョンを使わない
+
+  cargo_profile:
+    requirement: "リリースプロファイルを統一する"
+    profile: "release"
+    settings:
+      lto: "fat"
+      codegen-units: 1
+      opt-level: 3
+      debug: false
+      incremental: false
+    example: |
+      # Cargo.toml
+      [profile.release]
+      lto = "fat"
+      codegen-units = 1
+      opt-level = 3
+      debug = false
+      incremental = false
+    rationale: |
+      - lto = "fat": 最大限の最適化（インライン化、デッドコード削除）
+      - codegen-units = 1: 並列コンパイル無効化（最適化優先）
+      - incremental = false: インクリメンタルコンパイル無効化（再現性優先）
+
+  environment_variables:
+    RUSTFLAGS:
+      requirement: "コンパイラフラグを固定する"
+      value: ""  # デフォルトは空（プロジェクト設定に従う）
+      note: |
+        - RUSTFLAGS が設定されている場合は Before/After で統一する
+        - 環境変数とプロジェクト設定の競合に注意
+      verification: "echo $RUSTFLAGS で確認"
+
+    CARGO_TARGET_DIR:
+      requirement: "ビルド成果物の保存先を分離する（オプション）"
+      value: "target/benchmark"
+      note: |
+        - Before/After で異なるディレクトリを使うと、キャッシュの影響を排除できる
+        - ディスク容量に注意
+
+    CARGO_INCREMENTAL:
+      requirement: "インクリメンタルコンパイルを無効化する"
+      value: "0"
+      rationale: "再現性を優先（ビルド時間は長くなる）"
+
+  cargo_lock:
+    requirement: "依存関係のバージョンを固定する"
+    method: "Cargo.lock をコミットする"
+    verification: "git status で Cargo.lock が tracked であることを確認"
+    note: |
+      - Before/After で依存関係のバージョンが変わらないようにする
+      - 依存関係の更新は意図的に行う（cargo update）
+
+  clean_build:
+    requirement: "クリーンビルドを推奨"
+    command: "cargo clean && cargo build --release"
+    rationale: |
+      - 過去のビルド成果物の影響を排除する
+      - Before/After 比較の前に実行する
+
+# 2. ベンチマーク実行環境の固定
+execution_environment:
+  description: |
+    ベンチマーク実行時のハードウェア・OS設定を固定し、測定ノイズを削減する。
+
+  hardware:
+    cpu_governor:
+      requirement: "CPU周波数スケーリングを固定する（推奨）"
+      linux:
+        command: "sudo cpupower frequency-set --governor performance"
+        verification: "cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor"
+      macos:
+        note: "macOS は CPU周波数スケーリングの制御が困難（ベストエフォート）"
+      rationale: |
+        - 省電力モードでは CPU周波数が変動し、測定にノイズが入る
+        - performance モードで固定すると一貫性が向上
+
+    turbo_boost:
+      requirement: "Turbo Boost を無効化する（推奨）"
+      linux:
+        command: "echo 1 | sudo tee /sys/devices/system/cpu/intel_pstate/no_turbo"
+        verification: "cat /sys/devices/system/cpu/intel_pstate/no_turbo"
+      macos:
+        note: "macOS は Turbo Boost の制御が困難"
+      rationale: |
+        - Turbo Boost は温度・電力に応じて周波数を変動させる
+        - 無効化すると測定の一貫性が向上
+
+  os_settings:
+    background_processes:
+      requirement: "不要なバックグラウンドプロセスを停止する（推奨）"
+      examples:
+        - "ブラウザ、IDE、音楽プレイヤー"
+        - "自動アップデート、ウイルススキャン"
+      rationale: |
+        - CPU・メモリ・ディスクI/Oの競合を削減する
+
+    swap:
+      requirement: "スワップを無効化する（推奨）"
+      linux:
+        command: "sudo swapoff -a"
+        verification: "free -h"
+      rationale: |
+        - スワップが発生すると測定に大きなノイズが入る
+
+  network:
+    requirement: "API RPS ベンチマークはネットワーク環境を統一する"
+    considerations:
+      - "CI と ローカルで異なるネットワーク遅延が発生する"
+      - "localhost 接続を使用し、外部ネットワークの影響を排除する"
+      - "Docker ネットワークの設定を統一する（bridge / host）"
+
+# 3. IAI Callgrind ベンチマークの再現性
+iai_callgrind:
+  description: |
+    IAI Callgrind は決定論的なベンチマークツール。
+    ビルド条件が同じなら、命令数は一致する。
+
+  reproducibility:
+    determinism: "ビルド条件が同じなら命令数は一致する"
+    variability: "ビルド条件が異なると命令数が変動する可能性がある"
+    key_factors:
+      - "rustc バージョン"
+      - "依存関係のバージョン（Cargo.lock）"
+      - "コンパイラフラグ（RUSTFLAGS、profile設定）"
+      - "LTO、codegen-units、opt-level"
+
+  stability_verification:
+    requirement: "ビルド条件の変動を検出するため、複数回ビルド・測定を推奨（オプション）"
+    method: "10回実行し、変動係数 (CV = SD / Mean) <= 3% を達成する"
+    when_to_use: |
+      - ビルド条件の固定が不確実な場合（rust-toolchain.toml、Cargo.lock、profile設定が未統一）
+      - CI 環境で初めてベンチマークを実行する場合
+      - ビルド条件が統一されている場合は省略可能
+    rationale: |
+      - IAI Callgrind は決定論的だが、ビルド条件の微妙な差異（環境変数、ファイルタイムスタンプなど）で結果が変わる可能性がある
+      - 10回の測定で CV <= 3% なら、ビルド条件が安定していると判断できる
+      - ビルド条件が固定されている場合（rust-toolchain.toml、Cargo.lock、profile設定が統一）、CV検証は省略可能
+    example: |
+      # 10回測定の例
+      for i in {1..10}; do
+        cargo clean
+        cargo bench --bench persistent_vector_iai -- push_back_1000
+      done
+      # 結果を集計し、CV を算出
+      # CV = (標準偏差 / 平均値) * 100
+      # CV <= 3% なら合格
+
+  baseline_management:
+    save_baseline:
+      command: "cargo bench --bench persistent_vector_iai -- --save-baseline before"
+      description: "Before の結果をベースラインとして保存"
+
+    compare_baseline:
+      command: "cargo bench --bench persistent_vector_iai -- --baseline before"
+      description: "After の結果を Before と比較"
+
+    baseline_location: "target/iai/persistent_vector_iai/before/"
+
+  reproduction_steps:
+    - step: 1
+      name: "環境準備"
+      actions:
+        - "rust-toolchain.toml で Rust バージョンを固定"
+        - "Cargo.lock をコミット"
+        - "cargo clean でクリーンビルド"
+
+    - step: 2
+      name: "Before 測定"
+      actions:
+        - "git checkout <before-commit>"
+        - "cargo bench --bench persistent_vector_iai -- --save-baseline before"
+
+    - step: 3
+      name: "After 測定"
+      actions:
+        - "git checkout <after-commit>"
+        - "cargo bench --bench persistent_vector_iai -- --baseline before"
+
+    - step: 4
+      name: "結果確認"
+      actions:
+        - "target/iai/ 配下の結果を確認"
+        - "命令数の差分を記録"
+
+# 4. Criterion ベンチマークの再現性
+criterion:
+  description: |
+    Criterion は統計的ベンチマークツール。
+    実時間を測定するため、ノイズが多い。
+
+  reproducibility:
+    determinism: "実時間測定のため、完全な再現は困難"
+    variability: "CPU周波数、OS、他プロセスの影響を受ける"
+    statistical_approach: "多数回実行し、平均値・信頼区間で評価する"
+
+  baseline_management:
+    save_baseline:
+      command: "cargo bench --bench persistent_vector_criterion -- --save-baseline before"
+      description: "Before の結果をベースラインとして保存"
+
+    compare_baseline:
+      command: "cargo bench --bench persistent_vector_criterion -- --baseline before"
+      description: "After の結果を Before と比較"
+
+    baseline_location: "target/criterion/persistent_vector_criterion/before/"
+
+  noise_reduction:
+    warmup:
+      description: "CPU キャッシュ、分岐予測をウォームアップする"
+      iterations: 10
+
+    sample_size:
+      description: "統計的に十分なサンプル数を確保する"
+      exploration: 10
+      verification: 100
+
+    outlier_detection:
+      description: "外れ値を自動検出・除去する"
+      method: "Criterion のデフォルト（IQR法）"
+
+  reproduction_steps:
+    - step: 1
+      name: "環境準備"
+      actions:
+        - "CPU周波数を固定（可能なら）"
+        - "不要なバックグラウンドプロセスを停止"
+        - "cargo clean でクリーンビルド"
+
+    - step: 2
+      name: "Before 測定"
+      actions:
+        - "git checkout <before-commit>"
+        - "cargo bench --bench persistent_vector_criterion -- --save-baseline before"
+
+    - step: 3
+      name: "After 測定"
+      actions:
+        - "git checkout <after-commit>"
+        - "cargo bench --bench persistent_vector_criterion -- --baseline before"
+
+    - step: 4
+      name: "統計的検定"
+      actions:
+        - "p値、効果量、信頼区間を確認"
+        - "採用判定ゲートに従って判定"
+
+# 5. API RPS ベンチマークの再現性
+api_rps:
+  description: |
+    API RPS ベンチマークは実時間測定。
+    ネットワーク、データベース、OS の影響を受けるため、ノイズが非常に多い。
+
+  reproducibility:
+    determinism: "実時間測定のため、完全な再現は困難"
+    variability: "ネットワーク遅延、DB性能、Docker、OSの影響を受ける"
+    statistical_approach: "多数回実行し、平均値・信頼区間で評価する"
+
+  baseline_management:
+    save_baseline:
+      command: "benches/api/scripts/run_benchmark.sh tasks_bulk --baseline before"
+      description: "Before の結果をベースラインとして保存"
+
+    compare_baseline:
+      command: "benches/api/scripts/run_benchmark.sh tasks_bulk --baseline after --compare before"
+      description: "After の結果を Before と比較"
+
+    baseline_location: "benches/results/before/"
+
+  environment_preparation:
+    docker:
+      requirement: "Docker コンテナの設定を統一する"
+      considerations:
+        - "PostgreSQL、Redis のバージョンを固定"
+        - "コンテナのリソース制限を統一（CPU、メモリ）"
+        - "ネットワークモードを統一（bridge / host）"
+
+    database:
+      requirement: "データベースの初期状態を統一する"
+      steps:
+        - "データベースをリセット（スキーマ再作成）"
+        - "シードデータを統一する（固定のシード値）"
+        - "VACUUM、ANALYZE を実行（PostgreSQL）"
+
+  noise_reduction:
+    warmup:
+      description: "サーバー、DB、ネットワークをウォームアップする"
+      duration: "60秒"
+
+    repetitions:
+      description: "統計的に十分な反復数を確保する"
+      exploration: 5
+      verification: 10
+
+    concurrent_load:
+      description: "並行リクエスト数を固定する"
+      value: "50（wrk の -c オプション）"
+
+  reproduction_steps:
+    - step: 1
+      name: "環境準備"
+      actions:
+        - "Docker コンテナを起動（docker-compose up -d）"
+        - "データベースをリセット（./scripts/reset_db.sh）"
+        - "シードデータを投入（固定のシード値）"
+
+    - step: 2
+      name: "Before 測定"
+      actions:
+        - "git checkout <before-commit>"
+        - "cargo build --release"
+        - "benches/api/scripts/run_benchmark.sh tasks_bulk --baseline before"
+
+    - step: 3
+      name: "After 測定"
+      actions:
+        - "git checkout <after-commit>"
+        - "cargo build --release"
+        - "benches/api/scripts/run_benchmark.sh tasks_bulk --baseline after --compare before"
+
+    - step: 4
+      name: "統計的検定"
+      actions:
+        - "p値、効果量、信頼区間を確認"
+        - "RPSガードレールを確認（95% retention）"
+        - "採用判定ゲートに従って判定"
+
+# 6. 派生シード管理
+seed_management:
+  description: |
+    API RPS ベンチマークでは、データベースのシードデータが結果に影響する。
+    Before/After で同じシードを使用し、再現性を確保する。
+
+  seed_strategy:
+    fixed_seed:
+      description: "固定のシード値を使用する"
+      method: "環境変数 SEED で指定"
+      example: "SEED=42 ./scripts/seed_db.sh"
+      rationale: |
+        - Before/After で同じデータを使用する
+        - 再現性を最大化する
+
+    random_seed:
+      description: "ランダムなシード値を使用する（非推奨）"
+      rationale: |
+        - 再現性が低下する
+        - Before/After で異なるデータが生成される可能性がある
+
+  seed_recording:
+    requirement: "使用したシード値を記録する"
+    location: "benches/results/<baseline>/seed.txt"
+    example: |
+      # benches/results/before/seed.txt
+      SEED=42
+      COMMIT=82d1fe225cfc5be7a7537cf9060d2cf5edd3a010
+      DATE=2026-01-28T12:00:00Z
+
+  seed_reproduction:
+    steps:
+      - step: 1
+        name: "Before のシード値を確認"
+        command: "cat benches/results/before/seed.txt"
+
+      - step: 2
+        name: "After 測定時に同じシードを使用"
+        command: "SEED=42 ./scripts/seed_db.sh"
+
+# 7. CI/CD での再現性確保
+ci_cd:
+  description: |
+    CI/CD パイプラインでベンチマークを実行し、再現性を確保する。
+
+  github_actions:
+    rust_version:
+      method: "actions-rs/toolchain で固定バージョンを使用"
+      example: |
+        - uses: actions-rs/toolchain@v1
+          with:
+            toolchain: 1.92.0
+            profile: default
+            override: true
+
+    cache:
+      method: "Cargo キャッシュを使用（ビルド時間短縮）"
+      example: |
+        - uses: actions/cache@v3
+          with:
+            path: |
+              ~/.cargo/registry
+              ~/.cargo/git
+              target
+            key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+    environment_variables:
+      RUSTFLAGS: ""
+      CARGO_INCREMENTAL: "0"
+      CARGO_TARGET_DIR: "target/benchmark"
+
+    artifact_upload:
+      requirement: "ベンチマーク結果を Artifact として保存"
+      method: "actions/upload-artifact"
+      example: |
+        - uses: actions/upload-artifact@v3
+          with:
+            name: benchmark-results
+            path: benches/results/
+
+  local_reproduction:
+    description: |
+      CI で実行されたベンチマークをローカルで再現する。
+
+    steps:
+      - step: 1
+        name: "CI の環境変数を設定"
+        command: |
+          export RUSTFLAGS=""
+          export CARGO_INCREMENTAL=0
+          export CARGO_TARGET_DIR=target/benchmark
+
+      - step: 2
+        name: "CI と同じ Rust バージョンを使用"
+        command: "rustup default 1.92.0"
+
+      - step: 3
+        name: "クリーンビルド"
+        command: "cargo clean && cargo build --release"
+
+      - step: 4
+        name: "ベンチマーク実行"
+        command: "cargo bench --bench persistent_vector_iai"
+
+# 8. トラブルシューティング
+troubleshooting:
+  - problem: "Before/After で命令数が異なる（IAI Callgrind）"
+    possible_causes:
+      - "rustc バージョンが異なる"
+      - "依存関係のバージョンが異なる（Cargo.lock）"
+      - "コンパイラフラグが異なる（RUSTFLAGS、profile設定）"
+    solutions:
+      - "rustc --version で確認"
+      - "git diff Cargo.lock で確認"
+      - "echo $RUSTFLAGS で確認"
+
+  - problem: "Before/After で実行時間が大きく異なる（Criterion）"
+    possible_causes:
+      - "CPU周波数が変動している"
+      - "バックグラウンドプロセスが動作している"
+      - "スワップが発生している"
+    solutions:
+      - "CPU周波数を固定する"
+      - "不要なプロセスを停止する"
+      - "スワップを無効化する"
+
+  - problem: "Before/After で RPS が大きく異なる（API RPS）"
+    possible_causes:
+      - "ネットワーク遅延が変動している"
+      - "データベースの状態が異なる"
+      - "Docker コンテナのリソース制限が異なる"
+    solutions:
+      - "localhost 接続を使用する"
+      - "データベースをリセットする"
+      - "Docker コンテナの設定を統一する"
+
+# 9. チェックリスト
+checklist:
+  build:
+    - "[ ] rust-toolchain.toml で Rust バージョンを固定"
+    - "[ ] Cargo.lock をコミット"
+    - "[ ] Cargo.toml の profile 設定を統一"
+    - "[ ] RUSTFLAGS を統一（または空）"
+    - "[ ] cargo clean でクリーンビルド"
+
+  execution:
+    - "[ ] CPU周波数を固定（可能なら）"
+    - "[ ] Turbo Boost を無効化（可能なら）"
+    - "[ ] 不要なバックグラウンドプロセスを停止"
+    - "[ ] スワップを無効化"
+
+  baseline:
+    - "[ ] Before の結果を --save-baseline で保存"
+    - "[ ] After の結果を --baseline で比較"
+    - "[ ] ベースラインの保存先を記録"
+
+  seed:
+    - "[ ] 固定のシード値を使用（API RPS）"
+    - "[ ] シード値を記録（benches/results/<baseline>/seed.txt）"
+
+  verification:
+    - "[ ] rustc --version で確認"
+    - "[ ] git diff Cargo.lock で確認"
+    - "[ ] echo $RUSTFLAGS で確認"
+    - "[ ] 統計的検定結果を確認"
+    - "[ ] RPSガードレールを確認（API RPS）"
+
+# 参考文献
+references:
+  - title: "IAI Callgrind: Deterministic Benchmarking"
+    url: "https://github.com/iai-callgrind/iai-callgrind"
+
+  - title: "Criterion.rs: Statistical Benchmarking"
+    url: "https://github.com/bheisler/criterion.rs"
+
+  - title: "Rust Benchmarking Best Practices"
+    url: "https://doc.rust-lang.org/cargo/reference/profiles.html"
+
+  - title: "Linux CPU Frequency Scaling"
+    url: "https://www.kernel.org/doc/html/latest/admin-guide/pm/cpufreq.html"
