@@ -1015,7 +1015,7 @@ impl Default for SearchIndexConfig {
             max_tokens_per_task: 100,
             max_search_candidates: 1000,
             use_bulk_builder: true,
-            bulk_threshold: 100,
+            bulk_threshold: 10,
             use_merge_ngram_delta_bulk_insert: true,
         }
     }
@@ -1124,6 +1124,7 @@ impl SearchIndexConfigBuilder {
         self.config.use_merge_ngram_delta_bulk_insert = value;
         self
     }
+
 }
 
 impl Default for SearchIndexConfigBuilder {
@@ -5022,6 +5023,10 @@ impl SearchIndex {
         existing_index: &NgramIndex,
         bulk_index: &NgramIndex,
     ) -> NgramIndex {
+        // Chunk size limited to MAX_BULK_INSERT - 1 to avoid errors.
+        // The const assert in hashmap.rs guarantees MAX_BULK_INSERT >= 2.
+        const CHUNK_SIZE: usize = MAX_BULK_INSERT - 1;
+
         if bulk_index.is_empty() {
             return existing_index.clone();
         }
@@ -5029,21 +5034,17 @@ impl SearchIndex {
             return bulk_index.clone();
         }
 
-        // Chunk size limited to MAX_BULK_INSERT - 1 to avoid errors.
-        // The const assert in hashmap.rs guarantees MAX_BULK_INSERT >= 2.
-        const CHUNK_SIZE: usize = MAX_BULK_INSERT - 1;
-
         let mut transient = existing_index.clone().transient();
         let mut entries: Vec<(NgramKey, TaskIdCollection)> =
             Vec::with_capacity(CHUNK_SIZE.min(bulk_index.len()));
 
         for (ngram_key, bulk_posting_list) in bulk_index {
-            let merged = match existing_index.get(ngram_key.as_str()) {
-                Some(existing_posting_list) => {
+            let merged = existing_index.get(ngram_key.as_str()).map_or_else(
+                || bulk_posting_list.clone(),
+                |existing_posting_list| {
                     merge_sorted_posting_lists(existing_posting_list, bulk_posting_list)
-                }
-                None => bulk_posting_list.clone(),
-            };
+                },
+            );
             entries.push((ngram_key.clone(), merged));
 
             if entries.len() >= CHUNK_SIZE {
@@ -10333,14 +10334,14 @@ mod search_index_config_tests {
     ///
     /// Verifies:
     /// - `use_bulk_builder`: true (enabled by default for Phase 1)
-    /// - `bulk_threshold`: 100 (minimum changes to use `BulkBuilder`)
+    /// - `bulk_threshold`: 10 (minimum changes to use `BulkBuilder`)
     /// - `use_merge_ngram_delta_bulk_insert`: true (enabled by default for Phase 3)
     #[rstest]
     fn config_default_optimization_flags() {
         let config = SearchIndexConfig::default();
 
         assert!(config.use_bulk_builder);
-        assert_eq!(config.bulk_threshold, 100);
+        assert_eq!(config.bulk_threshold, 10);
         assert!(config.use_merge_ngram_delta_bulk_insert);
     }
 
@@ -10376,7 +10377,7 @@ mod search_index_config_tests {
         assert_eq!(config.max_tokens_per_task, 100);
         assert_eq!(config.max_search_candidates, 1000);
         assert!(config.use_bulk_builder);
-        assert_eq!(config.bulk_threshold, 100);
+        assert_eq!(config.bulk_threshold, 10);
         assert!(config.use_merge_ngram_delta_bulk_insert);
     }
 
@@ -10429,6 +10430,7 @@ mod search_index_config_tests {
         assert_eq!(config.bulk_threshold, 150);
         assert_eq!(config.ngram_size, 2);
     }
+
 }
 
 // =============================================================================

@@ -15,7 +15,7 @@ local common = require("common")
 local counter = 0
 
 -- Batch sizes for testing partial failure scenarios
-local batch_sizes = {3, 5, 10}
+local batch_sizes = {11, 25, 50}
 
 function request()
     counter = counter + 1
