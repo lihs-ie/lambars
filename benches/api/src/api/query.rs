@@ -1768,6 +1768,92 @@ impl SearchIndexBulkBuilder {
     }
 }
 
+/// Merges two sorted posting lists into a single sorted, deduplicated list.
+///
+/// This function performs a merge-sort style operation on two `TaskIdCollection`s,
+/// combining them efficiently without redundant intermediate allocations.
+///
+/// # Preconditions
+///
+/// - Both `existing` and `new_entries` must be sorted in ascending order.
+/// - No duplicate elements within each collection (deduplication is still performed
+///   for elements appearing in both collections).
+///
+/// # Algorithm
+///
+/// Uses a two-pointer merge algorithm (O(N+M) time complexity) to combine the lists:
+/// 1. Initialize iterators for both collections
+/// 2. Compare current elements from each iterator
+/// 3. Emit the smaller element (or skip duplicates if equal)
+/// 4. Construct the result using `from_sorted_vec` (O(n) construction)
+///
+/// # Complexity
+///
+/// - Time: O(N + M) where N and M are the sizes of the input collections
+/// - Space: O(N + M) for the result vector
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let existing = TaskIdCollection::from_sorted_vec(vec![task_id_1, task_id_3, task_id_5]);
+/// let new_entries = TaskIdCollection::from_sorted_vec(vec![task_id_2, task_id_4, task_id_6]);
+/// let merged = merge_sorted_posting_lists(&existing, &new_entries);
+/// // merged contains: [task_id_1, task_id_2, task_id_3, task_id_4, task_id_5, task_id_6]
+/// ```
+#[must_use]
+fn merge_sorted_posting_lists(
+    existing: &TaskIdCollection,
+    new_entries: &TaskIdCollection,
+) -> TaskIdCollection {
+    // Fast paths for empty collections
+    if existing.is_empty() {
+        return new_entries.clone();
+    }
+    if new_entries.is_empty() {
+        return existing.clone();
+    }
+
+    // Get sorted vectors for merge
+    let existing_sorted = existing.to_sorted_vec();
+    let new_sorted = new_entries.to_sorted_vec();
+
+    // Pre-allocate result with exact capacity
+    let mut result = Vec::with_capacity(existing_sorted.len() + new_sorted.len());
+
+    // Two-pointer merge
+    let mut existing_iterator = existing_sorted.into_iter().peekable();
+    let mut new_iterator = new_sorted.into_iter().peekable();
+
+    loop {
+        match (existing_iterator.peek(), new_iterator.peek()) {
+            (Some(existing_id), Some(new_id)) => match existing_id.cmp(new_id) {
+                std::cmp::Ordering::Less => {
+                    result.push(existing_iterator.next().unwrap());
+                }
+                std::cmp::Ordering::Greater => {
+                    result.push(new_iterator.next().unwrap());
+                }
+                std::cmp::Ordering::Equal => {
+                    // Skip duplicate - take from existing, advance both
+                    result.push(existing_iterator.next().unwrap());
+                    new_iterator.next();
+                }
+            },
+            (Some(_), None) => {
+                result.extend(existing_iterator);
+                break;
+            }
+            (None, Some(_)) => {
+                result.extend(new_iterator);
+                break;
+            }
+            (None, None) => break,
+        }
+    }
+
+    TaskIdCollection::from_sorted_vec(result)
+}
+
 /// Keys added during an Update operation, used for remove entry cancellation.
 #[derive(Debug, Default)]
 struct AddedKeys {
@@ -4805,14 +4891,179 @@ impl SearchIndex {
 
     /// Applies changes using the bulk path (optimized for Add-only batches).
     ///
+    /// This path uses `SearchIndexBulkBuilder` to efficiently process large batches
+    /// of Add operations by:
+    /// 1. Collecting all n-grams from new tasks in a single pass
+    /// 2. Building the bulk n-gram index with a single sort/dedup operation
+    /// 3. Merging the bulk index with existing indexes using optimized merge-sort
+    ///
+    /// # Preconditions
+    ///
     /// This path is used when:
     /// 1. `config.use_bulk_builder` is true
     /// 2. All changes are `TaskChange::Add`
     /// 3. `changes.len() >= config.bulk_threshold`
     ///
+    /// # Fallback Behavior
+    ///
+    /// If `SearchIndexBulkBuilder::build()` fails (e.g., due to memory limits),
+    /// this method falls back to `apply_changes_delta`.
+    ///
+    /// # Algorithm
+    ///
+    /// Phase 1: Bulk n-gram collection
+    /// - Iterate through all Add changes
+    /// - For each task, normalize title and tags
+    /// - Add all tokens to `SearchIndexBulkBuilder`
+    ///
+    /// Phase 2: Bulk index construction
+    /// - Call `SearchIndexBulkBuilder::build()` to create sorted n-gram index
+    /// - This performs a single sort/dedup operation (O(N log N))
+    ///
+    /// Phase 3: Index merging
+    /// - Merge bulk n-gram index with existing index using `merge_bulk_ngram_index`
+    /// - Update prefix indexes and `tasks_by_id` using delta path for correctness
     #[must_use]
     fn apply_changes_bulk(&self, changes: &[TaskChange]) -> Self {
-        self.apply_changes_delta(changes)
+        // Collect tasks from changes
+        let tasks: Vec<&Task> = changes
+            .iter()
+            .filter_map(|change| match change {
+                TaskChange::Add(task) => Some(task),
+                _ => None,
+            })
+            .collect();
+
+        if tasks.is_empty() {
+            return self.clone();
+        }
+
+        // Build bulk n-gram indexes for title_word, title_full, and tag
+        let mut title_word_builder = SearchIndexBulkBuilder::new(self.config.clone());
+        let mut title_full_builder = SearchIndexBulkBuilder::new(self.config.clone());
+        let mut tag_builder = SearchIndexBulkBuilder::new(self.config.clone());
+
+        for task in &tasks {
+            let normalized = NormalizedTaskData::from_task(task);
+
+            // Add title_full (joined normalized title)
+            title_full_builder =
+                title_full_builder.add_entry(normalized.title_key.clone(), task.task_id.clone());
+
+            // Add each title word
+            for word in &normalized.title_words {
+                title_word_builder =
+                    title_word_builder.add_entry(word.clone(), task.task_id.clone());
+            }
+
+            // Add each tag
+            for tag in &normalized.tags {
+                tag_builder = tag_builder.add_entry(tag.clone(), task.task_id.clone());
+            }
+        }
+
+        // Build bulk n-gram indexes
+        let title_word_bulk_result = title_word_builder.build();
+        let title_full_bulk_result = title_full_builder.build();
+        let tag_bulk_result = tag_builder.build();
+
+        // If any build fails, fall back to delta path
+        let (Ok(title_word_bulk), Ok(title_full_bulk), Ok(tag_bulk)) =
+            (title_word_bulk_result, title_full_bulk_result, tag_bulk_result)
+        else {
+            // Fallback to delta path on build error
+            return self.apply_changes_delta(changes);
+        };
+
+        // Merge bulk n-gram indexes with existing indexes
+        let title_word_ngram_index =
+            self.merge_bulk_ngram_index(&self.title_word_ngram_index, &title_word_bulk);
+        let title_full_ngram_index =
+            self.merge_bulk_ngram_index(&self.title_full_ngram_index, &title_full_bulk);
+        let tag_ngram_index = self.merge_bulk_ngram_index(&self.tag_ngram_index, &tag_bulk);
+
+        // For prefix indexes and tasks_by_id, use the delta approach
+        // (these are less performance-critical than n-gram indexes)
+        let mut delta = SearchIndexDelta::from_changes(changes, &self.config, &self.tasks_by_id);
+        delta.prepare_posting_lists();
+
+        // Apply delta for prefix indexes and tasks_by_id
+        let base_result = self.apply_delta(&delta, changes);
+
+        // Return with optimized n-gram indexes
+        Self {
+            title_word_ngram_index,
+            title_full_ngram_index,
+            tag_ngram_index,
+            // Use delta result for all other fields
+            title_word_index: base_result.title_word_index,
+            title_full_index: base_result.title_full_index,
+            title_full_all_suffix_index: base_result.title_full_all_suffix_index,
+            title_word_all_suffix_index: base_result.title_word_all_suffix_index,
+            tag_index: base_result.tag_index,
+            tag_all_suffix_index: base_result.tag_all_suffix_index,
+            tasks_by_id: base_result.tasks_by_id,
+            config: base_result.config,
+        }
+    }
+
+    /// Merges a bulk-built n-gram index with an existing n-gram index.
+    ///
+    /// This method efficiently combines two n-gram indexes using merge-sort
+    /// for each posting list, avoiding the overhead of individual insertions.
+    ///
+    /// # Algorithm
+    ///
+    /// For each n-gram key in the bulk index:
+    /// 1. If the key exists in the existing index, merge the posting lists
+    ///    using `merge_sorted_posting_lists` (O(N+M) merge-sort)
+    /// 2. If the key doesn't exist, insert the bulk posting list directly
+    ///
+    /// # Complexity
+    ///
+    /// - Time: O(K * (N + M)) where K is the number of unique n-grams,
+    ///   N and M are average posting list sizes
+    /// - Space: O(total entries) for the result index
+    ///
+    /// # Arguments
+    ///
+    /// * `existing_index` - The current n-gram index
+    /// * `bulk_index` - The newly built bulk n-gram index
+    ///
+    /// # Returns
+    ///
+    /// A new merged n-gram index containing all entries from both inputs.
+    #[must_use]
+    #[allow(clippy::unused_self)] // Method signature kept for API consistency
+    fn merge_bulk_ngram_index(
+        &self,
+        existing_index: &NgramIndex,
+        bulk_index: &NgramIndex,
+    ) -> NgramIndex {
+        if bulk_index.is_empty() {
+            return existing_index.clone();
+        }
+        if existing_index.is_empty() {
+            return bulk_index.clone();
+        }
+
+        let mut transient = existing_index.clone().transient();
+
+        for (ngram_key, bulk_posting_list) in bulk_index {
+            match existing_index.get(ngram_key.as_str()) {
+                Some(existing_posting_list) => {
+                    // Merge the posting lists using merge-sort
+                    let merged = merge_sorted_posting_lists(existing_posting_list, bulk_posting_list);
+                    transient.insert(ngram_key.clone(), merged);
+                }
+                None => {
+                    // New n-gram, insert directly
+                    transient.insert(ngram_key.clone(), bulk_posting_list.clone());
+                }
+            }
+        }
+
+        transient.persistent()
     }
 
     /// Applies multiple task changes in a single batch operation with metrics collection.
@@ -17426,6 +17677,124 @@ mod search_index_bulk_builder_tests {
             let ids1: Vec<_> = collection.iter().collect();
             let ids2: Vec<_> = other_collection.iter().collect();
             assert_eq!(ids1, ids2);
+        }
+    }
+}
+
+// =============================================================================
+// merge_sorted_posting_lists Tests
+// =============================================================================
+
+#[cfg(test)]
+mod merge_sorted_posting_lists_tests {
+    use super::*;
+    use rstest::rstest;
+
+    fn make_task_id(id: u128) -> TaskId {
+        TaskId::from_uuid(uuid::Uuid::from_u128(id))
+    }
+
+    /// Test merging two empty collections returns empty.
+    #[rstest]
+    fn merge_empty_collections_returns_empty() {
+        let existing = TaskIdCollection::new();
+        let new_entries = TaskIdCollection::new();
+
+        let merged = merge_sorted_posting_lists(&existing, &new_entries);
+
+        assert!(merged.is_empty());
+    }
+
+    /// Test merging empty with non-empty returns the non-empty.
+    #[rstest]
+    fn merge_empty_with_non_empty_returns_non_empty() {
+        let existing = TaskIdCollection::new();
+        let new_entries = TaskIdCollection::from_sorted_vec(vec![make_task_id(1), make_task_id(2)]);
+
+        let merged = merge_sorted_posting_lists(&existing, &new_entries);
+
+        assert_eq!(merged.len(), 2);
+        assert!(merged.contains(&make_task_id(1)));
+        assert!(merged.contains(&make_task_id(2)));
+    }
+
+    /// Test merging non-empty with empty returns the non-empty.
+    #[rstest]
+    fn merge_non_empty_with_empty_returns_non_empty() {
+        let existing = TaskIdCollection::from_sorted_vec(vec![make_task_id(1), make_task_id(2)]);
+        let new_entries = TaskIdCollection::new();
+
+        let merged = merge_sorted_posting_lists(&existing, &new_entries);
+
+        assert_eq!(merged.len(), 2);
+        assert!(merged.contains(&make_task_id(1)));
+        assert!(merged.contains(&make_task_id(2)));
+    }
+
+    /// Test merging two disjoint collections.
+    #[rstest]
+    fn merge_disjoint_collections() {
+        let existing = TaskIdCollection::from_sorted_vec(vec![make_task_id(1), make_task_id(3)]);
+        let new_entries = TaskIdCollection::from_sorted_vec(vec![make_task_id(2), make_task_id(4)]);
+
+        let merged = merge_sorted_posting_lists(&existing, &new_entries);
+
+        assert_eq!(merged.len(), 4);
+        let sorted = merged.to_sorted_vec();
+        assert_eq!(sorted[0], make_task_id(1));
+        assert_eq!(sorted[1], make_task_id(2));
+        assert_eq!(sorted[2], make_task_id(3));
+        assert_eq!(sorted[3], make_task_id(4));
+    }
+
+    /// Test merging overlapping collections deduplicates.
+    #[rstest]
+    fn merge_overlapping_collections_deduplicates() {
+        let existing = TaskIdCollection::from_sorted_vec(vec![make_task_id(1), make_task_id(2)]);
+        let new_entries = TaskIdCollection::from_sorted_vec(vec![make_task_id(2), make_task_id(3)]);
+
+        let merged = merge_sorted_posting_lists(&existing, &new_entries);
+
+        assert_eq!(merged.len(), 3);
+        let sorted = merged.to_sorted_vec();
+        assert_eq!(sorted[0], make_task_id(1));
+        assert_eq!(sorted[1], make_task_id(2));
+        assert_eq!(sorted[2], make_task_id(3));
+    }
+
+    /// Test merging identical collections returns same elements.
+    #[rstest]
+    fn merge_identical_collections() {
+        let existing =
+            TaskIdCollection::from_sorted_vec(vec![make_task_id(1), make_task_id(2), make_task_id(3)]);
+        let new_entries =
+            TaskIdCollection::from_sorted_vec(vec![make_task_id(1), make_task_id(2), make_task_id(3)]);
+
+        let merged = merge_sorted_posting_lists(&existing, &new_entries);
+
+        assert_eq!(merged.len(), 3);
+    }
+
+    /// Test result is always sorted.
+    #[rstest]
+    fn merge_result_is_sorted() {
+        let existing = TaskIdCollection::from_sorted_vec(vec![
+            make_task_id(10),
+            make_task_id(30),
+            make_task_id(50),
+        ]);
+        let new_entries = TaskIdCollection::from_sorted_vec(vec![
+            make_task_id(20),
+            make_task_id(40),
+            make_task_id(60),
+        ]);
+
+        let merged = merge_sorted_posting_lists(&existing, &new_entries);
+        let sorted = merged.to_sorted_vec();
+
+        // Verify sorted order
+        for i in 1..sorted.len() {
+            assert!(sorted[i - 1] < sorted[i], "Result should be strictly sorted");
         }
     }
 }
