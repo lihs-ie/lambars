@@ -1,0 +1,825 @@
+# tasks_bulk における世代トークン式 COW 削減要件定義
+#
+# 概要:
+#   TransientHashMap の世代トークンシステムを実効化し、tasks_bulk シナリオにおける
+#   COW（Copy-on-Write）操作を削減してパフォーマンスを大幅改善する。
+#
+# 設計方針:
+#   1. 参照カウント 1 の場合のみ in-place 更新（世代トークンは遅延更新）
+#      参照カウントが 1 でないノード（共有ノード）は局所的に COW へフォールバック
+#      世代トークンは in-place 更新時に owner_generation に更新される
+#   2. merge_bulk_ngram_index を bulk 挿入経路に変更し、per-key insert を削減
+#   3. SmallVec の inline 容量を最適化し、再アロケーションを削減
+#   4. プロファイリングで特定された [unknown] ホットスポットを解明
+#
+# 参照:
+#   - docs/internal/analysis/20260201_tasks_bulk_new_bottleneck_analysis.yaml
+#   - docs/internal/requirements/20260201_1120_tasks_bulk_bottleneck_remediation.yaml
+
+version: "1.0.0"
+name: "tasks_bulk_generation_token_cow_elimination"
+description: |
+  tasks_bulk シナリオのプロファイリング結果から、TransientHashMap の COW 操作が
+  全体の約42%を占めることが判明した。世代トークンシステムは実装済みだが、
+  以下の理由により効果が出ていない：
+
+  1. 主要経路で insert_without_cow が使われず、通常の insert が走る
+  2. insert_without_cow 内で generation 一致判定が COW を回避せず、make_mut が必ず発生
+  3. PersistentHashMap 由来ノードは SHARED_GENERATION のまま transient 化される
+  4. merge_ngram_delta_bulk が MAX_BULK_INSERT 超過で個別 insert にフォールバック
+
+  【本フェーズの目標（Phase 1: COW 削減）】
+  Amdahl の法則に基づき、COW 42% を 50% 削減した場合の改善見込み：
+  - RPS: 41 → 52+ req/s（1.27x 改善）
+  - P99 latency: 27.34秒 → < 22秒（1.27x 改善）
+  - COW 関連ホットスポット: 42% → < 25%
+
+  【将来フェーズの目標（Phase 2+: [unknown]・ソート・I/O 最適化）】
+  - RPS: 200+ req/s
+  - P99 latency: < 5秒
+  - 前提: [unknown] ホットスポットの特定・最適化、ソート系・I/O 改善
+
+# 背景・動機
+background:
+  problem: |
+    プロファイリング結果により以下のボトルネックが特定された：
+
+    【COW 関連（約42%）】
+    - PersistentHashMapIterator::advance: 14.44%
+    - drop_in_place<Vec<ChildSlot>>: 14.31%
+    - TransientHashMap::insert_into_bitmap_node_cow: 13.37%
+
+    【その他】
+    - [unknown]: 10.74%（未解決のホットスポット）
+    - SmallVec::try_grow: 4.68%
+    - ソート関係: 約9%
+    - malloc/realloc/cfree: 約4%+
+    - SearchIndex::compute_merged_posting_list_sorted: 約3%
+
+    現状の RPS は 41.00 req/s（目標: 200+ req/s、達成度: 20.5%）、
+    P99 latency は 27.34秒（目標: < 5秒、5.5倍超過）と大幅な性能不足。
+
+  motivation: |
+    世代トークンシステムの実効化により、COW 操作を大幅に削減し、
+    tasks_bulk シナリオのパフォーマンスを目標値まで引き上げる。
+
+    COW 関連のボトルネック（42%）を 1/2 に削減できても、Amdahl の法則より
+    全体の改善は約 1.27 倍（RPS 41 → 約 52）に留まる見込み。
+    RPS 200+ の達成には [unknown]・ソート系・I/O の追加最適化が前提となる。
+
+  prior_art:
+    - name: "im-rs の transient 実装"
+      description: "Clojure の transient を参考にした世代トークン式の実装。generation が一致する場合は in-place 更新を行う。"
+    - name: "rpds の Arc 共有戦略"
+      description: "Arc::make_mut を使った COW 実装。共有されていない場合は in-place 更新。"
+
+# 要件一覧
+requirements:
+  # ======================================================================
+  # 1. 世代トークン式 in-place 更新の実効化
+  # ======================================================================
+  - id: REQ-TBGTCE-001
+    name: "参照カウント 1 時の COW 回避"
+    description: |
+      現在の insert_without_cow は ReferenceCounter::make_mut を常時呼び出すため、
+      参照カウントが 1 であっても clone が発生している。
+
+      【問題箇所】
+      - src/persistent/hashmap.rs:3015（insert_without_cow）
+      - src/persistent/hashmap.rs:3263（insert_into_bitmap_node_cow の make_mut）
+
+      【改善方針】
+      参照カウントが 1 の場合のみ in-place 更新を行う。
+      共有ノード（参照カウント > 1）はその分岐のみ COW にフォールバックする。
+      世代トークンは in-place 更新時に owner_generation に遅延更新される（REQ-TBGTCE-002）。
+
+      実装は Rc/Arc 抽象の ReferenceCounter::get_mut を使用する：
+      - get_mut: 参照カウントが 1 の場合のみ Some を返す（COW 不要）
+      - make_mut: 参照カウントに関わらず &mut を返す（共有時は clone）
+
+      具体的には以下のアルゴリズムを適用：
+
+      1. ルートを ReferenceCounter::get_mut で取得（strong_count == 1 のみ Some）
+      2. Some の場合は ensure_node_generation で世代を更新し、insert_into_node_inplace で再帰的に in-place 更新
+      3. 子ノードが共有なら、その分岐のみ COW にフォールバック（ensure_child_owned で世代も更新）
+      4. ルートが共有なら従来の insert（COW）にフォールバック
+
+      これにより、参照カウントが 1 の箇所では COW を回避できる。
+
+    methods:
+      - name: "insert_without_cow"
+        signature: "pub fn insert_without_cow(&mut self, key: K, value: V) -> Option<V>"
+        description: |
+          参照カウントが 1 の場合のみ in-place 更新を試み、
+          共有されている場合は COW にフォールバックする。
+          in-place 更新時は ensure_node_generation（ルート）/ ensure_child_owned（子ノード）
+          を通じてノードの generation を owner_generation に更新する（REQ-TBGTCE-002）。
+
+          【COW 回避の条件】
+          1. 参照カウントが 1（ReferenceCounter::get_mut が Some）
+          2. 上記を満たす場合、ノードの generation を owner_generation に更新
+
+          【アルゴリズム】
+          ```rust
+          fn insert_without_cow(&mut self, key: K, value: V) -> Option<V> {
+              let hash = compute_hash(&key);
+              let owner_generation = self.generation;
+              if let Some(root_mut) = ReferenceCounter::get_mut(&mut self.root) {
+                  // ルートが排他所有なら generation を更新して in-place 挿入
+                  Self::ensure_node_generation(root_mut, owner_generation);
+                  let (old_value, added) =
+                      Self::insert_into_node_inplace(root_mut, key, value, hash, 0, owner_generation);
+                  if added {
+                      self.length += 1;
+                  }
+                  return old_value;
+              }
+              // ルートが共有なら COW フォールバック
+              self.insert(key, value)
+          }
+
+          /// ノードの generation を owner_generation に更新する。
+          /// 参照カウントが 1 であることが事前条件。
+          fn ensure_node_generation(node: &mut Node<K, V>, owner_generation: u64) {
+              match node {
+                  Node::Entry { generation, .. } => *generation = owner_generation,
+                  Node::Bitmap { generation, .. } => *generation = owner_generation,
+                  Node::Collision { generation, .. } => *generation = owner_generation,
+                  Node::Empty => {}
+              }
+          }
+          ```
+
+        examples:
+          - description: "参照カウントが 1 の場合の in-place 更新"
+            code: |
+              let mut transient = map.transient();
+              // transient が唯一の所有者なら in-place 更新
+              transient.insert_without_cow(key1, value1);
+              transient.insert_without_cow(key2, value2);
+              transient.insert_without_cow(key3, value3);
+
+      - name: "insert_into_node_inplace"
+        signature: "fn insert_into_node_inplace(node: &mut Node<K, V>, key: K, value: V, hash: u64, depth: usize, owner_generation: u64) -> (Option<V>, bool)"
+        description: |
+          ノードを直接変更する in-place 挿入。共有ノードは分岐単位で COW する。
+          子ノードの処理は ensure_child_owned（REQ-TBGTCE-002）を通じて行い、
+          generation の一貫性を保証する。
+
+          【アルゴリズム】
+          - BitmapNode の場合: ChildArray を直接変更
+          - CollisionNode の場合: CollisionArray を直接変更
+          - ValueNode の場合: 値を直接置換
+          - ChildSlot::Node の場合:
+            1. ensure_child_owned で子ノードを取得（参照カウント 1 なら in-place、共有なら局所 COW）
+            2. 取得した子ノードに再帰的に insert_into_node_inplace を適用
+            3. 子ノードの generation は ensure_child_owned で owner_generation に更新済み
+
+          再帰的に子ノードも in-place 更新し、generation の一貫性を保つ。
+
+    implementations:
+      - type: "TransientHashMap<K, V>"
+        description: |
+          世代トークンが一致する場合の in-place 更新を実装。
+
+          【実装の詳細】
+          1. insert_without_cow で ReferenceCounter::get_mut を試行
+          2. 成功した場合は insert_into_node_inplace で in-place 更新
+          3. 失敗した場合は従来の insert（COW）にフォールバック
+
+          【期待される効果】
+          - insert_into_bitmap_node_cow（13.37%）の大幅削減
+          - drop_in_place<Vec<ChildSlot>>（14.31%）の削減
+
+  # ======================================================================
+  # 2. PersistentHashMap 由来ノードの世代更新
+  # ======================================================================
+  - id: REQ-TBGTCE-002
+    name: "遅延世代更新方式の導入"
+    description: |
+      現在の transient() は既存ノードを SHARED_GENERATION のまま引き継ぐため、
+      最初の insert で COW が発生しやすい。
+
+      【問題箇所】
+      - src/persistent/hashmap.rs:4090（transient()）
+
+      【改善方針】
+      transient() 呼び出し時に全ノードを走査して世代更新するとコストが高い。
+      代替案として、遅延更新方式を採用する：
+
+      【遅延更新方式】
+      1. transient() 時は O(1) を維持し、ルート世代の即時更新は行わない
+      2. insert 時に参照カウントが 1 なら世代を更新
+      3. 共有されている場合は局所 COW 後に世代を更新
+      4. これにより、実際にアクセスされるノードのみ更新される
+
+      【適用経路】
+      遅延世代更新は以下の経路で適用される：
+
+      1. insert_without_cow（REQ-TBGTCE-001）
+         - ルートノード: ReferenceCounter::get_mut 成功時に ensure_node_generation を呼び出し
+         - 子ノード: insert_into_node_inplace 内で ensure_child_owned を呼び出し
+
+      2. insert_into_node_inplace（REQ-TBGTCE-001）
+         - ChildSlot::Node の処理時に ensure_child_owned を呼び出し
+         - 参照カウント 1 なら in-place で generation 更新
+         - 共有されている場合は局所 COW 後に generation 更新
+
+      3. insert（通常経路、フォールバック）
+         - 従来の COW 方式を使用（generation 更新は COW 時に行われる）
+
+      【呼び出しフロー】
+      ```
+      insert_without_cow
+      ├── ReferenceCounter::get_mut(root) → Some
+      │   ├── ensure_node_generation(root, owner_generation)  # ルートの generation 更新
+      │   └── insert_into_node_inplace(root, ...)
+      │       └── ChildSlot::Node の場合
+      │           └── ensure_child_owned(child_ref)  # 子ノードの generation 更新
+      │               ├── get_mut 成功 → in-place で generation 更新
+      │               └── get_mut 失敗 → 局所 COW 後に generation 更新
+      └── ReferenceCounter::get_mut(root) → None
+          └── self.insert(key, value)  # COW フォールバック
+      ```
+
+      【アルゴリズム（遅延更新）】
+      ```rust
+      /// 子ノードを排他所有状態にして返す。
+      /// 参照カウントが 1 なら in-place で generation を更新。
+      /// 共有されている場合は局所 COW 後に generation を更新する。
+      fn ensure_child_owned(
+          child_ref: &mut ReferenceCounter<Node<K, V>>,
+          owner_generation: u64,
+      ) -> &mut Node<K, V> {
+          if let Some(child_mut) = ReferenceCounter::get_mut(child_ref) {
+              // 参照カウント 1: in-place で generation 更新
+              Self::ensure_node_generation(child_mut, owner_generation);
+              return child_mut;
+          }
+          // 共有されている: 局所 COW 後に generation 更新
+          let child_mut = ReferenceCounter::make_mut(child_ref);
+          Self::ensure_node_generation(child_mut, owner_generation);
+          child_mut
+      }
+      ```
+
+    methods:
+      - name: "transient"
+        signature: "pub fn transient(self) -> TransientHashMap<K, V>"
+        description: |
+          PersistentHashMap から TransientHashMap を生成。
+          O(1) を維持し、世代更新は insert 時に遅延的に行う。
+
+          【不変条件】
+          - transient() 直後のノードは SHARED_GENERATION を持つ可能性がある
+          - 最初の insert_without_cow でアクセスされるノードのみ generation が更新される
+          - 更新されないノードは共有されたまま残り、構造共有が維持される
+
+        examples:
+          - description: "PersistentHashMap から TransientHashMap への変換"
+            code: |
+              let persistent = PersistentHashMap::new();
+              let mut transient = persistent.transient();
+              // 世代更新は挿入時に遅延
+              // この時点ではノードの generation は SHARED_GENERATION のまま
+
+      - name: "ensure_child_owned"
+        signature: "fn ensure_child_owned(child_ref: &mut ReferenceCounter<Node<K, V>>, owner_generation: u64) -> &mut Node<K, V>"
+        description: |
+          子ノードを排他所有状態にして返す。
+          参照カウントが 1 なら in-place で generation を更新。
+          共有されている場合は局所 COW 後に generation を更新する。
+
+          【事前条件】
+          - 親ノードが排他所有されていること（get_mut で取得済み）
+
+          【事後条件】
+          - 返されるノードの generation == owner_generation
+          - 参照カウント 1 の場合は元のノードを返す（COW なし）
+          - 共有されている場合は新しいノードを返す（局所 COW）
+
+      - name: "ensure_node_generation"
+        signature: "fn ensure_node_generation(node: &mut Node<K, V>, owner_generation: u64)"
+        description: |
+          ノードの generation を owner_generation に更新する。
+          参照カウントが 1 であることが事前条件。
+
+          【適用タイミング】
+          - insert_without_cow でルートノードに適用
+          - ensure_child_owned で子ノードに適用
+
+    implementations:
+      - type: "TransientHashMap<K, V>"
+        description: |
+          遅延更新方式により、アクセスされるノードのみ世代を更新する。
+
+          【期待される効果】
+          - 最初の insert での COW を削減
+          - transient() のオーバーヘッドを最小化
+
+  # ======================================================================
+  # 3. merge_bulk_ngram_index の bulk 化
+  # ======================================================================
+  - id: REQ-TBGTCE-003
+    name: "merge_bulk_ngram_index の bulk 挿入経路への変更"
+    description: |
+      現在の merge_bulk_ngram_index は bulk_index を走査して per-key で
+      transient.insert を呼び出すため、PersistentHashMapIterator::advance が
+      14.44% を占める最大のボトルネックとなっている。
+
+      【問題箇所】
+      - benches/api/src/api/query.rs:5052（merge_bulk_ngram_index）
+
+      【改善方針】
+      bulk_index のキー列をチャンク収集し、insert_bulk_owned で一括挿入する。
+
+      【insert_bulk_owned の正当性前提】
+      insert_bulk_owned を使用する際の正当性を保証するため、以下の前提条件を明確にする：
+
+      1. キー重複時の挙動:
+         - 同一チャンク内にキー重複がある場合、後のエントリが優先される（last-wins）
+         - 既存マップとのキー重複は compute_merged_posting_list_sorted でマージ済み
+         - 重複なしが保証される場合は insert_bulk_unique を使用可能（将来の最適化）
+
+      2. 挿入順序の独立性（論理的同値）:
+         - 同一のキー/値セットであれば、挿入順序に関わらず論理的に等価な結果が得られる
+         - 論理的同値: contains/get の結果が一致する（内部構造は異なる可能性がある）
+         - 注意: iter の反復順序は挿入順序に依存する可能性がある（HashMap は順序非保証）
+         - ハッシュ衝突時の内部構造は挿入順序に依存する可能性があるが、
+           論理的な振る舞い（キー検索・値取得）は同一
+         - 重複キーがある場合は last-wins の順序が結果に影響する
+
+      3. 結果の安定性:
+         - insert_bulk_owned(entries) と entries.iter().fold(map, insert) は等価
+         - プロパティテストで検証（REQ-TBGTCE-008 参照）
+
+      【アルゴリズム】
+      ```rust
+      fn merge_bulk_ngram_index(
+          &mut self,
+          bulk_index: &PersistentHashMap<String, TaskIdCollection>,
+      ) -> Result<()> {
+          // 1. bulk_index のエントリをチャンク収集
+          let mut entries = Vec::with_capacity(MAX_BULK_INSERT);
+          for (ngram, task_ids) in bulk_index.iter() {
+              // compute_merged_posting_list_sorted で既存とのマージを実施
+              // → 重複キーは発生しない（マージ済み）
+              let merged = self.compute_merged_posting_list_sorted(ngram, task_ids)?;
+              entries.push((ngram.clone(), merged));
+              if entries.len() == MAX_BULK_INSERT {
+                  self.transient.insert_bulk_owned(entries.drain(..));
+              }
+          }
+
+          // 2. 残りを一括挿入
+          if !entries.is_empty() {
+              self.transient.insert_bulk_owned(entries.drain(..));
+          }
+
+          Ok(())
+      }
+      ```
+
+      【考慮事項】
+      - MAX_BULK_INSERT ごとにバッファをフラッシュしてメモリ増加を抑制
+      - メモリ使用量の増加に注意（bulk_index のサイズ次第）
+
+    methods:
+      - name: "merge_bulk_ngram_index"
+        signature: "fn merge_bulk_ngram_index(&mut self, bulk_index: &PersistentHashMap<String, TaskIdCollection>) -> Result<()>"
+        description: |
+          bulk_index の全エントリを収集し、insert_bulk_owned で一括挿入する。
+
+          【アルゴリズム】
+          1. bulk_index.iter() で全エントリを走査
+          2. 各エントリについて compute_merged_posting_list_sorted でマージ
+          3. (key, merged_posting_list) を Vec に収集
+          4. MAX_BULK_INSERT ごとに insert_bulk_owned で挿入
+
+        examples:
+          - description: "bulk_index の一括マージ"
+            code: |
+              let mut builder = SearchIndexBulkBuilder::new();
+              builder.merge_bulk_ngram_index(&bulk_index)?;
+
+    implementations:
+      - type: "SearchIndexBulkBuilder"
+        description: |
+          merge_bulk_ngram_index を bulk 挿入経路に変更。
+
+          【期待される効果】
+          - insert 関連の COW を削減（Iterator 走査コストは残る）
+          - insert_into_bitmap_node_cow（13.37%）の削減
+          - drop_in_place<Vec<ChildSlot>>（14.31%）の削減
+
+  # ======================================================================
+  # 4. merge_ngram_delta_bulk のフォールバック対策
+  # ======================================================================
+  - id: REQ-TBGTCE-004
+    name: "merge_ngram_delta_bulk の MAX_BULK_INSERT 超過時のチャンク挿入"
+    description: |
+      merge_ngram_delta_bulk が MAX_BULK_INSERT を超過した場合、
+      個別 insert にフォールバックし、COW が増える。
+
+      【問題箇所】
+      - benches/api/src/api/query.rs:5360 付近のフォールバック分岐
+
+      【改善方針】
+      MAX_BULK_INSERT を超過した場合でも、チャンク収集して
+      insert_bulk_owned を複数回呼び出す。
+      これにより、per-key の COW オーバーヘッドを削減する。
+
+      注意: ngram.clone() は delta が借用参照（&HashMap）のため必要。
+      delta を owned で受け取れる場合は into_iter() で clone を回避可能。
+
+      【insert_bulk_owned の正当性前提】
+      REQ-TBGTCE-003 と同様の正当性前提が適用される：
+
+      1. キー重複時の挙動: last-wins（compute_merged_posting_list_sorted でマージ済み）
+      2. 挿入順序の独立性（論理的同値）: 同一キー/値セットで論理的に等価な結果
+      3. 結果の安定性: insert_bulk_owned と逐次 insert は等価
+
+      【アルゴリズム（借用版）】
+      ```rust
+      fn merge_ngram_delta_bulk(
+          &mut self,
+          delta: &HashMap<String, Vec<TaskId>>,
+      ) -> Result<()> {
+          let mut entries = Vec::with_capacity(MAX_BULK_INSERT);
+          for (ngram, task_ids) in delta.iter() {
+              // compute_merged_posting_list_sorted で既存とのマージを実施
+              // → 重複キーは発生しない（マージ済み）
+              let merged = self.compute_merged_posting_list_sorted(ngram, task_ids)?;
+              // delta が借用参照のため clone が必要
+              entries.push((ngram.clone(), merged));
+              if entries.len() == MAX_BULK_INSERT {
+                  self.transient.insert_bulk_owned(entries.drain(..));
+              }
+          }
+
+          // 残りを一括挿入
+          if !entries.is_empty() {
+              self.transient.insert_bulk_owned(entries.drain(..));
+          }
+
+          Ok(())
+      }
+      ```
+
+    methods:
+      - name: "merge_ngram_delta_bulk"
+        signature: "fn merge_ngram_delta_bulk(&mut self, delta: &HashMap<String, Vec<TaskId>>) -> Result<()>"
+        description: |
+          delta の全エントリをチャンク収集し、insert_bulk_owned で挿入。
+
+          【アルゴリズム】
+          1. delta.iter() で全エントリを走査
+          2. 各エントリについて compute_merged_posting_list_sorted でマージ
+          3. (key, merged_posting_list) を Vec に収集
+          4. MAX_BULK_INSERT でバッファをフラッシュ
+
+        examples:
+          - description: "delta の一括マージ"
+            code: |
+              let mut builder = SearchIndexBulkBuilder::new();
+              builder.merge_ngram_delta_bulk(&delta)?;
+
+    implementations:
+      - type: "SearchIndexBulkBuilder"
+        description: |
+          MAX_BULK_INSERT 超過時のフォールバックを削除し、チャンク挿入に変更。
+
+          【期待される効果】
+          - 大規模バッチ時の COW 回数低減
+
+  # ======================================================================
+  # 5. SmallVec の inline 容量最適化
+  # ======================================================================
+  - id: REQ-TBGTCE-005
+    name: "ChildArray/CollisionArray の inline 容量見直し"
+    description: |
+      SmallVec::try_grow が 4.68% を占めており、inline 容量（ChildArray: 6、CollisionArray: 4）
+      を超過した場合の再アロケーションが多発している。
+
+      【問題箇所】
+      - src/persistent/hashmap.rs:222（ChildArray の inline 容量: 6）
+      - src/persistent/hashmap.rs:228（CollisionArray の inline 容量: 4）
+
+      【改善方針】
+      本要件は 2 段階で実施する：
+
+      Phase 1: 計測（本フェーズ）
+      - bitmap の occupancy（ビット数）の分布を計測
+      - 計測結果に基づいて最適な inline 容量を決定
+      - 変更は Phase 2 で実施
+
+      Phase 2: 実装（計測結果に基づく）
+      - 計測結果が以下のゲート条件を満たす場合のみ実装
+      - 変更しない場合は本要件をクローズし、理由を記録
+
+      【ゲート条件】
+      以下の条件をすべて満たす場合のみ inline 容量を変更する：
+
+      1. occupancy 分布条件:
+         - 90th percentile の occupancy が現在の inline 容量を超過していること
+         - 例: ChildArray で 90th percentile が 7 以上なら変更を検討
+
+      2. メモリ増加条件:
+         - inline 容量の増加によるメモリ使用量の増加が許容範囲内であること
+         - 目安: 全体メモリ使用量の増加が 10% 以下
+
+      3. 性能改善条件:
+         - ベンチマークで SmallVec::try_grow の削減が確認できること
+         - 目安: try_grow の呼び出し回数が 50% 以上削減
+
+      【調査方法】
+      1. プロファイリングで bitmap の occupancy 分布を取得
+         ```rust
+         // 計測用コード（debug ビルドのみ）
+         #[cfg(debug_assertions)]
+         fn record_occupancy(bitmap: u32) {
+             OCCUPANCY_HISTOGRAM.lock().unwrap()
+                 .entry(bitmap.count_ones() as usize)
+                 .and_modify(|c| *c += 1)
+                 .or_insert(1);
+         }
+         ```
+      2. 90th percentile の occupancy を算出
+      3. ゲート条件を確認
+      4. 条件を満たす場合のみ Phase 2 を実施
+
+      【暫定案（計測結果に応じて変更）】
+      - ChildArray: 6 → 8（90th percentile が 7 以上の場合）
+      - CollisionArray: 4 → 6（90th percentile が 5 以上の場合）
+
+      【事前確保（即時実装可能）】
+      inline 容量の変更とは独立して、以下の最適化は即時実装可能：
+      - bitmap の occupancy に基づいて ChildArray を事前確保
+      - これにより try_grow の呼び出しを削減（inline 容量内でも効果あり）
+
+      ```rust
+      let occupancy = bitmap.count_ones() as usize;
+      let mut children = ChildArray::with_capacity(occupancy);
+      ```
+
+    methods:
+      - name: "ChildArray::with_capacity"
+        signature: "fn with_capacity(capacity: usize) -> Self"
+        description: |
+          指定した容量で ChildArray を作成。
+          bitmap の occupancy に基づいて事前確保する。
+
+        examples:
+          - description: "bitmap の occupancy に基づく事前確保"
+            code: |
+              let occupancy = bitmap.count_ones() as usize;
+              let mut children = ChildArray::with_capacity(occupancy);
+
+    implementations:
+      - type: "Phase 1: 計測"
+        description: |
+          occupancy 分布の計測とゲート条件の確認。
+
+      - type: "Phase 2: 実装（条件付き）"
+        description: |
+          ゲート条件を満たす場合のみ inline 容量を変更。
+
+          - ChildArray: 6 → 8（条件を満たす場合）
+          - CollisionArray: 4 → 6（条件を満たす場合）
+
+      - type: "BitmapNode（即時実装）"
+        description: |
+          ChildArray の生成時に bitmap の occupancy に基づいて事前確保する。
+          inline 容量の変更とは独立して実装可能。
+
+          【期待される効果】
+          - SmallVec::try_grow（4.68%）の削減
+
+  # ======================================================================
+  # 6. [unknown] ホットスポットの解明
+  # ======================================================================
+  - id: REQ-TBGTCE-006
+    name: "[unknown] ホットスポット（10.74%）の特定"
+    description: |
+      プロファイリング結果で [unknown] が 10.74% を占めているが、
+      シンボル未解決のためホットパスが特定できない。
+
+      【原因の可能性】
+      1. デバッグシンボルの欠如（リリースビルドでシンボルが削除されている）
+      2. std/alloc のインライン化（memcpy、memmove、malloc など）
+      3. 動的ディスパッチ（trait object の vtable 経由の呼び出し）
+
+      【改善方針】
+      デバッグシンボル付きでリリースビルドを行い、再プロファイルする。
+
+      【ビルドオプション】
+      ```toml
+      [profile.release-with-debug]
+      inherits = "release"
+      debug = true
+      ```
+
+      【プロファイリング方法】
+      ```bash
+      cargo build --profile release-with-debug
+      perf record --call-graph dwarf ./target/release-with-debug/benchmark
+      perf report
+      ```
+
+    methods:
+      - name: "profile_with_debug_symbols"
+        signature: "N/A（調査タスク）"
+        description: |
+          デバッグシンボル付きでプロファイリングを実施し、[unknown] の正体を特定。
+
+    implementations:
+      - type: "N/A（調査タスク）"
+        description: |
+          プロファイル設定の追加とベンチマークの再実行。
+
+          【期待される効果】
+          - [unknown] の原因特定
+          - 追加の最適化余地の発見
+
+  # ======================================================================
+  # 7. 検証と測定
+  # ======================================================================
+  - id: REQ-TBGTCE-007
+    name: "最適化効果の測定と検証"
+    description: |
+      各最適化の効果を定量的に測定し、本フェーズ（Phase 1）の目標値への到達度を確認する。
+
+      【測定項目】
+      1. RPS（Requests Per Second）
+      2. P99 latency
+      3. プロファイリング結果（各関数の CPU 時間割合）
+      4. メモリ使用量
+      5. COW 発生回数（ReferenceCounter::make_mut の clone 回数）
+
+      【測定方法】
+      ```bash
+      # ベンチマーク実行
+      cargo bench --bench api_bench -- tasks_bulk
+
+      # プロファイリング
+      perf record --call-graph dwarf ./target/release/benchmark
+      perf report
+
+      # メモリ使用量
+      valgrind --tool=massif ./target/release/benchmark
+      ```
+
+      【本フェーズ（Phase 1）の検証基準】
+      - RPS: 52+ req/s（現在: 41.00 req/s、1.27x 改善）
+      - P99 latency: < 22秒（現在: 27.34秒、1.27x 改善）
+      - COW 関連のホットスポット: 42% → < 25%
+      - [unknown]: 10.74% → 特定済み（原因分析完了）
+
+      【将来フェーズ（Phase 2+）の検証基準】
+      - RPS: 200+ req/s
+      - P99 latency: < 5秒
+      - 前提: [unknown] 最適化、ソート系・I/O 改善が完了していること
+
+      【フェーズ移行条件】
+      - 本フェーズの検証基準を満たした場合、Phase 2 の要件定義を起票
+      - 未達の場合は残存ボトルネックを分析し、追加要件を起票
+
+    methods:
+      - name: "measure_optimization_impact"
+        signature: "N/A（測定タスク）"
+        description: |
+          最適化前後のベンチマーク結果を比較し、効果を定量化。
+
+    implementations:
+      - type: "N/A（測定タスク）"
+        description: |
+          ベンチマークとプロファイリングの自動化スクリプトを作成。
+
+  # ======================================================================
+  # 8. 正当性・構造共有の検証
+  # ======================================================================
+  - id: REQ-TBGTCE-008
+    name: "世代トークン/構造共有の正当性検証"
+    description: |
+      in-place 更新の拡大は構造共有の破壊リスクがあるため、
+      PersistentHashMap の参照透過性を崩さないことを明示的に検証する。
+
+      【検証観点】
+      1. insert_without_cow と insert の結果が一致すること
+      2. transient での変更が元の PersistentHashMap に影響しないこと
+      3. 共有ノードは必ず COW されること（参照カウントが 1 の場合のみ in-place）
+      4. 新規/更新ノードの generation が transient.generation に揃うこと
+
+    methods:
+      - name: "validate_generation_invariants"
+        signature: "N/A（テストタスク）"
+        description: |
+          参照透過性と世代トークンの不変条件をテストで保証する。
+
+    implementations:
+      - type: "tests (persistent/hashmap.rs)"
+        description: |
+          既存テストに加えて、構造共有の破壊が起きていないことを検証するテストを追加。
+
+# 非機能要件
+non_functional_requirements:
+  performance:
+    # 本フェーズの目標（COW 削減のみ）
+    phase_1_targets:
+      - metric: "RPS"
+        current: "41.00 req/s"
+        target: "52+ req/s（1.27x 改善）"
+        rationale: "Amdahl の法則: COW 42% を 50% 削減 → 全体 1.27x 改善"
+      - metric: "P99 latency"
+        current: "27.34秒"
+        target: "< 22秒（1.27x 改善）"
+        rationale: "COW 削減による比例的改善"
+      - metric: "COW 関連のホットスポット"
+        current: "42%"
+        target: "< 25%"
+        rationale: "insert_into_bitmap_node_cow と drop_in_place の削減"
+
+    # 将来フェーズの目標（ソート、I/O、[unknown] 最適化を含む）
+    future_targets:
+      - metric: "RPS"
+        target: "200+ req/s"
+        prerequisite: "[unknown] ホットスポットの特定・最適化、ソート系・I/O 改善"
+      - metric: "P99 latency"
+        target: "< 5秒"
+        prerequisite: "[unknown] ホットスポットの特定・最適化、ソート系・I/O 改善"
+
+    # 調査項目（本フェーズで特定、次フェーズで対応）
+    investigation:
+      - "[unknown] ホットスポット（10.74%）の特定と原因分析"
+      - "ソート関連（約9%）の最適化可能性調査"
+      - "malloc/realloc/cfree（約4%）の削減可能性調査"
+
+  compatibility:
+    - "既存の PersistentHashMap/TransientHashMap API との互換性を維持"
+    - "insert_bulk_owned の既存実装を拡張（破壊的変更なし）"
+
+  testing:
+    - "最適化前後のベンチマーク結果を比較"
+    - "プロパティベーステストで正しさを保証"
+    - "世代トークン/構造共有の不変条件テストを追加"
+    - "既存のテストスイートがすべてパス"
+
+# 将来の拡張
+future_extensions:
+  - id: "EXT-TBGTCE-001"
+    name: "完全な再構築経路の追加"
+    description: |
+      bulk_index 全体を再構築する経路を追加し、既存マップとのマージを完全に回避する。
+
+      【アルゴリズム】
+      ```rust
+      fn rebuild_from_bulk_index(
+          bulk_index: &PersistentHashMap<String, TaskIdCollection>,
+      ) -> TransientHashMap<String, TaskIdCollection> {
+          let mut entries = Vec::with_capacity(bulk_index.len());
+          for (key, value) in bulk_index.iter() {
+              entries.push((key.clone(), value.clone()));
+          }
+          TransientHashMap::from_sorted_entries(entries)
+      }
+      ```
+
+      これにより、COW を完全に回避できる。
+
+    rationale: |
+      現時点では merge が必要なため、再構築経路は不要。
+      将来的に merge 不要なケースが増えた場合に検討する。
+
+  - id: "EXT-TBGTCE-002"
+    name: "posting list のソート済み収集"
+    description: |
+      SearchIndexBulkBuilder::build のソート処理（約9%）を削減するため、
+      posting list をソート済みで収集する設計に変更する。
+
+      【アルゴリズム】
+      - delta を TaskId の昇順で収集
+      - merge 時にソート済み前提で O(n) マージ
+
+    rationale: |
+      現時点では COW 削減が優先。ソート最適化は次フェーズで検討。
+
+  - id: "EXT-TBGTCE-003"
+    name: "メモリアロケータの変更"
+    description: |
+      malloc/realloc/cfree（約4%）を削減するため、jemalloc や mimalloc などの
+      高速アロケータに変更する。
+
+      【設定例】
+      ```toml
+      [dependencies]
+      jemallocator = "0.5"
+      ```
+
+      ```rust
+      #[global_allocator]
+      static ALLOC: jemallocator::Jemalloc = jemallocator::Jemalloc;
+      ```
+
+    rationale: |
+      現時点ではアルゴリズムレベルの最適化が優先。
+      アロケータ変更は最後の手段として検討。

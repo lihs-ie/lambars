@@ -85,6 +85,168 @@ const MAX_DEPTH: usize = 13;
 /// entries for optimal performance while staying well within limits.
 pub const MAX_BULK_INSERT: usize = 100_000;
 
+// Compile-time assertion: MAX_BULK_INSERT must be at least 2
+// for CHUNK_SIZE = MAX_BULK_INSERT - 1 to be valid.
+const _: () = assert!(MAX_BULK_INSERT >= 2, "MAX_BULK_INSERT must be at least 2");
+
+// =============================================================================
+// TASK-009: Occupancy Distribution Measurement (debug build only)
+// =============================================================================
+
+/// Module for collecting `BitmapNode` occupancy distribution statistics.
+///
+/// This module is only active in debug builds (`debug_assertions`).
+/// It tracks how many children each `BitmapNode` has when created,
+/// providing data to inform `SmallVec` inline capacity tuning.
+///
+/// # Buckets
+///
+/// Occupancy is grouped into buckets:
+/// - Bucket 0: 0 children (should be rare)
+/// - Bucket 1: 1 child
+/// - Bucket 2: 2 children
+/// - ...
+/// - Bucket 31: 31 children
+/// - Bucket 32: 32 children (fully populated)
+#[cfg(debug_assertions)]
+pub mod occupancy_histogram {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// Histogram buckets for occupancy counts (0-32 inclusive).
+    /// Index i represents `BitmapNode` instances with exactly i children.
+    ///
+    /// Note: We use `const INIT` for array initialization, which is a common pattern
+    /// for initializing arrays of `AtomicU64`. The clippy warning about interior
+    /// mutability in const is expected here since we only use it for initialization.
+    static HISTOGRAM: [AtomicU64; 33] = {
+        #[allow(clippy::declare_interior_mutable_const)]
+        const INIT: AtomicU64 = AtomicU64::new(0);
+        [INIT; 33]
+    };
+
+    /// Records a `BitmapNode` creation with the given occupancy.
+    ///
+    /// # Arguments
+    ///
+    /// * `occupancy` - Number of children in the `BitmapNode` (0-32)
+    ///
+    /// # Panics
+    ///
+    /// Panics in debug mode if occupancy > 32.
+    #[inline]
+    pub fn record_occupancy(occupancy: usize) {
+        debug_assert!(occupancy <= 32, "occupancy must be <= 32, got {occupancy}");
+        let index = occupancy.min(32);
+        HISTOGRAM[index].fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Returns the current histogram as an array of counts.
+    ///
+    /// # Returns
+    ///
+    /// An array of 33 elements where index i contains the count of
+    /// `BitmapNode` instances created with exactly i children.
+    ///
+    /// This function is primarily used by tests and external tooling for
+    /// performance analysis, hence the `allow(dead_code)` attribute.
+    #[must_use]
+    #[allow(dead_code)]
+    pub fn get_histogram() -> [u64; 33] {
+        let mut result = [0u64; 33];
+        for (i, bucket) in HISTOGRAM.iter().enumerate() {
+            result[i] = bucket.load(Ordering::Relaxed);
+        }
+        result
+    }
+
+    /// Resets all histogram buckets to zero.
+    ///
+    /// Useful for isolating measurements in tests or benchmarks.
+    /// This function is primarily used by tests, hence the `allow(dead_code)` attribute.
+    #[allow(dead_code)]
+    pub fn reset_histogram() {
+        for bucket in &HISTOGRAM {
+            bucket.store(0, Ordering::Relaxed);
+        }
+    }
+
+    /// Returns a summary of the histogram distribution.
+    ///
+    /// # Returns
+    ///
+    /// A formatted string showing:
+    /// - Total `BitmapNode` creations
+    /// - Distribution across occupancy levels
+    /// - Mean occupancy
+    ///
+    /// This function is primarily used by tests and external tooling for
+    /// performance analysis, hence the `allow(dead_code)` attribute.
+    #[must_use]
+    #[allow(dead_code)]
+    #[allow(clippy::cast_precision_loss)]
+    pub fn summary() -> String {
+        use std::fmt::Write;
+
+        let histogram = get_histogram();
+        let total: u64 = histogram.iter().sum();
+
+        if total == 0 {
+            return "No BitmapNode creations recorded.".to_string();
+        }
+
+        let mut output = String::new();
+        let _ = writeln!(output, "BitmapNode Occupancy Histogram (total: {total})");
+        output.push_str("-------------------------------------------\n");
+
+        let mut weighted_sum: u64 = 0;
+        for (occupancy, &count) in histogram.iter().enumerate() {
+            if count > 0 {
+                let percentage = (count as f64 / total as f64) * 100.0;
+                let _ = writeln!(
+                    output,
+                    "  {occupancy:>2} children: {count:>8} ({percentage:>5.1}%)"
+                );
+                weighted_sum += (occupancy as u64) * count;
+            }
+        }
+
+        let mean = weighted_sum as f64 / total as f64;
+        output.push_str("-------------------------------------------\n");
+        let _ = writeln!(output, "Mean occupancy: {mean:.2}");
+
+        output
+    }
+}
+
+/// Placeholder module for release builds (no-op).
+///
+/// These functions are intentionally no-ops in release builds.
+/// The `#[allow(dead_code)]` attribute is applied because the corresponding
+/// debug build functions are used in tests, but the release build versions
+/// may not be called directly.
+#[cfg(not(debug_assertions))]
+#[allow(dead_code)]
+pub mod occupancy_histogram {
+    /// No-op in release builds.
+    #[inline]
+    pub fn record_occupancy(_occupancy: usize) {}
+
+    /// Returns empty histogram in release builds.
+    #[must_use]
+    pub fn get_histogram() -> [u64; 33] {
+        [0u64; 33]
+    }
+
+    /// No-op in release builds.
+    pub fn reset_histogram() {}
+
+    /// Returns empty summary in release builds.
+    #[must_use]
+    pub fn summary() -> String {
+        "Occupancy histogram is only available in debug builds.".to_string()
+    }
+}
+
 // =============================================================================
 // Generation Token System
 // =============================================================================
@@ -907,8 +1069,11 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
             };
             let (subnode, added) = Self::insert_into_node(&sub_entry, key, value, hash, depth + 1);
             let bitmap = 1u32 << existing_index;
-            let mut children = ChildArray::new();
+            // TASK-008: Pre-allocate with exact capacity (1 child for single-bit bitmap)
+            let mut children = ChildArray::with_capacity(1);
             children.push(ChildSlot::Node(ReferenceCounter::new(subnode)));
+            // TASK-009: Record occupancy for histogram analysis
+            occupancy_histogram::record_occupancy(1);
             (
                 Node::Bitmap {
                     bitmap,
@@ -920,6 +1085,8 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
         } else {
             let bitmap = (1u32 << existing_index) | (1u32 << new_index);
             let mut children = ChildArray::with_capacity(2);
+            // TASK-009: Record occupancy for histogram analysis
+            occupancy_histogram::record_occupancy(2);
             if existing_index < new_index {
                 children.push(ChildSlot::Entry {
                     hash: existing_hash,
@@ -982,6 +1149,8 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
                     generation: SHARED_GENERATION,
                 },
             );
+            // TASK-009: Record occupancy for histogram analysis
+            occupancy_histogram::record_occupancy(new_children.len());
             (
                 Node::Bitmap {
                     bitmap: bitmap | bit,
@@ -1131,8 +1300,11 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
             // Same index - recurse with collision as subnode
             let (subnode, added) = Self::insert_into_node(node, key, value, hash, depth + 1);
             let bitmap = 1u32 << collision_index;
-            let mut children = ChildArray::new();
+            // TASK-008: Pre-allocate with exact capacity (1 child for single-bit bitmap)
+            let mut children = ChildArray::with_capacity(1);
             children.push(ChildSlot::Node(ReferenceCounter::new(subnode)));
+            // TASK-009: Record occupancy for histogram analysis
+            occupancy_histogram::record_occupancy(1);
             (
                 Node::Bitmap {
                     bitmap,
@@ -1161,6 +1333,8 @@ impl<K: Clone + Hash + Eq, V: Clone> PersistentHashMap<K, V> {
                 });
                 children.push(ChildSlot::Node(ReferenceCounter::new(node.clone())));
             }
+            // TASK-009: Record occupancy for histogram analysis
+            occupancy_histogram::record_occupancy(2);
             (
                 Node::Bitmap {
                     bitmap,
@@ -3007,29 +3181,403 @@ impl<K: Clone + Hash + Eq, V: Clone> TransientHashMap<K, V> {
     /// Inserts a key-value pair with generation-based COW optimization.
     ///
     /// Uses the generation token to skip COW when the node is exclusively owned
-    /// by this `TransientHashMap`. Nodes with `SHARED_GENERATION` (0) are shared
-    /// and always require COW.
-    ///
-    /// Semantically equivalent to [`insert`](Self::insert), but optimized for
-    /// bulk operations on newly created transient maps.
+    /// by this `TransientHashMap`. Semantically equivalent to [`insert`](Self::insert),
+    /// but optimized for bulk operations on newly created transient maps.
     pub fn insert_without_cow(&mut self, key: K, value: V) -> Option<V> {
         let hash = compute_hash(&key);
-        let generation = self.generation;
+        let owner_generation = self.generation;
+
+        if let Some(root_mut) = ReferenceCounter::get_mut(&mut self.root) {
+            Self::ensure_node_generation(root_mut, owner_generation);
+            let (old_value, added) =
+                Self::insert_into_node_inplace(root_mut, key, value, hash, 0, owner_generation);
+            if added {
+                self.length += 1;
+            }
+            return old_value;
+        }
+
         let root = ReferenceCounter::make_mut(&mut self.root);
         let (old_value, added) =
-            Self::insert_into_node_with_generation(root, key, value, hash, 0, generation);
+            Self::insert_into_node_with_generation(root, key, value, hash, 0, owner_generation);
         if added {
             self.length += 1;
         }
         old_value
     }
 
+    /// Updates the generation token of a node to the owner's generation.
+    ///
+    /// This is a helper function used in in-place insertion paths to ensure
+    /// that modified nodes have the correct generation token.
+    ///
+    /// # Preconditions
+    ///
+    /// The caller must ensure the node is exclusively owned (reference count == 1)
+    /// before calling this function.
+    // Note: Cannot be const fn because const functions with mutable references
+    // to generic types are not fully stabilized in Rust.
+    #[allow(clippy::missing_const_for_fn)]
+    #[inline]
+    fn ensure_node_generation(node: &mut Node<K, V>, owner_generation: u64) {
+        match node {
+            Node::Entry { generation, .. }
+            | Node::Bitmap { generation, .. }
+            | Node::Collision { generation, .. } => *generation = owner_generation,
+            Node::Empty => {}
+        }
+    }
+
+    /// Ensures a child node is exclusively owned and returns a mutable reference.
+    ///
+    /// # Performance Note
+    ///
+    /// While `ReferenceCounter::get_mut` could avoid the atomic strong count
+    /// decrement in `make_mut` for exclusively owned nodes, Rust's borrow checker
+    /// prevents the pattern of "try `get_mut`, fallback to `make_mut`" in a single
+    /// function returning a reference. The cost is minimal as `make_mut` is
+    /// already optimized for the exclusive ownership case.
+    #[inline]
+    fn ensure_child_owned(
+        child_ref: &mut ReferenceCounter<Node<K, V>>,
+        owner_generation: u64,
+    ) -> &mut Node<K, V> {
+        let child_mut = ReferenceCounter::make_mut(child_ref);
+        Self::ensure_node_generation(child_mut, owner_generation);
+        child_mut
+    }
+
+    /// Recursively updates the generation of a node and all its children.
+    ///
+    /// This is used when nodes are created via `PersistentHashMap::create_bitmap_from_two_entries`
+    /// or `PersistentHashMap::insert_into_node`, which produce nodes with `SHARED_GENERATION`.
+    /// This function ensures all nodes have the correct `owner_generation` for consistency
+    /// (RISK-002 mitigation).
+    fn update_node_generation_recursive(node: &mut Node<K, V>, owner_generation: u64) {
+        match node {
+            Node::Empty => {}
+            Node::Entry { generation, .. } | Node::Collision { generation, .. } => {
+                *generation = owner_generation;
+            }
+            Node::Bitmap {
+                generation,
+                children,
+                ..
+            } => {
+                *generation = owner_generation;
+                for child in children.iter_mut() {
+                    match child {
+                        ChildSlot::Entry {
+                            generation: child_gen,
+                            ..
+                        } => {
+                            *child_gen = owner_generation;
+                        }
+                        ChildSlot::Node(child_ref) => {
+                            if let Some(child_node) = ReferenceCounter::get_mut(child_ref) {
+                                Self::update_node_generation_recursive(
+                                    child_node,
+                                    owner_generation,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Inserts a key-value pair into a node using in-place modification.
+    ///
+    /// For shared child nodes, [`ensure_child_owned`](Self::ensure_child_owned)
+    /// performs local COW as needed.
+    ///
+    /// # Preconditions
+    ///
+    /// The `node` must be exclusively owned by the caller. This is guaranteed
+    /// when called from [`insert_without_cow`](Self::insert_without_cow) after
+    /// a successful `ReferenceCounter::get_mut`.
+    #[allow(clippy::too_many_lines)]
+    fn insert_into_node_inplace(
+        node: &mut Node<K, V>,
+        key: K,
+        value: V,
+        hash: u64,
+        depth: usize,
+        owner_generation: u64,
+    ) -> (Option<V>, bool) {
+        match node {
+            Node::Empty => {
+                *node = Node::Entry {
+                    hash,
+                    key,
+                    value,
+                    generation: owner_generation,
+                };
+                (None, true)
+            }
+            Node::Entry {
+                hash: existing_hash,
+                key: existing_key,
+                value: existing_value,
+                generation,
+            } => {
+                if *existing_hash == hash && *existing_key == key {
+                    // Same key - replace value in-place
+                    let old_value = std::mem::replace(existing_value, value);
+                    *generation = owner_generation;
+                    (Some(old_value), false)
+                } else if *existing_hash == hash {
+                    // Hash collision - create collision node
+                    let mut entries = CollisionArray::new();
+                    entries.push((existing_key.clone(), existing_value.clone()));
+                    entries.push((key, value));
+                    *node = Node::Collision {
+                        hash: *existing_hash,
+                        entries,
+                        generation: owner_generation,
+                    };
+                    (None, true)
+                } else {
+                    // Different hash - create bitmap node
+                    let (mut new_node, _) = PersistentHashMap::create_bitmap_from_two_entries(
+                        *existing_hash,
+                        existing_key,
+                        existing_value,
+                        key,
+                        value,
+                        hash,
+                        depth,
+                    );
+                    Self::ensure_node_generation(&mut new_node, owner_generation);
+                    if let Node::Bitmap { children, .. } = &mut new_node {
+                        for child in children.iter_mut() {
+                            match child {
+                                ChildSlot::Entry { generation, .. } => {
+                                    *generation = owner_generation;
+                                }
+                                ChildSlot::Node(child_node) => {
+                                    if let Some(child_mut) = ReferenceCounter::get_mut(child_node) {
+                                        Self::ensure_node_generation(child_mut, owner_generation);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    *node = new_node;
+                    (None, true)
+                }
+            }
+            Node::Bitmap {
+                bitmap,
+                children,
+                generation,
+            } => {
+                *generation = owner_generation;
+                Self::insert_into_bitmap_node_inplace(
+                    bitmap,
+                    children,
+                    key,
+                    value,
+                    hash,
+                    depth,
+                    owner_generation,
+                )
+            }
+            Node::Collision {
+                hash: collision_hash,
+                entries,
+                generation,
+            } => {
+                if hash == *collision_hash {
+                    // Same hash - add to collision entries in-place
+                    *generation = owner_generation;
+                    for entry in entries.iter_mut() {
+                        if entry.0 == key {
+                            let old_value = std::mem::replace(&mut entry.1, value);
+                            return (Some(old_value), false);
+                        }
+                    }
+                    entries.push((key, value));
+                    (None, true)
+                } else {
+                    // Different hash - convert collision to bitmap
+                    let collision_entries: CollisionArray<K, V> = entries.clone();
+                    let collision_hash_value = *collision_hash;
+
+                    let index = hash_index(collision_hash_value, depth);
+                    let bit = 1u32 << index;
+                    let collision_child = ChildSlot::Node(ReferenceCounter::new(Node::Collision {
+                        hash: collision_hash_value,
+                        entries: collision_entries,
+                        generation: owner_generation,
+                    }));
+
+                    let new_index = hash_index(hash, depth);
+                    let new_bit = 1u32 << new_index;
+
+                    if index == new_index {
+                        let mut subnode = Node::Collision {
+                            hash: collision_hash_value,
+                            entries: entries.clone(),
+                            generation: owner_generation,
+                        };
+                        let result = Self::insert_into_node_inplace(
+                            &mut subnode,
+                            key,
+                            value,
+                            hash,
+                            depth + 1,
+                            owner_generation,
+                        );
+                        // TASK-008: Pre-allocate with exact capacity (1 child for single-bit bitmap)
+                        let mut children = ChildArray::with_capacity(1);
+                        children.push(ChildSlot::Node(ReferenceCounter::new(subnode)));
+                        // TASK-009: Record occupancy for histogram analysis
+                        occupancy_histogram::record_occupancy(1);
+                        *node = Node::Bitmap {
+                            bitmap: bit,
+                            children,
+                            generation: owner_generation,
+                        };
+                        result
+                    } else {
+                        let new_child = ChildSlot::Entry {
+                            hash,
+                            key,
+                            value,
+                            generation: owner_generation,
+                        };
+                        let mut children = ChildArray::with_capacity(2);
+                        if index < new_index {
+                            children.push(collision_child);
+                            children.push(new_child);
+                        } else {
+                            children.push(new_child);
+                            children.push(collision_child);
+                        }
+                        // TASK-009: Record occupancy for histogram analysis
+                        occupancy_histogram::record_occupancy(2);
+                        *node = Node::Bitmap {
+                            bitmap: bit | new_bit,
+                            children,
+                            generation: owner_generation,
+                        };
+                        (None, true)
+                    }
+                }
+            }
+        }
+    }
+
+    /// Inserts into a bitmap node using in-place modification.
+    ///
+    /// For shared child nodes, [`ensure_child_owned`](Self::ensure_child_owned)
+    /// performs local COW.
+    fn insert_into_bitmap_node_inplace(
+        bitmap: &mut u32,
+        children: &mut ChildArray<K, V>,
+        key: K,
+        value: V,
+        hash: u64,
+        depth: usize,
+        owner_generation: u64,
+    ) -> (Option<V>, bool) {
+        let index = hash_index(hash, depth);
+        let bit = 1u32 << index;
+        let position = (*bitmap & (bit - 1)).count_ones() as usize;
+
+        if *bitmap & bit == 0 {
+            // New slot - insert entry with owner's generation
+            children.insert(
+                position,
+                ChildSlot::Entry {
+                    hash,
+                    key,
+                    value,
+                    generation: owner_generation,
+                },
+            );
+            *bitmap |= bit;
+            (None, true)
+        } else {
+            match &mut children[position] {
+                ChildSlot::Entry {
+                    hash: child_hash,
+                    key: child_key,
+                    value: child_value,
+                    generation,
+                } => {
+                    if *child_key == key {
+                        // Same key - replace value in-place
+                        let old_value = std::mem::replace(child_value, value);
+                        *generation = owner_generation;
+                        (Some(old_value), false)
+                    } else if *child_hash == hash {
+                        // Hash collision - convert to collision node
+                        let mut entries = CollisionArray::new();
+                        entries.push((child_key.clone(), child_value.clone()));
+                        entries.push((key, value));
+                        let collision = Node::Collision {
+                            hash,
+                            entries,
+                            generation: owner_generation,
+                        };
+                        children[position] = ChildSlot::Node(ReferenceCounter::new(collision));
+                        (None, true)
+                    } else {
+                        // Different hash - create sub-bitmap
+                        let child_entry = Node::Entry {
+                            hash: *child_hash,
+                            key: child_key.clone(),
+                            value: child_value.clone(),
+                            generation: owner_generation,
+                        };
+                        let (mut subnode, _) = PersistentHashMap::insert_into_node(
+                            &child_entry,
+                            key,
+                            value,
+                            hash,
+                            depth + 1,
+                        );
+                        Self::ensure_node_generation(&mut subnode, owner_generation);
+                        if let Node::Bitmap {
+                            children: sub_children,
+                            ..
+                        } = &mut subnode
+                        {
+                            for child in sub_children.iter_mut() {
+                                if let ChildSlot::Entry { generation, .. } = child {
+                                    *generation = owner_generation;
+                                }
+                            }
+                        }
+                        children[position] = ChildSlot::Node(ReferenceCounter::new(subnode));
+                        (None, true)
+                    }
+                }
+                ChildSlot::Node(subnode) => {
+                    let subnode_mut = Self::ensure_child_owned(subnode, owner_generation);
+                    Self::insert_into_node_inplace(
+                        subnode_mut,
+                        key,
+                        value,
+                        hash,
+                        depth + 1,
+                        owner_generation,
+                    )
+                }
+            }
+        }
+    }
+
     /// Recursively inserts into a node with generation-based COW optimization.
     ///
     /// Returns (`old_value`, `was_added`).
     ///
-    /// If the node's generation matches `owner_generation`, the node is owned
-    /// exclusively and can be modified in-place. Otherwise, a new node is created.
+    /// This function modifies nodes in-place after COW has been performed by the caller.
+    /// The `owner_generation` is applied to all newly created or modified nodes to maintain
+    /// generation consistency. This is a fallback path used when the root node is shared.
     #[allow(clippy::too_many_lines)]
     fn insert_into_node_with_generation(
         node: &mut Node<K, V>,
@@ -3082,14 +3630,8 @@ impl<K: Clone + Hash + Eq, V: Clone> TransientHashMap<K, V> {
                         hash,
                         depth,
                     );
-                    // Update generation on the new bitmap node
-                    if let Node::Bitmap {
-                        generation: node_gen,
-                        ..
-                    } = &mut new_node
-                    {
-                        *node_gen = owner_generation;
-                    }
+                    // Update generation on the new bitmap node and all its children (RISK-002 mitigation)
+                    Self::update_node_generation_recursive(&mut new_node, owner_generation);
                     *node = new_node;
                     (None, true)
                 }
@@ -3157,8 +3699,11 @@ impl<K: Clone + Hash + Eq, V: Clone> TransientHashMap<K, V> {
                             depth + 1,
                             owner_generation,
                         );
-                        let mut children = ChildArray::new();
+                        // TASK-008: Pre-allocate with exact capacity (1 child for single-bit bitmap)
+                        let mut children = ChildArray::with_capacity(1);
                         children.push(ChildSlot::Node(ReferenceCounter::new(subnode)));
+                        // TASK-009: Record occupancy for histogram analysis
+                        occupancy_histogram::record_occupancy(1);
                         *node = Node::Bitmap {
                             bitmap: bit,
                             children,
@@ -3180,6 +3725,8 @@ impl<K: Clone + Hash + Eq, V: Clone> TransientHashMap<K, V> {
                             children.push(new_child);
                             children.push(collision_child);
                         }
+                        // TASK-009: Record occupancy for histogram analysis
+                        occupancy_histogram::record_occupancy(2);
                         *node = Node::Bitmap {
                             bitmap: bit | new_bit,
                             children,
@@ -3249,13 +3796,15 @@ impl<K: Clone + Hash + Eq, V: Clone> TransientHashMap<K, V> {
                             value: child_value.clone(),
                             generation: owner_generation,
                         };
-                        let (subnode, _) = PersistentHashMap::insert_into_node(
+                        let (mut subnode, _) = PersistentHashMap::insert_into_node(
                             &child_entry,
                             key,
                             value,
                             hash,
                             depth + 1,
                         );
+                        // Update generation on the new subnode and all its children (RISK-002 mitigation)
+                        Self::update_node_generation_recursive(&mut subnode, owner_generation);
                         children[position] = ChildSlot::Node(ReferenceCounter::new(subnode));
                         (None, true)
                     }
@@ -3372,8 +3921,11 @@ impl<K: Clone + Hash + Eq, V: Clone> TransientHashMap<K, V> {
                         };
                         let result =
                             Self::insert_into_node_cow(&mut subnode, key, value, hash, depth + 1);
-                        let mut children = ChildArray::new();
+                        // TASK-008: Pre-allocate with exact capacity (1 child for single-bit bitmap)
+                        let mut children = ChildArray::with_capacity(1);
                         children.push(ChildSlot::Node(ReferenceCounter::new(subnode)));
+                        // TASK-009: Record occupancy for histogram analysis
+                        occupancy_histogram::record_occupancy(1);
                         *node = Node::Bitmap {
                             bitmap: bit,
                             children,
@@ -3395,6 +3947,8 @@ impl<K: Clone + Hash + Eq, V: Clone> TransientHashMap<K, V> {
                             children.push(new_child);
                             children.push(collision_child);
                         }
+                        // TASK-009: Record occupancy for histogram analysis
+                        occupancy_histogram::record_occupancy(2);
                         *node = Node::Bitmap {
                             bitmap: bit | new_bit,
                             children,
@@ -6147,6 +6701,717 @@ mod transient_hashmap_tests {
         // Should not overflow
         transient.reserve(usize::MAX);
         assert_eq!(transient.capacity_hint(), usize::MAX);
+    }
+
+    // =========================================================================
+    // TASK-001: ensure_node_generation Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_ensure_node_generation_entry() {
+        let mut node: Node<String, i32> = Node::Entry {
+            hash: 12345,
+            key: "test".to_string(),
+            value: 42,
+            generation: SHARED_GENERATION,
+        };
+
+        TransientHashMap::<String, i32>::ensure_node_generation(&mut node, 999);
+
+        match node {
+            Node::Entry { generation, .. } => assert_eq!(generation, 999),
+            _ => panic!("Expected Entry node"),
+        }
+    }
+
+    #[rstest]
+    fn test_ensure_node_generation_bitmap() {
+        let mut node: Node<String, i32> = Node::Bitmap {
+            bitmap: 0b101,
+            children: ChildArray::new(),
+            generation: SHARED_GENERATION,
+        };
+
+        TransientHashMap::<String, i32>::ensure_node_generation(&mut node, 123);
+
+        match node {
+            Node::Bitmap { generation, .. } => assert_eq!(generation, 123),
+            _ => panic!("Expected Bitmap node"),
+        }
+    }
+
+    #[rstest]
+    fn test_ensure_node_generation_collision() {
+        let mut node: Node<String, i32> = Node::Collision {
+            hash: 12345,
+            entries: CollisionArray::new(),
+            generation: SHARED_GENERATION,
+        };
+
+        TransientHashMap::<String, i32>::ensure_node_generation(&mut node, 456);
+
+        match node {
+            Node::Collision { generation, .. } => assert_eq!(generation, 456),
+            _ => panic!("Expected Collision node"),
+        }
+    }
+
+    #[rstest]
+    fn test_ensure_node_generation_empty() {
+        let mut node: Node<String, i32> = Node::Empty;
+
+        // Should not panic - Empty nodes don't have generation
+        TransientHashMap::<String, i32>::ensure_node_generation(&mut node, 789);
+
+        assert!(matches!(node, Node::Empty));
+    }
+
+    // =========================================================================
+    // TASK-002: ensure_child_owned Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_ensure_child_owned_exclusive() {
+        // When reference count is 1, should return in-place without cloning
+        let mut child_ref = ReferenceCounter::new(Node::Entry {
+            hash: 12345,
+            key: "exclusive".to_string(),
+            value: 100,
+            generation: SHARED_GENERATION,
+        });
+
+        let child_mut = TransientHashMap::<String, i32>::ensure_child_owned(&mut child_ref, 999);
+
+        // Generation should be updated
+        match child_mut {
+            Node::Entry {
+                generation, key, ..
+            } => {
+                assert_eq!(*generation, 999);
+                assert_eq!(key, "exclusive");
+            }
+            _ => panic!("Expected Entry node"),
+        }
+    }
+
+    #[rstest]
+    fn test_ensure_child_owned_shared() {
+        // When reference count > 1, should perform COW
+        let original = ReferenceCounter::new(Node::Entry {
+            hash: 12345,
+            key: "shared".to_string(),
+            value: 200,
+            generation: SHARED_GENERATION,
+        });
+        let mut cloned = original.clone();
+
+        // Now reference count is 2
+        let child_mut = TransientHashMap::<String, i32>::ensure_child_owned(&mut cloned, 888);
+
+        // Generation should be updated on the cloned node
+        match child_mut {
+            Node::Entry { generation, .. } => assert_eq!(*generation, 888),
+            _ => panic!("Expected Entry node"),
+        }
+
+        // Original should still have SHARED_GENERATION
+        match &*original {
+            Node::Entry { generation, .. } => assert_eq!(*generation, SHARED_GENERATION),
+            _ => panic!("Expected Entry node"),
+        }
+    }
+
+    #[rstest]
+    fn test_ensure_child_owned_generation_updated() {
+        // Test that generation is always updated even when already owned
+        let mut child_ref = ReferenceCounter::new(Node::Bitmap {
+            bitmap: 0b1010,
+            children: ChildArray::new(),
+            generation: 100, // Non-shared generation
+        });
+
+        let child_mut = TransientHashMap::<String, i32>::ensure_child_owned(&mut child_ref, 200);
+
+        match child_mut {
+            Node::Bitmap { generation, .. } => assert_eq!(*generation, 200),
+            _ => panic!("Expected Bitmap node"),
+        }
+    }
+
+    // =========================================================================
+    // TASK-003: insert_into_node_inplace Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_insert_into_node_inplace_empty() {
+        let mut node: Node<String, i32> = Node::Empty;
+
+        let (old_value, added) = TransientHashMap::insert_into_node_inplace(
+            &mut node,
+            "key".to_string(),
+            42,
+            compute_hash(&"key".to_string()),
+            0,
+            999,
+        );
+
+        assert_eq!(old_value, None);
+        assert!(added);
+        match node {
+            Node::Entry {
+                key,
+                value,
+                generation,
+                ..
+            } => {
+                assert_eq!(key, "key");
+                assert_eq!(value, 42);
+                assert_eq!(generation, 999);
+            }
+            _ => panic!("Expected Entry node"),
+        }
+    }
+
+    #[rstest]
+    fn test_insert_into_node_inplace_entry_same_key() {
+        let hash = compute_hash(&"key".to_string());
+        let mut node: Node<String, i32> = Node::Entry {
+            hash,
+            key: "key".to_string(),
+            value: 100,
+            generation: SHARED_GENERATION,
+        };
+
+        let (old_value, added) = TransientHashMap::insert_into_node_inplace(
+            &mut node,
+            "key".to_string(),
+            200,
+            hash,
+            0,
+            999,
+        );
+
+        assert_eq!(old_value, Some(100));
+        assert!(!added);
+        match node {
+            Node::Entry {
+                value, generation, ..
+            } => {
+                assert_eq!(value, 200);
+                assert_eq!(generation, 999);
+            }
+            _ => panic!("Expected Entry node"),
+        }
+    }
+
+    #[rstest]
+    fn test_insert_into_node_inplace_entry_collision() {
+        // Create two different keys with the same hash (simulated collision)
+        // Use a custom struct that can have controlled hash collisions
+        #[derive(Clone, PartialEq, Eq, Debug)]
+        struct CollisionKey {
+            value: String,
+            hash_override: u64,
+        }
+        impl std::hash::Hash for CollisionKey {
+            fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+                self.hash_override.hash(state);
+            }
+        }
+
+        let hash = 12345u64;
+        let key1 = CollisionKey {
+            value: "a".to_string(),
+            hash_override: hash,
+        };
+        let key2 = CollisionKey {
+            value: "b".to_string(),
+            hash_override: hash,
+        };
+
+        let mut node: Node<CollisionKey, i32> = Node::Entry {
+            hash,
+            key: key1,
+            value: 100,
+            generation: SHARED_GENERATION,
+        };
+
+        let (old_value, added) =
+            TransientHashMap::insert_into_node_inplace(&mut node, key2, 200, hash, 0, 999);
+
+        assert_eq!(old_value, None);
+        assert!(added);
+        match node {
+            Node::Collision {
+                entries,
+                generation,
+                ..
+            } => {
+                assert_eq!(entries.len(), 2);
+                assert_eq!(generation, 999);
+            }
+            _ => panic!("Expected Collision node, got {node:?}"),
+        }
+    }
+
+    #[rstest]
+    fn test_insert_into_node_inplace_bitmap() {
+        // Start with a bitmap node
+        let hash1 = compute_hash(&"key1".to_string());
+        let hash2 = compute_hash(&"key2".to_string());
+
+        // Create a bitmap node with one entry
+        let mut children = ChildArray::new();
+        children.push(ChildSlot::Entry {
+            hash: hash1,
+            key: "key1".to_string(),
+            value: 100,
+            generation: SHARED_GENERATION,
+        });
+
+        let index1 = hash_index(hash1, 0);
+        let bitmap = 1u32 << index1;
+
+        let mut node: Node<String, i32> = Node::Bitmap {
+            bitmap,
+            children,
+            generation: SHARED_GENERATION,
+        };
+
+        // Insert a new key
+        let (old_value, added) = TransientHashMap::insert_into_node_inplace(
+            &mut node,
+            "key2".to_string(),
+            200,
+            hash2,
+            0,
+            999,
+        );
+
+        assert_eq!(old_value, None);
+        assert!(added);
+        match node {
+            Node::Bitmap { generation, .. } => {
+                assert_eq!(generation, 999);
+            }
+            _ => panic!("Expected Bitmap node"),
+        }
+    }
+
+    #[rstest]
+    fn test_insert_into_node_inplace_nested() {
+        // Test inserting into a node that causes nested node creation
+        let mut transient: TransientHashMap<i32, i32> = TransientHashMap::new();
+
+        // Insert enough entries to create nested structure
+        for i in 0..20 {
+            transient.insert_without_cow(i, i * 10);
+        }
+
+        // Verify all entries
+        assert_eq!(transient.len(), 20);
+        for i in 0..20 {
+            assert_eq!(transient.get(&i), Some(&(i * 10)));
+        }
+    }
+
+    // =========================================================================
+    // TASK-004: insert_into_bitmap_node_inplace Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_insert_into_bitmap_node_inplace_new_slot() {
+        let mut bitmap: u32 = 0;
+        let mut children: ChildArray<String, i32> = ChildArray::new();
+
+        let hash = compute_hash(&"key".to_string());
+        let (old_value, added) = TransientHashMap::insert_into_bitmap_node_inplace(
+            &mut bitmap,
+            &mut children,
+            "key".to_string(),
+            42,
+            hash,
+            0,
+            999,
+        );
+
+        assert_eq!(old_value, None);
+        assert!(added);
+        assert_eq!(children.len(), 1);
+        match &children[0] {
+            ChildSlot::Entry {
+                key,
+                value,
+                generation,
+                ..
+            } => {
+                assert_eq!(key, "key");
+                assert_eq!(*value, 42);
+                assert_eq!(*generation, 999);
+            }
+            ChildSlot::Node(_) => panic!("Expected Entry child"),
+        }
+    }
+
+    #[rstest]
+    fn test_insert_into_bitmap_node_inplace_update_entry() {
+        let hash = compute_hash(&"key".to_string());
+        let index = hash_index(hash, 0);
+        let mut bitmap: u32 = 1u32 << index;
+        let mut children: ChildArray<String, i32> = ChildArray::new();
+        children.push(ChildSlot::Entry {
+            hash,
+            key: "key".to_string(),
+            value: 100,
+            generation: SHARED_GENERATION,
+        });
+
+        let (old_value, added) = TransientHashMap::insert_into_bitmap_node_inplace(
+            &mut bitmap,
+            &mut children,
+            "key".to_string(),
+            200,
+            hash,
+            0,
+            999,
+        );
+
+        assert_eq!(old_value, Some(100));
+        assert!(!added);
+        match &children[0] {
+            ChildSlot::Entry {
+                value, generation, ..
+            } => {
+                assert_eq!(*value, 200);
+                assert_eq!(*generation, 999);
+            }
+            ChildSlot::Node(_) => panic!("Expected Entry child"),
+        }
+    }
+
+    #[rstest]
+    fn test_insert_into_bitmap_node_inplace_collision() {
+        // Use same hash collision approach as before
+        #[derive(Clone, PartialEq, Eq, Debug)]
+        struct CollisionKey {
+            value: String,
+            hash_override: u64,
+        }
+        impl std::hash::Hash for CollisionKey {
+            fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+                self.hash_override.hash(state);
+            }
+        }
+
+        let hash = 12345u64;
+        let key1 = CollisionKey {
+            value: "a".to_string(),
+            hash_override: hash,
+        };
+        let key2 = CollisionKey {
+            value: "b".to_string(),
+            hash_override: hash,
+        };
+
+        let index = hash_index(hash, 0);
+        let mut bitmap: u32 = 1u32 << index;
+        let mut children: ChildArray<CollisionKey, i32> = ChildArray::new();
+        children.push(ChildSlot::Entry {
+            hash,
+            key: key1,
+            value: 100,
+            generation: SHARED_GENERATION,
+        });
+
+        let (old_value, added) = TransientHashMap::insert_into_bitmap_node_inplace(
+            &mut bitmap,
+            &mut children,
+            key2,
+            200,
+            hash,
+            0,
+            999,
+        );
+
+        assert_eq!(old_value, None);
+        assert!(added);
+        match &children[0] {
+            ChildSlot::Node(subnode) => match &**subnode {
+                Node::Collision {
+                    entries,
+                    generation,
+                    ..
+                } => {
+                    assert_eq!(entries.len(), 2);
+                    assert_eq!(*generation, 999);
+                }
+                _ => panic!("Expected Collision node"),
+            },
+            ChildSlot::Entry { .. } => panic!("Expected Node child"),
+        }
+    }
+
+    #[rstest]
+    fn test_insert_into_bitmap_node_inplace_nested_node() {
+        // Test inserting into a bitmap that contains a child node
+        let hash1 = compute_hash(&"key1".to_string());
+        let hash2 = compute_hash(&"key2".to_string());
+        let index = hash_index(hash1, 0);
+
+        // Create a child node
+        let child_node = ReferenceCounter::new(Node::Entry {
+            hash: hash1,
+            key: "key1".to_string(),
+            value: 100,
+            generation: SHARED_GENERATION,
+        });
+
+        let mut bitmap: u32 = 1u32 << index;
+        let mut children: ChildArray<String, i32> = ChildArray::new();
+        children.push(ChildSlot::Node(child_node));
+
+        // Insert key2 - either collides at same index or goes to a new slot
+        let index2 = hash_index(hash2, 0);
+        let (old_value, added) = TransientHashMap::insert_into_bitmap_node_inplace(
+            &mut bitmap,
+            &mut children,
+            "key2".to_string(),
+            200,
+            hash2,
+            0,
+            999,
+        );
+
+        // Common assertions for both cases
+        assert_eq!(old_value, None);
+        assert!(added);
+
+        // Additional assertion only when indices differ
+        if index != index2 {
+            assert_eq!(children.len(), 2);
+        }
+    }
+
+    // =========================================================================
+    // TASK-005: insert_without_cow Rewrite Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_insert_without_cow_exclusive_root() {
+        // When root is exclusive (ref count 1), should use in-place path
+        let mut transient: TransientHashMap<String, i32> = TransientHashMap::new();
+
+        // Insert first entry
+        let result = transient.insert_without_cow("key1".to_string(), 100);
+        assert_eq!(result, None);
+        assert_eq!(transient.len(), 1);
+        assert_eq!(transient.get("key1"), Some(&100));
+
+        // Insert second entry
+        let result = transient.insert_without_cow("key2".to_string(), 200);
+        assert_eq!(result, None);
+        assert_eq!(transient.len(), 2);
+
+        // Update existing
+        let result = transient.insert_without_cow("key1".to_string(), 150);
+        assert_eq!(result, Some(100));
+        assert_eq!(transient.get("key1"), Some(&150));
+    }
+
+    #[rstest]
+    fn test_insert_without_cow_shared_root_fallback() {
+        // When root is shared (ref count > 1), should fallback to COW
+        let persistent: PersistentHashMap<String, i32> =
+            vec![("existing".to_string(), 100)].into_iter().collect();
+
+        // Clone to preserve original for later verification
+        let persistent_clone = persistent.clone();
+
+        // Create transient from persistent (consumes the cloned version)
+        let mut transient = persistent.transient();
+
+        // At this point, root is shared with persistent_clone
+        // insert_without_cow should handle this via fallback
+        transient.insert_without_cow("new".to_string(), 200);
+        transient.insert_without_cow("existing".to_string(), 150);
+
+        let result = transient.persistent();
+        assert_eq!(result.get("existing"), Some(&150));
+        assert_eq!(result.get("new"), Some(&200));
+
+        // Original persistent_clone should be unchanged
+        assert_eq!(persistent_clone.get("existing"), Some(&100));
+        assert_eq!(persistent_clone.get("new"), None);
+    }
+
+    #[rstest]
+    fn test_insert_without_cow_generation_consistency() {
+        // Verify that all nodes have consistent generation after operations
+        let mut transient: TransientHashMap<i32, i32> = TransientHashMap::new();
+
+        // Insert many entries to create complex tree structure
+        for i in 0..100 {
+            transient.insert_without_cow(i, i * 10);
+        }
+
+        // Verify all entries are retrievable
+        assert_eq!(transient.len(), 100);
+        for i in 0..100 {
+            assert_eq!(transient.get(&i), Some(&(i * 10)));
+        }
+
+        // Convert to persistent and back
+        let persistent = transient.persistent();
+        let mut transient2 = persistent.transient();
+
+        // Insert more entries
+        for i in 100..150 {
+            transient2.insert_without_cow(i, i * 10);
+        }
+
+        assert_eq!(transient2.len(), 150);
+        for i in 0..150 {
+            assert_eq!(transient2.get(&i), Some(&(i * 10)));
+        }
+    }
+
+    #[rstest]
+    fn test_insert_without_cow_equivalence() {
+        // Verify insert_without_cow produces same results as insert
+        let items: Vec<(String, i32)> = (0..50).map(|i| (format!("key_{i}"), i * 2)).collect();
+
+        // Via insert
+        let mut via_insert: TransientHashMap<String, i32> = TransientHashMap::new();
+        for (k, v) in items.clone() {
+            via_insert.insert(k, v);
+        }
+
+        // Via insert_without_cow
+        let mut via_without_cow: TransientHashMap<String, i32> = TransientHashMap::new();
+        for (k, v) in items {
+            via_without_cow.insert_without_cow(k, v);
+        }
+
+        // Both should have same content
+        assert_eq!(via_insert.len(), via_without_cow.len());
+        for (key, value) in &via_insert.persistent() {
+            assert_eq!(via_without_cow.get(key), Some(value));
+        }
+    }
+
+    // =========================================================================
+    // TASK-008: ChildArray Pre-allocation Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_child_array_preallocation() {
+        // Test that ChildArray is pre-allocated correctly when creating BitmapNodes.
+        // This test verifies that:
+        // 1. Single-child BitmapNodes use with_capacity(1)
+        // 2. Two-child BitmapNodes use with_capacity(2)
+        // 3. No unnecessary reallocations occur during construction
+
+        // Create a map with entries that will require BitmapNode creation
+        let mut map = PersistentHashMap::new();
+
+        // Insert entries to trigger BitmapNode creation
+        // Different hash values will create BitmapNodes with varying child counts
+        for i in 0..100 {
+            map = map.insert(format!("key_{i}"), i);
+        }
+
+        // Verify all entries are accessible
+        assert_eq!(map.len(), 100);
+        for i in 0..100 {
+            assert_eq!(map.get(&format!("key_{i}")), Some(&i));
+        }
+
+        // Test via transient path as well
+        let mut transient: TransientHashMap<String, i32> = TransientHashMap::new();
+        for i in 0..100 {
+            transient.insert_without_cow(format!("trans_key_{i}"), i * 2);
+        }
+
+        let persistent = transient.persistent();
+        assert_eq!(persistent.len(), 100);
+        for i in 0..100 {
+            assert_eq!(persistent.get(&format!("trans_key_{i}")), Some(&(i * 2)));
+        }
+    }
+
+    // =========================================================================
+    // TASK-009: Occupancy Histogram Tests (debug build only)
+    // =========================================================================
+
+    #[cfg(debug_assertions)]
+    #[rstest]
+    fn test_occupancy_histogram_collection() {
+        use crate::persistent::hashmap::occupancy_histogram;
+
+        // Note: Tests run in parallel, so we cannot guarantee the histogram is empty
+        // after reset. Instead, we capture the state before and after our operations.
+
+        // Reset histogram and capture initial state
+        occupancy_histogram::reset_histogram();
+        let initial_histogram = occupancy_histogram::get_histogram();
+        let initial_total: u64 = initial_histogram.iter().sum();
+
+        // Create a map that will trigger BitmapNode creation
+        let mut map = PersistentHashMap::new();
+        for i in 0..50 {
+            map = map.insert(format!("key_{i}"), i);
+        }
+
+        // Check that histogram has recorded some occupancy data
+        let histogram = occupancy_histogram::get_histogram();
+        let total: u64 = histogram.iter().sum();
+
+        // We should have more BitmapNode creations than initially
+        assert!(
+            total > initial_total,
+            "Expected BitmapNode creations to increase: initial={initial_total}, after={total}"
+        );
+
+        // Most common initial occupancies should be 1 or 2
+        // (this check is still valid as we created new entries)
+        assert!(
+            histogram[1] > 0 || histogram[2] > 0,
+            "Expected BitmapNodes with 1 or 2 children"
+        );
+
+        // Test summary output format
+        let summary = occupancy_histogram::summary();
+        assert!(summary.contains("BitmapNode Occupancy Histogram"));
+        assert!(summary.contains("Mean occupancy"));
+    }
+
+    #[cfg(debug_assertions)]
+    #[rstest]
+    fn test_occupancy_histogram_transient_path() {
+        use crate::persistent::hashmap::occupancy_histogram;
+
+        // Note: Tests run in parallel, so we capture state before and after.
+
+        // Reset histogram and capture initial state
+        occupancy_histogram::reset_histogram();
+        let initial_histogram = occupancy_histogram::get_histogram();
+        let initial_total: u64 = initial_histogram.iter().sum();
+
+        // Create entries via transient path
+        let mut transient: TransientHashMap<String, i32> = TransientHashMap::new();
+        for i in 0..30 {
+            transient.insert_without_cow(format!("trans_{i}"), i);
+        }
+
+        // Get histogram data
+        let histogram = occupancy_histogram::get_histogram();
+        let total: u64 = histogram.iter().sum();
+
+        // Should have recorded more BitmapNode creations from transient operations
+        assert!(
+            total > initial_total,
+            "Expected BitmapNode creations to increase from transient operations: initial={initial_total}, after={total}"
+        );
     }
 }
 

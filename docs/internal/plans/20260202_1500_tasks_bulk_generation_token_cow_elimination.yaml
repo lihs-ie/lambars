@@ -1,0 +1,788 @@
+# tasks_bulk における世代トークン式 COW 削減実装計画
+#
+# 要件定義: docs/internal/requirements/20260202_0000_tasks_bulk_generation_token_cow_elimination.yaml
+#
+# Phase 1 目標:
+#   - RPS: 41 → 52+ req/s (27% 改善)
+#   - P99: 27.34s → <22s (20% 改善)
+#   - COW 関連ホットスポット: 42% → <25%
+#
+# Codex レビュー対応:
+#   - 2026-02-02: 初回レビュー指摘を反映
+#     - make_mut の動作に関する前提を修正
+#     - insert_bulk_owned のフォールバック処理を削除
+#     - フォールバック時の世代対応挿入経路を追加
+#     - フェーズと評価基準の整合性を修正
+
+version: "1.3.0"
+name: "tasks_bulk_generation_token_cow_elimination"
+created_at: "2026-02-02T15:00:00+09:00"
+updated_at: "2026-02-02T16:30:00+09:00"
+
+# =============================================================================
+# 前提条件
+# =============================================================================
+preconditions:
+  - name: "MAX_BULK_INSERT >= 2"
+    description: |
+      CHUNK_SIZE = MAX_BULK_INSERT - 1 の計算が成立するためには、
+      MAX_BULK_INSERT >= 2 である必要がある。
+      現在の実装では MAX_BULK_INSERT = 100,000 のため、この前提は満たされている。
+      実装時には Rust 標準の const assert パターンで前提を固定する。
+
+    implementation:
+      method: "Rust 標準の const assert パターン（外部依存なし）"
+      location: "src/persistent/hashmap.rs の MAX_BULK_INSERT 定義近傍"
+      code: |
+        /// Maximum number of entries for bulk insert operations.
+        pub const MAX_BULK_INSERT: usize = 100_000;
+
+        // Compile-time assertion: MAX_BULK_INSERT must be at least 2
+        // for CHUNK_SIZE = MAX_BULK_INSERT - 1 to be valid.
+        const _: () = assert!(MAX_BULK_INSERT >= 2, "MAX_BULK_INSERT must be at least 2");
+
+      task_reference: "TASK-006 の実装時に適用"
+
+# =============================================================================
+# 実装概要
+# =============================================================================
+overview:
+  description: |
+    TransientHashMap の COW 削減を実装する。
+
+    【問題の詳細分析】
+    Rc/Arc::make_mut は参照カウントが 1 の場合は clone を行わないが、
+    現在の実装では以下の問題がある：
+
+    1. make_mut の呼び出しオーバーヘッド
+       - 参照カウントの確認と分岐処理
+       - 再帰的なノード走査での累積コスト
+
+    2. ChildSlot::Node の処理における COW
+       - insert_into_node_with_generation (line 3267) で子ノードに対して
+         make_mut を呼び出している
+       - 子ノードが PersistentHashMap から共有されている場合に clone が発生
+       - プロファイリングで確認された insert_into_bitmap_node_cow (13.37%) の原因
+
+    3. 世代トークンの不一致
+       - PersistentHashMap から transient() で変換されたノードは SHARED_GENERATION
+       - 子ノードの世代が owner_generation と一致しないため、
+         世代ベースの最適化が効かない
+
+    【改善方針】
+    本計画では Rc::get_mut（参照カウント == 1 の場合のみ成功）を活用し、
+    明示的に排他所有を確認してから in-place 更新を行う。
+
+    - get_mut 成功: 完全な in-place 更新（世代も即時更新）
+    - get_mut 失敗: 世代対応の挿入経路（insert_into_node_with_generation）へフォールバック
+      → 新規ノードの世代が owner_generation に設定される
+
+  current_implementation:
+    file: src/persistent/hashmap.rs
+    key_functions:
+      - name: insert_without_cow
+        line: 3015
+        issue: |
+          ReferenceCounter::make_mut(&mut self.root) を常時呼び出している。
+          make_mut 自体は参照カウント 1 なら clone しないが、
+          子ノードへの再帰的な make_mut 呼び出しで COW が発生する。
+
+          具体的には line 3266-3267 で ChildSlot::Node に対して make_mut を
+          呼び出しており、子ノードが共有されている場合に clone が発生する。
+
+      - name: insert_into_node_with_generation
+        line: 3034
+        issue: |
+          generation 判定による最適化はあるが、ChildSlot::Node の処理で
+          ReferenceCounter::make_mut を呼び出している（3266行目）。
+
+          共有子ノードに対して make_mut を呼ぶと必ず clone が発生し、
+          これが insert_into_bitmap_node_cow (13.37%) のホットスポットの原因。
+
+  target_implementation:
+    description: |
+      1. ルートノードは ReferenceCounter::get_mut で取得を試みる
+      2. 成功（参照カウント == 1）なら insert_into_node_inplace で in-place 更新
+      3. 失敗（共有ノード）なら insert_into_node_with_generation へフォールバック
+         → 新規ノードの世代は owner_generation に設定される（SHARED_GENERATION にならない）
+      4. 子ノードは ensure_child_owned で局所的に処理
+
+# =============================================================================
+# 実装フェーズ
+# =============================================================================
+phases:
+  - phase: 1
+    name: "Rc::get_mut による COW 回避基盤"
+    description: |
+      insert_without_cow を Rc::get_mut ベースに書き換え、
+      参照カウント 1 のノードで完全な in-place 更新を実現する。
+
+    evaluation_criteria:
+      - "insert_without_cow が get_mut ベースに書き換え完了"
+      - "全テストがパス"
+      - "RPS 改善の兆候（ベースライン測定と比較）"
+
+    tasks:
+      - id: TASK-001
+        name: "ensure_node_generation 関数の実装"
+        type: rust
+        file: src/persistent/hashmap.rs
+        description: |
+          ノードの generation を owner_generation に更新するヘルパー関数。
+          参照カウントが 1 であることが事前条件。
+
+        signature: |
+          fn ensure_node_generation(node: &mut Node<K, V>, owner_generation: u64)
+
+        algorithm: |
+          match node {
+              Node::Entry { generation, .. } => *generation = owner_generation,
+              Node::Bitmap { generation, .. } => *generation = owner_generation,
+              Node::Collision { generation, .. } => *generation = owner_generation,
+              Node::Empty => {}
+          }
+
+        test_cases:
+          - name: test_ensure_node_generation_entry
+          - name: test_ensure_node_generation_bitmap
+          - name: test_ensure_node_generation_collision
+          - name: test_ensure_node_generation_empty
+
+      - id: TASK-002
+        name: "ensure_child_owned 関数の実装"
+        type: rust
+        file: src/persistent/hashmap.rs
+        description: |
+          子ノードを排他所有状態にして返す。
+          参照カウント 1 なら in-place で generation 更新、
+          共有なら局所 COW 後に generation 更新。
+
+        signature: |
+          fn ensure_child_owned(
+              child_ref: &mut ReferenceCounter<Node<K, V>>,
+              owner_generation: u64,
+          ) -> &mut Node<K, V>
+
+        algorithm: |
+          if let Some(child_mut) = ReferenceCounter::get_mut(child_ref) {
+              Self::ensure_node_generation(child_mut, owner_generation);
+              return child_mut;
+          }
+          let child_mut = ReferenceCounter::make_mut(child_ref);
+          Self::ensure_node_generation(child_mut, owner_generation);
+          child_mut
+
+        test_cases:
+          - name: test_ensure_child_owned_exclusive
+          - name: test_ensure_child_owned_shared
+          - name: test_ensure_child_owned_generation_updated
+
+      - id: TASK-003
+        name: "insert_into_node_inplace 関数の実装"
+        type: rust
+        file: src/persistent/hashmap.rs
+        description: |
+          ノードを直接変更する in-place 挿入。
+          共有子ノードは ensure_child_owned で局所 COW する。
+
+          【参照透過性の保証】
+          この関数は insert_without_cow 経路でのみ呼び出される。
+          insert_without_cow は ReferenceCounter::get_mut が成功した場合
+          （つまり参照カウントが 1 の場合）のみこの関数を呼び出すため、
+          ルートノードが共有されている状況では呼び出されない。
+
+          子ノードが共有されている場合は ensure_child_owned 経由で
+          局所的に COW が行われるため、参照透過性は維持される。
+
+        signature: |
+          fn insert_into_node_inplace(
+              node: &mut Node<K, V>,
+              key: K,
+              value: V,
+              hash: u64,
+              depth: usize,
+              owner_generation: u64,
+          ) -> (Option<V>, bool)
+
+        algorithm: |
+          現在の insert_into_node_with_generation と同様だが、
+          ChildSlot::Node の処理を ensure_child_owned に置き換える。
+
+          【処理フロー】
+          - Node::Empty: 新規 Entry を作成（generation = owner_generation）
+          - Node::Entry: キー一致なら値置換、ハッシュ一致なら Collision、異なれば Bitmap
+          - Node::Bitmap: insert_into_bitmap_node_inplace を呼び出し
+          - Node::Collision: エントリ追加または Bitmap への変換
+
+          【generation 更新手順（RISK-002 対策）】
+          全ての変更・新規作成されるノード/エントリに対して generation を設定する：
+          1. 新規 Node::Entry 作成時: generation = owner_generation
+          2. Node::Entry の値置換時: *generation = owner_generation
+          3. 新規 Node::Collision 作成時: generation = owner_generation
+          4. Node::Collision へのエントリ追加時: *generation = owner_generation
+          5. 新規 Node::Bitmap 作成時: generation = owner_generation
+          6. Node::Bitmap の変更時: *generation = owner_generation（既に更新済み）
+          7. ChildSlot::Entry 作成時: generation = owner_generation
+          8. ChildSlot::Node 作成時: 中のノードの generation = owner_generation
+
+        test_cases:
+          - name: test_insert_into_node_inplace_empty
+          - name: test_insert_into_node_inplace_entry_same_key
+          - name: test_insert_into_node_inplace_entry_collision
+          - name: test_insert_into_node_inplace_bitmap
+          - name: test_insert_into_node_inplace_nested
+
+      - id: TASK-004
+        name: "insert_into_bitmap_node_inplace 関数の実装"
+        type: rust
+        file: src/persistent/hashmap.rs
+        description: |
+          BitmapNode への in-place 挿入。
+          ChildArray を直接変更し、子ノードは ensure_child_owned で処理。
+
+        signature: |
+          fn insert_into_bitmap_node_inplace(
+              bitmap: &mut u32,
+              children: &mut ChildArray<K, V>,
+              key: K,
+              value: V,
+              hash: u64,
+              depth: usize,
+              owner_generation: u64,
+          ) -> (Option<V>, bool)
+
+        algorithm: |
+          1. hash_index で bit 位置を計算
+          2. bit が未設定なら新規 ChildSlot::Entry を挿入（generation = owner_generation）
+          3. bit が設定済みなら:
+             - ChildSlot::Entry: キー一致なら値置換（generation = owner_generation）、
+               異なれば Collision/Bitmap 変換（generation = owner_generation）
+             - ChildSlot::Node: ensure_child_owned で子ノード取得（generation 更新済み）、
+               再帰的に insert_into_node_inplace を呼び出し
+
+          【generation 更新手順（RISK-002 対策）】
+          1. 新規 ChildSlot::Entry 作成時: generation = owner_generation
+          2. ChildSlot::Entry の値置換時: *generation = owner_generation
+          3. ChildSlot::Entry → Node::Collision 変換時: generation = owner_generation
+          4. ChildSlot::Entry → Node::Bitmap 変換時: generation = owner_generation
+          5. ChildSlot::Node の処理: ensure_child_owned が generation を更新
+
+        test_cases:
+          - name: test_insert_into_bitmap_node_inplace_new_slot
+          - name: test_insert_into_bitmap_node_inplace_update_entry
+          - name: test_insert_into_bitmap_node_inplace_collision
+          - name: test_insert_into_bitmap_node_inplace_nested_node
+
+      - id: TASK-005
+        name: "insert_without_cow の書き換え"
+        type: rust
+        file: src/persistent/hashmap.rs
+        description: |
+          insert_without_cow を Rc::get_mut ベースに書き換え。
+
+          【フォールバック戦略の変更】
+          ルートが共有の場合、従来の insert ではなく insert_into_node_with_generation
+          を使用する。これにより、新規ノードの世代が owner_generation に設定され、
+          世代トークン最適化の設計意図と一貫する。
+
+        current_signature: |
+          pub fn insert_without_cow(&mut self, key: K, value: V) -> Option<V>
+
+        algorithm: |
+          let hash = compute_hash(&key);
+          let owner_generation = self.generation;
+
+          if let Some(root_mut) = ReferenceCounter::get_mut(&mut self.root) {
+              // ルートが排他所有なら in-place 挿入
+              Self::ensure_node_generation(root_mut, owner_generation);
+              let (old_value, added) =
+                  Self::insert_into_node_inplace(root_mut, key, value, hash, 0, owner_generation);
+              if added {
+                  self.length += 1;
+              }
+              return old_value;
+          }
+
+          // ルートが共有なら世代対応の挿入経路を使用
+          // （insert ではなく、新規ノードの世代を owner_generation に設定する経路）
+          let root = ReferenceCounter::make_mut(&mut self.root);
+          let (old_value, added) =
+              Self::insert_into_node_with_generation(root, key, value, hash, 0, owner_generation);
+          if added {
+              self.length += 1;
+          }
+          old_value
+
+        test_cases:
+          - name: test_insert_without_cow_exclusive_root
+          - name: test_insert_without_cow_shared_root_fallback
+          - name: test_insert_without_cow_generation_consistency
+          - name: test_insert_without_cow_equivalence
+
+  - phase: 2
+    name: "merge_bulk_ngram_index のバルク化"
+    description: |
+      merge_bulk_ngram_index が per-key で transient.insert を呼び出している問題を
+      解決し、bulk 挿入経路に変更する。
+
+    evaluation_criteria:
+      - "merge_bulk_ngram_index がチャンク挿入対応"
+      - "PersistentHashMapIterator::advance のホットスポットが削減"
+      - "全テストがパス"
+
+    tasks:
+      - id: TASK-006
+        name: "merge_bulk_ngram_index のチャンク挿入実装"
+        type: rust
+        file: benches/api/src/api/query.rs
+        description: |
+          bulk_index のエントリをチャンク収集し、insert_bulk_owned で一括挿入する。
+          これにより PersistentHashMapIterator::advance のホットスポットを削減。
+
+          【エラー処理の簡素化】
+          Codex レビュー指摘に基づき、insert_bulk_owned のフォールバック処理を削除。
+          チャンクサイズを MAX_BULK_INSERT 未満に制限することで、エラーは発生しない。
+
+        current_location: line 5038
+
+        algorithm: |
+          fn merge_bulk_ngram_index(
+              &self,
+              existing_index: &NgramIndex,
+              bulk_index: &NgramIndex,
+          ) -> NgramIndex {
+              if bulk_index.is_empty() {
+                  return existing_index.clone();
+              }
+              if existing_index.is_empty() {
+                  return bulk_index.clone();
+              }
+
+              // チャンクサイズを MAX_BULK_INSERT 未満に制限（エラー回避）
+              const CHUNK_SIZE: usize = MAX_BULK_INSERT - 1;
+
+              let mut transient = existing_index.clone().transient();
+              let mut entries = Vec::with_capacity(CHUNK_SIZE.min(bulk_index.len()));
+
+              for (ngram_key, bulk_posting_list) in bulk_index {
+                  let merged = match existing_index.get(ngram_key.as_str()) {
+                      Some(existing) => merge_sorted_posting_lists(existing, bulk_posting_list),
+                      None => bulk_posting_list.clone(),
+                  };
+                  entries.push((ngram_key.clone(), merged));
+
+                  if entries.len() >= CHUNK_SIZE {
+                      // チャンクを挿入（CHUNK_SIZE < MAX_BULK_INSERT なのでエラーは発生しない）
+                      transient = transient
+                          .insert_bulk_owned(std::mem::take(&mut entries))
+                          .expect("CHUNK_SIZE < MAX_BULK_INSERT なのでエラーは発生しない");
+                      entries = Vec::with_capacity(CHUNK_SIZE);
+                  }
+              }
+
+              // 残りを挿入
+              if !entries.is_empty() {
+                  transient = transient
+                      .insert_bulk_owned(entries)
+                      .expect("残りは CHUNK_SIZE 未満なのでエラーは発生しない");
+              }
+
+              transient.persistent()
+          }
+
+        test_cases:
+          - name: test_merge_bulk_ngram_index_empty_bulk
+          - name: test_merge_bulk_ngram_index_empty_existing
+          - name: test_merge_bulk_ngram_index_merge
+          - name: test_merge_bulk_ngram_index_large_batch
+
+      - id: TASK-007
+        name: "merge_ngram_delta_bulk のチャンク挿入改善"
+        type: rust
+        file: benches/api/src/api/query.rs
+        description: |
+          MAX_BULK_INSERT 超過時のフォールバックをチャンク挿入に変更。
+          TASK-006 と同様の CHUNK_SIZE 制限を適用。
+
+        current_location: line 5315
+
+        algorithm: |
+          TASK-006 と同様に、CHUNK_SIZE を MAX_BULK_INSERT 未満に制限し、
+          insert_bulk_owned を複数回呼び出す。
+
+  - phase: 3
+    name: "SmallVec 最適化と測定"
+    description: |
+      ChildArray の事前確保と occupancy 計測を実装。
+
+      【drop_in_place 最適化について】
+      Codex レビューで指摘された drop_in_place 比率（14.31%）の高さは、
+      Phase 1 の直接的な対象外とする。ただし、以下の理由で Phase 1 の
+      COW 削減が間接的に drop_in_place を削減する効果が期待される：
+
+      - COW 時の clone で作成されたノードの drop が減少
+      - insert_into_node_inplace での in-place 更新は追加の Vec を作成しない
+
+      drop_in_place の直接的な最適化は Phase 2+ で検討する。
+
+    evaluation_criteria:
+      - "ChildArray 事前確保が実装完了"
+      - "occupancy 分布の計測データが取得可能"
+
+    tasks:
+      - id: TASK-008
+        name: "ChildArray 事前確保の実装"
+        type: rust
+        file: src/persistent/hashmap.rs
+        description: |
+          BitmapNode 作成時に bitmap の occupancy に基づいて
+          ChildArray を事前確保する。
+
+        algorithm: |
+          let occupancy = bitmap.count_ones() as usize;
+          let mut children = ChildArray::with_capacity(occupancy);
+
+        affected_locations:
+          - insert_into_node_inplace の BitmapNode 生成部分
+          - create_bitmap_from_two_entries
+
+        test_cases:
+          - name: test_child_array_preallocation
+
+      - id: TASK-009
+        name: "occupancy 分布計測の実装（debug ビルド）"
+        type: rust
+        file: src/persistent/hashmap.rs
+        description: |
+          debug ビルドで occupancy 分布を計測するヒストグラムを追加。
+          Phase 2 での inline 容量調整の判断材料とする。
+
+        test_cases:
+          - name: test_occupancy_histogram_collection
+
+  - phase: 4
+    name: "検証と正当性テスト"
+    description: |
+      構造共有の正当性と性能改善を検証。
+
+    evaluation_criteria:
+      - "全ての正当性テストがパス"
+      - "RPS 52+ req/s 達成"
+      - "P99 <22s 達成"
+      - "COW 比率 <25%"
+
+    tasks:
+      - id: TASK-010
+        name: "構造共有正当性テストの追加"
+        type: rust
+        file: tests/persistent_hashmap_tests.rs
+        description: |
+          insert_without_cow と insert の結果が等価であることを検証。
+          transient での変更が元の PersistentHashMap に影響しないことを確認。
+
+          【検証観点】
+          1. insert_without_cow 経路での参照透過性維持
+             - insert_into_node_inplace は insert_without_cow からのみ呼び出される
+             - ルートの参照カウントが 1 の場合のみ in-place 更新
+          2. 世代一貫性
+             - フォールバック時も新規ノードの世代は owner_generation
+          3. 構造共有の非破壊
+             - 元の PersistentHashMap が影響を受けないこと
+
+        test_cases:
+          - name: test_insert_without_cow_structural_sharing
+          - name: test_transient_isolation
+          - name: test_generation_consistency
+          - name: test_insert_without_cow_inplace_only_on_exclusive
+          - name: property_test_insert_without_cow_equivalence
+            description: |
+              プロパティベーステスト（RISK-001 対策）:
+              任意のキー/値ペアに対して、insert_without_cow と insert が
+              同じ結果を生成することを検証。
+          - name: property_test_transient_isolation
+            description: |
+              プロパティベーステスト（RISK-001 対策）:
+              transient での変更が元の PersistentHashMap に影響しないことを検証。
+
+      - id: TASK-011
+        name: "ベンチマークと性能測定"
+        type: shell
+        description: |
+          tasks_bulk ベンチマークを実行し、Phase 1 目標への到達度を確認。
+
+        commands:
+          - cargo bench --bench api_bench -- tasks_bulk
+
+        metrics:
+          - RPS: 目標 52+ req/s
+          - P99: 目標 <22s
+          - COW 比率: 目標 <25%
+
+# =============================================================================
+# 依存関係と実装順序
+# =============================================================================
+dependencies:
+  graph: |
+    Phase 1: COW 回避基盤
+    TASK-001 (ensure_node_generation)
+        ↓
+    TASK-002 (ensure_child_owned)
+        ↓
+    TASK-003 (insert_into_node_inplace)
+        ↓
+    TASK-004 (insert_into_bitmap_node_inplace)
+        ↓
+    TASK-005 (insert_without_cow 書き換え)
+
+    Phase 2: バルク化（Phase 1 完了後）
+    TASK-006 (merge_bulk_ngram_index チャンク化)
+        ↓
+    TASK-007 (merge_ngram_delta_bulk 改善)
+
+    Phase 3: SmallVec 最適化（Phase 1, 2 と並行可能）
+    TASK-008 (ChildArray 事前確保)
+        ↓
+    TASK-009 (occupancy 計測)
+
+    Phase 4: 検証（全タスク完了後）
+    TASK-010 (正当性テスト)
+        ↓
+    TASK-011 (ベンチマーク)
+
+  critical_path:
+    path: "TASK-001 -> TASK-002 -> TASK-003 -> TASK-004 -> TASK-005"
+    description: |
+      insert_without_cow の書き換えが最重要パス。
+      これにより COW 削減の基盤が確立される。
+
+# =============================================================================
+# リスクと注意点
+# =============================================================================
+risks:
+  - id: RISK-001
+    name: "構造共有の破壊"
+    severity: high
+    description: |
+      in-place 更新が不適切に行われると、
+      PersistentHashMap の参照透過性が破壊される。
+    mitigation: |
+      - 参照カウント 1 の場合のみ in-place 更新
+      - ensure_child_owned で共有ノードは必ず COW
+      - insert_into_node_inplace は insert_without_cow 経路のみで呼び出される
+      - プロパティテストで検証（TASK-010 に含む）:
+        - property_test_insert_without_cow_equivalence
+        - property_test_transient_isolation
+
+  - id: RISK-002
+    name: "generation 不整合"
+    severity: medium
+    description: |
+      generation の更新漏れがあると、
+      将来の in-place 更新で誤った判定が行われる。
+    mitigation: |
+      - ensure_node_generation を必ず呼び出す
+      - ensure_child_owned が generation 更新を担当
+      - フォールバック時も insert_into_node_with_generation を使用
+        → 新規ノードの世代は owner_generation に設定
+
+  - id: RISK-003
+    name: "性能劣化のリスク"
+    severity: low
+    description: |
+      get_mut のチェックが追加されるため、
+      常に共有されているケースでは若干のオーバーヘッドが発生。
+    mitigation: |
+      - get_mut は O(1) の参照カウント比較のみ
+      - フォールバックは insert_into_node_with_generation（既存実装と同等）
+
+  - id: RISK-004
+    name: "drop_in_place の直接的な最適化が Phase 1 対象外"
+    severity: medium
+    description: |
+      drop_in_place (14.31%) は Phase 1 の直接的な最適化対象外。
+      間接的な削減効果に依存。
+    mitigation: |
+      - COW 削減による間接的な効果を期待
+      - Phase 2+ で直接的な最適化を検討
+      - ベンチマークで効果を確認し、不足なら追加対応
+
+# =============================================================================
+# 実装対象別タスクリスト
+# =============================================================================
+task_summary:
+  rust_implementation:
+    phase_1:
+      - TASK-001: ensure_node_generation
+      - TASK-002: ensure_child_owned
+      - TASK-003: insert_into_node_inplace
+      - TASK-004: insert_into_bitmap_node_inplace
+      - TASK-005: insert_without_cow 書き換え
+    phase_2:
+      - TASK-006: merge_bulk_ngram_index チャンク化
+      - TASK-007: merge_ngram_delta_bulk 改善
+    phase_3:
+      - TASK-008: ChildArray 事前確保
+      - TASK-009: occupancy 計測
+
+  test_implementation:
+    - TASK-010: 構造共有正当性テスト
+
+  shell_script:
+    - TASK-011: ベンチマーク実行
+
+# =============================================================================
+# 期待される成果
+# =============================================================================
+expected_outcomes:
+  # Phase 1 の評価基準（COW 回避基盤）
+  phase_1_completion:
+    - "insert_without_cow が Rc::get_mut ベースに書き換え完了"
+    - "フォールバック時も insert_into_node_with_generation を使用"
+    - "全テストがパス"
+
+  # Phase 2 の評価基準（バルク化）
+  phase_2_completion:
+    - "merge_bulk_ngram_index がチャンク挿入対応"
+    - "merge_ngram_delta_bulk がチャンク挿入対応"
+    - "全テストがパス"
+
+  # Phase 3 の評価基準（SmallVec 最適化）
+  phase_3_completion:
+    - "ChildArray 事前確保が実装完了"
+    - "occupancy 分布の計測データが取得可能"
+
+  # Phase 4 の評価基準（全体検証）
+  phase_4_completion:
+    - "全ての正当性テストがパス"
+    - "RPS 52+ req/s 達成（現状 41.00 req/s）"
+    - "P99 <22s 達成（現状 27.34s）"
+    - "COW 比率 <25%（現状 42%）"
+
+  measurement_criteria:
+    - metric: RPS
+      baseline: 41.00
+      target: 52.00
+      improvement: "27% 以上"
+    - metric: P99_latency_seconds
+      baseline: 27.34
+      target: 22.00
+      improvement: "20% 以上"
+    - metric: COW_ratio
+      baseline: 0.42
+      target: 0.25
+      improvement: "40% 削減"
+
+# =============================================================================
+# Codex レビュー履歴
+# =============================================================================
+codex_review_history:
+  - date: "2026-02-02"
+    version: "1.2.0 → 1.3.0"
+    issues:
+      - severity: medium
+        issue: |
+          const_assert! が現状リポジトリ内に存在せず、依存追加 or 代替手段の明記がない。
+        resolution: |
+          preconditions セクションに implementation を追加。
+          Rust 標準の const assert パターン（const _: () = assert!(...)）を使用し、
+          外部依存なしで前提を固定することを明記。
+          具体的なコード例と配置場所（src/persistent/hashmap.rs の MAX_BULK_INSERT 近傍）を記載。
+          TASK-006 の実装時に適用することを明記。
+
+    status: "実装進行可"
+
+  - date: "2026-02-02"
+    version: "1.1.0 → 1.2.0"
+    issues:
+      - severity: medium
+        issue: |
+          CHUNK_SIZE = MAX_BULK_INSERT - 1 は MAX_BULK_INSERT >= 2 を
+          暗黙前提にしており、1 以下だと CHUNK_SIZE = 0 となる。
+        resolution: |
+          preconditions セクションを追加し、MAX_BULK_INSERT >= 2 の前提を明記。
+          実装時には const assert で前提を固定することを記載。
+
+      - severity: medium
+        issue: |
+          in-place 系アルゴリズムで generation 更新手順が明文化されていない。
+        resolution: |
+          TASK-003 と TASK-004 の algorithm に generation 更新手順を追加。
+          RISK-002 対策として、全ての変更・新規作成されるノード/エントリに対して
+          generation を設定する手順を明確化。
+
+      - severity: low
+        issue: |
+          RISK-001 の「プロパティテストで検証」がタスクに落ちていない。
+        resolution: |
+          TASK-010 の test_cases に property_test_insert_without_cow_equivalence と
+          property_test_transient_isolation を追加。
+          RISK-001 の mitigation にも具体的なテスト名を記載。
+
+    confirmations:
+      - question: |
+          MAX_BULK_INSERT は 2 以上で固定前提でよいですか？
+        answer: |
+          はい。現在の実装では MAX_BULK_INSERT = 100,000 のため、
+          この前提は十分に満たされている。
+          preconditions セクションに明記し、実装時には const assert で
+          前提を固定することを計画に記載した。
+
+  - date: "2026-02-02"
+    version: "1.0.0 → 1.1.0"
+    issues:
+      - severity: high
+        issue: |
+          make_mut が常時 COW するという前提が誤り。
+          Rc/Arc::make_mut は強参照が 1 なら clone しない。
+        resolution: |
+          overview.description を修正し、問題の詳細分析を追加。
+          make_mut の呼び出しオーバーヘッドと子ノードでの COW が
+          実際の問題であることを明確化。
+
+      - severity: medium
+        issue: |
+          insert_bulk_owned のフォールバック処理が不正。
+          insert_bulk_owned は self を消費するため、
+          unwrap_or_else 内で transient を再利用できない。
+        resolution: |
+          TASK-006 の algorithm を修正。
+          CHUNK_SIZE を MAX_BULK_INSERT 未満に制限し、
+          エラーが発生しないようにすることでフォールバック処理を削除。
+
+      - severity: medium
+        issue: |
+          ルート共有時に insert へフォールバックすると、
+          新規ノードが SHARED_GENERATION になり設計意図と矛盾。
+        resolution: |
+          TASK-005 の algorithm を修正。
+          フォールバック時も insert_into_node_with_generation を使用し、
+          新規ノードの世代を owner_generation に設定。
+
+      - severity: low
+        issue: |
+          Phase 1 完了条件に merge_bulk_ngram_index が含まれているが、
+          タスク定義は Phase 2。
+        resolution: |
+          expected_outcomes を phase_1_completion, phase_2_completion,
+          phase_3_completion, phase_4_completion に分割し、
+          フェーズと評価基準を整合。
+
+    confirmations:
+      - question: |
+          insert_into_node_inplace が insert_without_cow 経路のみに限定される
+          前提で、参照透過性が崩れないことを明記できますか。
+        answer: |
+          TASK-003 と TASK-010 の description に明記。
+          insert_without_cow は ReferenceCounter::get_mut が成功した場合
+          （参照カウント 1）のみ insert_into_node_inplace を呼び出すため、
+          ルートが共有されている状況では呼び出されない。
+          子ノードが共有されている場合は ensure_child_owned で局所 COW。
+
+      - question: |
+          drop_in_place 比率の高さへの直接的な手当ては Phase 1 の対象外で
+          よいか、優先度の確認がしたい。
+        answer: |
+          Phase 3 の description と RISK-004 に記載。
+          Phase 1 の COW 削減による間接的な効果を期待し、
+          直接的な最適化は Phase 2+ で検討。
+          ベンチマークで効果を確認し、不足なら追加対応。

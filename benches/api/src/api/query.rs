@@ -42,7 +42,7 @@ use crate::domain::{Priority, Task, TaskId, TaskStatus};
 use crate::infrastructure::{PaginatedResult, Pagination, SearchScope as RepositorySearchScope};
 use lambars::persistent::{
     OrderedUniqueSet, PersistentHashMap, PersistentHashSet, PersistentTreeMap, PersistentVector,
-    TransientHashMap, TransientTreeMap,
+    TransientHashMap, TransientTreeMap, MAX_BULK_INSERT,
 };
 
 type TaskIdCollection = OrderedUniqueSet<TaskId>;
@@ -5009,30 +5009,12 @@ impl SearchIndex {
 
     /// Merges a bulk-built n-gram index with an existing n-gram index.
     ///
-    /// This method efficiently combines two n-gram indexes using merge-sort
-    /// for each posting list, avoiding the overhead of individual insertions.
-    ///
-    /// # Algorithm
-    ///
-    /// For each n-gram key in the bulk index:
-    /// 1. If the key exists in the existing index, merge the posting lists
-    ///    using `merge_sorted_posting_lists` (O(N+M) merge-sort)
-    /// 2. If the key doesn't exist, insert the bulk posting list directly
+    /// Uses merge-sort for each posting list, avoiding individual insertion overhead.
     ///
     /// # Complexity
     ///
     /// - Time: O(K * (N + M)) where K is the number of unique n-grams,
     ///   N and M are average posting list sizes
-    /// - Space: O(total entries) for the result index
-    ///
-    /// # Arguments
-    ///
-    /// * `existing_index` - The current n-gram index
-    /// * `bulk_index` - The newly built bulk n-gram index
-    ///
-    /// # Returns
-    ///
-    /// A new merged n-gram index containing all entries from both inputs.
     #[must_use]
     #[allow(clippy::unused_self)] // Method signature kept for API consistency
     fn merge_bulk_ngram_index(
@@ -5047,20 +5029,35 @@ impl SearchIndex {
             return bulk_index.clone();
         }
 
+        // Chunk size limited to MAX_BULK_INSERT - 1 to avoid errors.
+        // The const assert in hashmap.rs guarantees MAX_BULK_INSERT >= 2.
+        const CHUNK_SIZE: usize = MAX_BULK_INSERT - 1;
+
         let mut transient = existing_index.clone().transient();
+        let mut entries: Vec<(NgramKey, TaskIdCollection)> =
+            Vec::with_capacity(CHUNK_SIZE.min(bulk_index.len()));
 
         for (ngram_key, bulk_posting_list) in bulk_index {
-            match existing_index.get(ngram_key.as_str()) {
+            let merged = match existing_index.get(ngram_key.as_str()) {
                 Some(existing_posting_list) => {
-                    // Merge the posting lists using merge-sort
-                    let merged = merge_sorted_posting_lists(existing_posting_list, bulk_posting_list);
-                    transient.insert(ngram_key.clone(), merged);
+                    merge_sorted_posting_lists(existing_posting_list, bulk_posting_list)
                 }
-                None => {
-                    // New n-gram, insert directly
-                    transient.insert(ngram_key.clone(), bulk_posting_list.clone());
-                }
+                None => bulk_posting_list.clone(),
+            };
+            entries.push((ngram_key.clone(), merged));
+
+            if entries.len() >= CHUNK_SIZE {
+                transient = transient
+                    .insert_bulk_owned(std::mem::take(&mut entries))
+                    .expect("CHUNK_SIZE < MAX_BULK_INSERT, so error should not occur");
+                entries = Vec::with_capacity(CHUNK_SIZE);
             }
+        }
+
+        if !entries.is_empty() {
+            transient = transient
+                .insert_bulk_owned(entries)
+                .expect("remaining entries < CHUNK_SIZE < MAX_BULK_INSERT, so error should not occur");
         }
 
         transient.persistent()
@@ -5311,18 +5308,18 @@ impl SearchIndex {
 
     /// Optimized merge implementation using bulk insert.
     ///
-    /// Collects all merged entries first, then uses `insert_bulk_owned`.
+    /// Collects all merged entries first, then uses `insert_bulk_owned` with chunking.
     fn merge_ngram_delta_bulk(
         index: &NgramIndex,
         add: &MutableIndex,
         remove: &MutableIndex,
         all_keys: &std::collections::HashSet<&NgramKey>,
     ) -> MergeNgramDeltaResult {
-        let mut result = index.clone().transient();
-        let mut fallback_reason: Option<MergeNgramDeltaFallbackReason> = None;
+        // Chunk size limited to MAX_BULK_INSERT - 1 to avoid errors.
+        // The const assert in hashmap.rs guarantees MAX_BULK_INSERT >= 2.
+        const CHUNK_SIZE: usize = MAX_BULK_INSERT - 1;
 
-        // Collect all entries to insert (for bulk insert)
-        // and keys to remove (must be processed individually)
+        let mut result = index.clone().transient();
         let mut entries_to_insert: Vec<(NgramKey, TaskIdCollection)> = Vec::new();
         let mut keys_to_remove: Vec<&str> = Vec::new();
 
@@ -5346,67 +5343,22 @@ impl SearchIndex {
             }
         }
 
-        // Process removals individually (cannot be batched)
         for key_str in &keys_to_remove {
             result.remove(*key_str);
         }
 
-        // Try bulk insert for additions
-        // Note: MAX_BULK_INSERT = 100_000
-        // insert_bulk_owned consumes self, so we must check count before calling.
         if !entries_to_insert.is_empty() {
-            let entries_count = entries_to_insert.len();
-
-            if entries_count <= lambars::persistent::MAX_BULK_INSERT {
-                // Within limit: use bulk insert for optimal COW reduction
-                // Note: The count check above guarantees TooManyEntries error will not occur.
-                // We use unwrap_or_else to handle any unexpected errors gracefully by
-                // rebuilding the index and falling back to individual inserts.
-                result = result.insert_bulk_owned(entries_to_insert).unwrap_or_else(|error| {
-                    // Unexpected error: recover items and insert individually.
-                    // Since insert_bulk_owned consumed `result`, we must rebuild from
-                    // the persistent form we have so far.
-                    let recovered_items = error.into_items();
-                    fallback_reason = Some(MergeNgramDeltaFallbackReason::TooManyEntries {
-                        count: recovered_items.len(),
-                        limit: lambars::persistent::MAX_BULK_INSERT,
-                    });
-                    // Rebuild transient from index (removals already processed via fold)
-                    let mut rebuilt = index.clone().transient();
-                    // Re-apply removals
-                    for key_str in &keys_to_remove {
-                        rebuilt.remove(*key_str);
-                    }
-                    // Apply recovered items individually
-                    for (key, collection) in recovered_items {
-                        rebuilt.insert(key, collection);
-                    }
-                    rebuilt
-                });
-            } else {
-                // Too many entries: fall back to individual inserts
-                // Note: insert_bulk_owned consumes self on error, making chunked retry
-                // impossible without reconstructing the TransientHashMap. For simplicity,
-                // we fall back to individual inserts which always work.
-                fallback_reason = Some(MergeNgramDeltaFallbackReason::TooManyEntries {
-                    count: entries_count,
-                    limit: lambars::persistent::MAX_BULK_INSERT,
-                });
-
-                for (key, collection) in entries_to_insert {
-                    result.insert(key, collection);
-                }
+            // Use drain to avoid cloning - transfer ownership chunk by chunk
+            while !entries_to_insert.is_empty() {
+                let chunk_size = entries_to_insert.len().min(CHUNK_SIZE);
+                let chunk_vec: Vec<_> = entries_to_insert.drain(..chunk_size).collect();
+                result = result
+                    .insert_bulk_owned(chunk_vec)
+                    .expect("CHUNK_SIZE < MAX_BULK_INSERT, so error should not occur");
             }
         }
 
-        let persistent_result = result.persistent();
-        match fallback_reason {
-            Some(reason) => MergeNgramDeltaResult::Fallback {
-                index: persistent_result,
-                reason,
-            },
-            None => MergeNgramDeltaResult::Ok(persistent_result),
-        }
+        MergeNgramDeltaResult::Ok(result.persistent())
     }
 
     /// Computes `(existing ∪ add) - remove` with deduplication.

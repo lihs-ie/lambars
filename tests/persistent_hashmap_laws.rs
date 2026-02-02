@@ -644,3 +644,200 @@ proptest! {
         prop_assert_eq!(via_chaining, via_single);
     }
 }
+
+// =============================================================================
+// TASK-010: insert_without_cow Property-Based Tests
+//
+// These property tests verify:
+// 1. insert_without_cow produces the same results as insert (RISK-001 mitigation)
+// 2. transient modifications do not affect the original PersistentHashMap
+// =============================================================================
+
+proptest! {
+    /// Property test: insert_without_cow is equivalent to insert.
+    ///
+    /// For any sequence of key-value pairs, inserting via insert_without_cow
+    /// should produce the same result as inserting via insert.
+    ///
+    /// This test serves as a mitigation for RISK-001 (structural sharing breakage)
+    /// by verifying that the optimized COW path maintains semantic equivalence
+    /// with the standard insert path.
+    #[test]
+    fn prop_insert_without_cow_equivalence(
+        entries in arbitrary_entries()
+    ) {
+        // Via insert_without_cow
+        let mut via_without_cow = TransientHashMap::new();
+        for (key, value) in entries.clone() {
+            via_without_cow.insert_without_cow(key, value);
+        }
+        let via_without_cow = via_without_cow.persistent();
+
+        // Via insert
+        let mut via_insert = TransientHashMap::new();
+        for (key, value) in entries {
+            via_insert.insert(key, value);
+        }
+        let via_insert = via_insert.persistent();
+
+        // Both should produce the same map
+        prop_assert_eq!(via_without_cow, via_insert);
+    }
+}
+
+proptest! {
+    /// Property test: transient modifications are isolated from the original.
+    ///
+    /// When a transient is created from a persistent map and modified via
+    /// insert_without_cow, the original persistent map should remain unchanged.
+    ///
+    /// This test serves as a mitigation for RISK-001 (structural sharing breakage)
+    /// by verifying that the in-place update optimization preserves referential
+    /// transparency of the persistent data structure.
+    #[test]
+    fn prop_transient_isolation(
+        initial_entries in arbitrary_entries(),
+        additional_entries in arbitrary_entries()
+    ) {
+        // Create initial persistent map
+        let initial: PersistentHashMap<String, i32> =
+            initial_entries.clone().into_iter().collect();
+
+        // Keep a clone to verify after transient operations
+        // (transient() consumes the original)
+        let initial_clone = initial.clone();
+
+        // Take a snapshot of the initial map contents
+        let initial_len = initial_clone.len();
+        let initial_keys: HashSet<_> = initial_clone.keys().cloned().collect();
+        let initial_values: Vec<_> = initial_entries.iter()
+            .map(|(k, _)| (k.clone(), initial_clone.get(k).cloned()))
+            .collect();
+
+        // Create transient and modify via insert_without_cow
+        let mut transient = initial.transient();
+        for (key, value) in additional_entries {
+            transient.insert_without_cow(key, value);
+        }
+
+        // Convert back to persistent
+        let _result = transient.persistent();
+
+        // The clone (which shares structure with the original) should be unchanged
+        prop_assert_eq!(initial_clone.len(), initial_len);
+
+        let current_keys: HashSet<_> = initial_clone.keys().cloned().collect();
+        prop_assert_eq!(current_keys, initial_keys);
+
+        // All original values should be unchanged
+        for (key, expected_value) in initial_values {
+            prop_assert_eq!(initial_clone.get(&key).cloned(), expected_value);
+        }
+    }
+}
+
+proptest! {
+    /// Property test: insert_without_cow with updates is equivalent to insert with updates.
+    ///
+    /// When updating existing keys, insert_without_cow should behave identically
+    /// to insert, returning the old value and storing the new value.
+    #[test]
+    fn prop_insert_without_cow_update_equivalence(
+        initial_entries in prop::collection::vec(arbitrary_entry(), 1..30),
+        update_value in arbitrary_value()
+    ) {
+        // Create initial map
+        let initial: PersistentHashMap<String, i32> =
+            initial_entries.clone().into_iter().collect();
+
+        // Pick a key that exists (last value for duplicate keys)
+        let existing_keys: std::collections::HashMap<_, _> =
+            initial_entries.into_iter().collect();
+
+        if let Some((key, original_value)) = existing_keys.iter().next() {
+            // Via insert_without_cow
+            let mut transient1 = initial.clone().transient();
+            let old_via_without_cow = transient1.insert_without_cow(key.clone(), update_value);
+            let result1 = transient1.persistent();
+
+            // Via insert
+            let mut transient2 = initial.transient();
+            let old_via_insert = transient2.insert(key.clone(), update_value);
+            let result2 = transient2.persistent();
+
+            // Old values should match
+            prop_assert_eq!(old_via_without_cow, old_via_insert);
+            prop_assert_eq!(old_via_without_cow, Some(*original_value));
+
+            // Results should be equal
+            prop_assert_eq!(&result1, &result2);
+            prop_assert_eq!(result1.get(key), Some(&update_value));
+        }
+    }
+}
+
+proptest! {
+    /// Property test: sequential insert_without_cow operations are order-preserving.
+    ///
+    /// The final value for any key should be the last value inserted for that key,
+    /// regardless of whether insert_without_cow or insert is used.
+    #[test]
+    fn prop_insert_without_cow_last_value_wins(
+        key in arbitrary_key(),
+        values in prop::collection::vec(arbitrary_value(), 2..10)
+    ) {
+        let last_value = *values.last().expect("values is not empty");
+
+        // Via insert_without_cow
+        let mut transient = TransientHashMap::new();
+        for value in values {
+            transient.insert_without_cow(key.clone(), value);
+        }
+        let result = transient.persistent();
+
+        prop_assert_eq!(result.len(), 1);
+        prop_assert_eq!(result.get(&key), Some(&last_value));
+    }
+}
+
+proptest! {
+    /// Property test: insert_without_cow from existing PersistentHashMap preserves entries.
+    ///
+    /// When creating a transient from an existing persistent map and adding new entries
+    /// via insert_without_cow, all original entries should be preserved unless overwritten.
+    #[test]
+    fn prop_insert_without_cow_preserves_existing(
+        existing_entries in arbitrary_entries(),
+        new_entries in arbitrary_entries()
+    ) {
+        // Create initial persistent map
+        let existing: PersistentHashMap<String, i32> =
+            existing_entries.clone().into_iter().collect();
+
+        // Create expected map (existing + new, with new overwriting existing on conflict)
+        let existing_map: std::collections::HashMap<_, _> =
+            existing_entries.into_iter().collect();
+        let new_map: std::collections::HashMap<_, _> =
+            new_entries.clone().into_iter().collect();
+
+        // Create transient and add new entries
+        let mut transient = existing.transient();
+        for (key, value) in new_entries {
+            transient.insert_without_cow(key, value);
+        }
+        let result = transient.persistent();
+
+        // Verify all entries are present with correct values
+        // New entries should be present
+        for (key, value) in &new_map {
+            prop_assert_eq!(result.get(key), Some(value));
+        }
+
+        // Existing entries not in new should be preserved
+        for (key, value) in &existing_map {
+            if !new_map.contains_key(key) {
+                prop_assert_eq!(result.get(key), Some(value));
+            }
+        }
+    }
+}

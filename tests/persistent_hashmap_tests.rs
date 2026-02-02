@@ -3313,3 +3313,171 @@ fn test_collision_contains_key_large_bucket() {
     }
     assert!(!map.contains_key(&missing_key));
 }
+
+// =============================================================================
+// TASK-010: insert_without_cow Structural Sharing Tests
+//
+// These tests verify that:
+// 1. insert_without_cow and insert produce equivalent results
+// 2. transient modifications do not affect the original PersistentHashMap
+// 3. Generation tokens remain consistent during operations
+// 4. In-place updates only occur when the root is exclusively owned
+// =============================================================================
+
+use lambars::persistent::TransientHashMap;
+
+/// Tests that structural sharing is correctly maintained.
+///
+/// When a PersistentHashMap is converted to a TransientHashMap and modified,
+/// the original PersistentHashMap should remain unchanged.
+#[rstest]
+fn test_insert_without_cow_structural_sharing() {
+    // Create a persistent map with some entries
+    let persistent: PersistentHashMap<String, i32> = (0..100)
+        .map(|index| (format!("key_{index}"), index))
+        .collect();
+
+    // Clone before creating transient to verify structural sharing
+    let persistent_clone = persistent.clone();
+
+    // Create transient and modify via insert_without_cow
+    let mut transient = persistent.transient();
+    for index in 100..150 {
+        transient.insert_without_cow(format!("key_{index}"), index);
+    }
+
+    // Convert back to persistent
+    let result = transient.persistent();
+
+    // Original persistent should be unchanged
+    assert_eq!(persistent_clone.len(), 100);
+    for index in 0..100 {
+        assert_eq!(persistent_clone.get(&format!("key_{index}")), Some(&index));
+    }
+
+    // Result should have all entries
+    assert_eq!(result.len(), 150);
+    for index in 0..150 {
+        assert_eq!(result.get(&format!("key_{index}")), Some(&index));
+    }
+}
+
+/// Tests that transient modifications are isolated from the original map.
+///
+/// Modifications via insert_without_cow on a transient should not affect
+/// any PersistentHashMap instances derived from the same source.
+#[rstest]
+fn test_transient_isolation() {
+    // Create a base persistent map
+    let base: PersistentHashMap<String, i32> = vec![
+        ("a".to_string(), 1),
+        ("b".to_string(), 2),
+        ("c".to_string(), 3),
+    ]
+    .into_iter()
+    .collect();
+
+    // Create two transients from the same base
+    let mut transient1 = base.clone().transient();
+    let mut transient2 = base.transient();
+
+    // Modify each transient differently using insert_without_cow
+    transient1.insert_without_cow("a".to_string(), 100);
+    transient1.insert_without_cow("d".to_string(), 4);
+
+    transient2.insert_without_cow("b".to_string(), 200);
+    transient2.insert_without_cow("e".to_string(), 5);
+
+    // Convert back to persistent
+    let result1 = transient1.persistent();
+    let result2 = transient2.persistent();
+
+    // Results should be independent
+    assert_eq!(result1.get("a"), Some(&100));
+    assert_eq!(result1.get("d"), Some(&4));
+    assert_eq!(result1.get("b"), Some(&2)); // Unchanged from original
+
+    assert_eq!(result2.get("b"), Some(&200));
+    assert_eq!(result2.get("e"), Some(&5));
+    assert_eq!(result2.get("a"), Some(&1)); // Unchanged from original
+}
+
+/// Tests that generation tokens remain consistent during operations.
+///
+/// After multiple insert_without_cow operations, converting to persistent
+/// and back to transient should maintain correct behavior.
+#[rstest]
+fn test_generation_consistency() {
+    // Create initial transient
+    let mut transient: TransientHashMap<i32, i32> = TransientHashMap::new();
+
+    // Insert many entries to create a complex tree structure
+    for index in 0..200 {
+        transient.insert_without_cow(index, index * 10);
+    }
+
+    // Convert to persistent and back to transient
+    let persistent = transient.persistent();
+    let mut transient2 = persistent.transient();
+
+    // Continue modifying
+    for index in 200..300 {
+        transient2.insert_without_cow(index, index * 10);
+    }
+
+    // Update some existing keys
+    for index in 0..50 {
+        transient2.insert_without_cow(index, index * 100);
+    }
+
+    // Final result should have all entries correctly
+    let result = transient2.persistent();
+    assert_eq!(result.len(), 300);
+
+    // Verify updated values
+    for index in 0..50 {
+        assert_eq!(result.get(&index), Some(&(index * 100)));
+    }
+
+    // Verify unchanged values
+    for index in 50..200 {
+        assert_eq!(result.get(&index), Some(&(index * 10)));
+    }
+
+    // Verify new values
+    for index in 200..300 {
+        assert_eq!(result.get(&index), Some(&(index * 10)));
+    }
+}
+
+/// Tests that in-place updates only occur when the root is exclusively owned.
+///
+/// When multiple references exist to the root (shared ownership), the fallback
+/// COW path should be used to maintain referential transparency.
+#[rstest]
+fn test_insert_without_cow_inplace_only_on_exclusive() {
+    // Create a persistent map
+    let persistent: PersistentHashMap<String, i32> =
+        vec![("existing".to_string(), 100)].into_iter().collect();
+
+    // Keep a reference to the persistent map
+    let persistent_clone = persistent.clone();
+
+    // Create transient - the root is now shared between persistent_clone and transient
+    let mut transient = persistent.transient();
+
+    // insert_without_cow should handle shared root via fallback path
+    transient.insert_without_cow("new".to_string(), 200);
+    transient.insert_without_cow("existing".to_string(), 150);
+
+    let result = transient.persistent();
+
+    // Original clone should be unchanged (structural sharing preserved)
+    assert_eq!(persistent_clone.len(), 1);
+    assert_eq!(persistent_clone.get("existing"), Some(&100));
+
+    // Result should have modifications
+    assert_eq!(result.len(), 2);
+    assert_eq!(result.get("existing"), Some(&150));
+    assert_eq!(result.get("new"), Some(&200));
+}
