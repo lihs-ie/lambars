@@ -1,0 +1,1071 @@
+# tasks_bulk n-gram 二重構築最適化 要件定義
+#
+# 概要:
+#   apply_changes_bulk で発生している n-gram の二重構築を排除し、
+#   tasks_bulk ベンチマークのスループットを改善する。
+#
+# 設計方針:
+#   1. SearchIndexDelta に n-gram 収集をスキップするモードを追加
+#   2. apply_changes_bulk では n-gram スキップモードの delta を使用
+#   3. bulk_threshold を 100 に戻して過度なバルク経路発火を防ぐ
+#   4. 正規化結果 (NormalizedTaskData) を一度だけ計算して再利用
+#
+# 参照:
+#   - docs/internal/analysis/20260201_tasks_bulk_new_bottleneck_analysis.yaml
+#   - benches/api/src/api/query.rs (SearchIndex::apply_changes_bulk)
+
+version: "1.0.0"
+name: "tasks_bulk_ngram_double_build_optimization"
+description: |
+  apply_changes_bulk メソッドで発生している n-gram の二重構築を排除する。
+
+  現在の実装では、SearchIndexBulkBuilder で n-gram を構築した後、
+  SearchIndexDelta::from_changes でも同じ n-gram を再収集・ソート・マージしており、
+  同等のコストの処理が二重実行されている。
+
+  この二重処理が tasks_bulk ベンチマークのスループットを大幅に悪化させている:
+  - RPS: 14.14 req/s (前回: 43 req/s) - **-67.1%悪化**
+  - P99: 28.75s (前回: 27.23s) - **+5.6%悪化**
+
+# 背景・動機
+background:
+  problem: |
+    ## 根本原因: n-gram の二重構築
+
+    apply_changes_bulk (benches/api/src/api/query.rs:4928-5009) で以下が両方実行:
+
+    1. SearchIndexBulkBuilder による n-gram 構築 (4967-4969行)
+       - title_word_builder.build()
+       - title_full_builder.build()
+       - tag_builder.build()
+
+    2. SearchIndexDelta::from_changes による n-gram 再収集 (4988行)
+       - collect_title_word_ngrams
+       - collect_title_full_ngrams
+       - collect_tag_ngrams
+       - prepare_posting_lists() でソート/重複排除
+
+    この二重処理により、1リクエストあたりの作業量が大幅増加。
+
+    ## bulk_threshold=10 の問題
+
+    デフォルト設定 (benches/api/src/api/query.rs:1018):
+    ```rust
+    bulk_threshold: 10,
+    ```
+
+    この閾値が低すぎるため:
+    - ほぼ全リクエストでバルク経路が発火
+    - バルク経路の追加コスト（二重処理） > 最適化効果
+    - 常時発火してスループット悪化
+
+  motivation: |
+    ## 期待される改善効果
+
+    ### 計測条件
+    - ベンチマーク: tasks_bulk (benches/api/benchmarks/wrk/tasks_bulk.lua)
+    - データセット: 10タスク × 1000リクエスト = 10,000タスク追加
+    - 環境: Apple M1 Pro, 16GB RAM, macOS 14.4
+    - ワークロード: Add のみの一括挿入
+
+    ### 緊急対応（bulk_threshold を 100 に戻す）
+    - 根拠: 前回ブランチ (feature/async-io-unboxed-execution) で bulk_threshold=100 時の実測値
+    - スループット: +100% 以上（前回レベルまで回復）
+    - RPS: 14.14 → 43 req/s 以上（実測値ベース）
+    - P99: 28.75s → 27.23s 以下（実測値ベース）
+
+    ### 根本解決（n-gram 二重構築の排除）
+    - 根拠: n-gram 収集が 2 回 → 1 回になるため、理論上 50% 削減
+    - 実測では他のオーバーヘッドがあるため、控えめに 30% 削減を目標
+    - apply_changes_bulk の実行時間: -30% 以上
+    - n-gram 収集・ソート・マージの処理: -50% 以上
+    - insert_into_node_cow 呼び出し数: -30% 以上
+
+    ### 総合効果（Phase 1 + Phase 2 + Phase 3）
+    - Phase 1: 14.14 → 43 req/s（3倍）
+    - Phase 2: 43 → 65 req/s（1.5倍、保守的）
+    - Phase 3: 65 → 100 req/s（1.5倍、保守的）
+    - Phase 2 楽観シナリオ: 43 → 86 req/s（2倍）
+    - Phase 3 楽観シナリオ: 86 → 130 req/s（1.5倍）
+
+    ### 目標値まとめ
+    - Phase 1 目標: RPS >= 43 req/s、P99 < 28秒
+    - Phase 2 目標: RPS >= 65 req/s、P99 < 15秒
+    - Phase 2 ストレッチ: RPS >= 85 req/s、P99 < 12秒
+    - Phase 3 目標: RPS >= 100 req/s、P99 < 10秒
+    - Phase 3 ストレッチ: RPS >= 130 req/s、P99 < 8秒
+
+    ### 注意事項
+    - 上記はあくまで推定値であり、実測で検証が必要
+    - ワークロードやデータ特性により効果は変動する
+    - Phase 2/3 の工数には実測とチューニングの時間を含む
+
+  prior_art:
+    - name: "SearchIndexBulkBuilder"
+      description: |
+        既に実装済みのバルク構築 API。
+        n-gram を一括で効率的に構築する。
+
+    - name: "SearchIndexDelta"
+      description: |
+        既存の差分マージアルゴリズム。
+        Add/Remove/Update を含む全ての変更パターンに対応。
+        prefix/suffix インデックスと tasks_by_id の更新にも使用。
+
+# 要件一覧
+requirements:
+  # ======================================================================
+  # 1. SearchIndexDelta の n-gram スキップモード
+  # ======================================================================
+  - id: REQ-NGRAM-OPT-001
+    name: "SearchIndexDelta に n-gram 収集をスキップするモードを追加"
+    description: |
+      SearchIndexDelta::from_changes に n-gram 収集をスキップするモードを追加する。
+
+      ## 重要な制約
+
+      **この最適化は Add のみの変更に対してのみ適用される**:
+      - apply_changes_bulk は Add のみの条件でのみ呼ばれる（4873行で検証済み）
+      - Remove/Update が含まれる場合は apply_changes_delta が使用される
+      - したがって、from_changes_without_ngrams は Add のみを想定して良い
+
+      ## 設計
+
+      ### オプション A: DeltaMode 列挙型を追加
+
+      ```rust
+      pub enum DeltaMode {
+          /// 全てのインデックス（n-gram, prefix, suffix, tasks_by_id）を収集
+          Full,
+          /// n-gram をスキップし、prefix, suffix, tasks_by_id のみ収集
+          WithoutNgram,
+      }
+
+      impl SearchIndexDelta {
+          pub fn from_changes_with_mode(
+              changes: &[TaskChange],
+              config: &SearchIndexConfig,
+              tasks_by_id: &TasksById,
+              mode: DeltaMode,
+          ) -> Self {
+              // mode に応じて n-gram 収集をスキップ
+          }
+      }
+      ```
+
+      ### オプション B: 専用コンストラクタを追加
+
+      ```rust
+      impl SearchIndexDelta {
+          /// n-gram をスキップし、prefix/suffix/tasks_by_id のみ収集
+          ///
+          /// # Preconditions
+          /// - All changes must be `TaskChange::Add` (Add-only)
+          /// - This is intended for use by `apply_changes_bulk` only
+          pub fn from_changes_without_ngrams(
+              changes: &[TaskChange],
+              config: &SearchIndexConfig,
+              tasks_by_id: &TasksById,
+          ) -> Self {
+              // n-gram 収集をスキップ
+              // debug_assert で Add のみであることを検証
+          }
+      }
+      ```
+
+      ## 推奨アプローチ
+
+      **オプション B（専用コンストラクタ）を推奨**:
+      - API が明確（名前から振る舞いが分かる）
+      - 既存コードへの影響が最小
+      - テストも独立して書ける
+      - Add のみの前提を明示できる
+
+      ## 実装の詳細
+
+      ### from_changes_without_ngrams の処理フロー
+
+      1. **前提条件の検証** (Debug ビルドのみ)
+         ```rust
+         // Debug ビルドでは assert で早期エラー
+         debug_assert!(
+             changes.iter().all(|c| matches!(c, TaskChange::Add(_))),
+             "from_changes_without_ngrams requires Add-only changes"
+         );
+
+         // Release ビルドでは検証をスキップ（呼び出し元が保証）
+         // 理由:
+         // - apply_changes_bulk は既に Add のみをチェック済み（4873行）
+         // - from_changes_without_ngrams は内部 API（pub ではあるが apply_changes_bulk 専用）
+         // - したがって、from_changes_without_ngrams は Add のみを前提としても安全
+         ```
+
+         **注意**: この API は内部実装の詳細であり、外部から直接呼ばれることを想定していない。
+         apply_changes_bulk のみから呼ばれることを前提とする。
+
+      2. **正規化とタスク収集** (既存と同じ)
+         - NormalizedTaskData::from_task で正規化
+         - Add タスクを収集
+
+      3. **prefix/suffix インデックスの収集** (既存と同じ)
+         - collect_title_word_prefix
+         - collect_title_full_prefix
+         - collect_tag_prefix
+         - collect_*_all_suffix
+
+      4. **n-gram インデックスの収集をスキップ** (新規)
+         - collect_title_word_ngrams を呼ばない
+         - collect_title_full_ngrams を呼ばない
+         - collect_tag_ngrams を呼ばない
+         - title_word_ngram_add/remove は空のまま
+         - title_full_ngram_add/remove は空のまま
+         - tag_ngram_add/remove は空のまま
+
+      5. **prepare_posting_lists の呼び出し** (既存と同じ)
+         - n-gram が空でも正常に動作する
+
+      6. **空のチェック**
+         - changes が空の場合の振る舞いを明確化
+         - 空の場合は空の delta を返す（既存の from_changes と同じ）
+
+      ### 参照透過性の保証
+
+      - 同じ入力 (changes, config, tasks_by_id) に対して常に同じ出力を返す
+      - 外部状態に依存しない
+      - 副作用なし
+      - 空の changes に対しても安全に動作
+
+    methods:
+      - name: "from_changes_without_ngrams"
+        signature: |
+          pub fn from_changes_without_ngrams(
+              changes: &[TaskChange],
+              config: &SearchIndexConfig,
+              tasks_by_id: &TasksById,
+          ) -> Self
+        description: |
+          n-gram をスキップし、prefix/suffix/tasks_by_id のみ収集する。
+
+          ## 前提条件
+          - 全ての changes が TaskChange::Add であること（debug_assert で検証）
+          - config が有効な設定であること
+          - changes が空でも安全に動作（空の delta を返す）
+
+          ## 事後条件
+          - title_word_ngram_add/remove が空
+          - title_full_ngram_add/remove が空
+          - tag_ngram_add/remove が空
+          - その他のフィールド（prefix/suffix/tasks_by_id）は from_changes と同じ
+
+          ## 呼び出し元の責任
+          - Add のみであることを保証する
+          - apply_changes_bulk は既に Add のみをチェックしているため安全
+
+        examples:
+          - description: "Add のみの変更で n-gram をスキップ"
+            code: |
+              let task = create_test_task("test task");
+              let changes = vec![TaskChange::Add(task)];
+              let config = SearchIndexConfig::default();
+              let tasks_by_id = PersistentHashMap::new();
+
+              let delta = SearchIndexDelta::from_changes_without_ngrams(
+                  &changes,
+                  &config,
+                  &tasks_by_id,
+              );
+
+              // n-gram が空であることを確認
+              assert!(delta.title_word_ngram_add.is_empty());
+              assert!(delta.title_full_ngram_add.is_empty());
+              assert!(delta.tag_ngram_add.is_empty());
+
+              // prefix/suffix は収集されていることを確認
+              assert!(!delta.title_word_prefix_add.is_empty());
+
+          - description: "空の changes でも安全に動作"
+            code: |
+              let changes = vec![];
+              let config = SearchIndexConfig::default();
+              let tasks_by_id = PersistentHashMap::new();
+
+              let delta = SearchIndexDelta::from_changes_without_ngrams(
+                  &changes,
+                  &config,
+                  &tasks_by_id,
+              );
+
+              // 全てのフィールドが空
+              assert!(delta.title_word_ngram_add.is_empty());
+              assert!(delta.title_word_prefix_add.is_empty());
+
+    implementations:
+      - type: "SearchIndexDelta"
+        description: |
+          benches/api/src/api/query.rs の SearchIndexDelta に実装。
+
+          from_changes の実装をベースに、n-gram 収集の部分をスキップする。
+
+  # ======================================================================
+  # 2. apply_changes_bulk での n-gram スキップモードの使用
+  # ======================================================================
+  - id: REQ-NGRAM-OPT-002
+    name: "apply_changes_bulk で n-gram スキップモードを使用"
+    description: |
+      apply_changes_bulk メソッドを修正し、SearchIndexDelta::from_changes_without_ngrams
+      を使用して n-gram の二重構築を排除する。
+
+      ## 修正箇所
+
+      benches/api/src/api/query.rs:4988-4989
+
+      ### 修正前
+      ```rust
+      let mut delta = SearchIndexDelta::from_changes(changes, &self.config, &self.tasks_by_id);
+      delta.prepare_posting_lists();
+      ```
+
+      ### 修正後
+      ```rust
+      let mut delta = SearchIndexDelta::from_changes_without_ngrams(
+          changes,
+          &self.config,
+          &self.tasks_by_id,
+      );
+      delta.prepare_posting_lists();
+      ```
+
+      ## 期待される効果
+
+      - n-gram 収集・ソート・マージの処理が 1 回のみになる
+      - apply_changes_bulk の実行時間が -30% 以上削減
+      - insert_into_node_cow の呼び出し数が -30% 以上削減
+
+      ## 正確性の保証
+
+      - n-gram は SearchIndexBulkBuilder で構築済み
+      - delta は prefix/suffix と tasks_by_id のみ更新
+      - 最終結果は変わらない（テストで検証）
+
+    methods:
+      - name: "apply_changes_bulk"
+        signature: |
+          fn apply_changes_bulk(&self, changes: &[TaskChange]) -> Self
+        description: |
+          変更を SearchIndexBulkBuilder で一括処理する。
+
+          ## 修正内容
+          1. SearchIndexBulkBuilder で n-gram を構築
+          2. SearchIndexDelta::from_changes_without_ngrams で prefix/suffix/tasks_by_id を収集
+          3. n-gram は BulkBuilder の結果を使用
+          4. prefix/suffix/tasks_by_id は delta の結果を使用
+
+    implementations:
+      - type: "SearchIndex"
+        description: |
+          benches/api/src/api/query.rs の SearchIndex::apply_changes_bulk を修正。
+
+  # ======================================================================
+  # 3. 正規化結果の再利用
+  # ======================================================================
+  - id: REQ-NGRAM-OPT-003
+    name: "正規化結果 (NormalizedTaskData) を一度だけ計算して再利用（Phase 3: オプショナル）"
+    description: |
+      apply_changes_bulk で NormalizedTaskData::from_task を 2 回呼び出している問題を解決する。
+
+      **注意: この要件は Phase 3（オプショナル）であり、Phase 1/2 では実装しない**
+
+      ## 現在の問題
+
+      1. SearchIndexBulkBuilder への追加時に正規化 (4947-4964行)
+      2. SearchIndexDelta::from_changes_without_ngrams で再度正規化
+
+      同じタスクに対して正規化が二重実行されている。
+
+      ## 解決策
+
+      正規化結果を事前に計算して、BulkBuilder と delta の両方に渡す。
+
+      ### 設計案: 正規化結果を事前計算して渡す
+
+      ```rust
+      // 1. 正規化結果を事前計算
+      let normalized_tasks: Vec<(&Task, NormalizedTaskData)> = tasks
+          .iter()
+          .map(|task| {
+              let normalized = NormalizedTaskData::from_task(task);
+              (task, normalized)
+          })
+          .collect();
+
+      // 2. BulkBuilder に渡す
+      for (task, normalized) in &normalized_tasks {
+          title_full_builder = title_full_builder
+              .add_entry(normalized.title_key.clone(), task.task_id.clone());
+          // ...
+      }
+
+      // 3. delta にも渡す（新しい API が必要）
+      // TaskChange::Add は Task を持っているので、Task と NormalizedTaskData のペアを渡せる
+      let normalized_changes: Vec<(&Task, &NormalizedTaskData)> = normalized_tasks
+          .iter()
+          .map(|(task, normalized)| (*task, normalized))
+          .collect();
+
+      let mut delta = SearchIndexDelta::from_normalized_adds_without_ngrams(
+          &normalized_changes,
+          &self.config,
+          &self.tasks_by_id,
+      );
+      ```
+
+      ## API 設計
+
+      ### from_normalized_adds_without_ngrams
+
+      ```rust
+      impl SearchIndexDelta {
+          /// 事前に正規化された Add 変更から delta を構築する。
+          /// n-gram はスキップ。
+          ///
+          /// # Preconditions
+          /// - 全ての変更が TaskChange::Add であること
+          /// - normalized_data が正しく正規化されていること
+          pub fn from_normalized_adds_without_ngrams(
+              normalized_adds: &[(&Task, &NormalizedTaskData)],
+              config: &SearchIndexConfig,
+              tasks_by_id: &TasksById,
+          ) -> Self {
+              // 正規化を再実行せずに delta を構築
+          }
+      }
+      ```
+
+      ## 期待される効果
+
+      - 正規化の重複実行を排除
+      - CPU 使用率の削減（正規化は文字列操作が多い）
+      - メモリ使用量の削減（中間結果の削減）
+      - ただし、効果は Phase 2 ほど大きくない（10-20% 程度）
+
+      ## 実装の優先度
+
+      - Phase 1/2 で十分な改善が得られた場合は実装しない
+      - さらなる最適化が必要な場合のみ Phase 3 として実装
+
+    methods:
+      - name: "from_normalized_adds_without_ngrams"
+        signature: |
+          pub fn from_normalized_adds_without_ngrams(
+              normalized_adds: &[(&Task, &NormalizedTaskData)],
+              config: &SearchIndexConfig,
+              tasks_by_id: &TasksById,
+          ) -> Self
+        description: |
+          事前に正規化された Add 変更から delta を構築する。
+          n-gram はスキップ。
+
+          ## 前提条件
+          - 全ての変更が Add であること
+          - normalized_data が正しく正規化されていること（Task と対応）
+
+          ## 事後条件
+          - from_changes_without_ngrams と同じ結果を返す
+          - ただし、正規化を再実行しない
+
+        examples:
+          - description: "正規化結果から delta を構築"
+            code: |
+              let task = create_test_task("test task");
+              let normalized = NormalizedTaskData::from_task(&task);
+              let normalized_adds = vec![(&task, &normalized)];
+              let config = SearchIndexConfig::default();
+              let tasks_by_id = PersistentHashMap::new();
+
+              let delta = SearchIndexDelta::from_normalized_adds_without_ngrams(
+                  &normalized_adds,
+                  &config,
+                  &tasks_by_id,
+              );
+
+              // from_changes_without_ngrams と等価
+              let changes = vec![TaskChange::Add(task.clone())];
+              let expected = SearchIndexDelta::from_changes_without_ngrams(
+                  &changes,
+                  &config,
+                  &tasks_by_id,
+              );
+
+              assert_eq!(delta.title_word_prefix_add, expected.title_word_prefix_add);
+
+    implementations:
+      - type: "SearchIndexDelta"
+        description: |
+          正規化結果を受け取る新しいコンストラクタを追加。
+          Phase 3 でのみ実装。
+
+  # ======================================================================
+  # 4. bulk_threshold の調整
+  # ======================================================================
+  - id: REQ-NGRAM-OPT-004
+    name: "bulk_threshold を 100 に戻す"
+    description: |
+      デフォルトの bulk_threshold を 10 から 100 に戻す。
+
+      ## 理由
+
+      bulk_threshold=10 は以下の問題を引き起こしている:
+      - ほぼ全リクエストでバルク経路が発火
+      - バルク経路の追加コスト > 最適化効果（小規模バッチでは）
+      - 常時発火してスループット悪化
+
+      ## 変更箇所
+
+      benches/api/src/api/query.rs:1018
+
+      ### 修正前
+      ```rust
+      impl Default for SearchIndexConfig {
+          fn default() -> Self {
+              Self {
+                  // ...
+                  bulk_threshold: 10,
+                  // ...
+              }
+          }
+      }
+      ```
+
+      ### 修正後
+      ```rust
+      impl Default for SearchIndexConfig {
+          fn default() -> Self {
+              Self {
+                  // ...
+                  bulk_threshold: 100,
+                  // ...
+              }
+          }
+      }
+      ```
+
+      ## 期待される効果
+
+      - 小規模バッチ（<100件）ではデルタ経路を使用
+      - 大規模バッチ（>=100件）のみバルク経路を使用
+      - バルク経路の追加コストが最適化効果を上回るようになる
+
+      ## 将来の改善
+
+      根本修正（n-gram 二重構築の排除）後に、再度閾値を調整:
+      - 10-50 程度に下げられる可能性がある
+      - 実測データに基づいて最適値を決定
+
+    implementations:
+      - type: "SearchIndexConfig"
+        description: |
+          benches/api/src/api/query.rs の SearchIndexConfig::default を修正。
+
+  # ======================================================================
+  # 5. テスト要件
+  # ======================================================================
+  - id: REQ-NGRAM-OPT-005
+    name: "n-gram スキップモードの正確性テスト"
+    description: |
+      SearchIndexDelta::from_changes_without_ngrams の正確性を検証する。
+
+      ## テストケース
+
+      ### 1. n-gram が空であることを確認
+      ```rust
+      #[rstest]
+      fn from_changes_without_ngrams_skips_ngram_collection() {
+          let task = create_test_task("test task");
+          let changes = vec![TaskChange::Add(task)];
+          let config = SearchIndexConfig::default();
+          let tasks_by_id = PersistentHashMap::new();
+
+          let delta = SearchIndexDelta::from_changes_without_ngrams(
+              &changes,
+              &config,
+              &tasks_by_id,
+          );
+
+          // n-gram が空
+          assert!(delta.title_word_ngram_add.is_empty());
+          assert!(delta.title_word_ngram_remove.is_empty());
+          assert!(delta.title_full_ngram_add.is_empty());
+          assert!(delta.title_full_ngram_remove.is_empty());
+          assert!(delta.tag_ngram_add.is_empty());
+          assert!(delta.tag_ngram_remove.is_empty());
+      }
+      ```
+
+      ### 2. prefix/suffix は収集されることを確認
+      ```rust
+      #[rstest]
+      fn from_changes_without_ngrams_collects_prefix_suffix() {
+          let task = create_test_task_with_title("callback");
+          let changes = vec![TaskChange::Add(task)];
+          let config = SearchIndexConfig::default();
+          let tasks_by_id = PersistentHashMap::new();
+
+          let delta = SearchIndexDelta::from_changes_without_ngrams(
+              &changes,
+              &config,
+              &tasks_by_id,
+          );
+
+          // prefix が収集されている
+          assert!(!delta.title_word_prefix_add.is_empty());
+
+          // all_suffix が収集されている
+          if config.enable_all_suffix_search {
+              assert!(!delta.title_word_all_suffix_add.is_empty());
+          }
+      }
+      ```
+
+      ### 3. apply_changes_bulk と apply_changes_delta の結果が等価（詳細比較）
+      ```rust
+      #[rstest]
+      fn apply_changes_bulk_with_ngram_skip_equals_delta() {
+          let bulk_config = SearchIndexConfigBuilder::new()
+              .use_bulk_builder(true)
+              .bulk_threshold(2)
+              .build();
+          let delta_config = SearchIndexConfigBuilder::new()
+              .use_bulk_builder(false)
+              .build();
+
+          let tasks: PersistentVector<Task> = PersistentVector::new();
+          let bulk_index = SearchIndex::build_with_config(&tasks, bulk_config);
+          let delta_index = SearchIndex::build_with_config(&tasks, delta_config);
+
+          let task1 = create_test_task_with_id("callback function", task_id_from_u128(1));
+          let task2 = create_test_task_with_id("handler for events", task_id_from_u128(2));
+          let task3 = create_test_task_with_id("important meeting", task_id_from_u128(3));
+
+          let changes = vec![
+              TaskChange::Add(task1.clone()),
+              TaskChange::Add(task2.clone()),
+              TaskChange::Add(task3.clone()),
+          ];
+
+          let bulk_result = bulk_index.apply_changes(&changes);
+          let delta_result = delta_index.apply_changes(&changes);
+
+          // 検索結果が等価（タスクの集合として一致、順序は問わない）
+          // 注意: SearchIndex は順序を保証しないため、HashSet で比較
+          for query in &["callback", "handler", "meeting", "important", "function", "events"] {
+              let bulk_search = bulk_result.search_by_title(query);
+              let delta_search = delta_result.search_by_title(query);
+
+              match (bulk_search, delta_search) {
+                  (Some(bulk_res), Some(delta_res)) => {
+                      // タスクIDの集合として比較（順序は問わない）
+                      let bulk_ids: HashSet<_> = bulk_res.tasks().iter().map(|t| &t.task_id).collect();
+                      let delta_ids: HashSet<_> = delta_res.tasks().iter().map(|t| &t.task_id).collect();
+                      assert_eq!(
+                          bulk_ids, delta_ids,
+                          "Search results for '{}' should be identical. bulk: {:?}, delta: {:?}",
+                          query, bulk_ids, delta_ids
+                      );
+                  }
+                  (None, None) => {}
+                  _ => panic!(
+                      "Search results for '{}' differ in presence. bulk: {:?}, delta: {:?}",
+                      query,
+                      bulk_search.map(|r| r.tasks().len()),
+                      delta_search.map(|r| r.tasks().len())
+                  ),
+              }
+          }
+
+          // tasks_by_id が完全一致
+          assert_eq!(bulk_result.tasks_by_id.len(), delta_result.tasks_by_id.len());
+          for task_id in [task1.task_id, task2.task_id, task3.task_id] {
+              assert!(
+                  bulk_result.tasks_by_id.contains_key(&task_id),
+                  "bulk result should contain task_id: {:?}",
+                  task_id
+              );
+              assert!(
+                  delta_result.tasks_by_id.contains_key(&task_id),
+                  "delta result should contain task_id: {:?}",
+                  task_id
+              );
+              assert_eq!(
+                  bulk_result.tasks_by_id.get(&task_id),
+                  delta_result.tasks_by_id.get(&task_id),
+                  "task content should be identical for task_id: {:?}",
+                  task_id
+              );
+          }
+      }
+      ```
+
+    implementations:
+      - type: "SearchIndexDelta"
+        description: |
+          benches/api/src/api/query.rs のテストセクションに追加。
+
+# 非機能要件
+non_functional_requirements:
+  performance:
+    - "Phase 1: RPS >= 43 req/s、P99 < 28秒"
+    - "Phase 2: RPS >= 65 req/s、P99 < 15秒（目標）"
+    - "Phase 2 ストレッチ: RPS >= 85 req/s、P99 < 12秒"
+    - "Phase 3: RPS >= 100 req/s、P99 < 10秒（目標）"
+    - "Phase 3 ストレッチ: RPS >= 130 req/s、P99 < 8秒"
+    - "apply_changes_bulk の実行時間を -30% 以上削減（Phase 2）"
+    - "insert_into_node_cow の呼び出し数を -30% 以上削減（Phase 2）"
+    - "正規化の重複実行を排除（Phase 3 でのみ、Phase 1/2 では未対応）"
+
+  compatibility:
+    - "既存の SearchIndexDelta::from_changes API は変更しない（後方互換性）"
+    - "既存のテストが全て通過すること"
+    - "apply_changes_bulk と apply_changes_delta の検索結果が等価であること"
+
+  testing:
+    - "from_changes_without_ngrams の単体テスト（Add のみ）"
+    - "apply_changes_bulk の差分テスト（bulk vs delta、Add のみ）"
+    - "プロパティテスト: 任意の Add-only changes で bulk == delta（use_bulk_builder=true、bulk_threshold を超える件数）"
+    - "ベンチマーク: Before/After でプロファイル結果を比較"
+    - "注意: Remove/Update を含む changes は bulk 経路を通らないためテスト対象外"
+    - "注意: bulk_threshold 未満の changes も delta 経路になるためテスト対象外"
+
+  maintainability:
+    - "コードの重複を最小限に抑える"
+    - "関数型プログラミングの原則（参照透過性、不変性）を維持"
+    - "API の明確性（名前から振る舞いが分かる）"
+
+# 実装手順
+implementation_steps:
+  phase_1_emergency:
+    - id: "STEP-001"
+      name: "bulk_threshold を 100 に戻す"
+      priority: "P0"
+      estimated_effort: "1 hour（実装 10分 + ベンチマーク実行・分析 50分）"
+      description: |
+        SearchIndexConfig::default の bulk_threshold を 10 → 100 に変更。
+
+        修正ファイル:
+        - benches/api/src/api/query.rs (1018行)
+
+        テスト:
+        - 既存のテスト（bulk_threshold=2 を明示的に設定しているもの）は影響なし
+        - ベンチマーク実行でスループット改善を確認
+
+        ベンチマーク実行:
+        1. cargo bench --bench api_benchmark -- tasks_bulk
+        2. 結果を benchmark_results_phase1.txt に保存
+        3. Before/After を比較
+        4. プロファイリング（flamegraph）で改善を確認
+
+      acceptance_criteria:
+        - "bulk_threshold が 100 になっていること"
+        - "既存テストが全て通過"
+        - "tasks_bulk ベンチマークで RPS >= 43 req/s"
+        - "ベンチマーク結果がドキュメント化されていること"
+
+  phase_2_root_cause:
+    - id: "STEP-002"
+      name: "SearchIndexDelta::from_changes_without_ngrams を実装"
+      priority: "P0"
+      estimated_effort: "2 hours"
+      description: |
+        n-gram 収集をスキップする from_changes_without_ngrams を実装。
+
+        実装ファイル:
+        - benches/api/src/api/query.rs (SearchIndexDelta)
+
+        実装内容:
+        1. from_changes の実装を参考に、共通部分を関数として抽出
+        2. n-gram 収集の有無をパラメータ化
+        3. from_changes と from_changes_without_ngrams の両方から呼び出す
+        4. 単体テストを追加
+
+        実装方針:
+        - コードの重複を最小化するため、内部ヘルパー関数を導入
+        - 例: `from_changes_internal(changes, config, tasks_by_id, skip_ngrams: bool)`
+        - from_changes は `from_changes_internal(..., false)` を呼ぶ
+        - from_changes_without_ngrams は `from_changes_internal(..., true)` を呼ぶ
+
+      acceptance_criteria:
+        - "from_changes_without_ngrams が実装されている"
+        - "n-gram が空であることをテストで確認"
+        - "prefix/suffix は収集されることをテストで確認"
+        - "from_changes と from_changes_without_ngrams の共通処理が抽出されている"
+        - "コードの重複が最小限（DRY 原則）"
+
+    - id: "STEP-003"
+      name: "apply_changes_bulk で from_changes_without_ngrams を使用"
+      priority: "P0"
+      estimated_effort: "30 minutes"
+      description: |
+        apply_changes_bulk を修正し、from_changes_without_ngrams を使用。
+
+        修正ファイル:
+        - benches/api/src/api/query.rs (4988行)
+
+        修正内容:
+        ```rust
+        let mut delta = SearchIndexDelta::from_changes_without_ngrams(
+            changes,
+            &self.config,
+            &self.tasks_by_id,
+        );
+        ```
+
+      acceptance_criteria:
+        - "apply_changes_bulk が from_changes_without_ngrams を使用"
+        - "既存テスト（apply_changes_bulk_and_delta_paths_are_equivalent）が通過"
+        - "ベンチマークで RPS >= 65 req/s（目標）"
+        - "ベンチマークで RPS >= 85 req/s（ストレッチ）"
+
+    - id: "STEP-004"
+      name: "差分テストを追加"
+      priority: "P1"
+      estimated_effort: "1 hour"
+      description: |
+        apply_changes_bulk と apply_changes_delta の等価性を検証するテストを追加。
+
+        テストファイル:
+        - benches/api/src/api/query.rs (tests モジュール)
+
+        テストケース:
+        - 小規模バッチ（2件）
+        - 中規模バッチ（50件）
+        - 大規模バッチ（200件）
+        - 様々な検索クエリで結果が等価
+
+      acceptance_criteria:
+        - "差分テストが実装されている"
+        - "全てのテストケースで bulk == delta"
+
+  phase_3_optimization:
+    - id: "STEP-005"
+      name: "正規化結果の再利用（オプショナル）"
+      priority: "P2"
+      estimated_effort: "3 hours"
+      description: |
+        正規化結果を一度だけ計算して再利用する。
+
+        実装ファイル:
+        - benches/api/src/api/query.rs (SearchIndexDelta, apply_changes_bulk)
+
+        実装内容:
+        1. from_normalized_adds_without_ngrams を実装
+        2. apply_changes_bulk で正規化結果を事前計算
+        3. BulkBuilder と delta の両方に渡す
+
+      acceptance_criteria:
+        - "正規化が 1 回のみ実行されることをテストで確認"
+        - "ベンチマークでさらなる改善（+10-20%）"
+        - "RPS 100+ req/s を達成"
+
+# ベンチマーク計測要件
+benchmark_requirements:
+  before_after_comparison:
+    - metric: "tasks_bulk RPS"
+      before: "14.14 req/s"
+      after_phase1_target: ">= 43 req/s"
+      after_phase2_target: ">= 65 req/s"
+      after_phase2_stretch: ">= 85 req/s"
+      after_phase3_target: ">= 100 req/s"
+      after_phase3_stretch: ">= 130 req/s"
+
+    - metric: "tasks_bulk P99 latency"
+      before: "28.75s"
+      after_phase1_target: "< 28s"
+      after_phase2_target: "< 15s"
+      after_phase2_stretch: "< 12s"
+      after_phase3_target: "< 10s"
+      after_phase3_stretch: "< 8s"
+
+    - metric: "apply_changes_bulk 実行時間"
+      before: "baseline"
+      after_phase2: "-30% 以上"
+      stretch: "-50% 以上"
+
+    - metric: "insert_into_node_cow 呼び出し数"
+      before: "11,743,229,372"
+      after_phase2: "-30% 以上"
+      stretch: "-50% 以上"
+
+  profiling_requirements:
+    - "flamegraph で apply_changes_bulk のホットスポットを確認"
+    - "SearchIndexDelta::from_changes の呼び出し回数を確認"
+    - "n-gram 収集関数の CPU 時間を確認"
+    - "正規化関数の呼び出し回数を確認"
+
+# ロールバック計画
+rollback_plan:
+  phase_1:
+    condition: "bulk_threshold=100 でスループットが改善しない"
+    action: "bulk_threshold を元の 10 に戻す"
+    rollback_time: "即座（設定変更のみ）"
+    impact: "低（元の状態に戻るだけ）"
+
+  phase_2:
+    condition: "from_changes_without_ngrams で検索結果が不正"
+    actions:
+      - step: "apply_changes_bulk で from_changes_without_ngrams の使用を停止"
+        method: "from_changes に戻す（1 行の変更）"
+        rollback_time: "即座"
+
+      - step: "バルク経路自体を無効化したい場合"
+        method: "環境変数または設定フラグで use_bulk_builder を false に"
+        rollback_time: "設定変更のみ（再起動不要）"
+        flag: "SearchIndexConfig { use_bulk_builder: false, ... }"
+
+      - step: "最終手段: バルク経路を完全削除"
+        method: "apply_changes が常に apply_changes_delta を呼ぶように変更"
+        rollback_time: "コード変更 + デプロイ"
+
+    impact: "中（パフォーマンスは Phase 1 レベルに戻る）"
+    monitoring: |
+      - 検索結果の正確性をテストで検証
+      - プロダクションログで不正な検索結果を監視
+      - 差分テストで bulk vs delta を比較
+
+  phase_3:
+    condition: "正規化再利用で検索結果が不正"
+    action: "from_normalized_adds_without_ngrams の使用を停止し、from_changes_without_ngrams に戻す"
+    rollback_time: "即座（コード数行の変更）"
+    impact: "低（Phase 2 のパフォーマンスに戻るだけ）"
+
+# 将来の拡張
+future_extensions:
+  - id: "EXT-001"
+    name: "bulk_threshold の自動調整"
+    description: |
+      ワークロードに応じて bulk_threshold を動的に調整する。
+
+      実装案:
+      - 過去の実行時間を記録
+      - デルタ経路とバルク経路の break-even ポイントを学習
+      - リクエストサイズに応じて最適な経路を選択
+    rationale: |
+      現時点では固定値（100）で十分。
+      動的調整は実装コストが高く、現時点では優先度が低い。
+
+  - id: "EXT-002"
+    name: "SearchIndexBulkBuilder を prefix/suffix まで拡張"
+    description: |
+      SearchIndexBulkBuilder を拡張し、prefix/suffix インデックスも一括構築する。
+
+      これにより、apply_changes_bulk で SearchIndexDelta を全く使わずに済む。
+    rationale: |
+      現時点では n-gram のみバルク構築で十分。
+      prefix/suffix のバルク構築は実装コストが高く、
+      パフォーマンス改善効果も n-gram ほど大きくない。
+
+  - id: "EXT-003"
+    name: "環境変数による bulk_threshold のオーバーライド"
+    description: |
+      環境変数 SEARCH_INDEX_BULK_THRESHOLD でデフォルト値を上書き可能にする。
+
+      実装案:
+      ```rust
+      impl Default for SearchIndexConfig {
+          fn default() -> Self {
+              let bulk_threshold = std::env::var("SEARCH_INDEX_BULK_THRESHOLD")
+                  .ok()
+                  .and_then(|s| s.parse().ok())
+                  .unwrap_or(100);
+
+              Self {
+                  // ...
+                  bulk_threshold,
+                  // ...
+              }
+          }
+      }
+      ```
+
+      ## 関数型プログラミングの観点での注意事項
+
+      **環境変数を読む処理は外部状態への依存であり、参照透過性を破る。**
+
+      ### 推奨されない理由
+
+      1. 同じコード `Default::default()` が環境により異なる結果を返す
+      2. テストが環境変数に依存し、再現性が低下する
+      3. 参照透過性が失われ、関数型プログラミングの原則に反する
+
+      ### より関数型的なアプローチ（推奨）
+
+      ```rust
+      // main() などのエントリポイントで環境変数を読む
+      fn main() {
+          let bulk_threshold = std::env::var("SEARCH_INDEX_BULK_THRESHOLD")
+              .ok()
+              .and_then(|s| s.parse().ok())
+              .unwrap_or(100);
+
+          let config = SearchIndexConfigBuilder::new()
+              .bulk_threshold(bulk_threshold)
+              .build();
+
+          // config を明示的に渡す
+          let index = SearchIndex::build_with_config(&tasks, config);
+      }
+
+      // Default::default() は常に固定値を返す
+      impl Default for SearchIndexConfig {
+          fn default() -> Self {
+              Self {
+                  bulk_threshold: 100, // 固定値
+                  // ...
+              }
+          }
+      }
+      ```
+
+      ### 結論
+
+      **この拡張は実装すべきではない。固定値（100）で十分。**
+
+    rationale: |
+      現時点では固定値（100）で十分。
+      環境変数対応は実装コストが低いが、必要性が低い。
+      また、参照透過性の観点から推奨されない実装パターンである。
+
+# 関連ドキュメント
+related_documents:
+  analysis:
+    - path: "docs/internal/analysis/20260201_tasks_bulk_new_bottleneck_analysis.yaml"
+      description: "Codex MCP による詳細分析結果"
+
+    - path: "docs/internal/analysis/20260201_tasks_bulk_bottleneck_analysis.yaml"
+      description: "前回の分析結果（feature/async-io-unboxed-execution）"
+
+  requirements:
+    - path: "docs/internal/requirements/20260201_1120_tasks_bulk_bottleneck_remediation.yaml"
+      description: "SearchIndexBulkBuilder と insert_bulk の要件定義"
+
+  issues:
+    - path: "docs/internal/issues/20260201_1500_insert_without_cow_optimization.yaml"
+      description: "insert_without_cow の将来の拡張"
+
+    - path: "docs/internal/issues/20260201_1505_transient_reserve_method.yaml"
+      description: "reserve メソッドの将来の拡張"
+
+# メタ情報
+metadata:
+  created_at: "2026-02-02T08:30:00Z"
+  created_by: "Claude Code"
+  status: "draft"
+  reviewers:
+    - "Codex MCP"
+    - "functional-programming-specialist"
+  estimated_completion: "2026-02-03"
+  priority: "P0"
+  tags:
+    - "performance"
+    - "optimization"
+    - "tasks_bulk"
+    - "ngram"
+    - "bottleneck"
