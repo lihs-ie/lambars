@@ -1680,6 +1680,7 @@ async fn example() {
 | `map.filter { case (k, v) => p(k, v) }`               | `PersistentHashMap::keep_if`    | マッチするエントリを保持                 |
 | `map.filterNot { case (k, v) => p(k, v) }`            | `PersistentHashMap::delete_if`  | マッチするエントリを削除                 |
 | `map.partition { case (k, v) => p(k, v) }`            | `PersistentHashMap::partition`  | 述語で分割                               |
+| `Map(entries: _*)`                                    | `transient().insert_bulk(entries)?.persistent()` | イテラブルから一括構築          |
 
 ### コード例
 
@@ -1773,6 +1774,22 @@ let value: Option<&i32> = map.get("a");
 
 let removed = map.remove("a");
 // removed.get("a") = None
+
+// 一括挿入（Scala の Map(entries: _*) に類似）
+use lambars::persistent::BulkInsertError;
+
+let entries = vec![
+    ("key1".to_string(), 1),
+    ("key2".to_string(), 2),
+    ("key3".to_string(), 3),
+];
+
+let map_bulk: Result<PersistentHashMap<String, i32>, BulkInsertError> =
+    PersistentHashMap::new()
+        .transient()
+        .insert_bulk(entries)
+        .map(|t| t.persistent());
+// 効率的な一括構築、コピーオンライトのオーバーヘッドを削減
 ```
 
 ---

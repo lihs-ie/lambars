@@ -1251,6 +1251,22 @@ let updated = map.insert(1, "ONE");
 
 let keys: Vec<&i32> = map.keys().collect();
 // keys = vec![&1, &2] (ソート済み)
+
+// PersistentHashMap の一括挿入（注: F# の Map は順序付き、こちらは非順序）
+use lambars::persistent::{PersistentHashMap, BulkInsertError};
+
+let entries = vec![
+    ("key1".to_string(), 1),
+    ("key2".to_string(), 2),
+    ("key3".to_string(), 3),
+];
+
+let map_bulk: Result<PersistentHashMap<String, i32>, BulkInsertError> =
+    PersistentHashMap::new()
+        .transient()
+        .insert_bulk(entries)
+        .map(|t| t.persistent());
+// 効率的な一括構築、コピーオンライトのオーバーヘッドを削減
 ```
 
 #### F# Set vs lambars PersistentHashSet

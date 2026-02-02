@@ -505,11 +505,7 @@ async fn search_in_database(
 async fn search_in_external(state: &AppState, query: &str) -> Option<(Task, String)> {
     // First, find a task by title in the database
     let pagination = Pagination::new(0, 100);
-    let result = state
-        .task_repository
-        .list(pagination)
-        .await
-        .ok()?;
+    let result = state.task_repository.list(pagination).await.ok()?;
 
     let matching_task = result
         .items

@@ -424,9 +424,7 @@ pub async fn transform_async(
     let pipeline = build_transform_pipeline(repository, id, transforms.clone(), validate_first);
 
     // Execute the pipeline
-    let task = pipeline
-        .await
-        .map_err(PipelineError::into_api_error)?;
+    let task = pipeline.await.map_err(PipelineError::into_api_error)?;
 
     let execution_time_ms = start.elapsed().as_millis() as u64;
     let applied_transforms: Vec<String> = transforms.iter().map(transform_name).collect();
@@ -850,9 +848,8 @@ pub async fn conditional_pipeline(
     // Build and execute conditional pipeline
     let pipeline = build_conditional_pipeline(repository, id, &conditions);
 
-    let (task, pipeline_type, conditions_evaluated) = pipeline
-        .await
-        .map_err(PipelineError::into_api_error)?;
+    let (task, pipeline_type, conditions_evaluated) =
+        pipeline.await.map_err(PipelineError::into_api_error)?;
 
     let execution_time_ms = start.elapsed().as_millis() as u64;
 

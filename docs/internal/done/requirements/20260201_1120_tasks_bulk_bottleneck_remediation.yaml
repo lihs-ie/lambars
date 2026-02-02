@@ -1,0 +1,1096 @@
+# tasks_bulk ボトルネック改善 要件定義
+#
+# 概要:
+#   tasks_bulk APIベンチマークにおける深刻なパフォーマンス劣化（RPS 42.64、P99 27秒）を
+#   解消し、本番運用可能なレベル（target: 500 RPS、P99 < 1秒）に改善する。
+#
+# 設計方針:
+#   1. SearchIndex のバルクビルダー導入でマージ/ソート回数を削減
+#   2. TransientHashMap のバルク挿入APIでCOW回数を削減
+#   3. 安定ソートが不要な箇所を sort_unstable に切り替え
+#   4. 参照透過性を維持しながら内部可変性を活用したビルダーパターンを採用
+#
+# 参照:
+#   - docs/internal/analysis/20260131_profiling_bottleneck_findings.yaml
+#   - docs/internal/requirements/20260201_1050_async_io_unboxed_execution_bottleneck.yaml
+#   - benches/results/feature-async-io-unboxed-execution/tasks_bulk/
+
+version: "1.3.0"
+name: "tasks_bulk_bottleneck_remediation"
+description: |
+  feature/async-io-unboxed-execution ブランチにおける tasks_bulk API ベンチマークの
+  深刻なパフォーマンス劣化を解消する。
+
+  ## 現状の問題
+  - RPS: 42.64 req/s（target: 500 req/s、達成率 8.5%）
+  - P99 latency: 27.12秒（許容値: < 1秒）
+  - エラー率: 0%（正常動作しているが極端に遅い）
+
+  ## Codex MCPによる根本原因分析
+  1. SearchIndex::compute_merged_posting_list_sorted のマージ/ソート多発
+  2. TransientHashMap::insert_into_node_cow の COW 多発
+  3. sort::stable::quicksort の使用（安定ソートのオーバーヘッド）
+  4. 大量書き込みで「マージ+ソート+永続構造のCOW」がCPU支配
+
+  ## 期待される改善効果
+  - RPS: 42.64 → 500+ req/s（11.7倍以上の改善）
+  - P99 latency: 27.12秒 → < 1秒（27倍以上の改善）
+  - CPU使用率の削減とホットスポットの分散
+
+# 背景・動機
+background:
+  problem: |
+    feature/async-io-unboxed-execution ブランチにおいて、tasks_bulk APIベンチマークが
+    深刻なパフォーマンス劣化を示している。
+
+    ## 測定結果
+    - RPS: 42.64 req/s
+    - P99 latency: 27.12秒
+    - エラー率: 0%
+    - 環境: Azure 4コア、15GB RAM、Rust 1.93.0
+
+    ## 既存分析との比較
+    - Before (feature/search-index-bulk-build): 142.95 req/s
+    - 現ブランチ: 42.64 req/s（-70.2%の退行）
+    - 注: Before は異なるコミット/ツールチェーンのため直接比較は困難
+
+    ## ホットスポット分析（Codex MCP）
+    benches/results/feature-async-io-unboxed-execution/tasks_bulk/stacks.folded より:
+    - PersistentHashMapIterator::advance（イテレーション多発）
+    - TransientHashMap::insert_into_node_cow（COW 多発）
+    - sort::stable::quicksort（安定ソートのオーバーヘッド）
+    - SearchIndex::compute_merged_posting_list_sorted（マージ/ソート多発）
+
+    これらが大量書き込み時のCPUボトルネックとなっている。
+
+  motivation: |
+    1. 本番運用適性の確保
+       - 現状の P99 27秒は同期APIとして致命的
+       - バルク登録/一括処理がタイムアウトの原因となる
+       - target 500 RPS / P99 < 1秒 が本番運用の最低ライン
+
+    2. アルゴリズム的ボトルネックの解消
+       - 1件ごとのマージ/ソートは計算量的に非効率
+       - バルク構築専用のアルゴリズムで大幅改善が可能
+
+    3. 永続データ構造のCOW最適化
+       - TransientHashMap は一時的な可変ビューだが、個別挿入ではCOWが多発
+       - バルク挿入APIで事前確保・バッチ処理により削減可能
+
+    4. 関数型プログラミングの原則との両立
+       - ビルダーパターンで内部可変性を活用
+       - 最終的に不変な永続データ構造を返すことで参照透過性を維持
+
+  prior_art:
+    - name: "docs/internal/requirements/20260201_1050_async_io_unboxed_execution_bottleneck.yaml"
+      description: "AsyncIO run_async削除後のボトルネック分析。tasks_bulk の問題を特定"
+      path: "/Users/lihs/workspace/lambars/docs/internal/requirements/20260201_1050_async_io_unboxed_execution_bottleneck.yaml"
+    - name: "docs/internal/analysis/20260131_profiling_bottleneck_findings.yaml"
+      description: "feature/search-index-bulk-build の分析結果。SearchIndex改善の方向性を示唆"
+      path: "/Users/lihs/workspace/lambars/docs/internal/analysis/20260131_profiling_bottleneck_findings.yaml"
+    - name: "Haskell Data.HashMap.Strict"
+      description: "fromList 関数によるバルク構築。一括でハッシュマップを構築し、個別挿入のオーバーヘッドを削減"
+      url: "https://hackage.haskell.org/package/unordered-containers/docs/Data-HashMap-Strict.html"
+    - name: "Scala immutable.HashMap"
+      description: "++ 演算子によるバルク結合。内部で効率的なマージアルゴリズムを使用"
+      url: "https://www.scala-lang.org/api/current/scala/collection/immutable/HashMap.html"
+
+# 要件一覧
+requirements:
+  # ======================================================================
+  # 1. SearchIndex バルクビルダー導入
+  # ======================================================================
+  - id: REQ-TASKS-BULK-001
+    name: "SearchIndex バルクビルダー導入"
+    description: |
+      ## 目的
+      SearchIndex::compute_merged_posting_list_sorted のマージ/ソート回数を削減し、
+      tasks_bulk のCPUボトルネックを解消する。
+
+      ## 現状の問題
+      - 1件ごとに index_ngrams / remove_ngrams を呼び出し
+      - 各呼び出しで compute_merged_posting_list_sorted が実行される
+      - 大量書き込み時に O(N * M log M) の計算量（N: エントリ数、M: ngram数）
+
+      ## 改善アプローチ
+      バルク構築専用のビルダーを導入し、以下のアルゴリズムで最適化:
+      1. 全エントリの ngram を収集（中間ソートなし）
+      2. 一括でソート/マージ（1回のみ）
+      3. 不変な SearchIndex を返す
+
+      計算量: O((N * M) log (N * M)) に削減
+
+      ## 関数型プログラミングの原則
+      - 内部可変性: ビルダーは内部で可変状態（Vec<(K, V)>）を持つが、外部に副作用を漏らさない
+      - 参照透過性: build() メソッドは常に新しい不変な SearchIndex を返す
+      - 純粋関数: ビルダーの操作は外部状態に依存せず、同じ入力に対して同じ出力を返す
+      - カプセル化: 可変状態はビルダー内部に閉じており、外部からは観測不可能
+
+      ## API 設計例
+      ```rust
+      pub struct SearchIndexBulkBuilder<K, V> {
+          entries: Vec<(K, V, usize)>,  // 内部可変状態（key, value, 元の順序）
+      }
+
+      impl<K, V> SearchIndexBulkBuilder<K, V>
+      where
+          K: Ord + Clone,
+          V: Clone,
+      {
+          pub fn new() -> Self {
+              SearchIndexBulkBuilder { entries: Vec::new() }
+          }
+
+          pub fn add_entry(mut self, key: K, value: V) -> Self {
+              let order = self.entries.len();
+              self.entries.push((key, value, order));
+              self  // ビルダーパターン（fluent interface）
+          }
+
+          pub fn build(self) -> Result<SearchIndex<K, V>, BuildError> {
+              // 入力上限チェック（エントリ数）
+              if self.entries.len() > MAX_BULK_ENTRIES {
+                  return Err(BuildError::TooManyEntries(self.entries.len()));
+              }
+
+              // 一括でソート（決定的な順序を保証）
+              // 1. key で比較
+              // 2. key が同じ場合、元の順序（order）で比較（後勝ち）
+              let mut sorted = self.entries;
+              sorted.sort_by(|(k1, _, o1), (k2, _, o2)| {
+                  k1.cmp(k2).then(o1.cmp(o2))
+              });
+
+              // 重複キーの処理（後勝ち）
+              // sorted は (key, order) で昇順ソート済み
+              // 同じキーの場合、order が大きい（後に追加された）ものが最後に来る
+              let deduped = sorted
+                  .into_iter()
+                  .fold(Vec::new(), |mut acc, (k, v, _)| {
+                      match acc.last_mut() {
+                          Some((last_k, last_v)) if last_k == &k => {
+                              // 同じキーの場合、値を上書き（後勝ち）
+                              *last_v = v;
+                          }
+                          _ => {
+                              // 新しいキーを追加
+                              acc.push((k, v));
+                          }
+                      }
+                      acc
+                  });
+
+              // ngram 生成と上限チェック
+              let (index, ngram_count, estimated_memory) =
+                  Self::build_index_with_stats(&deduped)?;
+
+              // 総ngram数チェック
+              if ngram_count > MAX_TOTAL_NGRAMS {
+                  return Err(BuildError::TooManyNgrams {
+                      count: ngram_count,
+                      limit: MAX_TOTAL_NGRAMS
+                  });
+              }
+
+              // 推定メモリ使用量チェック
+              if estimated_memory > MAX_ESTIMATED_MEMORY {
+                  return Err(BuildError::MemoryLimitExceeded {
+                      estimated: estimated_memory,
+                      limit: MAX_ESTIMATED_MEMORY
+                  });
+              }
+
+              // 不変な SearchIndex を返す
+              Ok(index)
+          }
+      }
+
+      pub enum BuildError {
+          /// エントリ数が MAX_BULK_ENTRIES を超過
+          TooManyEntries(usize),
+          /// 総ngram数が MAX_TOTAL_NGRAMS を超過
+          TooManyNgrams { count: usize, limit: usize },
+          /// 推定メモリ使用量が MAX_ESTIMATED_MEMORY を超過
+          MemoryLimitExceeded { estimated: usize, limit: usize },
+      }
+
+      const MAX_BULK_ENTRIES: usize = 100_000;  // 非機能要件で定義
+      const MAX_TOTAL_NGRAMS: usize = 10_000_000;  // 非機能要件で定義
+      const MAX_ESTIMATED_MEMORY: usize = 1_073_741_824;  // 1GB
+      ```
+
+      ## 使用例
+      ```rust
+      let index = SearchIndexBulkBuilder::new()
+          .add_entry(key1, value1)
+          .add_entry(key2, value2)
+          .add_entry(key3, value3)
+          .build();  // Result<SearchIndex<K, V>, BuildError> を返す
+
+      // エラーハンドリング例
+      match index {
+          Ok(idx) => {
+              // 正常に構築された SearchIndex を使用
+          }
+          Err(BuildError::TooManyEntries(count)) => {
+              // エントリ数超過: 分割処理を検討
+              eprintln!("Too many entries: {count}. Consider chunking.");
+          }
+          Err(BuildError::TooManyNgrams { count, limit }) => {
+              // ngram数超過: より小さなバッチで再試行
+              eprintln!("Too many ngrams: {count} > {limit}");
+          }
+          Err(BuildError::MemoryLimitExceeded { estimated, limit }) => {
+              // メモリ超過: バッチサイズを縮小
+              eprintln!("Memory limit exceeded: {estimated} > {limit}");
+          }
+      }
+      ```
+
+    methods:
+      - name: "SearchIndexBulkBuilder::new"
+        signature: "pub fn new() -> Self"
+        description: |
+          空のビルダーを作成する。
+
+          ## 参照透過性
+          - 常に新しいビルダーインスタンスを返す
+          - 外部状態に依存しない
+
+      - name: "SearchIndexBulkBuilder::add_entry"
+        signature: "pub fn add_entry(mut self, key: K, value: V) -> Self"
+        description: |
+          エントリを追加する。
+
+          ## 内部可変性
+          - ビルダー内部の Vec を変更するが、外部には副作用を漏らさない
+          - self を消費し、新しい状態のビルダーを返す（move semantics）
+
+          ## 注意
+          - 実装は mut self を使用するが、API としては値渡し（所有権移動）
+          - これにより、使用後のビルダーが再利用されることを防ぐ
+
+      - name: "SearchIndexBulkBuilder::build"
+        signature: "pub fn build(self) -> Result<SearchIndex<K, V>, BuildError>"
+        description: |
+          ビルダーを消費し、不変な SearchIndex を構築する。
+
+          ## 参照透過性
+          - 同じエントリの**順序を保持した集合**から常に同じ SearchIndex を生成
+          - ソート順序が決定的であることを保証:
+            1. key で比較
+            2. key が同じ場合、元の順序（add_entry の呼び出し順）で比較
+          - 重複キーの処理: **後勝ち**（最後に追加された値が優先）
+
+          ## エラーハンドリング
+          - 失敗条件:
+            - エントリ数が MAX_BULK_ENTRIES (100,000) を超える場合 → BuildError::TooManyEntries
+            - 総ngram数が MAX_TOTAL_NGRAMS (10,000,000) を超える場合 → BuildError::TooManyNgrams
+            - 推定メモリ使用量が MAX_ESTIMATED_MEMORY (1GB) を超える場合 → BuildError::MemoryLimitExceeded
+          - エラー型: BuildError 列挙型（TooManyEntries, TooManyNgrams, MemoryLimitExceeded）
+
+          ## 実装詳細
+          1. 入力上限チェック（MAX_BULK_ENTRIES）
+          2. 内部の Vec を sort_by でソート（key, 元の順序）
+          3. 重複キーを除去（後勝ち）
+          4. ソート済みエントリから SearchIndex を構築
+          5. ビルダーは消費され、再利用不可
+
+    priority: "critical"
+    classification: "performance_optimization"
+    blocking_merge: true
+    reason: "tasks_bulk の RPS を 42.64 → 500+ req/s に改善するための最優先施策"
+
+  # ======================================================================
+  # 2. TransientHashMap バルク挿入API
+  # ======================================================================
+  - id: REQ-TASKS-BULK-002
+    name: "TransientHashMap バルク挿入API"
+    description: |
+      ## 目的
+      TransientHashMap::insert_into_node_cow の COW 回数を削減し、
+      大量書き込みのスループットを改善する。
+
+      ## 現状の問題
+      - 1件ごとに insert を呼び出し
+      - 各呼び出しで insert_into_node_cow が実行される
+      - ノードのコピー（COW）が多発し、メモリアロケーション/デアロケーションのオーバーヘッド
+
+      ## 改善アプローチ
+      バルク挿入専用のAPIを導入:
+      1. 挿入する要素数を事前に把握
+      2. ノードを事前確保（capacity 設定）
+      3. バッチ処理で連続的に挿入
+      4. COW の回数を削減（最小限の構造変更のみ）
+
+      ## 関数型プログラミングの原則
+      - 内部可変性: TransientHashMap は永続構造の一時的な可変ビュー
+      - 参照透過性: persistent() は常に新しい不変な PersistentHashMap を返す
+      - 副作用の分離: TransientHashMap の操作は外部状態に影響しない
+      - カプセル化: 可変操作は transient() ~ persistent() のスコープに限定
+
+      ## API 設計例
+      ```rust
+      impl<K, V> TransientHashMap<K, V> {
+          pub fn insert_bulk<I: IntoIterator<Item = (K, V)>>(mut self, items: I) -> Result<Self, BulkInsertError> {
+              // 早期打ち切り: MAX_BULK_INSERT + 1 個で収集を停止（メモリスパイク防止）
+              let items_vec: Vec<(K, V)> = items
+                  .into_iter()
+                  .take(MAX_BULK_INSERT + 1)
+                  .collect();
+
+              // 入力上限チェック
+              if items_vec.len() > MAX_BULK_INSERT {
+                  return Err(BulkInsertError::TooManyEntries {
+                      count: items_vec.len(),
+                      limit: MAX_BULK_INSERT,
+                  });
+              }
+
+              // 事前確保
+              self.reserve(items_vec.len());
+
+              // バッチ挿入
+              for (key, value) in items_vec {
+                  self.insert_without_cow(key, value);
+              }
+
+              Ok(self)
+          }
+
+          fn reserve(&mut self, additional: usize) {
+              // ノードの事前確保
+          }
+
+          fn insert_without_cow(&mut self, key: K, value: V) {
+              // COWを最小限に抑えた挿入
+          }
+      }
+
+      #[derive(Debug, Clone, PartialEq, Eq)]
+      pub enum BulkInsertError {
+          TooManyEntries { count: usize, limit: usize },
+      }
+
+      const MAX_BULK_INSERT: usize = 100_000;  // 非機能要件で定義
+      ```
+
+      ## 使用例
+      ```rust
+      let persistent_map = map.transient()
+          .insert_bulk(vec![
+              (key1, value1),
+              (key2, value2),
+              (key3, value3),
+          ])?
+          .persistent();  // 不変な PersistentHashMap を返す
+      ```
+
+      ## 注意: 重複キーの処理
+      - insert_bulk は items の順序を保持
+      - 同じキーが複数回出現する場合、**最後の値が優先**（後勝ち）
+      - これは個別の insert を順次実行する場合と同じ意味論
+
+      ## 注意: 参照透過性の維持
+      - insert_bulk は mut self を取り、Result<Self, BulkInsertError> を返す
+      - 同じキーが複数回挿入される場合、最後の値が優先されることを文書化
+      - プロパティテストで参照透過性を検証:
+        - insert_bulk(items) と items.fold(map, |m, (k, v)| m.insert(k, v)) が等価
+        - 同じ items から常に同じ結果が得られることを確認
+
+    methods:
+      - name: "TransientHashMap::insert_bulk"
+        signature: "pub fn insert_bulk<I: IntoIterator<Item = (K, V)>>(mut self, items: I) -> Result<Self, BulkInsertError>"
+        description: |
+          複数の要素を一括で挿入する。
+
+          ## API 設計の変更点
+          - シグネチャ: `&mut self` → `mut self` に変更
+          - 戻り値: `()` → `Result<Self, BulkInsertError>` に変更
+          - 理由: メソッドチェーン可能にし、エラーハンドリングを明示
+
+          ## 内部可変性
+          - mut self を取り、内部状態を変更後に self を返す
+          - transient() ~ persistent() のチェーンで使用可能
+
+          ## 参照透過性の考慮
+          - 同じキーが複数回挿入される場合、**最後の値が優先**（後勝ち）
+          - items の順序を保持し、決定的な結果を保証
+          - プロパティテスト:
+            - insert_bulk(items) と items.fold(map, |m, (k, v)| m.insert(k, v)) が等価
+            - 入力順序のシャッフルで異なる結果（重複キーがある場合）
+
+          ## エラーハンドリング
+          - 失敗条件:
+            - エントリ数が MAX_BULK_INSERT (100,000) を超える場合
+          - エラー型: BulkInsertError::TooManyEntries { count, limit }
+
+          ## 実装詳細
+          1. IntoIterator を Vec に collect（要素数の把握）
+             - **早期打ち切り**: MAX_BULK_INSERT + 1 個で収集を停止
+             - メモリスパイクを防ぐため、全要素を収集する前に上限チェック
+          2. 入力上限チェック（MAX_BULK_INSERT）
+          3. reserve で事前確保
+          4. insert_without_cow でバッチ挿入
+          5. Result<Self, BulkInsertError> を返す
+
+          ## 早期打ち切りの実装例
+          ```rust
+          // 悪い例: 全要素を収集してからチェック（メモリスパイクの可能性）
+          let items_vec: Vec<_> = items.into_iter().collect();
+          if items_vec.len() > MAX_BULK_INSERT { ... }
+
+          // 良い例: MAX_BULK_INSERT + 1 で早期打ち切り
+          let items_vec: Vec<_> = items
+              .into_iter()
+              .take(MAX_BULK_INSERT + 1)
+              .collect();
+          if items_vec.len() > MAX_BULK_INSERT {
+              return Err(BulkInsertError::TooManyEntries {
+                  count: items_vec.len(),
+                  limit: MAX_BULK_INSERT,
+              });
+          }
+          ```
+
+      - name: "TransientHashMap::reserve"
+        signature: "fn reserve(&mut self, additional: usize)"
+        description: |
+          追加の要素を格納するためにノードを事前確保する。
+
+          ## 内部実装
+          - ハッシュテーブルのサイズを拡張
+          - COW の回数を削減
+
+      - name: "TransientHashMap::insert_without_cow"
+        signature: "fn insert_without_cow(&mut self, key: K, value: V)"
+        description: |
+          COW を最小限に抑えた挿入処理。
+
+          ## 最適化
+          - 既に reserve で確保済みのノードに直接書き込み
+          - 構造変更が必要な場合のみ COW を実施
+
+          ## 安全条件（不変性の保証）
+          insert_without_cow は以下の安全条件を満たす場合のみ COW を省略:
+
+          1. **排他所有の保証（世代トークンによる検証）**:
+             - TransientHashMap は生成時に一意の世代トークン（generation token）を持つ
+             - ノードは最後に変更した TransientHashMap の世代トークンを記録
+             - ノードの世代トークン == 現在の TransientHashMap の世代トークン の場合のみ COW 省略可能
+             - それ以外の場合（共有ノード）は必ず COW にフォールバック
+
+          2. **実装例**:
+             ```rust
+             fn insert_without_cow(&mut self, key: K, value: V) {
+                 let node = self.find_or_create_node(&key);
+
+                 if node.generation == self.generation {
+                     // 排他所有: COW 不要、直接変更可能
+                     node.insert_direct(key, value);
+                 } else {
+                     // 共有ノード: COW にフォールバック
+                     let new_node = node.clone();
+                     new_node.generation = self.generation;
+                     new_node.insert_direct(key, value);
+                     self.replace_node(new_node);
+                 }
+             }
+             ```
+
+          3. **世代トークンの生成**:
+             - TransientHashMap::new() または PersistentHashMap::transient() 呼び出し時に生成
+             - グローバルカウンタまたは UUID で一意性を保証
+             - 世代トークンは Copy + Eq を実装
+
+             **参照透過性との関係（重要）**:
+             - 世代トークンは**内部実装の詳細**であり、API の出力には一切影響しない
+             - 外部から観測可能なのは persistent() が返す PersistentHashMap の内容のみ
+             - 同じ入力（キーと値のペアの順序付き列）に対して、常に同じ内容の PersistentHashMap を返す
+             - 世代トークンの値自体は出力に含まれず、等価性判定にも使用されない
+             - したがって、世代トークンの生成が非決定的であっても参照透過性は損なわれない
+
+          4. **不変性の保証**:
+             - PersistentHashMap から transient() で生成された TransientHashMap は新しい世代トークンを持つ
+             - 元の PersistentHashMap のノードは古い世代トークンのまま
+             - これにより、元の PersistentHashMap は変更されない（不変性が保証される）
+
+          ## COW フォールバックの条件
+          以下の場合、必ず COW を実施:
+          - ノードの世代トークンが TransientHashMap の世代トークンと異なる
+          - ノードが他の PersistentHashMap/TransientHashMap と共有されている可能性がある
+
+    priority: "critical"
+    classification: "performance_optimization"
+    blocking_merge: true
+    reason: "tasks_bulk の CPU 使用率削減とレイテンシ改善に直結"
+
+  # ======================================================================
+  # 3. 安定ソートから sort_unstable への切り替え
+  # ======================================================================
+  - id: REQ-TASKS-BULK-003
+    name: "安定ソートから sort_unstable への切り替え"
+    description: |
+      ## 目的
+      順序保証が不要な箇所で sort_unstable を使用し、
+      ソートのオーバーヘッドを削減する。
+
+      ## 現状の問題
+      - sort::stable::quicksort が使用されている
+      - 安定ソートは等価な要素の順序を保持するため、オーバーヘッドが大きい
+      - tasks_bulk のホットスポットに含まれている
+
+      ## 改善アプローチ
+      1. ソート順序が API の戻り値として観測可能かを確認
+      2. 内部実装の詳細である場合、sort_unstable に切り替え
+      3. 参照透過性を損なわないことをプロパティテストで検証
+
+      ## 参照透過性の考慮
+      sort_unstable への切り替えは、以下の場合のみ許可:
+      - ソート結果が外部に公開されない（内部実装の詳細）
+      - 等価な要素の順序が意味論に影響しない
+      - 同じ入力に対して常に同じ出力を返す（ソート順序が決定的）
+
+      ## 検証方法
+      プロパティテストで以下を確認:
+      1. 同じ入力に対して複数回実行し、結果が同一であることを確認
+      2. 入力順序をシャッフルしても、等価な要素の順序が異なるだけで意味論的に等価であることを確認
+      3. 異なるハッシュシード（環境変数 RUST_HASH_SEED）でも結果が等価であることを確認
+      4. ソート結果を使用する上位層の操作が決定的であることを確認
+
+      ## 注意: 決定性の保証
+      - sort_unstable は「等価な要素の順序が不安定」だが、**決定的**
+      - 同じ入力（順序含む）に対して常に同じ出力を返す
+      - ただし、以下の前提が必要:
+        1. 入力が全順序であること（Ord トレイト）
+        2. 入力の順序が定義されていること（Vec など）
+        3. 等価な要素の順序が観測可能でないこと（内部実装の詳細）
+
+      ## HashMap反復順序への依存の排除
+      - ソート入力が HashMap/HashSet から生成される場合、反復順序が非決定的
+      - **対策**: ソート前に必ず決定的な順序を保証する
+        1. HashMap からの反復は、collect 後に key でソートしてから処理
+        2. または BTreeMap/BTreeSet を使用して順序を保証
+        3. ソート入力生成段階で決定的順序を保証する要件を追加
+
+      ## 等価性の定義
+      - 「等価」とは、比較キーが `Ord::cmp` で `Ordering::Equal` を返すこと
+      - API から順序が観測可能な箇所では sort_unstable を**禁止**:
+        - イテレータとして順序付きで返す API
+        - 順序に依存するシリアライズ結果を返す API
+        - 順序に依存する等価性テスト（`assert_eq!` など）
+
+      ## 参照透過性の維持
+      - sort_unstable への切り替えは、以下の場合のみ許可:
+        1. ソート結果が API の戻り値として公開されない
+        2. 等価な要素の順序が意味論に影響しない
+        3. 内部実装の詳細として文書化される
+
+      ## 切り替え対象の関数一覧
+      以下の関数について sort_unstable への切り替えを検討:
+
+      | 関数名 | 現状 | 切り替え可否 | 理由 |
+      |--------|------|--------------|------|
+      | SearchIndex::compute_merged_posting_list_sorted | sort | 可 | 内部実装、順序は外部に公開されない |
+      | SearchIndexBulkBuilder::build | sort_by | 可 | タイブレーク用の order があり決定的 |
+      | TransientHashMap::insert_bulk（内部ソート） | N/A | N/A | ソートは使用しない |
+
+      ## 切り替え判定基準
+      1. **必須条件**:
+         - ソート結果が外部 API で順序として観測不可能
+         - 等価要素の順序が戻り値の等価性に影響しない
+      2. **推奨条件**:
+         - ホットスポット分析で当該ソートが上位に出現
+         - 要素数が 1000 以上になりうる箇所
+
+    methods:
+      - name: "SearchIndex::compute_merged_posting_list_sorted（内部実装）"
+        signature: "検討中"
+        description: |
+          マージ済みポスティングリストをソートする。
+
+          ## 分析
+          1. ソート結果が API の戻り値として公開されるか
+             - YES: sort_unstable 不可（順序が観測可能）
+             - NO: sort_unstable 可（内部実装の詳細）
+
+          2. 等価な要素の順序が意味論に影響するか
+             - YES: sort_unstable 不可
+             - NO: sort_unstable 可
+
+          3. ソート順序が決定的であるか
+             - sort_unstable でも、同じ入力に対して同じ出力を返すことを検証
+
+          ## 実装方針
+          - 上記分析の結果、sort_unstable が許可される場合のみ切り替え
+          - プロパティテストで参照透過性を検証
+          - ドキュメントに「内部実装の詳細であり、順序保証なし」を明記
+
+    priority: "high"
+    classification: "performance_optimization"
+    blocking_merge: false
+    reason: "効果は大きいが、参照透過性の検証に時間がかかる可能性。P0施策の後に実施"
+
+  # ======================================================================
+  # 4. プロファイリングによる効果測定
+  # ======================================================================
+  - id: REQ-TASKS-BULK-004
+    name: "改善効果の定量的測定"
+    description: |
+      ## 目的
+      各最適化施策の効果を定量的に測定し、目標達成を確認する。
+
+      ## 測定項目
+      1. tasks_bulk RPS
+         - Before: 42.64 req/s
+         - Target: 500 req/s 以上
+         - 測定方法: wrk による 30秒間の負荷試験
+
+      2. tasks_bulk P99 latency
+         - Before: 27.12秒
+         - Target: < 1秒
+         - 測定方法: wrk の latency distribution
+
+      3. CPU 使用率
+         - ホットスポットの分散を確認
+         - 測定方法: perf record + flamegraph
+
+      4. メモリアロケーション
+         - COW 回数の削減を確認
+         - 測定方法:
+           - `perf record -e 'syscalls:sys_enter_mmap' -e 'syscalls:sys_enter_brk'`
+           - または `heaptrack` によるヒープ使用量のプロファイリング
+           - または `jemalloc` のプロファイル機能
+
+      ## 測定環境の統一
+      - ツールチェーン: Rust 1.93.0（現ブランチと統一）
+      - CPU: 固定インスタンス（Azure Standard_D4s_v3 推奨）
+      - OS: Ubuntu 22.04 LTS
+      - 実行回数: 3回の平均値と標準偏差を記録
+
+      ## 統計的有意性の判断
+      - 差分 > 標準偏差の 2倍: 有意な変化
+      - 差分 <= 標準偏差の 2倍: 測定ブレ
+
+      ## マージ条件
+      1. 最低ライン（マージ条件）:
+         - tasks_bulk RPS >= 200 req/s（4.7倍改善）
+         - P99 latency < 5秒（5.4倍改善）
+      2. 推奨ライン:
+         - tasks_bulk RPS >= 300 req/s（7倍改善）
+         - P99 latency < 2秒（13.6倍改善）
+      3. 最終目標（次フェーズ）:
+         - tasks_bulk RPS >= 500 req/s（11.7倍改善）
+         - P99 latency < 1秒（27倍改善）
+
+    priority: "critical"
+    classification: "validation"
+    blocking_merge: true
+    reason: "改善効果の確認なしにマージ不可。最低ラインの達成が必須"
+
+# 非機能要件
+non_functional_requirements:
+  performance:
+    - metric: "tasks_bulk RPS"
+      target: "500 req/s 以上"
+      minimum: "200 req/s 以上（マージ条件）"
+      measurement: "wrk による 30秒間の負荷試験、3回の平均値"
+    - metric: "tasks_bulk P99 latency"
+      target: "< 1秒"
+      minimum: "< 5秒（マージ条件）"
+      measurement: "wrk の latency distribution、3回の平均値"
+    - metric: "CPU 使用率"
+      target: "ホットスポットの分散（特定の関数への集中を回避）"
+      measurement: "perf record + flamegraph"
+    - metric: "メモリアロケーション"
+      target: "COW 回数の削減"
+      measurement: "perf record -e 'syscalls:sys_enter_mmap' -e 'syscalls:sys_enter_brk' または heaptrack"
+    - metric: "バルク処理の入力上限"
+      target: "MAX_BULK_ENTRIES: 100,000 エントリ"
+      rationale: "メモリスパイクやOOMを防ぐため、入力上限を設定"
+      measurement: "100,000 エントリでのメモリ使用量が許容範囲内（< 1GB）であることを確認"
+    - metric: "総ngram数による入力上限"
+      target: "MAX_TOTAL_NGRAMS: 10,000,000 ngram"
+      rationale: |
+        エントリ数だけでなく、ngram の総数でもメモリ使用量が決まる。
+        1エントリあたり平均 100 ngram の場合、100,000 エントリで 10,000,000 ngram。
+        ngram あたり約 100 バイト（キー + ポスティングリストエントリ）と仮定すると、
+        10,000,000 ngram で約 1GB のメモリ使用。
+      measurement: |
+        - ビルド中の ngram 総数をカウント
+        - MAX_TOTAL_NGRAMS を超えた時点で BuildError::TooManyNgrams を返す
+    - metric: "推定メモリ使用量による入力上限"
+      target: "MAX_ESTIMATED_MEMORY: 1GB"
+      rationale: |
+        エントリ数と ngram 数から推定メモリ使用量を計算し、1GB を超える場合はエラー。
+        計算式: estimated_memory = num_entries * AVG_ENTRY_SIZE + num_ngrams * AVG_NGRAM_SIZE
+        - AVG_ENTRY_SIZE: 1KB（平均的なエントリサイズ）
+        - AVG_NGRAM_SIZE: 100 バイト（キー + ポスティングリストエントリ）
+      measurement: |
+        - ビルド中に推定メモリ使用量を計算
+        - MAX_ESTIMATED_MEMORY を超える場合 BuildError::MemoryLimitExceeded を返す
+      implementation_note: |
+        推定メモリ使用量は build() 内でチェック（遅延チェック方式）:
+        1. add_entry はエントリを蓄積するのみ（Self を返す、エラーなし）
+        2. build() 呼び出し時に ngram 生成と統計情報の計算を実施
+        3. 総ngram数と推定メモリ使用量が閾値を超える場合、BuildError を返却
+
+        **設計理由**:
+        - ビルダーパターンとしてシンプル（add_entry が常に成功）
+        - メソッドチェーンが途中で中断しない
+        - 最終的な build() でまとめてエラーハンドリング
+    - metric: "入力上限超過時の対応方針"
+      strategy: "エラー返却（自動分割は実装しない）"
+      rationale: |
+        自動分割は以下の理由により実装しない:
+        1. 分割単位の決定が困難（データ依存）
+        2. 順序保証が複雑化（トランザクション境界の問題）
+        3. 責務の明確化（呼び出し側が分割を制御すべき）
+      error_handling:
+        - "入力上限超過時、BuildError::TooManyEntries / BulkInsertError::TooManyEntries を返す"
+        - "呼び出し側が分割処理を実装する（推奨チャンクサイズ: 10,000 エントリ）"
+        - "エラーメッセージに推奨チャンクサイズと分割方法のガイダンスを含める"
+      example: |
+        ```rust
+        // 推奨される分割処理の実装例
+        const CHUNK_SIZE: usize = 10_000;
+
+        fn bulk_insert_with_chunking<K, V>(
+            entries: Vec<(K, V)>,
+        ) -> Result<SearchIndex<K, V>, BuildError> {
+            let mut builder = SearchIndexBulkBuilder::new();
+
+            for chunk in entries.chunks(CHUNK_SIZE) {
+                for (key, value) in chunk {
+                    builder = builder.add_entry(key.clone(), value.clone());
+                }
+            }
+
+            builder.build()
+        }
+        ```
+
+  compatibility:
+    - "既存の API ベンチマークシナリオとの互換性維持"
+    - "SearchIndex の公開 API との互換性維持"
+    - "PersistentHashMap / TransientHashMap の公開 API との互換性維持"
+
+  testing:
+    - name: "SearchIndexBulkBuilder のユニットテスト"
+      items:
+        - "重複キーの処理（後勝ち）の検証"
+        - "入力上限（MAX_BULK_ENTRIES）の検証"
+        - "エラーハンドリング（BuildError）の検証"
+    - name: "TransientHashMap::insert_bulk のユニットテスト"
+      items:
+        - "重複キーの処理（後勝ち）の検証"
+        - "入力上限（MAX_BULK_INSERT）の検証"
+        - "エラーハンドリング（BulkInsertError）の検証"
+    - name: "sort_unstable 切り替え箇所のプロパティテスト（参照透過性の検証）"
+      items:
+        - "同じ入力で複数回実行し、結果が同一であることを確認"
+        - "入力順序のシャッフルでも意味論的に等価であることを確認"
+        - "異なるハッシュシードでも結果が等価であることを確認"
+    - "tasks_bulk ベンチマークでの回帰テスト"
+    - "Before/After の定量的な比較レポート"
+
+  code_quality:
+    - name: "関数型プログラミングの原則の遵守"
+      items:
+        - "参照透過性: ビルダーの build() は同じ入力（順序含む）に対して常に同じ不変な構造を返す"
+        - "純粋関数: 外部状態に依存しない（注: ビルダーは HashMap の反復順序を使用せず、入力順序のみに依存するため、ハッシュシードの影響を受けない）"
+        - "内部可変性のカプセル化: 可変状態はビルダー内部に閉じる"
+        - "決定性の保証: 入力の順序を元の順序として記録し、ソート時のタイブレークに使用"
+    - name: "コードの可読性とメンテナンス性"
+      items:
+        - "ビルダーパターンの fluent interface"
+        - "ドキュメントコメントの充実"
+        - "重複キーの処理（後勝ち）を明示的に文書化"
+    - name: "エラーハンドリング"
+      items:
+        - "入力上限を超える場合、Result でエラーを返す"
+        - "エラー型: BuildError, BulkInsertError を定義"
+        - "panic を使用しない（例外を制御フローに使わない）"
+
+# ベンチマーク網羅性
+benchmark_coverage:
+  description: |
+    現状のベンチマーク構成と、不足しているベンチマークの評価。
+
+  existing_benchmarks:
+    - name: "tasks_bulk API ベンチマーク"
+      path: "benches/api/scenarios/tasks_bulk/"
+      coverage: "E2E レベルでのバルク操作性能"
+      metrics: ["RPS", "P99 latency", "error rate"]
+
+    - name: "SearchIndex ベンチマーク"
+      path: "benches/persistent/search_index_bench.rs"
+      coverage: "SearchIndex の基本操作（insert, lookup, remove）"
+      metrics: ["throughput", "latency"]
+
+    - name: "PersistentHashMap ベンチマーク"
+      path: "benches/persistent/persistent_hashmap_bench.rs"
+      coverage: "PersistentHashMap の基本操作"
+      metrics: ["throughput", "latency"]
+
+  missing_benchmarks:
+    - name: "SearchIndexBulkBuilder 専用ベンチマーク"
+      necessity: "high"
+      rationale: |
+        REQ-TASKS-BULK-001 で導入するバルクビルダーの性能を測定するため。
+        個別 insert との比較、エントリ数別の性能特性を把握する必要がある。
+      proposed_metrics:
+        - "エントリ数別スループット（100, 1000, 10000, 100000）"
+        - "メモリ使用量（ピーク、最終）"
+        - "個別 insert 方式との比較"
+
+    - name: "TransientHashMap::insert_bulk 専用ベンチマーク"
+      necessity: "high"
+      rationale: |
+        REQ-TASKS-BULK-002 で導入するバルク挿入 API の性能を測定するため。
+        COW 削減効果を定量的に評価する必要がある。
+      proposed_metrics:
+        - "エントリ数別スループット"
+        - "COW 発生回数（計測可能であれば）"
+        - "個別 insert 方式との比較"
+
+    - name: "AsyncIO 専用ベンチマーク"
+      necessity: "medium"
+      rationale: |
+        AsyncIO の run_async 削除後、直接 await での性能特性を測定する必要がある。
+        ただし、tasks_bulk ベンチマークが E2E で AsyncIO を含むため、
+        優先度は中程度。ボトルネックが AsyncIO にある場合は必要。
+      proposed_metrics:
+        - "単一 IO 操作のレイテンシ"
+        - "並行 IO 操作のスループット"
+        - "Tokio ランタイムオーバーヘッド"
+      evaluation: |
+        現時点では tasks_bulk のボトルネックは SearchIndex と TransientHashMap に
+        集中しているため、AsyncIO 専用ベンチマークの優先度は低い。
+        ただし、P0 施策完了後にホットスポットが AsyncIO に移行した場合は追加を検討。
+
+    - name: "sort_unstable 切り替え効果ベンチマーク"
+      necessity: "high"
+      rationale: |
+        REQ-TASKS-BULK-003 の効果を定量的に測定するため。
+        安定ソートと不安定ソートの性能差を把握する必要がある。
+      proposed_metrics:
+        - "ソート時間（要素数別: 100, 1000, 10000, 100000）"
+        - "等価要素の割合別性能（0%, 10%, 50%）"
+
+  action_items:
+    - id: "BENCH-001"
+      description: "SearchIndexBulkBuilder 専用ベンチマークの追加"
+      priority: "high"
+      blocking_merge: false
+      rationale: "P0 施策の効果測定に必要だが、tasks_bulk E2E で代替可能"
+
+    - id: "BENCH-002"
+      description: "TransientHashMap::insert_bulk 専用ベンチマークの追加"
+      priority: "high"
+      blocking_merge: false
+      rationale: "P0 施策の効果測定に必要だが、tasks_bulk E2E で代替可能"
+
+    - id: "BENCH-003"
+      description: "AsyncIO 専用ベンチマークの追加評価"
+      priority: "low"
+      blocking_merge: false
+      rationale: "現時点ではボトルネックではない。P0 完了後に再評価"
+
+    - id: "BENCH-004"
+      description: "sort_unstable 切り替え効果のマイクロベンチマーク"
+      priority: "medium"
+      blocking_merge: false
+      rationale: "REQ-TASKS-BULK-003 の判断材料として有用"
+
+# 運用監視
+operational_monitoring:
+  description: |
+    本番運用時のパフォーマンス監視、性能退行検知、およびロールバック基準を定義する。
+
+  alert_thresholds:
+    - metric: "tasks_bulk RPS"
+      warning: "< 300 req/s"
+      critical: "< 200 req/s"
+      action: "オンコール通知、スケールアウト検討"
+
+    - metric: "tasks_bulk P99 latency"
+      warning: "> 2秒"
+      critical: "> 5秒"
+      action: "オンコール通知、トラフィック制限検討"
+
+    - metric: "メモリ使用量"
+      warning: "> 70% of available memory"
+      critical: "> 85% of available memory"
+      action: "OOM 防止のためのリクエスト拒否、スケールアウト"
+
+    - metric: "BuildError 発生率"
+      warning: "> 1%"
+      critical: "> 5%"
+      action: "入力データの分析、バッチサイズ調整の検討"
+
+  regression_detection:
+    description: |
+      CI/CD パイプラインでの性能退行検知方法を定義する。
+
+    method: "ベースラインとの比較"
+    baseline_source: "main ブランチの最新ベンチマーク結果"
+
+    criteria:
+      - metric: "tasks_bulk RPS"
+        threshold: "-10% vs baseline"
+        action: "PR マージをブロック、レビュー必須"
+
+      - metric: "tasks_bulk P99 latency"
+        threshold: "+20% vs baseline"
+        action: "PR マージをブロック、レビュー必須"
+
+      - metric: "メモリ使用量（ピーク）"
+        threshold: "+30% vs baseline"
+        action: "警告表示、レビュー推奨"
+
+    statistical_validation: |
+      - 3回の測定の平均値を使用
+      - 差分 > 標準偏差の 2倍 の場合のみ有意な変化とみなす
+      - 測定環境は固定（Azure Standard_D4s_v3、Rust 1.93.0）
+
+  rollback_criteria:
+    description: |
+      本番環境でのロールバック判断基準を定義する。
+
+    immediate_rollback:
+      - condition: "tasks_bulk RPS < 100 req/s（ベースラインの 50% 未満）"
+        action: "即時ロールバック、インシデント対応開始"
+
+      - condition: "tasks_bulk P99 latency > 10秒"
+        action: "即時ロールバック、インシデント対応開始"
+
+      - condition: "BuildError による 5xx エラー率 > 10%"
+        action: "即時ロールバック、入力データ分析"
+
+    gradual_rollback:
+      - condition: "RPS が 24時間以上 200 req/s 未満"
+        action: "ロールバック検討、根本原因分析"
+
+      - condition: "P99 latency が 24時間以上 5秒以上"
+        action: "ロールバック検討、根本原因分析"
+
+    rollback_procedure:
+      - step: 1
+        action: "トラフィックを旧バージョンに切り替え（カナリアリリースの場合）"
+      - step: 2
+        action: "ログとメトリクスを収集し、根本原因を特定"
+      - step: 3
+        action: "修正を実装し、ステージング環境で検証"
+      - step: 4
+        action: "再デプロイ前にベンチマークで性能確認"
+
+# 将来の拡張
+future_extensions:
+  - id: "TASKS-BULK-EXT-001"
+    name: "SearchIndex の並列構築"
+    description: |
+      バルクビルダーの内部実装を並列化し、さらなる高速化を実現する。
+      - par_sort によるソートの並列化
+      - rayon による並列マージ
+    rationale: |
+      現フェーズではシングルスレッドでの最適化に集中。
+      並列化は次フェーズで検討。
+
+  - id: "TASKS-BULK-EXT-002"
+    name: "TransientHashMap の capacity 自動調整"
+    description: |
+      insert_bulk の呼び出しパターンを学習し、最適な capacity を自動設定する。
+      - 過去の挿入パターンの統計
+      - 動的な capacity 調整
+    rationale: |
+      現フェーズでは明示的な reserve に依存。
+      自動調整は次フェーズで検討。
+
+  - id: "TASKS-BULK-EXT-003"
+    name: "バッチサイズの自動最適化"
+    description: |
+      tasks_bulk の処理単位を動的に調整し、レイテンシとスループットのバランスを最適化。
+      - 小バッチ: レイテンシ優先
+      - 大バッチ: スループット優先
+      - 負荷に応じた自動切り替え
+    rationale: |
+      現フェーズでは固定バッチサイズで測定。
+      動的調整は次フェーズで検討。
+
+# 関連Issue
+related_issues:
+  github:
+    - number: null
+      title: "tasks_bulk RPS 大幅低下の調査と改善"
+      status: "to_be_created"
+
+  internal:
+    - path: "docs/internal/requirements/20260201_1050_async_io_unboxed_execution_bottleneck.yaml"
+      relation: "親要件定義（AsyncIO run_async削除後のボトルネック分析）"
+    - path: "docs/internal/analysis/20260131_profiling_bottleneck_findings.yaml"
+      relation: "既存のボトルネック分析結果"
+
+# メタ情報
+metadata:
+  created_at: "2026-02-01T11:20:00Z"
+  created_by: "Claude Code"
+  codex_reviewed: true
+  codex_review_date: "2026-02-01T12:00:00Z"
+  status: "implementing"
+  implementation_started_at: "2026-02-01T15:00:00Z"
+  phase: "implementation"
+  priority: "critical"
+  estimated_effort: "3-5 days"
+  dependencies:
+    - "SearchIndex の内部実装の理解"
+    - "TransientHashMap の内部実装の理解"
+    - "プロファイリング環境の整備"
+  revision_history:
+    - version: "1.0.0"
+      date: "2026-02-01T11:20:00Z"
+      description: "初版作成"
+    - version: "1.1.0"
+      date: "2026-02-01T12:00:00Z"
+      description: |
+        Codex MCP レビュー指摘への対応（全7件）:
+        1. [High] 参照透過性・決定性の担保: HashMap反復順序への依存排除、等価性の定義を追加
+        2. [High] insert_without_cow の安全条件: 世代トークンによる排他所有保証を追加
+        3. [High] 入力上限: 総ngram数/推定メモリ量による上限を追加
+        4. [Medium] insert_bulk の早期打ち切り: MAX_BULK_INSERT + 1 での早期打ち切り要件を追加
+        5. [Medium] 重複キー除去の疑似コード修正: 正しい「後勝ち」処理のコードに修正
+        6. [Medium] sort_unstable の切り替え対象: 対象関数一覧と判定基準を明記
+        7. [Medium] ベンチマーク網羅性: benchmark_coverage セクションを追加
+    - version: "1.2.0"
+      date: "2026-02-01T12:30:00Z"
+      description: |
+        Codex MCP 再レビュー指摘への対応（全3件）:
+        1. [Medium] BuildError のバリアント不整合: TooManyNgrams, MemoryLimitExceeded を追加し、build の失敗条件に明記
+        2. [Medium] insert_bulk のAPI設計例が早期打ち切り要件と矛盾: take(MAX_BULK_INSERT + 1) を使う形に修正
+        3. [Low] ハッシュシード依存と参照透過性の矛盾: ビルダーがHashMap反復順序を使用しない前提を明文化
+    - version: "1.3.0"
+      date: "2026-02-01T13:00:00Z"
+      description: |
+        Codex MCP 最終レビュー指摘への対応（全3件）:
+        1. [重大] BuildError の発生タイミング/実装例の不整合を修正:
+           - add_entry は Self を返す（エラーなし）
+           - build() でのみ TooManyNgrams / MemoryLimitExceeded をチェック（遅延チェック方式）
+           - API例にエラーハンドリングを追加
+        2. [中] 世代トークン生成が外部状態依存の問題を明確化:
+           - 世代トークンは内部実装の詳細であり、API出力に影響しないことを明記
+           - 参照透過性は「API出力」に対して保証されることを説明
+        3. [軽] 運用監視/回帰検知/ロールバック基準を追加:
+           - operational_monitoring セクションを新設
+           - アラート閾値（RPS、P99、メモリ、エラー率）
+           - CI/CD での性能退行検知基準
+           - 本番環境でのロールバック判断基準と手順
+    - version: "1.4.0"
+      date: "2026-02-01T15:00:00Z"
+      description: |
+        実装開始:
+        - status を "reviewed" から "implementing" に変更
+        - implementation_started_at を追加
+        - phase を "implementation" に変更
+        - 将来の拡張として Issue ファイルを作成:
+          - docs/internal/issues/20260201_1500_insert_without_cow_optimization.yaml
+          - docs/internal/issues/20260201_1505_transient_reserve_method.yaml

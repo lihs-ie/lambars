@@ -264,10 +264,7 @@ async fn test_cached_task_repository_write_through() {
         .increment_version()
         .with_description("Updated description");
 
-    cached_repository
-        .save(&updated_task)
-        .await
-        .unwrap();
+    cached_repository.save(&updated_task).await.unwrap();
 
     // Verify primary has updated version
     let primary_result = primary.find_by_id(&task_id).await.unwrap();
@@ -338,10 +335,7 @@ async fn test_cache_key_version_invalidation() {
 
     // Update to v2
     let updated_task = task.clone().increment_version();
-    cached_repository
-        .save(&updated_task)
-        .await
-        .unwrap();
+    cached_repository.save(&updated_task).await.unwrap();
 
     // Verify v1 is deleted
     let v1_exists: bool = connection.exists(&v1_key).await.unwrap();
@@ -524,10 +518,7 @@ async fn test_cache_disabled_invalidates_on_write() {
         CachedTaskRepository::new(primary.clone(), pool.clone(), disabled_config);
 
     let updated_task = task.clone().increment_version();
-    disabled_repository
-        .save(&updated_task)
-        .await
-        .unwrap();
+    disabled_repository.save(&updated_task).await.unwrap();
 
     // Verify cache was invalidated (latest key should be deleted)
     let cached_version: Option<u64> = connection.get(&latest_key).await.unwrap();

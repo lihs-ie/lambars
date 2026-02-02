@@ -1,0 +1,676 @@
+# tasks_bulk apply_changes ルーティング修正 要件定義
+#
+# 概要:
+#   SearchIndexBulkBuilderが実装済みだがapply_changesで使用されていない問題を修正し、
+#   バルク最適化パスへ正しくルーティングすることでパフォーマンスを改善する。
+#
+# 設計方針:
+#   1. bulk_threshold を 10 に変更してバルクパスを有効化
+#   2. 段階的な最適化アプローチ（Phase 1: ルーティング修正、Phase 2: COW削減）
+#   3. 環境変数による制御はオプション（ロールバック手段として推奨だが必須ではない）
+#
+# 参照:
+#   - docs/internal/analysis/20260201_tasks_bulk_new_bottleneck_analysis.yaml
+#   - docs/internal/requirements/20260201_1120_tasks_bulk_bottleneck_remediation.yaml
+#   - docs/internal/issues/20260201_1500_insert_without_cow_optimization.yaml
+
+version: "1.0.0"
+name: "tasks_bulk_apply_changes_routing_fix"
+description: |
+  SearchIndexBulkBuilderの実装は完了しているが、apply_changesメソッドでバルクパスへの
+  ルーティングが正しく機能していないため、パフォーマンス改善効果が出ていない。
+
+  現在の問題（feature/tasks-bulk-bottleneck-remediation ブランチ）:
+  - RPS: 40.90 req/s
+  - P99: 27.18秒
+  - SearchIndexBulkBuilderがプロファイリングで0サンプル（未使用）
+  - TransientHashMap::insert_bulk_ownedの使用率が0.011%のみ
+
+  根本原因（実コード調査による推定）:
+  1. SearchIndexConfig::default() で bulk_threshold = 100（query.rs:1018）
+  2. tasks_bulk.lua のバッチサイズ = 3, 5, 10（tasks_bulk.lua:18）
+  3. **問題**: 3/5/10 < 100 のため、条件 `changes.len() >= bulk_threshold` が常にfalse
+  4. したがって apply_changes_bulk が一切呼ばれていない
+
+  注: use_bulk_builder はデフォルトでtrue（query.rs:1017）であり、問題ではない。
+
+  この要件定義では、Phase 1としてルーティング修正に焦点を当て、
+  Phase 2のCOW削減（insert_without_cowの最適化）は別要件として扱う。
+
+# 背景・動機
+background:
+  problem: |
+    benches/api/src/api/query.rs の SearchIndex::apply_changes には、
+    SearchIndexBulkBuilder を使用する分岐（apply_changes_bulk）が実装済みだが、
+    tasks_bulk ベンチマークでこのパスが一切使用されていない。
+
+    プロファイリング結果:
+    - SearchIndexBulkBuilder::build: 0サンプル（完全に未使用）
+    - TransientHashMap::insert_bulk_owned: 全体の0.011%のみ
+    - TransientHashMap::insert_into_node_cow: 16.36%（COWが激増）
+    - compute_merged_posting_list_sorted: 3.74%（ソート処理のオーバーヘッド）
+
+    分岐条件（query.rs:4870-4873）:
+    ```rust
+    if self.config.use_bulk_builder
+        && changes.len() >= self.config.bulk_threshold
+        && changes.iter().all(|c| matches!(c, TaskChange::Add(_)))
+    {
+        self.apply_changes_bulk(changes)
+    }
+    ```
+
+    この条件が満たされない理由（実コード調査による推定）:
+    1. config.bulk_threshold = 100（query.rs:1018）
+    2. tasks_bulk.lua のバッチサイズ = 3, 5, 10（tasks_bulk.lua:18）
+    3. **問題**: 3/5/10 < 100 のため、条件 `changes.len() >= bulk_threshold` が常にfalse
+
+    注: use_bulk_builder はデフォルトでtrue（query.rs:1017）であり、問題ではない。
+
+    実装済みのバルクAPIが使用されないため、以下の最適化が機能していない:
+    - SearchIndexBulkBuilder による一括n-gram構築
+    - merge_bulk_ngram_index による効率的なマージ
+    - insert_bulk_owned によるチャンク挿入（ただしCOW削減効果は限定的）
+
+  motivation: |
+    tasks_bulk ベンチマークの性能を改善する必要がある:
+    - 現在のRPS: 40.90 req/s
+    - 現在のP99: 27.18秒
+
+    SearchIndexBulkBuilder と TransientHashMap::insert_bulk_owned は実装済みであり、
+    これらを正しく使用することで大幅な性能改善が期待できる。
+
+    Phase 1（本要件）の目標:
+    - バルクパスへの正しいルーティングを実現（bulk_threshold を 100 → 10 に変更）
+    - SearchIndexBulkBuilder が実際に使用されることを確認
+    - パフォーマンス改善の達成（具体的な目標は非機能要件セクションを参照）
+
+    注: Phase 1 では bulk path 内でも apply_delta を実行しており（query.rs:4985-4991）、
+    効果は限定的。大幅な改善には Phase 2 の COW 削減が必要。
+
+    Phase 2（別要件）の目標:
+    - insert_without_cow の世代トークン最適化
+    - COW呼び出し数70%削減
+    - 最終目標のパフォーマンス達成（RPS 200+ req/s、P99 <5秒）
+
+  prior_art:
+    - name: "SearchIndexBulkBuilder"
+      description: |
+        要件定義 20260201_1120 で設計・実装済み。
+        n-gramインデックスを一括構築し、ソート/重複排除を1回のみ実行することで
+        効率化を実現。現在は未使用状態。
+
+    - name: "TransientHashMap::insert_bulk_owned"
+      description: |
+        要件定義 20260201_1120 で設計・実装済み。
+        MAX_BULK_INSERT（100,000）件までのエントリを一括挿入可能。
+        内部で insert_without_cow を使用してCOW削減を試みるが、
+        現状では世代トークン最適化が不完全なためCOW削減効果は限定的。
+
+    - name: "merge_bulk_ngram_index"
+      description: |
+        query.rs:5020 で実装済み。
+        既存インデックスとバルクインデックスをマージし、
+        CHUNK_SIZE（99,999件）ごとに insert_bulk_owned を呼び出す。
+
+# 要件一覧
+requirements:
+  # ======================================================================
+  # 1. バルクパス条件の検証と修正
+  # ======================================================================
+  - id: REQ-ROUTING-001
+    name: "バルクパス分岐条件の検証"
+    description: |
+      apply_changes の分岐条件が実際のベンチマークで満たされない理由を特定し、
+      適切な条件に修正する。
+
+      検証項目:
+      1. SearchIndexConfig::use_bulk_builder のデフォルト値
+      2. SearchIndexConfig::bulk_threshold の値
+      3. tasks_bulk ベンチマークで渡される changes の内容
+         - changes.len() の実際の値
+         - TaskChange::Add 以外の変更が含まれるか
+
+      修正方針:
+      - bulk_threshold を 10 に引き下げ（現在: 100 → 修正後: 10）
+      - これにより、バッチサイズ 10 でバルクパスが使用される
+      - 注: use_bulk_builder は既に true なので変更不要
+
+    methods:
+      - name: "SearchIndexConfig::default"
+        signature: "impl Default for SearchIndexConfig"
+        description: |
+          SearchIndexConfig のデフォルト値を設定する。
+          use_bulk_builder をtrueに、bulk_threshold を適切な値に設定。
+        examples:
+          - description: "デフォルト設定の修正"
+            code: |
+              impl Default for SearchIndexConfig {
+                  fn default() -> Self {
+                      Self {
+                          use_bulk_builder: true,  // 既存: true（変更不要）
+                          bulk_threshold: 10,      // 変更: 100 → 10
+                          // ... 他のフィールド
+                      }
+                  }
+              }
+
+      - name: "SearchIndex::apply_changes"
+        signature: "pub fn apply_changes(&self, changes: &[TaskChange]) -> Self"
+        description: |
+          分岐条件を満たす場合にバルクパスを使用する。
+          条件を満たさない場合はデルタパスにフォールバック。
+
+          注: ログ出力は参照透過性を損なうため、apply_changes 内では行わない。
+          代わりに、呼び出し元（update_search_index_batch など）でログを出力する。
+        examples:
+          - description: "bulk_threshold を 10 に変更"
+            code: |
+              impl Default for SearchIndexConfig {
+                  fn default() -> Self {
+                      Self {
+                          // ... 他のフィールド
+                          use_bulk_builder: true,  // 既存: true（変更不要）
+                          bulk_threshold: 10,      // 変更: 100 → 10
+                          // ... 他のフィールド
+                      }
+                  }
+              }
+
+    implementations:
+      - type: "SearchIndex"
+        description: |
+          apply_changes メソッドの分岐条件を修正し、
+          適切にバルクパスへルーティングする。
+
+      - type: "SearchIndexConfig"
+        description: |
+          use_bulk_builder と bulk_threshold のデフォルト値を調整。
+
+  # ======================================================================
+  # 2. 環境変数による動的制御
+  # ======================================================================
+  - id: REQ-ROUTING-002
+    name: "環境変数によるバルクパス制御（オプション）"
+    description: |
+      本番環境で問題が発生した場合に、コード変更なしでバルクパスを無効化できるように、
+      環境変数による制御機構を追加する（実装は任意、ロールバック手段として推奨）。
+
+      環境変数:
+      - SEARCH_INDEX_USE_BULK_BUILDER (default: true、許容値: "true" | "false")
+      - SEARCH_INDEX_BULK_THRESHOLD (default: 10、許容値: 正の整数)
+
+      優先順位:
+      1. 環境変数が設定されている場合: 環境変数の値を使用
+      2. 環境変数が未設定の場合: SearchIndexConfig の値を使用
+
+    methods:
+      - name: "SearchIndexConfig::from_env"
+        signature: "pub fn from_env() -> Self"
+        description: |
+          環境変数から設定を読み込み、SearchIndexConfig を作成する。
+          環境変数が未設定の場合はデフォルト値を使用。
+        examples:
+          - description: "環境変数からの設定読み込み"
+            code: |
+              impl SearchIndexConfig {
+                  pub fn from_env() -> Self {
+                      let mut config = Self::default();
+
+                      if let Ok(val) = std::env::var("SEARCH_INDEX_USE_BULK_BUILDER") {
+                          config.use_bulk_builder = val.parse().unwrap_or_else(|_| {
+                              Self::default().use_bulk_builder
+                          });
+                      }
+
+                      if let Ok(val) = std::env::var("SEARCH_INDEX_BULK_THRESHOLD") {
+                          if let Ok(parsed) = val.parse::<usize>() {
+                              if parsed > 0 {
+                                  config.bulk_threshold = parsed;
+                              }
+                              // parsed <= 0 の場合はデフォルト値を使用（フォールバック）
+                          }
+                          // パース失敗の場合もデフォルト値を使用（フォールバック）
+                      }
+
+                      config
+                  }
+              }
+
+      - name: "SearchIndex::new_with_env_config"
+        signature: "pub fn new_with_env_config() -> Self"
+        description: |
+          環境変数から読み込んだ設定で SearchIndex を作成する。
+        examples:
+          - description: "環境変数ベースの初期化"
+            code: |
+              pub fn new_with_env_config() -> Self {
+                  Self::new(SearchIndexConfig::from_env())
+              }
+
+    implementations:
+      - type: "SearchIndexConfig"
+        description: |
+          環境変数から設定を読み込む from_env メソッドを追加。
+
+      - type: "SearchIndex"
+        description: |
+          環境変数ベースの初期化メソッドを追加（オプション）。
+
+  # ======================================================================
+  # 3. ベンチマーク経路の検証
+  # ======================================================================
+  - id: REQ-ROUTING-003
+    name: "tasks_bulk ベンチマークの経路検証"
+    description: |
+      tasks_bulk ベンチマークが実際に apply_changes を呼び出す経路を確認し、
+      バルクパスが使用されることを検証する。
+
+      検証項目:
+      1. benches/api/src/api/bulk.rs の update_search_index_batch が
+         apply_changes を呼び出していることを確認
+      2. apply_changes に渡される changes の内容を確認
+         - 件数（changes.len()）
+         - 全てが TaskChange::Add か
+      3. SearchIndex の初期化時に適切な config が設定されていることを確認
+
+    methods:
+      - name: "update_search_index_batch"
+        signature: "fn update_search_index_batch(...) -> SearchIndex"
+        description: |
+          SearchIndex::apply_changes を呼び出す箇所で、
+          バルクパスが使用されることを確認する。
+
+          ログ出力は FP 観点から境界（update_search_index_batch）側で行う。
+        examples:
+          - description: "境界でのデバッグログ追加（オプション）"
+            code: |
+              fn update_search_index_batch(
+                  current: &SearchIndex,
+                  changes: &[TaskChange],
+              ) -> SearchIndex {
+                  #[cfg(feature = "logging")]
+                  {
+                      let all_adds = changes.iter().all(|c| matches!(c, TaskChange::Add(_)));
+                      let meets_threshold = changes.len() >= current.config.bulk_threshold;
+                      let will_use_bulk = current.config.use_bulk_builder && meets_threshold && all_adds;
+                      log::debug!(
+                          "update_search_index_batch: {} changes, will use {} path",
+                          changes.len(),
+                          if will_use_bulk { "bulk" } else { "delta" }
+                      );
+                  }
+
+                  current.apply_changes(changes)
+              }
+
+    implementations:
+      - type: "update_search_index_batch"
+        description: |
+          benches/api/src/api/bulk.rs の関数を検証し、
+          必要に応じて修正・デバッグログ追加。
+
+  # ======================================================================
+  # 4. プロファイリングによる効果測定
+  # ======================================================================
+  - id: REQ-ROUTING-004
+    name: "プロファイリングによるバルクパス使用の確認"
+    description: |
+      修正後、プロファイリングを実施してバルクパスが実際に使用されていることを確認する。
+
+      確認項目:
+      1. SearchIndexBulkBuilder::build のサンプル数が0より大きい
+      2. TransientHashMap::insert_bulk_owned の使用率が増加
+      3. TransientHashMap::insert_into_node_cow の使用率が減少
+         （ただし、Phase 1では大幅な削減は期待できない）
+      4. compute_merged_posting_list_sorted の使用率が減少
+
+      測定方法:
+      - cargo flamegraph を使用してプロファイリング
+      - ホットスポットの変化を Before/After で比較
+
+    methods:
+      - name: "プロファイリング実行"
+        signature: "cargo flamegraph --bench api_benchmark_api"
+        description: |
+          修正前後でプロファイリングを実施し、
+          ホットスポットの変化を確認する。
+        examples:
+          - description: "プロファイリングコマンド"
+            code: |
+              # Before
+              git checkout feature/tasks-bulk-bottleneck-remediation
+              cargo flamegraph --bench api_benchmark_api -- \
+                --bench --profile-time=60 tasks_bulk
+              mv flamegraph.svg profiling-results/before_routing_fix.svg
+
+              # After
+              git checkout feature/routing-fix
+              cargo flamegraph --bench api_benchmark_api -- \
+                --bench --profile-time=60 tasks_bulk
+              mv flamegraph.svg profiling-results/after_routing_fix.svg
+
+    implementations:
+      - type: "プロファイリングスクリプト"
+        description: |
+          Before/After の比較を自動化するスクリプトを作成（オプション）。
+
+  # ======================================================================
+  # 5. パフォーマンス目標の設定
+  # ======================================================================
+  - id: REQ-ROUTING-005
+    name: "Phase 1 パフォーマンス目標"
+    description: |
+      Phase 1（ルーティング修正）で達成すべきパフォーマンス目標を設定する。
+
+      Phase 1（本要件）の目標:
+      - 最低ライン: RPS 50+ req/s、P99 <25秒
+      - 推奨: RPS 55+ req/s、P99 <22秒
+      - SearchIndexBulkBuilder が実際に使用される（プロファイリングで確認可能）
+
+      注: Phase 1 では bulk path 内でも apply_delta を実行しているため、
+      効果は限定的。大幅な改善には Phase 2（別要件）の COW 削減が必要。
+
+      Phase 2 の目標（insert_without_cow 最適化後）:
+      - RPS: 200+ req/s（現在の40.90 req/sから400%改善）
+      - P99 latency: <5秒（現在の27.18秒から80%改善）
+      - TransientHashMap::insert_into_node_cow 呼び出し数が70%削減
+
+      測定方法:
+      - cargo bench --bench api_benchmark_api -- tasks_bulk
+      - wrk による負荷テスト
+
+    methods:
+      - name: "ベンチマーク実行"
+        signature: "cargo bench --bench api_benchmark_api"
+        description: |
+          修正前後でベンチマークを実施し、
+          パフォーマンス指標の変化を測定する。
+        examples:
+          - description: "ベンチマークコマンド"
+            code: |
+              # Before
+              git checkout feature/tasks-bulk-bottleneck-remediation
+              cargo bench --bench api_benchmark_api -- tasks_bulk \
+                > benchmark_results_before_routing_fix.txt
+
+              # After
+              git checkout feature/routing-fix
+              cargo bench --bench api_benchmark_api -- tasks_bulk \
+                > benchmark_results_after_routing_fix.txt
+
+              # 比較
+              diff benchmark_results_before_routing_fix.txt \
+                   benchmark_results_after_routing_fix.txt
+
+    implementations:
+      - type: "ベンチマーク比較スクリプト"
+        description: |
+          Before/After の比較を自動化するスクリプトを作成（オプション）。
+
+# 非機能要件
+non_functional_requirements:
+  performance:
+    - "Phase 1: RPS 50+ req/s（最低ライン）、55+ req/s（推奨）"
+    - "Phase 1: P99 latency <25秒（最低ライン）、<22秒（推奨）"
+    - "SearchIndexBulkBuilder が実際に使用されることをプロファイリングで確認"
+    - "apply_changes_bulk の呼び出し回数がプロファイリングで可視化される"
+    - "Phase 2（別要件）: RPS 200+ req/s、P99 latency <5秒"
+    - "注: Phase 1 の効果は限定的（bulk path 内でも apply_delta を実行）"
+
+  compatibility:
+    - "既存の apply_changes の動作を変更しない（デルタパスとバルクパスは等価な結果を返す）"
+    - "環境変数が未設定の場合でも正常に動作する（環境変数制御はオプション）"
+
+  testing:
+    - "apply_changes_bulk と apply_changes_delta が等価な結果を返すことをプロパティテストで検証"
+    - "分岐条件のユニットテスト（use_bulk_builder、bulk_threshold、all_adds）"
+    - "bulk_threshold の妥当性検証（> 0 であることを確認）"
+    - "環境変数による設定読み込みのテスト（実装する場合）"
+    - "プロファイリングによるバルクパス使用の確認"
+    - "ベンチマークによるパフォーマンス改善の測定"
+
+  observability:
+    - "デバッグログでどちらのパス（バルク/デルタ）が使用されたかを記録"
+    - "環境変数が読み込まれた場合はログ出力（オプション）"
+    - "プロファイリング結果を profiling-results/ に保存"
+
+# 実装手順
+implementation_steps:
+  step_1_investigation:
+    - step: 1
+      description: "現在の SearchIndexConfig のデフォルト値を確認"
+      files:
+        - "benches/api/src/api/query.rs"
+      expected_outcome: "use_bulk_builder と bulk_threshold の現在の値を特定"
+
+    - step: 2
+      description: "tasks_bulk ベンチマークで apply_changes に渡される changes の内容を確認"
+      files:
+        - "benches/api/src/api/bulk.rs"
+        - "benches/api/benches/api_benchmark_api.rs"
+      expected_outcome: "changes.len() と TaskChange の種類を特定"
+
+    - step: 3
+      description: "分岐条件が満たされない理由を特定"
+      expected_outcome: |
+        以下のいずれかの理由を特定:
+        - use_bulk_builder が false
+        - bulk_threshold が大きすぎる
+        - TaskChange::Add 以外が混在
+
+  step_2_implementation:
+    - step: 4
+      description: "SearchIndexConfig のデフォルト値を修正"
+      changes:
+        - file: "benches/api/src/api/query.rs"
+          change: "use_bulk_builder を true に、bulk_threshold を適切な値に設定"
+
+    - step: 5
+      description: "環境変数による制御機構を追加（オプション）"
+      changes:
+        - file: "benches/api/src/api/query.rs"
+          change: "SearchIndexConfig::from_env メソッドを追加（実装は任意）"
+
+    - step: 6
+      description: "update_search_index_batch にデバッグログを追加（オプション）"
+      changes:
+        - file: "benches/api/src/api/bulk.rs"
+          change: "境界でどちらのパスが使用されるかをログ出力（FP観点から副作用を境界に閉じ込める）"
+
+  step_3_verification:
+    - step: 7
+      description: "ユニットテストの追加"
+      tests:
+        - "分岐条件のテスト"
+        - "bulk_threshold > 0 の妥当性検証テスト"
+        - "環境変数読み込みのテスト（環境変数制御を実装する場合）"
+        - "apply_changes_bulk と apply_changes_delta の等価性テスト"
+
+    - step: 8
+      description: "プロファイリングによる効果測定"
+      command: "cargo flamegraph --bench api_benchmark_api -- tasks_bulk"
+      expected_outcome: |
+        - SearchIndexBulkBuilder::build のサンプル数 > 0
+        - insert_bulk_owned の使用率増加
+
+    - step: 9
+      description: "ベンチマークによるパフォーマンス測定"
+      command: "cargo bench --bench api_benchmark_api -- tasks_bulk"
+      expected_outcome: |
+        - RPS 50+ req/s（最低ライン）、55+ req/s（推奨）
+        - P99 latency <25秒（最低ライン）、<22秒（推奨）
+
+# 将来の拡張
+future_extensions:
+  - id: EXT-ROUTING-001
+    name: "Phase 2: insert_without_cow の世代トークン最適化"
+    description: |
+      TransientHashMap::insert_without_cow の世代トークン機構を最適化し、
+      COW呼び出し数を70%削減する。
+
+      これにより、以下の改善が期待される:
+      - TransientHashMap::insert_into_node_cow の使用率が16.36% → 5%未満に削減
+      - RPS 200+ req/s（現在の40.90 req/sから400%改善）
+      - P99 latency <5秒（現在の27.18秒から80%改善）
+    rationale: |
+      Phase 1 でまずルーティングを修正し、バルクパスが実際に使用されることを確認する。
+      Phase 2 は別要件として切り出し、段階的に最適化を進める。
+
+      Phase 2 の実装は複雑であり、世代トークン機構の慎重な設計が必要。
+      Phase 1 で基盤を整えた上で、Phase 2 に取り組む。
+
+      Phase 2 の目標は最終的な性能目標であり、Phase 1 のみでは達成困難。
+    related_issue: "docs/internal/issues/20260201_1500_insert_without_cow_optimization.yaml"
+
+  - id: EXT-ROUTING-002
+    name: "compute_merged_posting_list_sorted の中間 Vec 削減"
+    description: |
+      compute_merged_posting_list_sorted で生成される中間 Vec を削減し、
+      malloc/free のオーバーヘッドを削減する。
+
+      具体的な改善策:
+      - TaskIdCollection::from_sorted_iter の実装
+      - MutableIndex 生成時の with_capacity 使用
+
+      期待される効果:
+      - malloc 呼び出し数が30%削減
+      - メモリアロケーションの最適化
+    rationale: |
+      Phase 1 と Phase 2 の効果を測定した上で、
+      さらなる最適化として実施する。
+
+      Phase 1、Phase 2 で大幅な改善が得られた場合、
+      この最適化の優先度は下がる可能性がある。
+    related_analysis: "docs/internal/analysis/20260201_tasks_bulk_new_bottleneck_analysis.yaml"
+
+  - id: EXT-ROUTING-003
+    name: "動的なバルク閾値の調整"
+    description: |
+      実行時の負荷状況に応じて bulk_threshold を動的に調整する機構。
+
+      調整方針:
+      - 低負荷時: bulk_threshold を下げてバルクパスを積極的に使用
+      - 高負荷時: bulk_threshold を上げてメモリ使用量を抑制
+
+      期待される効果:
+      - 負荷状況に応じた最適なパフォーマンス
+      - メモリ使用量の制御
+    rationale: |
+      Phase 1、Phase 2 で固定の閾値による効果を測定した上で、
+      動的な調整機構を検討する。
+
+      現時点では固定の閾値で十分な効果が得られる可能性が高い。
+
+# 関連ドキュメント
+related_documents:
+  requirements:
+    - path: "docs/internal/requirements/20260201_1120_tasks_bulk_bottleneck_remediation.yaml"
+      description: "SearchIndexBulkBuilder と TransientHashMap::insert_bulk の設計・実装"
+
+  analysis:
+    - path: "docs/internal/analysis/20260201_tasks_bulk_new_bottleneck_analysis.yaml"
+      description: "プロファイリング結果に基づくボトルネック分析"
+
+    - path: "docs/internal/analysis/20260201_tasks_bulk_bottleneck_analysis.yaml"
+      description: "初回のボトルネック分析（feature/async-io-unboxed-execution）"
+
+  issues:
+    - path: "docs/internal/issues/20260201_1500_insert_without_cow_optimization.yaml"
+      description: "insert_without_cow の世代トークン最適化（Phase 2 で対応）"
+
+    - path: "docs/internal/issues/20260201_1505_transient_reserve_method.yaml"
+      description: "reserve メソッドの実装（実装済み、効果は限定的）"
+
+# 受け入れ基準
+acceptance_criteria:
+  minimum:
+    - "SearchIndexConfig::default() で bulk_threshold を 100 → 10 に変更"
+    - "bulk_threshold > 0 であることを保証（コンパイル時 const assertion または実行時チェック）"
+    - "apply_changes がバルクパス条件を満たす場合に apply_changes_bulk を呼び出す"
+    - "apply_changes_bulk と apply_changes_delta が等価な結果を返す（プロパティテスト）"
+    - "プロファイリングで SearchIndexBulkBuilder::build のサンプル数 > 0"
+    - "RPS 50+ req/s、P99 <25秒"
+
+  recommended:
+    - "RPS 55+ req/s、P99 <22秒"
+    - "TransientHashMap::insert_bulk_owned の使用率が1%以上"
+    - "プロファイリング結果を Before/After で比較可能"
+    - "環境変数 SEARCH_INDEX_BULK_THRESHOLD で閾値を制御可能（オプション）"
+    - "境界（update_search_index_batch）でのログ出力（オプション）"
+
+  stretch:
+    - "RPS 60+ req/s、P99 <20秒"
+    - "環境変数による動的制御の実装"
+
+# リスク分析
+risks:
+  - id: RISK-ROUTING-001
+    description: "バルクパスとデルタパスで結果が異なる可能性"
+    severity: "high"
+    mitigation: |
+      - プロパティテストで apply_changes_bulk と apply_changes_delta の等価性を検証
+      - 既存のテストスイートを全て通過することを確認
+      - ロールバック手段: bulk_threshold を大きな値に変更して再起動、または環境変数制御を実装する場合は環境変数で無効化
+
+  - id: RISK-ROUTING-002
+    description: "bulk_threshold の設定ミスによる性能劣化"
+    severity: "medium"
+    mitigation: |
+      - 複数の閾値でベンチマークを実施し、最適値を決定
+      - 環境変数で動的に変更可能にする
+      - デバッグログでバルクパス使用状況を監視
+
+  - id: RISK-ROUTING-003
+    description: "Phase 1 のみでは目標性能に到達しない可能性"
+    severity: "medium"
+    mitigation: |
+      - Phase 1 の目標を現実的なライン（RPS 50-55+）に設定
+      - bulk path 内でも apply_delta を実行しているため、Phase 1 の効果は限定的
+      - Phase 2（insert_without_cow 最適化）で最終目標（RPS 200+）を達成
+      - 段階的な改善により、各フェーズでの効果を測定可能にする
+
+  - id: RISK-ROUTING-004
+    description: "環境変数の設定ミスによる動作不良（環境変数制御を実装する場合）"
+    severity: "low"
+    mitigation: |
+      - 環境変数のパース失敗時は SearchIndexConfig::default() の値を使用
+      - 設定値の妥当性チェックを受け入れ基準・テスト要件に明記（bulk_threshold > 0 など）
+      - エラーメッセージを明確にする
+
+  - id: RISK-ROUTING-005
+    description: "bulk build 失敗時のフォールバック処理によるメモリ使用量増加"
+    severity: "medium"
+    mitigation: |
+      - SearchIndexBulkBuilder::build() が失敗した場合、apply_changes_delta に
+        フォールバックするが、この時点で既に bulk builder にデータが蓄積されている。
+      - フォールバック処理により、一時的にメモリ使用量が増加する可能性がある。
+      - 対策: bulk_threshold を適切に設定し、メモリ制限を超えないようにする。
+      - 監視: build() の失敗率をログで監視し、閾値が適切かを確認する。
+
+  - id: RISK-ROUTING-006
+    description: "TaskChange::Add 以外が混在する場合にバルクパスが使用されない"
+    severity: "medium"
+    mitigation: |
+      - tasks_bulk ベンチマークでは Add のみを想定しているが、
+        実際のワークロードで Remove や Update が混在する場合、
+        バルクパス条件 `all(|c| matches!(c, TaskChange::Add(_)))` が満たされず、
+        改善効果が出ない可能性がある。
+      - 対策: ベンチマーク実施時に changes の内容を確認し、全て Add であることを検証。
+      - 将来の拡張: Remove/Update を含むバッチの最適化を別要件として検討。
+
+# メタ情報
+metadata:
+  created_at: "2026-02-02T12:26:00Z"
+  created_by: "Claude Code"
+  phase: "requirement_definition"
+  priority: "P0"
+  estimated_effort: "2-3 days"
+  dependencies:
+    - "SearchIndexBulkBuilder 実装済み（20260201_1120）"
+    - "TransientHashMap::insert_bulk_owned 実装済み（20260201_1120）"
+    - "insert_without_cow 実装済み（世代トークン最適化は Phase 2）"
+  next_steps:
+    - "Phase 1: 本要件の実装（ルーティング修正）"
+    - "Phase 2: insert_without_cow の世代トークン最適化（別要件）"
+    - "Phase 3: compute_merged_posting_list_sorted の最適化（将来の拡張）"

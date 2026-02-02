@@ -375,11 +375,7 @@ pub async fn save_task_with_event(
         .map_err(ApiErrorResponse::from)?;
 
     // 2. Write event (failure becomes warning)
-    match state
-        .event_store
-        .append(&event, expected_version)
-        .await
-    {
+    match state.event_store.append(&event, expected_version).await {
         Ok(()) => Ok(SaveTaskResult::success()),
         Err(error) => {
             // Construct warning (pure function)
@@ -495,11 +491,7 @@ pub async fn write_events_sequentially(
     for (index, event) in events.into_iter().enumerate() {
         let expected_version = initial_version + index as u64;
 
-        match state
-            .event_store
-            .append(&event, expected_version)
-            .await
-        {
+        match state.event_store.append(&event, expected_version).await {
             Ok(()) => {
                 written += 1;
             }

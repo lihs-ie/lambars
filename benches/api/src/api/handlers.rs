@@ -326,10 +326,7 @@ impl AppState {
         applied_config: AppliedConfig,
     ) -> Result<Self, RepositoryError> {
         // Fetch all tasks to build the initial search index
-        let all_tasks = repositories
-            .task_repository
-            .list(Pagination::all())
-            .await?;
+        let all_tasks = repositories.task_repository.list(Pagination::all()).await?;
 
         // Build the search index from all tasks (pure function)
         // If SEARCH_INDEX_METRICS_PATH is set, measure build performance and output metrics
@@ -605,9 +602,7 @@ async fn backfill_existing_tasks(
 
     for task in tasks {
         // Idempotency check: skip tasks that already have events
-        let current_version = event_store
-            .get_current_version(&task.task_id)
-            .await?;
+        let current_version = event_store.get_current_version(&task.task_id).await?;
 
         if current_version > 0 {
             skipped_count += 1;

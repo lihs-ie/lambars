@@ -586,6 +586,26 @@ assert_eq!(updated.get("one"), Some(&100)); // New version
 // Removal
 let removed = map.remove("one");
 assert_eq!(removed.get("one"), None);
+
+// Efficient bulk operations with transient
+use lambars::persistent::BulkInsertError;
+
+let entries = vec![
+    ("key1".to_string(), 1),
+    ("key2".to_string(), 2),
+    ("key3".to_string(), 3),
+];
+
+// Note: insert_bulk has a limit of MAX_BULK_INSERT (100,000) entries
+// For larger datasets, split into chunks
+let map = PersistentHashMap::new()
+    .transient()
+    .insert_bulk(entries)?
+    .persistent();
+
+assert_eq!(map.get("key1"), Some(&1));
+assert_eq!(map.get("key2"), Some(&2));
+assert_eq!(map.get("key3"), Some(&3));
 ```
 
 #### PersistentHashSet

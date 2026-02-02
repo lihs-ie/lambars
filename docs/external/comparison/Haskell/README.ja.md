@@ -2309,6 +2309,22 @@ let updated = map1.insert("three".to_string(), 3);
 let value: Option<&i32> = map1.get("one");
 // value = Some(&1)
 
+// PersistentHashMap の一括挿入（Haskell の Data.HashMap.Strict.fromList に類似）
+use lambars::persistent::BulkInsertError;
+
+let entries = vec![
+    ("key1".to_string(), 1),
+    ("key2".to_string(), 2),
+    ("key3".to_string(), 3),
+];
+
+let map_bulk: Result<PersistentHashMap<String, i32>, BulkInsertError> =
+    PersistentHashMap::new()
+        .transient()
+        .insert_bulk(entries)
+        .map(|t| t.persistent());
+// 効率的な一括構築、コピーオンライトのオーバーヘッドを削減
+
 // HashSet 操作
 let set1: PersistentHashSet<i32> = [1, 2, 3].into_iter().collect();
 let set2: PersistentHashSet<i32> = [2, 3, 4].into_iter().collect();

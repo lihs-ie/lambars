@@ -1,0 +1,628 @@
+# tasks_bulk apply_changes_bulk SearchIndexBulkBuilder 統合 要件定義
+#
+# 概要:
+#   apply_changes_bulk に SearchIndexBulkBuilder を統合し、Add-only バッチ更新時の
+#   性能回帰（RPS 13%低下、P99 27秒超）を解消する。
+#
+# 設計方針:
+#   1. apply_changes_bulk を SearchIndexBulkBuilder 経路に接続し、Add-only 大量更新を最適化
+#   2. SearchIndexBulkBuilder で構築した ngram index と既存 index を統合する専用マージを実装
+#   3. compute_merged_posting_list_sorted の呼び出し回数を削減
+#   4. 参照透過性を維持しながら内部可変性を活用したビルダーパターンを採用
+#   5. ロールバック可能なフラグでリスクを管理
+#
+# 参照:
+#   - docs/internal/analysis/20260201_tasks_bulk_new_bottleneck_analysis.yaml
+#   - docs/internal/requirements/20260201_1120_tasks_bulk_bottleneck_remediation.yaml
+#   - docs/internal/requirements/20260201_1530_tasks_bulk_apply_changes_optimization.yaml
+#   - benches/api/src/api/query.rs (SearchIndexBulkBuilder 実装)
+
+version: "1.0.0"
+name: "tasks_bulk_apply_changes_bulk_builder_integration"
+description: |
+  ## 現状の問題
+
+  feature/tasks-bulk-bottleneck-remediation ブランチにおいて、tasks_bulk API の性能回帰が発生している。
+
+  ### 測定結果
+  - RPS: 48.23 → 41.94（約13%低下）
+  - Avg Latency: 16.81s → 17.15s（約2%増加）
+  - P99: 27.28s（目標: 5秒未満）
+
+  ### Codex MCP 分析による根本原因
+
+  1. **apply_changes_bulk が SearchIndexBulkBuilder を使用していない**
+     - 実装が apply_changes_delta にフォールバックしているだけ
+     - SearchIndexBulkBuilder は実装済みだが、apply_changes から接続されていない
+     - use_bulk_builder と bulk_threshold の条件を満たしても最適化が働かない
+
+  2. **compute_merged_posting_list_sorted の多発**
+     - TaskIdCollection → Vec → TaskIdCollection の変換が大量発生
+     - malloc/free のオーバーヘッドが支配的
+     - insert_into_node_cow の呼び出し数が 11,743,229,372 サンプル（約16.36%）
+
+  3. **TransientHashMap の COW 多発**
+     - insert_without_cow と reserve は実装済みだが効果が限定的
+     - 共有ノード起点の挿入では初回 COW は避けられない
+     - 世代トークン方式だけでは期待ほど削減できていない
+
+  ## 改善アプローチ
+
+  SearchIndexBulkBuilder を apply_changes_bulk に統合し、Add-only 大量更新時に
+  以下のアルゴリズムで最適化する:
+
+  1. 全エントリの ngram を SearchIndexBulkBuilder で一括収集
+  2. 一括でソート/マージ（compute_merged_posting_list_sorted を回避）
+  3. 既存 index との統合専用マージで不変な SearchIndex を返す
+
+  ## 期待される改善効果
+
+  - RPS: 41.94 → 200+ req/s（4.7倍以上の改善、最低ライン）
+  - RPS 目標: 500+ req/s（11.9倍以上の改善、推奨目標）
+  - P99 latency: 27.28秒 → < 5秒（最低ライン）
+  - P99 目標: < 1秒（推奨目標）
+  - insert_into_node_cow 呼び出し数: -50%以上（Phase 1）、-70%以上（Phase 2）
+  - malloc 呼び出し数: -30%以上
+
+# 背景・動機
+background:
+  problem: |
+    ## 性能回帰の発生
+
+    feature/tasks-bulk-bottleneck-remediation ブランチにおいて、SearchIndexBulkBuilder と
+    TransientHashMap::insert_bulk を実装したにもかかわらず、tasks_bulk API の性能が回帰している。
+
+    ### 測定結果
+    - RPS: 48.23 → 41.94（約13%低下）
+    - Avg Latency: 16.81s → 17.15s（約2%増加）
+    - P99: 27.28s（目標: 5秒未満）
+
+    ### 実装状況の矛盾
+
+    1. SearchIndexBulkBuilder は実装済み（benches/api/src/api/query.rs:1612）
+    2. apply_changes_bulk は apply_changes_delta にフォールバックしているだけ（benches/api/src/api/query.rs:4814）
+    3. SearchIndexBulkBuilder が実運用経路で一切使われていない
+
+    ### プロファイリング結果（ホットスポット）
+
+    - TransientHashMap::insert_into_node_cow: 11,743,229,372 サンプル（約16.36%）
+    - SearchIndex::compute_merged_posting_list_sorted: 2,682,046,066 サンプル（約3.74%）
+    - TransientHashMap::insert: 4,604,814,319 サンプル（約6.42%）
+    - malloc/libc: 3,000,000,000+ サンプル（約4%+）
+
+    これらが大量書き込み時のCPUボトルネックとなっている。
+
+  motivation: |
+    1. **実装済みコードの有効化**
+       - SearchIndexBulkBuilder は実装済みだが使用されていない
+       - apply_changes_bulk を正しく実装することで投資を回収
+       - use_bulk_builder と bulk_threshold の条件を有効化
+
+    2. **本番運用適性の確保**
+       - 現状の P99 27秒は同期APIとして致命的
+       - バルク登録/一括処理がタイムアウトの原因となる
+       - target 500 RPS / P99 < 1秒 が本番運用の最低ライン
+
+    3. **アルゴリズム的ボトルネックの解消**
+       - 1件ごとのマージ/ソートは計算量的に非効率
+       - バルク構築専用のアルゴリズムで大幅改善が可能
+       - compute_merged_posting_list_sorted の呼び出し回数を削減
+
+    4. **永続データ構造のCOW最適化**
+       - TransientHashMap の COW が多発している
+       - SearchIndexBulkBuilder 経由で一括構築することで削減可能
+       - 中間 Vec の削減により malloc/free オーバーヘッドを削減
+
+    5. **関数型プログラミングの原則との両立**
+       - ビルダーパターンで内部可変性を活用
+       - 最終的に不変な永続データ構造を返すことで参照透過性を維持
+       - 外部から観測可能な副作用なし
+
+  prior_art:
+    - name: "docs/internal/requirements/20260201_1120_tasks_bulk_bottleneck_remediation.yaml"
+      description: "SearchIndexBulkBuilder と TransientHashMap::insert_bulk の仕様"
+      path: "/Users/lihs/workspace/lambars/docs/internal/requirements/20260201_1120_tasks_bulk_bottleneck_remediation.yaml"
+
+    - name: "docs/internal/analysis/20260201_tasks_bulk_new_bottleneck_analysis.yaml"
+      description: "Codex MCP によるボトルネック分析結果"
+      path: "/Users/lihs/workspace/lambars/docs/internal/analysis/20260201_tasks_bulk_new_bottleneck_analysis.yaml"
+
+    - name: "benches/api/src/api/query.rs (SearchIndexBulkBuilder)"
+      description: "既存の SearchIndexBulkBuilder 実装"
+      path: "/Users/lihs/workspace/lambars/benches/api/src/api/query.rs"
+      line: 1612
+
+    - name: "Haskell Data.HashMap.Strict"
+      description: "fromList 関数によるバルク構築。一括でハッシュマップを構築し、個別挿入のオーバーヘッドを削減"
+      url: "https://hackage.haskell.org/package/unordered-containers/docs/Data-HashMap-Strict.html"
+
+    - name: "Scala immutable.HashMap"
+      description: "++ 演算子によるバルク結合。内部で効率的なマージアルゴリズムを使用"
+      url: "https://www.scala-lang.org/api/current/scala/collection/immutable/HashMap.html"
+
+# 要件一覧
+requirements:
+  # ======================================================================
+  # 1. apply_changes_bulk の SearchIndexBulkBuilder 統合
+  # ======================================================================
+  - id: REQ-APPLY-BULK-001
+    name: "apply_changes_bulk の SearchIndexBulkBuilder 統合"
+    description: |
+      ## 目的
+
+      apply_changes_bulk を SearchIndexBulkBuilder 経路に接続し、Add-only 大量更新時の
+      性能を劇的に改善する。
+
+      ## 現状の問題
+
+      現在の apply_changes_bulk は以下のように実装されている:
+
+      ```rust
+      fn apply_changes_bulk(&self, changes: &[TaskChange]) -> Self {
+          self.apply_changes_delta(changes)
+      }
+      ```
+
+      これは単に apply_changes_delta にフォールバックしているだけで、SearchIndexBulkBuilder を
+      使用していない。その結果、use_bulk_builder と bulk_threshold の条件を満たしても
+      最適化が働かない。
+
+      ## 改善アプローチ
+
+      apply_changes_bulk を以下のように実装する:
+
+      1. SearchIndexBulkBuilder で全エントリの ngram を一括収集
+      2. SearchIndexBulkBuilder::build() で一括ソート/マージ
+      3. 既存 index との統合専用マージで不変な SearchIndex を返す
+
+      ## アルゴリズム
+
+      ### フェーズ1: バルク構築
+
+      ```rust
+      // 全エントリの ngram を一括収集
+      let bulk_builder = changes.iter()
+          .filter_map(|change| match change {
+              TaskChange::Add(task) => Some(task),
+              _ => None,
+          })
+          .fold(SearchIndexBulkBuilder::new(self.config.clone()), |builder, task| {
+              builder.add_task(task)
+          });
+
+      // 一括でソート/マージ
+      let bulk_index = bulk_builder.build()?;
+      ```
+
+      ### フェーズ2: 既存 index との統合
+
+      ```rust
+      // 既存 index と bulk_index を統合
+      let merged_ngram_index = self.merge_bulk_ngram_index(&bulk_index.ngram_index);
+      let merged_prefix_index = self.merge_bulk_prefix_index(&bulk_index.prefix_index);
+      let merged_tasks_by_id = self.merge_bulk_tasks_by_id(&bulk_index.tasks_by_id);
+
+      SearchIndex {
+          config: self.config.clone(),
+          ngram_index: merged_ngram_index,
+          prefix_index: merged_prefix_index,
+          tasks_by_id: merged_tasks_by_id,
+      }
+      ```
+
+      ## 関数型プログラミングの原則
+
+      - **内部可変性**: SearchIndexBulkBuilder は内部で可変状態を持つが、外部に副作用を漏らさない
+      - **参照透過性**: apply_changes_bulk は常に新しい不変な SearchIndex を返す
+      - **純粋関数**: 外部状態に依存せず、同じ入力に対して同じ出力を返す
+      - **カプセル化**: 可変状態はビルダー内部に閉じており、外部からは観測不可能
+
+    methods:
+      - name: "apply_changes_bulk"
+        signature: "fn apply_changes_bulk(&self, changes: &[TaskChange]) -> Self"
+        description: |
+          Add-only 大量更新時に SearchIndexBulkBuilder を使用して最適化する。
+
+          ## 前提条件
+
+          - changes.iter().all(|c| matches!(c, TaskChange::Add(_))) == true
+          - changes.len() >= self.config.bulk_threshold
+
+          ## アルゴリズム
+
+          1. SearchIndexBulkBuilder で全エントリの ngram を一括収集
+          2. SearchIndexBulkBuilder::build() で一括ソート/マージ
+          3. 既存 index との統合専用マージで不変な SearchIndex を返す
+
+          ## エラーハンドリング
+
+          - SearchIndexBulkBuilder::build() がエラーを返した場合は apply_changes_delta にフォールバック
+          - フォールバックしたことをログに記録（debug レベル）
+
+        examples:
+          - description: "Add-only 大量更新"
+            code: |
+              let changes = vec![
+                  TaskChange::Add(task1),
+                  TaskChange::Add(task2),
+                  TaskChange::Add(task3),
+              ];
+              let updated = index.apply_changes_bulk(&changes);
+
+      - name: "merge_bulk_ngram_index"
+        signature: "fn merge_bulk_ngram_index(&self, bulk_ngram_index: &NgramIndex) -> NgramIndex"
+        description: |
+          既存の ngram index と SearchIndexBulkBuilder で構築した ngram index を統合する。
+
+          ## アルゴリズム
+
+          Add-only のため、既存のポスティングリストと新規のポスティングリストをマージするだけ。
+          compute_merged_posting_list_sorted を使用せず、専用の最適化マージを実装。
+
+          ### 最適化ポイント
+
+          1. 既存のポスティングリストはソート済み
+          2. 新規のポスティングリストもソート済み（SearchIndexBulkBuilder が保証）
+          3. マージソート（O(N+M)）で効率的に統合可能
+
+          ### 実装方針
+
+          ```rust
+          fn merge_bulk_ngram_index(&self, bulk_ngram_index: &NgramIndex) -> NgramIndex {
+              let mut result = self.ngram_index.as_transient();
+
+              for (ngram, bulk_posting_list) in bulk_ngram_index.iter() {
+                  match self.ngram_index.get(ngram) {
+                      Some(existing) => {
+                          // マージソートで統合
+                          let merged = merge_sorted_posting_lists(existing, bulk_posting_list);
+                          result = result.insert_without_cow(ngram.clone(), merged);
+                      }
+                      None => {
+                          // 新規エントリ
+                          result = result.insert_without_cow(ngram.clone(), bulk_posting_list.clone());
+                      }
+                  }
+              }
+
+              result.into_persistent()
+          }
+          ```
+
+        examples:
+          - description: "既存 index と bulk index のマージ"
+            code: |
+              let merged = index.merge_bulk_ngram_index(&bulk_index.ngram_index);
+
+      - name: "merge_sorted_posting_lists"
+        signature: "fn merge_sorted_posting_lists(existing: &TaskIdCollection, new: &TaskIdCollection) -> TaskIdCollection"
+        description: |
+          ソート済みの2つのポスティングリストをマージソートで統合する。
+
+          ## 前提条件
+
+          - existing はソート済み
+          - new はソート済み
+
+          ## アルゴリズム
+
+          マージソート（O(N+M)）で効率的に統合:
+
+          1. 両方のイテレータを同時に走査
+          2. 小さい方を結果に追加
+          3. 重複は除外
+          4. TaskIdCollection::from_sorted_vec で構築
+
+          ## 最適化ポイント
+
+          - Vec への変換を最小限に抑える
+          - from_sorted_iter を使用して中間 Vec を削減（将来の拡張）
+
+        examples:
+          - description: "ソート済みポスティングリストのマージ"
+            code: |
+              let existing = TaskIdCollection::from_sorted_vec(vec![1, 3, 5]);
+              let new = TaskIdCollection::from_sorted_vec(vec![2, 4, 6]);
+              let merged = merge_sorted_posting_lists(&existing, &new);
+              // merged: [1, 2, 3, 4, 5, 6]
+
+    implementations:
+      - type: "SearchIndex"
+        description: |
+          SearchIndex に apply_changes_bulk の最適化実装を追加する。
+
+          ## 実装箇所
+
+          - benches/api/src/api/query.rs
+          - SearchIndex 実装ブロック内
+
+          ## 変更内容
+
+          1. apply_changes_bulk を SearchIndexBulkBuilder 経路に接続
+          2. merge_bulk_ngram_index の実装
+          3. merge_sorted_posting_lists の実装
+
+  # ======================================================================
+  # 2. from_sorted_iter による中間 Vec 削減
+  # ======================================================================
+  - id: REQ-APPLY-BULK-002
+    name: "from_sorted_iter による中間 Vec 削減"
+    description: |
+      ## 目的
+
+      compute_merged_posting_list_sorted の中間 Vec 生成を削減し、
+      malloc/free オーバーヘッドを削減する。
+
+      ## 現状の問題
+
+      compute_merged_posting_list_sorted は以下のような処理フロー:
+
+      1. 既存の TaskIdCollection を Vec に変換
+      2. 新規の Vec<TaskId> とマージ
+      3. ソート/重複排除
+      4. TaskIdCollection::from_sorted_vec で新しいコレクション作成
+
+      この過程で大量の Vec が生成され、malloc/free が多発している。
+
+      ## 改善アプローチ
+
+      TaskIdCollection::from_sorted_iter を実装し、中間 Vec を削減:
+
+      ```rust
+      pub fn from_sorted_iter<I>(iter: I) -> Self
+      where
+          I: Iterator<Item = TaskId>,
+      {
+          // イテレータから直接構築
+          // 中間 Vec を経由しない
+      }
+      ```
+
+      ## 期待される改善効果
+
+      - malloc 呼び出し数: -30%以上
+      - P99 latency の改善
+
+    methods:
+      - name: "from_sorted_iter"
+        signature: "pub fn from_sorted_iter<I>(iter: I) -> Self where I: Iterator<Item = TaskId>"
+        description: |
+          ソート済みイテレータから TaskIdCollection を直接構築する。
+
+          ## 前提条件
+
+          - イテレータの要素はソート済み
+          - 重複なし
+
+          ## アルゴリズム
+
+          1. イテレータの size_hint を使用して容量を推定
+          2. Vec::with_capacity で事前確保
+          3. イテレータを走査して要素を収集
+          4. Small/Large の閾値に応じて適切な表現を選択
+
+        examples:
+          - description: "ソート済みイテレータから構築"
+            code: |
+              let iter = vec![1, 2, 3, 4, 5].into_iter();
+              let collection = TaskIdCollection::from_sorted_iter(iter);
+
+    implementations:
+      - type: "TaskIdCollection"
+        description: |
+          TaskIdCollection に from_sorted_iter を追加する。
+
+          ## 実装箇所
+
+          - benches/api/src/api/query.rs
+          - TaskIdCollection 実装ブロック内
+
+  # ======================================================================
+  # 3. ロールバック機能とモニタリング
+  # ======================================================================
+  - id: REQ-APPLY-BULK-003
+    name: "ロールバック機能とモニタリング"
+    description: |
+      ## 目的
+
+      本番環境で問題が発生した場合、即座に旧経路に戻せるようにする。
+
+      ## 実装内容
+
+      1. 環境変数 USE_SEARCH_INDEX_BULK_BUILDER (default: true) で切り替え可能に
+      2. apply_changes の分岐先をログ出力（debug レベル）
+      3. SearchIndexBulkBuilder::build() のエラーを捕捉してフォールバック
+
+      ## ログフォーマット
+
+      ```
+      [DEBUG] apply_changes: using SearchIndexBulkBuilder (changes: 1000)
+      [DEBUG] apply_changes: using SearchIndexDelta (changes: 10, reason: mixed operations)
+      [DEBUG] apply_changes: fallback to SearchIndexDelta (changes: 1000, reason: build error)
+      ```
+
+    methods:
+      - name: "should_use_bulk_builder"
+        signature: "fn should_use_bulk_builder(&self, changes: &[TaskChange]) -> bool"
+        description: |
+          SearchIndexBulkBuilder を使用すべきかを判定する。
+
+          ## 判定条件
+
+          1. 環境変数 USE_SEARCH_INDEX_BULK_BUILDER == "true" (default: true)
+          2. self.config.use_bulk_builder == true
+          3. changes.len() >= self.config.bulk_threshold
+          4. changes.iter().all(|c| matches!(c, TaskChange::Add(_)))
+
+        examples:
+          - description: "バルク経路の判定"
+            code: |
+              if self.should_use_bulk_builder(&changes) {
+                  self.apply_changes_bulk(changes)
+              } else {
+                  self.apply_changes_delta(changes)
+              }
+
+    implementations:
+      - type: "SearchIndex"
+        description: |
+          SearchIndex に should_use_bulk_builder を追加する。
+
+          ## 実装箇所
+
+          - benches/api/src/api/query.rs
+          - SearchIndex 実装ブロック内
+
+# 非機能要件
+non_functional_requirements:
+  performance:
+    - "RPS >= 200 req/s（最低ライン）を達成すること"
+    - "RPS 目標: 500+ req/s（推奨目標）"
+    - "P99 latency < 5秒（最低ライン）を達成すること"
+    - "P99 目標: < 1秒（推奨目標）"
+    - "insert_into_node_cow 呼び出し数を 50% 以上削減すること（Phase 1）"
+    - "insert_into_node_cow 呼び出し数を 70% 以上削減すること（Phase 2）"
+    - "malloc 呼び出し数を 30% 以上削減すること"
+    - "apply_changes_us を 30% 以上削減すること"
+
+  compatibility:
+    - "既存の apply_changes API と完全に互換であること"
+    - "apply_changes_bulk と apply_changes_delta が同じ結果を返すこと（テストで検証）"
+    - "SearchIndexBulkBuilder::build() のエラー時に apply_changes_delta にフォールバックすること"
+
+  testing:
+    - "apply_changes_bulk と apply_changes_delta の等価性テストを実装すること"
+    - "プロファイリング結果の Before/After 比較を実施すること"
+    - "ホットスポットの変化を flamegraph で可視化すること"
+    - "環境変数によるロールバック機能をテストすること"
+
+  monitoring:
+    - "apply_changes の分岐先をログ出力すること（debug レベル）"
+    - "SearchIndexBulkBuilder::build() のエラーをログ出力すること（warn レベル）"
+    - "フォールバックが発生したことをログ出力すること（debug レベル）"
+
+  code_quality:
+    - "関数型プログラミングの原則を維持すること"
+    - "参照透過性を維持すること"
+    - "外部から観測可能な副作用を持たないこと"
+    - "プロパティテストで参照透過性を検証すること"
+
+# 将来の拡張
+future_extensions:
+  - id: "EXT-BULK-001"
+    name: "Remove-only バッチの最適化"
+    description: |
+      Remove-only のバッチ更新にも専用の最適化経路を追加する。
+
+      ## アルゴリズム
+
+      1. 削除する TaskId を一括収集
+      2. PersistentHashSet で削除対象を管理
+      3. フィルタリングで効率的に削除
+
+    rationale: |
+      現時点では Add-only の最適化に集中する。
+      Remove-only の最適化は別途検討する。
+
+  - id: "EXT-BULK-002"
+    name: "TransientHashMap::insert_without_cow の改善"
+    description: |
+      世代トークン方式の改善により、共有ノード起点の挿入でも COW を削減する。
+
+      ## アルゴリズム
+
+      1. ノードの世代トークンを確認
+      2. 世代トークンが一致する場合は COW を省略
+      3. 世代トークンが一致しない場合は COW にフォールバック
+
+    rationale: |
+      現時点では SearchIndexBulkBuilder 統合に集中する。
+      TransientHashMap の最適化は別途検討する。
+
+  - id: "EXT-BULK-003"
+    name: "compute_merged_posting_list_sorted の完全削除"
+    description: |
+      from_sorted_iter を使用して compute_merged_posting_list_sorted を完全に削除する。
+
+      ## アルゴリズム
+
+      1. merge_sorted_posting_lists を from_sorted_iter ベースに書き換え
+      2. compute_merged_posting_list_sorted の呼び出しを全て置き換え
+      3. Vec への変換を最小限に抑える
+
+    rationale: |
+      現時点では from_sorted_iter の実装に集中する。
+      compute_merged_posting_list_sorted の完全削除は別途検討する。
+
+# 成功基準
+success_criteria:
+  minimum:
+    - "apply_changes_bulk が SearchIndexBulkBuilder を使用すること"
+    - "apply_changes_bulk と apply_changes_delta が同じ結果を返すこと（テストで検証）"
+    - "RPS >= 200 req/s を達成すること"
+    - "P99 latency < 5秒 を達成すること"
+    - "insert_into_node_cow 呼び出し数が 50% 以上削減されること"
+
+  recommended:
+    - "RPS >= 500 req/s を達成すること"
+    - "P99 latency < 1秒 を達成すること"
+    - "insert_into_node_cow 呼び出し数が 70% 以上削減されること"
+    - "malloc 呼び出し数が 30% 以上削減されること"
+
+# 実装フェーズ
+implementation_phases:
+  phase_1:
+    name: "apply_changes_bulk の SearchIndexBulkBuilder 統合"
+    description: |
+      SearchIndexBulkBuilder を apply_changes_bulk に統合し、Add-only 大量更新を最適化する。
+    tasks:
+      - "apply_changes_bulk を SearchIndexBulkBuilder 経路に接続"
+      - "merge_bulk_ngram_index の実装"
+      - "merge_sorted_posting_lists の実装"
+      - "ロールバック機能とモニタリングの実装"
+      - "等価性テストの実装"
+      - "プロファイリング結果の Before/After 比較"
+    estimated_effort: "2 days"
+    expected_improvement: "RPS +100% 以上、insert_into_node_cow -50%"
+
+  phase_2:
+    name: "from_sorted_iter による中間 Vec 削減"
+    description: |
+      TaskIdCollection::from_sorted_iter を実装し、中間 Vec を削減する。
+    tasks:
+      - "TaskIdCollection::from_sorted_iter の実装"
+      - "merge_sorted_posting_lists を from_sorted_iter ベースに書き換え"
+      - "プロファイリング結果の Before/After 比較"
+    estimated_effort: "1 day"
+    expected_improvement: "malloc -30%、P99 latency 改善"
+    dependencies: ["phase_1"]
+
+# 関連ドキュメント
+related_documents:
+  analysis:
+    - path: "docs/internal/analysis/20260201_tasks_bulk_new_bottleneck_analysis.yaml"
+      description: "Codex MCP によるボトルネック分析結果"
+
+  requirements:
+    - path: "docs/internal/requirements/20260201_1120_tasks_bulk_bottleneck_remediation.yaml"
+      description: "SearchIndexBulkBuilder と TransientHashMap::insert_bulk の仕様"
+
+    - path: "docs/internal/requirements/20260201_1530_tasks_bulk_apply_changes_optimization.yaml"
+      description: "apply_changes の最適化要件（既存）"
+
+  issues:
+    - path: "docs/internal/issues/20260201_1500_insert_without_cow_optimization.yaml"
+      description: "insert_without_cow の将来の拡張"
+
+    - path: "docs/internal/issues/20260201_1505_transient_reserve_method.yaml"
+      description: "reserve メソッドの将来の拡張"
+
+# メタ情報
+metadata:
+  created_at: "2026-02-02T09:00:00Z"
+  created_by: "Claude Code + Codex MCP"
+  codex_review: "pending"
+  status: "draft"
+  priority: "P0"
+  target_branch: "feature/tasks-bulk-bottleneck-remediation"
+  estimated_completion: "2026-02-04"

@@ -1060,11 +1060,7 @@ mod tests {
         assert!(update_result.is_ok());
 
         // Verify the update
-        let found = repository
-            .find_by_id(&task_id)
-            .await
-            .unwrap()
-            .unwrap();
+        let found = repository.find_by_id(&task_id).await.unwrap().unwrap();
         assert_eq!(found.title, "Updated Title");
         assert_eq!(found.version, 2);
     }
@@ -1209,10 +1205,7 @@ mod tests {
         assert!(delete_result.unwrap());
 
         // Verify deletion
-        let find_result = repository
-            .find_by_id(&project_id)
-            .await
-            .unwrap();
+        let find_result = repository.find_by_id(&project_id).await.unwrap();
         assert!(find_result.is_none());
     }
 
