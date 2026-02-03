@@ -23,19 +23,19 @@ end
 function setup(thread)
     if error_tracker then error_tracker.setup_thread(thread) end
 
-    local total_threads = tonumber(os.getenv("WRK_THREADS"))
+    local total_threads = tonumber(os.getenv("WRK_THREADS")) or 1
     local pool_size = tonumber(os.getenv("ID_POOL_SIZE")) or 10
 
-    if not total_threads or total_threads <= 0 then
-        io.stderr:write("[tasks_update] ERROR: WRK_THREADS must be > 0\n")
-        os.exit(1)
+    if total_threads <= 0 then
+        io.stderr:write("[tasks_update] WARN: WRK_THREADS must be > 0, using 1\n")
+        total_threads = 1
     end
 
     if pool_size < total_threads then
         io.stderr:write(string.format(
-            "[tasks_update] ERROR: ID_POOL_SIZE (%d) < WRK_THREADS (%d)\n",
+            "[tasks_update] WARN: ID_POOL_SIZE (%d) < WRK_THREADS (%d), using pool_size\n",
             pool_size, total_threads))
-        os.exit(1)
+        total_threads = pool_size
     end
 
     local ids_per_thread = math.floor(pool_size / total_threads)
