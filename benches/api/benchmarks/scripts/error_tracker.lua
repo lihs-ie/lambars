@@ -1,5 +1,4 @@
 -- Error tracking module for wrk benchmark scripts
--- Tracks HTTP status codes and network errors across threads
 
 local M = {}
 
@@ -42,6 +41,10 @@ function M.init()
     M.state.errors_by_type = {timeout = 0, connect = 0, read = 0, write = 0, other = 0}
 end
 
+local function safe_rate(count)
+    return M.state.total_requests == 0 and 0 or count / M.state.total_requests
+end
+
 function M.track_response(status, error_type)
     M.state.total_requests = M.state.total_requests + 1
 
@@ -54,11 +57,7 @@ function M.track_response(status, error_type)
 
     if error_type then
         M.state.network_error_count = M.state.network_error_count + 1
-        if M.state.errors_by_type[error_type] then
-            M.state.errors_by_type[error_type] = M.state.errors_by_type[error_type] + 1
-        else
-            M.state.errors_by_type.other = M.state.errors_by_type.other + 1
-        end
+        M.state.errors_by_type[error_type] = (M.state.errors_by_type[error_type] or 0) + 1
         if error_type == "timeout" then
             M.state.timeout_count = M.state.timeout_count + 1
         elseif error_type == "connect" then
@@ -67,45 +66,15 @@ function M.track_response(status, error_type)
     end
 end
 
-function M.track_retry()
-    M.state.retry_count = M.state.retry_count + 1
-end
-
-function M.should_inject_error()
-    return M.state.inject_error_rate and math.random() < M.state.inject_error_rate
-end
-
-local function safe_rate(count)
-    return M.state.total_requests == 0 and 0 or count / M.state.total_requests
-end
-
-function M.http_error_rate()
-    return safe_rate(M.state.http_error_count)
-end
-
-function M.network_error_rate()
-    return safe_rate(M.state.network_error_count)
-end
-
-function M.error_rate()
-    return M.http_error_rate()
-end
-
-function M.total_error_rate()
-    return safe_rate(M.state.http_error_count + M.state.network_error_count)
-end
-
-function M.conflict_rate()
-    return safe_rate(M.state.conflict_count)
-end
-
-function M.is_within_threshold()
-    return not M.state.expected_error_rate or M.http_error_rate() <= M.state.expected_error_rate
-end
-
-function M.should_fail()
-    return M.state.fail_on_error_threshold and not M.is_within_threshold()
-end
+function M.track_retry() M.state.retry_count = M.state.retry_count + 1 end
+function M.should_inject_error() return M.state.inject_error_rate and math.random() < M.state.inject_error_rate end
+function M.http_error_rate() return safe_rate(M.state.http_error_count) end
+function M.network_error_rate() return safe_rate(M.state.network_error_count) end
+function M.error_rate() return M.http_error_rate() end
+function M.total_error_rate() return safe_rate(M.state.http_error_count + M.state.network_error_count) end
+function M.conflict_rate() return safe_rate(M.state.conflict_count) end
+function M.is_within_threshold() return not M.state.expected_error_rate or M.http_error_rate() <= M.state.expected_error_rate end
+function M.should_fail() return M.state.fail_on_error_threshold and not M.is_within_threshold() end
 
 function M.aggregate_from_summary(summary)
     if not summary then return end
@@ -131,18 +100,13 @@ function M.set_http_error_counts(counts)
     if not counts then return end
     M.state.http_error_count = counts.total or 0
     M.state.conflict_count = counts.count_409 or 0
-    local status_codes = {"400", "404", "409", "422", "500"}
-    for _, code in ipairs(status_codes) do
+    for _, code in ipairs({"400", "404", "409", "422", "500"}) do
         local count = counts["count_" .. code]
-        if count and count > 0 then
-            M.state.errors_by_status[code] = count
-        end
+        if count and count > 0 then M.state.errors_by_status[code] = count end
     end
 end
 
-function M.set_http_errors(count)
-    M.state.http_error_count = count or 0
-end
+function M.set_http_errors(count) M.state.http_error_count = count or 0 end
 
 function M.get_summary()
     return {
@@ -188,9 +152,7 @@ function M.get_config()
 end
 
 function M.setup_thread(thread)
-    table.insert(M.threads, thread)
-    local status_codes = {"200", "201", "207", "400", "404", "409", "422", "500", "502", "other"}
-    for _, code in ipairs(status_codes) do
+    for _, code in ipairs({"200", "201", "207", "400", "404", "409", "422", "500", "502", "other"}) do
         thread:set("status_" .. code, 0)
     end
 end
@@ -202,28 +164,29 @@ function M.track_thread_response(status)
     local key = "status_" .. tostring(status)
     thread:set(key, (tonumber(thread:get(key)) or 0) + 1)
 
-    local standard_codes = {200, 201, 207, 400, 404, 409, 422, 500, 502}
     local is_standard = false
-    for _, code in ipairs(standard_codes) do
+    for _, code in ipairs({200, 201, 207, 400, 404, 409, 422, 500, 502}) do
         if status == code then is_standard = true break end
     end
-    -- Only count non-standard 4xx/5xx as "status_other" to avoid over-counting 2xx/3xx as errors
     if not is_standard and status >= 400 then
         thread:set("status_other", (tonumber(thread:get("status_other")) or 0) + 1)
     end
 end
 
 function M.get_thread_aggregated_summary()
-    local aggregated = {
-        status_200 = 0, status_201 = 0, status_207 = 0,
-        status_400 = 0, status_404 = 0, status_409 = 0,
-        status_422 = 0, status_500 = 0, status_502 = 0,
-        status_other = 0,
-    }
-    for _, thread in ipairs(M.threads) do
-        for key, _ in pairs(aggregated) do
-            aggregated[key] = aggregated[key] + (tonumber(thread:get(key)) or 0)
-        end
+    local thread = wrk.thread
+    if not thread then
+        return {
+            status_200 = 0, status_201 = 0, status_207 = 0,
+            status_400 = 0, status_404 = 0, status_409 = 0,
+            status_422 = 0, status_500 = 0, status_502 = 0,
+            status_other = 0,
+        }
+    end
+
+    local aggregated = {}
+    for _, code in ipairs({"200", "201", "207", "400", "404", "409", "422", "500", "502", "other"}) do
+        aggregated["status_" .. code] = tonumber(thread:get("status_" .. code)) or 0
     end
     return aggregated
 end

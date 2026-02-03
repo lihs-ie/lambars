@@ -177,31 +177,81 @@ function M.finalize(summary, latency, requests)
     local duration_seconds = summary.duration / 1000000
     M.results.duration_seconds = duration_seconds
     M.results.execution.duration_seconds = duration_seconds
-    M.results.total_requests = summary.requests
-    M.results.successful_requests = summary.requests - (summary.errors.connect + summary.errors.read +
-                                                         summary.errors.write + summary.errors.timeout +
-                                                         summary.errors.status)
-    M.results.failed_requests = summary.requests - M.results.successful_requests
+
+    -- Use thread-local status_counts sum for total_requests in lua_metrics.json
+    -- This ensures http_status sum equals total_requests (REQ-PIPELINE-006)
+    -- wrk's summary.requests is global, but M.status_counts is thread-local
+    local thread_total_requests = 0
+    for _, count in pairs(M.status_counts) do
+        if type(count) == "number" then
+            thread_total_requests = thread_total_requests + count
+        end
+    end
+
+    -- Use thread-local count if available, otherwise fall back to summary
+    -- Thread-local count is preferred for consistency with http_status
+    local use_thread_local = thread_total_requests > 0
+    M.results.total_requests = use_thread_local and thread_total_requests or summary.requests
+
+    -- Calculate failed_requests from thread-local status_counts (4xx + 5xx)
+    local thread_failed_requests = 0
+    if use_thread_local then
+        for code, count in pairs(M.status_counts) do
+            local code_num = tonumber(code)
+            if code_num and code_num >= 400 and type(count) == "number" then
+                thread_failed_requests = thread_failed_requests + count
+            end
+        end
+        M.results.failed_requests = thread_failed_requests
+        M.results.successful_requests = thread_total_requests - thread_failed_requests
+    else
+        M.results.successful_requests = summary.requests - (summary.errors.connect + summary.errors.read +
+                                                             summary.errors.write + summary.errors.timeout +
+                                                             summary.errors.status)
+        M.results.failed_requests = summary.requests - M.results.successful_requests
+    end
 
     if duration_seconds > 0 then
         M.results.rps.actual = M.results.total_requests / duration_seconds
     end
 
-    M.results.throughput.requests_total = summary.requests
+    -- Throughput: use thread-local requests, but bytes are global (wrk limitation)
+    -- When use_thread_local, bytes metrics are not meaningful for this thread's portion
+    M.results.throughput.requests_total = M.results.total_requests
     M.results.throughput.requests_per_second = M.results.rps.actual
-    M.results.throughput.bytes_total = summary.bytes or 0
-    if duration_seconds > 0 then
-        M.results.throughput.bytes_per_second = (summary.bytes or 0) / duration_seconds
+    if use_thread_local then
+        -- Bytes are global and cannot be attributed to this thread
+        -- Set to null to indicate unavailability in thread-local mode
+        M.results.throughput.bytes_total = M.NULL
+        M.results.throughput.bytes_per_second = M.NULL
+    else
+        M.results.throughput.bytes_total = summary.bytes or 0
+        if duration_seconds > 0 then
+            M.results.throughput.bytes_per_second = (summary.bytes or 0) / duration_seconds
+        end
     end
 
-    M.results.errors = {
-        connect = summary.errors.connect,
-        read = summary.errors.read,
-        write = summary.errors.write,
-        timeout = summary.errors.timeout,
-        status = { ["4xx"] = 0, ["5xx"] = 0 }
-    }
-    M.results.errors.status_total = summary.errors.status
+    -- Network errors: global (wrk limitation), not available in thread-local mode
+    if use_thread_local then
+        -- Network errors cannot be attributed to specific threads
+        M.results.errors = {
+            connect = M.NULL,
+            read = M.NULL,
+            write = M.NULL,
+            timeout = M.NULL,
+            status = { ["4xx"] = 0, ["5xx"] = 0 }
+        }
+        M.results.errors.status_total = M.NULL
+    else
+        M.results.errors = {
+            connect = summary.errors.connect,
+            read = summary.errors.read,
+            write = summary.errors.write,
+            timeout = summary.errors.timeout,
+            status = { ["4xx"] = 0, ["5xx"] = 0 }
+        }
+        M.results.errors.status_total = summary.errors.status
+    end
 
     if next(M.status_counts) then
         M.results.status_codes = M.status_counts
@@ -343,10 +393,15 @@ function M.finalize(summary, latency, requests)
                     count_500 = M.NULL,
                 }
             end
-            local network_errors = (summary and summary.errors) and
-                ((summary.errors.connect or 0) + (summary.errors.read or 0) +
-                 (summary.errors.write or 0) + (summary.errors.timeout or 0)) or 0
-            M.results.network_error_rate = network_errors / M.results.total_requests
+            -- Network error rate: only available when not in thread-local mode
+            if M.results.errors.connect == M.NULL then
+                M.results.network_error_rate = M.NULL
+            else
+                local network_errors = (summary and summary.errors) and
+                    ((summary.errors.connect or 0) + (summary.errors.read or 0) +
+                     (summary.errors.write or 0) + (summary.errors.timeout or 0)) or 0
+                M.results.network_error_rate = network_errors / M.results.total_requests
+            end
         else
             M.results.error_rate = 0
             M.results.client_error_rate = 0
@@ -406,10 +461,15 @@ function M.finalize(summary, latency, requests)
                     count_500 = M.NULL,
                 }
             end
-            local network_errors = (summary and summary.errors) and
-                ((summary.errors.connect or 0) + (summary.errors.read or 0) +
-                 (summary.errors.write or 0) + (summary.errors.timeout or 0)) or 0
-            M.results.network_error_rate = network_errors / M.results.total_requests
+            -- Network error rate: only available when not in thread-local mode
+            if M.results.errors.connect == M.NULL then
+                M.results.network_error_rate = M.NULL
+            else
+                local network_errors = (summary and summary.errors) and
+                    ((summary.errors.connect or 0) + (summary.errors.read or 0) +
+                     (summary.errors.write or 0) + (summary.errors.timeout or 0)) or 0
+                M.results.network_error_rate = network_errors / M.results.total_requests
+            end
         else
             M.results.error_rate = 0
             M.results.client_error_rate = 0
@@ -491,8 +551,16 @@ function M.format_yaml()
     add_line(0, "successful_requests", M.results.successful_requests)
     add_line(0, "failed_requests", M.results.failed_requests)
     add_rate("error_rate", M.results.error_rate)
-    add_line(0, "http_error_rate", string.format("%.4f", M.results.http_error_rate or 0))
-    add_line(0, "network_error_rate", string.format("%.4f", M.results.network_error_rate or 0))
+    if M.results.http_error_rate == M.NULL then
+        add_line(0, "http_error_rate", M.NULL)
+    else
+        add_line(0, "http_error_rate", string.format("%.4f", M.results.http_error_rate or 0))
+    end
+    if M.results.network_error_rate == M.NULL then
+        add_line(0, "network_error_rate", M.NULL)
+    else
+        add_line(0, "network_error_rate", string.format("%.4f", M.results.network_error_rate or 0))
+    end
     add_rate("client_error_rate", M.results.client_error_rate)
     add_line(0, "conflict_count", M.results.conflict_count or 0)
     add_rate("conflict_rate", M.results.conflict_rate)
@@ -529,6 +597,7 @@ function M.format_yaml()
     add_line(1, "target_rps", M.results.load_profile.target_rps or 0)
 
     add_line(0, "errors")
+    -- Handle M.NULL for thread-local mode
     add_line(1, "connect", M.results.errors.connect)
     add_line(1, "read", M.results.errors.read)
     add_line(1, "write", M.results.errors.write)
@@ -541,7 +610,11 @@ function M.format_yaml()
     elseif type(M.results.errors.status) == "number" then add_line(1, "status", M.results.errors.status)
     else add_line(1, "status", 0) end
 
-    if M.results.errors.status_total then add_line(1, "status_total", M.results.errors.status_total) end
+    if M.results.errors.status_total and M.results.errors.status_total ~= M.NULL then
+        add_line(1, "status_total", M.results.errors.status_total)
+    elseif M.results.errors.status_total == M.NULL then
+        add_line(1, "status_total", M.NULL)
+    end
 
     return table.concat(lines, "\n")
 end
@@ -582,8 +655,16 @@ function M.format_text()
     table.insert(lines, string.format("Total requests:      %d", M.results.total_requests))
     table.insert(lines, string.format("Successful requests: %d", M.results.successful_requests))
     table.insert(lines, string.format("Failed requests:     %d", M.results.failed_requests))
-    table.insert(lines, string.format("HTTP error rate:     %.2f%% (4xx/5xx only)", (M.results.http_error_rate or 0) * 100))
-    table.insert(lines, string.format("Network error rate:  %.2f%% (socket errors)", (M.results.network_error_rate or 0) * 100))
+    if M.results.http_error_rate == M.NULL then
+        table.insert(lines, "HTTP error rate:     N/A (4xx/5xx only)")
+    else
+        table.insert(lines, string.format("HTTP error rate:     %.2f%% (4xx/5xx only)", (M.results.http_error_rate or 0) * 100))
+    end
+    if M.results.network_error_rate == M.NULL then
+        table.insert(lines, "Network error rate:  N/A (socket errors)")
+    else
+        table.insert(lines, string.format("Network error rate:  %.2f%% (socket errors)", (M.results.network_error_rate or 0) * 100))
+    end
     table.insert(lines, format_rate("5xx error rate:     ", M.results.error_rate))
     table.insert(lines, format_rate("Client error rate:  ", M.results.client_error_rate))
     table.insert(lines, format_count("Conflict count:     ", M.results.conflict_count))
@@ -633,10 +714,17 @@ function M.format_text()
     table.insert(lines, "")
 
     table.insert(lines, "--- Errors Breakdown ---")
-    table.insert(lines, string.format("Connect: %d", M.results.errors.connect))
-    table.insert(lines, string.format("Read:    %d", M.results.errors.read))
-    table.insert(lines, string.format("Write:   %d", M.results.errors.write))
-    table.insert(lines, string.format("Timeout: %d", M.results.errors.timeout))
+    if M.results.errors.connect == M.NULL then
+        table.insert(lines, "Connect: N/A")
+        table.insert(lines, "Read:    N/A")
+        table.insert(lines, "Write:   N/A")
+        table.insert(lines, "Timeout: N/A")
+    else
+        table.insert(lines, string.format("Connect: %d", M.results.errors.connect))
+        table.insert(lines, string.format("Read:    %d", M.results.errors.read))
+        table.insert(lines, string.format("Write:   %d", M.results.errors.write))
+        table.insert(lines, string.format("Timeout: %d", M.results.errors.timeout))
+    end
 
     if type(M.results.errors.status) == "table" then
         local status_errors_total = 0
@@ -652,8 +740,10 @@ function M.format_text()
         table.insert(lines, string.format("Status: %s", tostring(M.results.errors.status or 0)))
     end
 
-    if M.results.errors.status_total and M.results.errors.status_total > 0 then
+    if M.results.errors.status_total and M.results.errors.status_total ~= M.NULL and M.results.errors.status_total > 0 then
         table.insert(lines, string.format("Status (from wrk): %d", M.results.errors.status_total))
+    elseif M.results.errors.status_total == M.NULL then
+        table.insert(lines, "Status (from wrk): N/A")
     end
 
     table.insert(lines, "====================================")

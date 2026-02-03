@@ -247,6 +247,80 @@ PROFILE_MODE=true ./run_benchmark.sh --scenario scenarios/tasks_eff.yaml
   - インライン展開された関数（`debug = 1` では解決不可）
   - JIT コンパイルされたコード
 
+## HTTP ステータス集計
+
+ベンチマーク実行時に HTTP ステータスコードを集計し、エラー原因の分析を可能にします。
+
+### 出力ファイル
+
+| ファイル | 説明 |
+|---------|------|
+| `lua_metrics.json` | Lua スクリプトが生成する HTTP ステータス集計 |
+| `raw_wrk.txt` | wrk の生出力（done ハンドラ出力を含む） |
+| `meta.json` | 最終成果物（http_status を含む） |
+
+### lua_metrics.json のフォーマット
+
+```json
+{
+  "total_requests": 1000,
+  "error_rate": 0.05,
+  "http_status": {
+    "200": 800,
+    "201": 150,
+    "400": 30,
+    "409": 15,
+    "500": 5
+  },
+  "status_distribution": {
+    "200": 0.80,
+    "201": 0.15,
+    "400": 0.03,
+    "409": 0.015,
+    "500": 0.005
+  },
+  "latency": {
+    "min_ms": 1.5,
+    "max_ms": 150.0,
+    "mean_ms": 10.5,
+    "p50_ms": 8.2,
+    "p99_ms": 45.3
+  }
+}
+```
+
+### パイプラインテスト
+
+HTTP ステータス集計パイプラインの動作確認:
+
+```bash
+# 既存結果のテスト
+./scripts/test_http_status_pipeline.sh
+
+# ベンチマーク実行してからテスト (API サーバー必須)
+./scripts/test_http_status_pipeline.sh --run
+```
+
+### アーキテクチャ
+
+```
+wrk (Lua)
+  | track_thread_response()
+error_tracker.lua (スレッド状態管理)
+  | get_thread_aggregated_summary()
+common.lua (done ハンドラ)
+  | io.write()
+raw_wrk.txt (標準出力)
+
+result_collector.lua
+  | finalize() -> save_results()
+lua_metrics.json (各フェーズ)
+  | merge_lua_metrics.py
+lua_metrics.json (統合)
+  | generate_meta_json()
+meta.json (最終成果物)
+```
+
 ## トラブルシューティング
 
 ### wrk2 が見つからない
@@ -281,3 +355,31 @@ cd ../docker
 docker compose -f compose.ci.yaml ps
 docker compose -f compose.ci.yaml logs
 ```
+
+### http_status が空の場合
+
+1. lua_metrics.json が存在するか確認:
+   ```bash
+   find results/ -name "lua_metrics.json"
+   ```
+
+2. raw_wrk.txt に done 出力があるか確認:
+   ```bash
+   grep "HTTP Status Distribution" results/*/raw_wrk.txt
+   ```
+
+3. LUA_RESULTS_DIR が設定されているか確認:
+   ```bash
+   env | grep LUA_RESULTS_DIR
+   ```
+
+4. パイプラインテストを実行:
+   ```bash
+   ./scripts/test_http_status_pipeline.sh
+   ```
+
+### done ハンドラが実行されない場合
+
+- Lua スクリプトに `done()` 関数が定義されているか確認
+- `common.finalize_benchmark()` が呼ばれているか確認
+- wrk の `-d` オプションで十分な実行時間が指定されているか確認
