@@ -273,13 +273,13 @@ jobs:
           clean: false
 
       - name: Download baseline artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: benchmark-baseline-${{ github.sha }}
           path: artifacts
 
       - name: Download PR artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: benchmark-pr-${{ github.sha }}
           path: artifacts
