@@ -1,0 +1,1031 @@
+# ベンチマーク網羅性改善 要件定義
+#
+# 概要:
+#   Codex分析により特定されたベンチマーク不足を解消し、
+#   パフォーマンス測定の品質と信頼性を向上させる。
+#
+# 設計方針:
+#   1. 不足ベンチマークの優先度付けと段階的な実装
+#   2. 測定品質の改善（統計的信頼性、エラー分類）
+#   3. 既存インフラとの整合性維持
+#   4. CI/CDパイプラインとの統合
+#
+# 参照:
+#   - Codex分析結果（2026-02-01）
+#   - docs/internal/requirements/20260122_2011_api_benchmark_coverage.yaml
+#   - benches/async_io_runtime_bench.rs
+#   - benches/iai/effect_iai.rs
+
+version: "1.4.0"
+name: "benchmark_coverage_improvement"
+description: |
+  Codex分析により特定された以下のベンチマーク不足を解消する:
+  1. AsyncIO 専用ベンチマークの拡充
+  2. tasks_bulk のスケール別測定
+  3. IAI Callgrind 測定問題の調査
+  4. HTTPステータス別エラー集計
+  5. cache hit/miss の実測
+  6. 統計的信頼性の向上
+
+  これらの改善により、パフォーマンス回帰の検出精度を高め、
+  ボトルネック分析の信頼性を向上させる。
+
+# 背景・動機
+background:
+  problem: |
+    現状のベンチマーク構成には以下の問題がある:
+
+    ## 1. AsyncIO 専用ベンチマークの不足
+    - run_async 削除前後の比較が困難
+    - AsyncIO の微退行（+3〜8%）の真偽が不明
+    - 既存の async_io_runtime_bench.rs は存在するが、
+      run_async と直接 await の系統的な比較が不十分
+
+    ## 2. tasks_bulk のスケール別測定の不足
+    - 現状: 3, 5, 10 件のバッチサイズのみ
+    - バッチサイズの最適値が不明
+    - 大規模バッチ（1000, 10000, 100000）での性能特性が未知
+
+    ## 3. IAI Callgrind の測定問題
+    - 一部のベンチマークで `Instructions: 0` が報告される
+    - 実際のパフォーマンス差異を検出できない
+    - 原因: インライン化、最適化、または測定設定の問題
+
+    ## 4. HTTPステータス別エラー集計の不足
+    - error_rate の意味が不明確
+    - 409 Conflict と 500 Error の区別ができない
+    - tasks_update の error_rate 41% の原因分析が困難
+
+    ## 5. cache hit/miss の実測不足
+    - cache_metrics.lua は存在するが、実測値が null
+    - キャッシュ効果の定量的評価ができない
+    - Redis MONITOR による実測が未実装
+
+    ## 6. 統計的信頼性の不足
+    - 標準偏差の記録なし
+    - 1回の測定のみで判断している場合がある
+    - 統計的有意性の判断が困難
+
+  motivation: |
+    1. **パフォーマンス回帰の早期検出**
+       - 微小な退行（+5%程度）も検出可能にする
+       - 統計的に有意な変化のみを報告する
+
+    2. **ボトルネック分析の精度向上**
+       - スケール別の性能特性を把握
+       - エラーの種類（Conflict vs Error）を区別
+
+    3. **本番運用の信頼性確保**
+       - キャッシュ効果を定量的に評価
+       - バッチサイズの最適化指針を提供
+
+    4. **関数型プログラミングの原則との整合**
+       - 測定自体が参照透過的（同じ入力で同じ結果）
+       - 副作用（I/O、時間、乱数）を適切に分離
+
+  prior_art:
+    - name: "benches/async_io_runtime_bench.rs"
+      description: "既存の AsyncIO ランタイムベンチマーク。run_async と await の比較を含む"
+      path: "/Users/lihs/workspace/lambars/benches/async_io_runtime_bench.rs"
+    - name: "benches/iai/effect_iai.rs"
+      description: "IAI Callgrind によるエフェクトシステムのベンチマーク"
+      path: "/Users/lihs/workspace/lambars/benches/iai/effect_iai.rs"
+    - name: "benches/api/benchmarks/scripts/error_tracker.lua"
+      description: "エラートラッキングモジュール。HTTPステータス別集計機能を含む"
+      path: "/Users/lihs/workspace/lambars/benches/api/benchmarks/scripts/error_tracker.lua"
+    - name: "benches/api/benchmarks/scripts/cache_metrics.lua"
+      description: "キャッシュメトリクス追跡モジュール"
+      path: "/Users/lihs/workspace/lambars/benches/api/benchmarks/scripts/cache_metrics.lua"
+    - name: "docs/internal/requirements/20260122_2011_api_benchmark_coverage.yaml"
+      description: "API ベンチマーク網羅化の要件定義"
+      path: "/Users/lihs/workspace/lambars/docs/internal/requirements/20260122_2011_api_benchmark_coverage.yaml"
+
+# 要件一覧
+requirements:
+  # ======================================================================
+  # 1. AsyncIO 専用ベンチマーク
+  # ======================================================================
+  - id: REQ-BENCH-COV-001
+    name: "AsyncIO 専用ベンチマークの拡充"
+    description: |
+      ## 目的
+      AsyncIO の run_async 削除前後の性能差を系統的に測定し、
+      微退行の真偽を判断する。
+
+      ## 現状
+      - benches/async_io_runtime_bench.rs が存在
+      - run_async と直接 await の比較を含む
+      - ただし、retry/bracket/par での詳細比較が不足
+
+      ## 改善内容
+      1. **retry 操作の詳細ベンチマーク**
+         - retry_success_first: 1回目で成功
+         - retry_success_second: 2回目で成功
+         - retry_all_fail: 全リトライ失敗
+
+      2. **bracket 操作の詳細ベンチマーク**
+         - finally_async_simple: シンプルな finally
+         - on_error_success: エラーなし時の処理
+         - on_error_fail: エラー時の処理
+
+      3. **par 操作の詳細ベンチマーク**
+         - par_pure_2: 2並列の pure 操作
+         - par_pure_10: 10並列の pure 操作
+         - par_io_2: 2並列の疑似 I/O 操作
+         - par_io_10: 10並列の疑似 I/O 操作
+
+      **注**: `run_async` メソッドは非推奨となり削除されたため、
+      全てのベンチマークは直接 `.await` を使用します。
+
+      ## 測定環境の統一条件
+      測定の再現性を担保するため、以下の条件を必須とする:
+      1. **ランタイム**: ベンチマーク関数ごとに専用の tokio Runtime を使用
+         - retry/bracket: `current_thread` (シングルスレッド、決定的)
+         - par: `multi_thread` (並列実行の測定に必要)
+      2. **ウォームアップ**: Criterion のデフォルト (3秒) を使用
+      3. **固定入力**: 乱数やタイムスタンプを使用せず、決定的な入力データを使用
+      4. **疑似 I/O**: `tokio::task::yield_now()` を使用
+         - timer resolution variance を避けるため、`sleep` ではなく `yield_now` を使用
+         - 決定的かつ高速な非同期コンテキストスイッチを測定
+      5. **スケジューラ**: `current_thread` または `multi_thread` を用途に応じて明示的に指定
+
+      ## 測定方法
+      - Criterion: `bencher.to_async(&runtime)` で非同期測定
+      - 100サンプル（デフォルト）で測定
+      - 標準偏差を記録
+
+      ## 期待効果
+      - AsyncIO 微退行（+3〜8%）の真偽を判断
+      - IAI effect_iai で No change の場合、測定ブレと判断
+      - 真の退行の場合、改善施策を検討
+
+      ## 関数型プログラミングの原則
+      - **純粋計算と副作用の分離**: AsyncIO の計算ロジックは純粋、実行（await）で副作用が発生
+      - **参照透過性の担保**: `yield_now()` を使用し、timer variance を排除
+      - ランタイム初期化は測定外に分離
+      - 入力データは不変で決定的
+
+    evidence:
+      - path: "benches/async_io_runtime_bench.rs"
+        finding: "既存のベンチマークは run_async と await の基本比較のみ"
+      - path: "benches/results/feature-async-io-unboxed-execution/criterion-profiling-*/effect_bench/"
+        finding: "retry/bracket/par で +3〜8% の退行が報告されている"
+
+    priority: "high"
+    classification: "benchmark_enhancement"
+    blocking_merge: false
+    reason: "性能評価の精度向上に重要だが、既存ベンチマークで代替可能"
+
+    methods:
+      - name: "benchmark_async_io_retry_detailed"
+        signature: "fn benchmark_async_io_retry_detailed(criterion: &mut Criterion)"
+        description: |
+          retry 操作の詳細ベンチマーク。
+          - retry_success_first: 1回目で成功するケース
+          - retry_success_second: 2回目で成功するケース
+          - retry_all_fail: 全リトライ失敗するケース
+
+      - name: "benchmark_async_io_bracket_detailed"
+        signature: "fn benchmark_async_io_bracket_detailed(criterion: &mut Criterion)"
+        description: |
+          bracket 操作の詳細ベンチマーク。
+          - finally_async_simple: シンプルな finally 処理
+          - on_error_success: エラーなし時の on_error 処理
+          - on_error_fail: エラー時の on_error 処理
+
+      - name: "benchmark_async_io_par_detailed"
+        signature: "fn benchmark_async_io_par_detailed(criterion: &mut Criterion)"
+        description: |
+          par 操作の詳細ベンチマーク（multi_thread runtime を使用）。
+          - par_pure_2: 2並列の pure 操作
+          - par_pure_10: 10並列の pure 操作
+          - par_io_2: 2並列の疑似 I/O 操作（yield_now）
+          - par_io_10: 10並列の疑似 I/O 操作（yield_now）
+
+  # ======================================================================
+  # 2. tasks_bulk のスケール別測定
+  # ======================================================================
+  - id: REQ-BENCH-COV-002
+    name: "tasks_bulk のスケール別測定"
+    description: |
+      ## 目的
+      バッチサイズ別の性能特性を把握し、最適なバッチサイズを特定する。
+
+      ## 現状
+      - benches/api/benchmarks/scripts/tasks_bulk.lua では 3, 5, 10 件のみ
+      - 大規模バッチでの性能特性が未知
+      - バッチサイズの最適値が不明
+
+      ## 改善内容
+      1. **バッチサイズのバリエーション追加**
+         - 10 エントリ: 小規模バッチ
+         - 100 エントリ: 中規模バッチ
+         - 1,000 エントリ: 大規模バッチ
+         - 10,000 エントリ: 超大規模バッチ（条件付き）
+         - 100,000 エントリ: 上限候補（条件付き、実行前に制約確認必須）
+
+      2. **測定項目**
+         - RPS（リクエスト/秒）
+         - P50/P95/P99 レイテンシ
+         - エラー率（HTTPステータス別）
+         - メモリ使用量（可能であれば）
+
+      3. **シナリオ分離**
+         - tasks_bulk_10.lua: 10エントリ専用
+         - tasks_bulk_100.lua: 100エントリ専用
+         - tasks_bulk_1000.lua: 1000エントリ専用
+         - tasks_bulk_10000.lua: 10000エントリ専用（条件付き）
+         - tasks_bulk_100000.lua: 100000エントリ専用（条件付き）
+
+      ## システム制約と上限条件
+      大規模バッチ（10,000以上）の実行には以下の制約を確認すること:
+
+      1. **リクエストボディサイズ**
+         - 確認先: benches/api の Axum 設定（body_limit）
+         - 推定: 100,000エントリ × 平均500バイト = 50MB
+         - 対策: body_limit >= 64MB を確認、または分割リクエスト
+
+      2. **タイムアウト制約**
+         - wrk デフォルト: 接続タイムアウト 2秒
+         - API サーバー: リクエストタイムアウト（設定確認必要）
+         - 30秒の測定期間内で完了できるか事前検証
+
+      3. **自動打ち切り基準**
+         - P99 > 60秒: タイムアウト超過、スケール減少を検討
+         - エラー率 > 10%: システム限界、スケール減少を検討
+         - OOM 検出: 即時停止、メモリ制約を記録
+
+      4. **100,000エントリの実行条件**
+         - 1,000 / 10,000 エントリの測定が正常完了していること
+         - 推定完了時間 < 30秒 × 安全係数 2 = 60秒 であること
+         - メモリ使用量 < 利用可能メモリの 80% であること
+
+      ## 期待効果
+      - バッチサイズと性能の関係を定量化
+      - 最適バッチサイズの特定（例: 1000エントリで最高RPS）
+      - 上限値の把握（メモリ/タイムアウト）
+      - システム制約の明文化
+
+      ## 関数型プログラミングの原則
+      - 各バッチサイズで決定的な結果（同じデータで同じ性能）
+      - ランダム要素は再現可能なシードで制御
+
+    evidence:
+      - path: "benches/api/benchmarks/scripts/tasks_bulk.lua"
+        finding: "batch_sizes = {3, 5, 10} のみ"
+      - path: "benches/results/feature-async-io-unboxed-execution/tasks_bulk/"
+        finding: "RPS 42.64 req/s（target 500 未達）"
+
+    priority: "critical"
+    classification: "benchmark_enhancement"
+    blocking_merge: false
+    reason: "バッチサイズ最適化に必要だが、現状のベンチマークでボトルネック特定は可能"
+
+    methods:
+      - name: "tasks_bulk_scale_10"
+        signature: "wrk -t2 -c10 -d30s -s scripts/tasks_bulk_10.lua"
+        description: |
+          10エントリのバルク作成ベンチマーク。
+          - 小規模バッチの baseline
+          - オーバーヘッド測定
+
+      - name: "tasks_bulk_scale_100"
+        signature: "wrk -t2 -c10 -d30s -s scripts/tasks_bulk_100.lua"
+        description: |
+          100エントリのバルク作成ベンチマーク。
+          - 中規模バッチの性能特性
+
+      - name: "tasks_bulk_scale_1000"
+        signature: "wrk -t2 -c10 -d30s -s scripts/tasks_bulk_1000.lua"
+        description: |
+          1000エントリのバルク作成ベンチマーク。
+          - 大規模バッチの性能特性
+          - ホットスポット分析の主要対象
+
+      - name: "tasks_bulk_scale_10000"
+        signature: "wrk -t2 -c10 -d30s -s scripts/tasks_bulk_10000.lua"
+        description: |
+          10000エントリのバルク作成ベンチマーク。
+          - 超大規模バッチの性能特性
+          - メモリ使用量の監視
+
+      - name: "tasks_bulk_scale_100000"
+        signature: "wrk -t2 -c10 -d30s -s scripts/tasks_bulk_100000.lua"
+        description: |
+          100000エントリのバルク作成ベンチマーク。
+          - 上限テスト
+          - タイムアウト/OOMの検証
+
+  # ======================================================================
+  # 3. IAI Callgrind 測定問題
+  # ======================================================================
+  - id: REQ-BENCH-COV-003
+    name: "IAI Callgrind 測定問題の調査と修正"
+    description: |
+      ## 目的
+      `Instructions: 0` が報告される問題を調査し、
+      正確な命令数カウントを実現する。
+
+      ## 現状
+      - 一部の IAI Callgrind ベンチマークで `Instructions: 0` が報告される
+      - 実際のパフォーマンス差異を検出できない
+      - 原因は不明（インライン化、最適化、測定設定のいずれか）
+
+      ## 再現条件の特定（調査必須項目）
+      1. **問題が発生するベンチマークのリスト**
+         - 具体的なベンチマーク関数名
+         - 発生頻度（常に/時々/特定条件で）
+         - コンパイルオプション（debug/release、LTO有無）
+
+      2. **環境情報**
+         - Rust バージョン
+         - iai-callgrind バージョン
+         - Valgrind/Callgrind バージョン
+         - OS/アーキテクチャ
+
+      ## 調査項目
+      1. **死コード除去の影響**
+         - 関数の戻り値が使用されているか確認
+         - `black_box` で戻り値をラップして死コード除去を防止
+         - 入力パラメータも `black_box` でラップ
+
+      2. **インライン化の影響**
+         - `#[inline(never)]` 属性の追加で解決するか
+         - LTO が有効な場合、クロスモジュールインライン化の影響
+
+      3. **コンパイル設定の固定化**
+         - `Cargo.toml` の `[profile.bench]` セクション
+         - opt-level = 3、lto = "thin" または "off" を明示
+         - codegen-units = 1 で決定的なコード生成
+
+      4. **IAI Callgrind の設定**
+         - `library_benchmark` マクロの使用方法を確認
+         - `--callgrind-args` で追加オプションを指定
+
+      ## 受け入れ基準
+      以下の条件を満たすこと:
+      1. `Instructions: 0` が報告されるベンチマークが 0 件
+      2. 全ベンチマークで Instructions > 0 が記録される
+      3. Before/After で差分検出が可能（既知の変更で検証）
+
+      ## 改善内容
+      1. **問題の特定**
+         - `Instructions: 0` が報告されるベンチマークをリスト化
+         - 原因を特定（死コード除去、インライン化、その他）
+
+      2. **修正の適用**
+         - `black_box` による死コード除去対策（入力と出力両方）
+         - `#[inline(never)]` の追加（必要な場合）
+         - コンパイル設定の固定化
+         - IAI Callgrind の設定調整
+
+      3. **検証**
+         - 修正後に正常な命令数がカウントされることを確認
+         - Before/After で適切な差分が検出されることを確認
+         - 3回連続で同一結果が得られることを確認（決定性）
+
+      ## 期待効果
+      - IAI Callgrind による決定的な命令数測定
+      - 微小な最適化/退行の検出
+
+      ## 関数型プログラミングの原則
+      - IAI Callgrind は決定的測定（同じコードで同じ命令数）
+      - 外部状態（CPU、メモリ状態）に依存しない
+
+    evidence:
+      - path: "benches/iai/effect_iai.rs"
+        finding: "IAI effect_iai では全項目 No change"
+      - path: "benches/results/feature-async-io-unboxed-execution/README.md"
+        finding: "一部のベンチマークで Instructions: 0 の可能性"
+
+    priority: "medium"
+    classification: "bug_investigation"
+    blocking_merge: false
+    reason: "測定精度に影響するが、Criterion で代替可能"
+
+    methods:
+      - name: "調査: インライン化の影響"
+        signature: "cargo bench --bench effect_iai -- --callgrind-args='--dump-line=yes'"
+        description: |
+          Callgrind の詳細出力でインライン化の影響を調査。
+
+      - name: "修正: #[inline(never)] の追加"
+        signature: "#[inline(never)] fn benchmark_target(...)"
+        description: |
+          測定対象関数にインライン化抑制属性を追加。
+
+      - name: "検証: 命令数のカウント確認"
+        signature: "cargo bench --bench effect_iai"
+        description: |
+          修正後の命令数カウントを確認。
+
+  # ======================================================================
+  # 4. HTTPステータス別エラー集計
+  # ======================================================================
+  - id: REQ-BENCH-COV-004
+    name: "HTTPステータス別エラー集計の実装"
+    description: |
+      ## 目的
+      error_rate の内訳を把握し、 409 Conflict と 500 Error を区別する。
+
+      ## 現状
+      - error_tracker.lua で HTTPステータス別集計機能は存在
+      - ただし、スレッド分離により done() で正確な集計ができない
+      - wrk の summary.errors は非2xxをまとめてカウント
+
+      ## wrk のスレッド分離問題
+      wrk は各スレッドが独立した Lua 状態を持つため、response() で記録した
+      カウンタは done() から直接参照できない。
+
+      ### 解決策: setup() + thread:get() 方式
+      ```lua
+      -- グローバルスレッドリスト
+      local threads = {}
+
+      function setup(thread)
+          table.insert(threads, thread)
+          -- スレッドローカルのカウンタを初期化
+          thread:set("conflict_count", 0)
+          thread:set("validation_count", 0)
+          thread:set("server_error_count", 0)
+      end
+
+      function response(status, headers, body)
+          local thread = wrk.thread
+          if status == 409 then
+              thread:set("conflict_count", thread:get("conflict_count") + 1)
+          elseif status == 422 then
+              thread:set("validation_count", thread:get("validation_count") + 1)
+          elseif status >= 500 then
+              thread:set("server_error_count", thread:get("server_error_count") + 1)
+          end
+      end
+
+      function done(summary, latency, requests)
+          local total_conflict = 0
+          local total_validation = 0
+          local total_server_error = 0
+
+          for _, thread in ipairs(threads) do
+              total_conflict = total_conflict + thread:get("conflict_count")
+              total_validation = total_validation + thread:get("validation_count")
+              total_server_error = total_server_error + thread:get("server_error_count")
+          end
+
+          print(string.format("Status distribution:"))
+          print(string.format("  409 Conflict: %d", total_conflict))
+          print(string.format("  422 Validation: %d", total_validation))
+          print(string.format("  5xx Server: %d", total_server_error))
+      end
+      ```
+
+      ### 代替策: 単一スレッド専用シナリオ
+      精度が重要な場合、`-t1` で単一スレッドで実行し、グローバルカウンタを使用。
+      ただし、並行性のテストには不適。
+
+      ## 改善内容
+      1. **setup() + thread:get() 方式の実装**
+         - 全シナリオで使用可能なパターンとして標準化
+         - error_tracker.lua を拡張してスレッド対応
+
+      2. **単一スレッドシナリオの追加（オプション）**
+         - tasks_update_single_thread.lua
+         - 精度優先の場合に使用
+
+      3. **result_collector.lua との連携**
+         - set_http_error_counts() の活用
+         - ステータス分布の記録
+
+      4. **tasks_update シナリオでの検証**
+         - error_rate 41% の内訳を確認
+         - 409 Conflict が楽観的ロック競合によるものか検証
+
+      ## 期待効果
+      - error_rate の意味が明確化
+      - 409 Conflict（仕様内動作）と 500 Error（バグ）の区別
+      - 適切なリトライ/バックオフ方針の策定
+
+      ## 関数型プログラミングの原則
+      - 集計は純粋関数: 入力（レスポンス列）から出力（集計結果）を決定的に計算
+      - 副作用（ネットワークI/O）は測定対象に限定
+
+    evidence:
+      - path: "benches/api/benchmarks/scripts/error_tracker.lua"
+        finding: "errors_by_status の集計機能は存在するが、スレッド分離の制限あり"
+      - path: "benches/results/feature-async-io-unboxed-execution/tasks_update/benchmark/meta/tasks_update.json"
+        finding: "error_rate: 0.415198（内訳不明）"
+
+    priority: "high"
+    classification: "measurement_improvement"
+    blocking_merge: false
+    reason: "エラー分析に重要だが、現状でもおおよその傾向は把握可能"
+
+    methods:
+      - name: "setup() + thread:get() 方式によるスレッド間集計"
+        signature: "function setup(thread) / function response(status, headers, body) / function done(summary, latency, requests)"
+        description: |
+          wrk のスレッド分離を考慮した集計方式。
+          ```lua
+          -- グローバルスレッドリスト（done() からアクセス可能）
+          local threads = {}
+
+          function setup(thread)
+              table.insert(threads, thread)
+              -- スレッドローカルのカウンタを初期化
+              thread:set("conflict_count", 0)
+              thread:set("validation_count", 0)
+              thread:set("server_error_count", 0)
+              thread:set("success_count", 0)
+          end
+
+          function response(status, headers, body)
+              local thread = wrk.thread
+              if status >= 200 and status < 300 then
+                  thread:set("success_count", thread:get("success_count") + 1)
+              elseif status == 409 then
+                  thread:set("conflict_count", thread:get("conflict_count") + 1)
+              elseif status == 422 then
+                  thread:set("validation_count", thread:get("validation_count") + 1)
+              elseif status >= 500 then
+                  thread:set("server_error_count", thread:get("server_error_count") + 1)
+              end
+          end
+
+          function done(summary, latency, requests)
+              local total_success = 0
+              local total_conflict = 0
+              local total_validation = 0
+              local total_server_error = 0
+
+              for _, thread in ipairs(threads) do
+                  total_success = total_success + thread:get("success_count")
+                  total_conflict = total_conflict + thread:get("conflict_count")
+                  total_validation = total_validation + thread:get("validation_count")
+                  total_server_error = total_server_error + thread:get("server_error_count")
+              end
+
+              print(string.format("Status distribution:"))
+              print(string.format("  2xx: %d", total_success))
+              print(string.format("  409 Conflict: %d", total_conflict))
+              print(string.format("  422 Validation: %d", total_validation))
+              print(string.format("  5xx Server: %d", total_server_error))
+          end
+          ```
+
+      - name: "単一スレッドシナリオ（精度優先、オプション）"
+        signature: "wrk -t1 -c1 -d30s -s scripts/tasks_update_single_thread.lua"
+        description: |
+          精度が重要な場合、単一スレッドで実行。
+          この場合はグローバルカウンタも使用可能。
+          注: 並行性のテストには不適。
+
+  # ======================================================================
+  # 5. cache hit/miss の実測
+  # ======================================================================
+  - id: REQ-BENCH-COV-005
+    name: "cache hit/miss の実測実装"
+    description: |
+      ## 目的
+      キャッシュ効果を定量的に評価し、キャッシュ戦略の最適化に活用する。
+
+      ## 現状
+      - cache_metrics.lua は存在するが、実測値が null
+      - キャッシュヒット率の取得方法が未実装
+      - Redis MONITOR やレスポンスヘッダーからの取得が必要
+
+      ## 情報源の優先順位
+      信頼性と実装コストを考慮し、以下の優先順位で実装する:
+
+      ### 優先度1: Redis INFO stats の差分（推奨）
+      ```bash
+      # ベンチマーク前
+      redis-cli INFO stats | grep keyspace > before.txt
+
+      # ベンチマーク実行
+
+      # ベンチマーク後
+      redis-cli INFO stats | grep keyspace > after.txt
+
+      # 差分計算
+      # keyspace_hits, keyspace_misses の差分でヒット率を計算
+      ```
+      - 利点: 軽量、信頼性が高い、負荷増加なし
+      - 欠点: リクエスト単位のトラッキングは不可
+
+      ### 優先度2: API側キャッシュメトリクス/レスポンスヘッダー
+      - /metrics エンドポイントで cache_hits_total, cache_misses_total を公開
+      - X-Cache: HIT / MISS レスポンスヘッダー（API実装が必要）
+
+      ### 優先度3: Redis MONITOR（調査用途のみ）
+      - 負荷が高いため、ベンチマーク中の使用は非推奨
+      - 特定の問題調査時に短時間使用
+
+      ## 改善内容
+      1. **Redis INFO stats 差分の実装**
+         - ベンチマーク前後で keyspace_hits/misses を取得
+         - 差分からヒット率を計算
+         - scripts/cache_stats.sh として実装
+
+      2. **API側キャッシュヘッダー対応（オプション）**
+         - benches/api で X-Cache ヘッダーを設定
+         - cache_metrics.lua で is_cache_hit を判定
+
+      3. **warmup フェーズの分離**
+         - ウォームアップ期間のリクエストはカウントから除外
+         - CACHE_WARMUP_REQUESTS 環境変数で設定
+
+      ## 期待効果
+      - キャッシュヒット率の定量化（例: 90%）
+      - ヒット時/ミス時のレイテンシ差の把握
+      - キャッシュサイズの最適化指針
+
+      ## 関数型プログラミングの原則
+      - キャッシュは純粋関数の最適化（メモ化）
+      - 同じ入力に対して同じ出力（キャッシュの有無に関わらず）
+
+    evidence:
+      - path: "benches/api/benchmarks/scripts/cache_metrics.lua"
+        finding: "track() 関数は存在するが、is_cache_hit の取得方法が未実装"
+      - path: "benches/api/src/api/cache_header.rs"
+        finding: "キャッシュヘッダーの処理が実装されている可能性"
+
+    priority: "medium"
+    classification: "measurement_improvement"
+    blocking_merge: false
+    reason: "キャッシュ最適化に有用だが、現状のボトルネックはキャッシュ以外"
+
+    methods:
+      - name: "レスポンスヘッダーからの取得"
+        signature: "headers['X-Cache'] == 'HIT'"
+        description: |
+          レスポンスヘッダーからキャッシュヒットを判定。
+          ```lua
+          function response(status, headers, body)
+              local is_hit = headers['X-Cache'] == 'HIT'
+              cache_metrics.track(endpoint, is_hit, latency)
+          end
+          ```
+
+      - name: "Redis MONITOR 連携"
+        signature: "redis-cli MONITOR | grep 'GET\\|SET'"
+        description: |
+          Redis MONITOR でコマンドを監視し、ヒット/ミスを計算。
+          注: ベンチマーク実行時は別プロセスで監視。
+
+      - name: "/metrics エンドポイント"
+        signature: "GET /metrics"
+        description: |
+          API 側でキャッシュメトリクスを公開。
+          ```
+          cache_hits_total 12345
+          cache_misses_total 1234
+          cache_hit_rate 0.909
+          ```
+
+  # ======================================================================
+  # 6. 統計的信頼性
+  # ======================================================================
+  - id: REQ-BENCH-COV-006
+    name: "統計的信頼性の向上"
+    description: |
+      ## 目的
+      測定の統計的信頼性を向上させ、有意な変化のみを報告する。
+
+      ## 現状
+      - 標準偏差の記録なし
+      - 1回の測定のみで判断している場合がある
+      - 測定ブレと真の変化の区別が困難
+
+      ## 環境ノイズ対策（前提条件）
+      統計的信頼性を確保するため、以下の環境制御を実施:
+
+      1. **CPU 制御（可能な環境のみ）**
+         - CPU ピニング: `taskset -c 0-3 <command>`
+         - ターボブースト無効: `echo 1 > /sys/devices/system/cpu/intel_pstate/no_turbo`
+         - 固定クロック: governor を performance に設定
+
+      2. **GitHub Actions / CI 環境**
+         - CPU 制御が不可能な場合、反復回数を増やして補完
+         - self-hosted runner の使用を推奨
+
+      3. **ウォームアップ**
+         - 各測定前に 10 秒のウォームアップ実行
+         - JIT/キャッシュの安定化
+
+      ## 改善内容
+      1. **反復回数の自動決定**
+         - 最小: 3回
+         - CI幅条件: 95%信頼区間の幅 < 平均値の 10% になるまで反復
+         - 最大: 10回（収束しない場合は警告を出して終了）
+
+      2. **t分布による信頼区間計算**
+         - サンプル数が少ない場合、正規分布ではなく t分布を使用
+         - scipy.stats.t.interval() または同等の計算
+
+         ```python
+         from scipy import stats
+         import numpy as np
+
+         def calculate_confidence_interval(samples, confidence=0.95):
+             n = len(samples)
+             mean = np.mean(samples)
+             stderr = stats.sem(samples)
+             h = stderr * stats.t.ppf((1 + confidence) / 2, n - 1)
+             return (mean - h, mean + h)
+         ```
+
+      3. **停止条件の定義**
+         - 収束条件: CI幅 / mean < 0.1（10%以内）
+           - 例外: mean が 0 に近い場合（|mean| < 1e-6）は CI幅の絶対値 < 0.1 で判定
+           - この例外は、エラー率が 0 に近い場合など mean が 0 に近いケースに対応
+         - 最大反復: 10回
+         - タイムアウト: 全測定で 30分以内
+
+      4. **結果記録フォーマットの拡張**
+         - mean: 平均値
+         - stddev: 標準偏差
+         - stderr: 標準誤差
+         - min/max: 最小値/最大値
+         - samples: サンプル数
+         - confidence_interval_95: 95%信頼区間（t分布）
+         - ci_width_ratio: CI幅 / mean（収束判定用）
+           - 例外: mean が 0 に近い場合（|mean| < 1e-6）は CI幅の絶対値を格納
+
+      5. **有意性判断の自動化**
+         - Welch の t 検定を使用
+         - p値 < 0.05: 有意な変化
+         - p値 >= 0.05: 測定ブレ
+         - CI/CDで自動判定
+
+      ## 期待効果
+      - 測定ブレによる誤検知の削減
+      - 真の退行のみを報告
+      - マージ判断の客観的基準
+
+      ## 関数型プログラミングの原則
+      - 統計計算は純粋関数: 測定値の列から統計量を計算
+      - 判定ロジックも純粋: (before_samples, after_samples) -> (bool, float)
+      - 停止条件も純粋: (samples, threshold) -> bool
+
+    evidence:
+      - path: "benches/results/feature-async-io-unboxed-execution/README.md"
+        finding: "標準偏差が記録されていない"
+      - path: "docs/internal/requirements/20260201_1050_async_io_unboxed_execution_bottleneck.yaml"
+        finding: "統計的有意性の判断基準が定義されているが、実装されていない"
+
+    priority: "critical"
+    classification: "measurement_improvement"
+    blocking_merge: false
+    reason: "全ての測定結果の信頼性を担保する基盤。他の測定の前提条件"
+
+    methods:
+      - name: "ベンチマーク実行スクリプト"
+        signature: "bash scripts/run_benchmark_with_stats.sh <scenario>"
+        description: |
+          CI幅が収束するまで反復実行して統計量を計算するスクリプト。
+          ```bash
+          #!/bin/bash
+          SCENARIO=$1
+          MIN_RUNS=3
+          MAX_RUNS=10
+          CI_WIDTH_THRESHOLD=0.1  # 10%
+
+          RESULTS=()
+          CONVERGED=false
+
+          for i in $(seq 1 $MAX_RUNS); do
+              result=$(wrk -t2 -c10 -d30s -s "scripts/${SCENARIO}.lua" http://localhost:3000)
+              RESULTS+=("$result")
+
+              if [ $i -ge $MIN_RUNS ]; then
+                  # CI幅をチェック
+                  ci_check=$(python3 scripts/check_convergence.py "${RESULTS[@]}" --threshold $CI_WIDTH_THRESHOLD)
+                  if [ "$ci_check" == "converged" ]; then
+                      CONVERGED=true
+                      break
+                  fi
+              fi
+          done
+
+          if [ "$CONVERGED" == "false" ]; then
+              echo "Warning: CI width did not converge within $MAX_RUNS runs"
+          fi
+
+          # 統計量の計算（t分布）
+          python3 scripts/calculate_stats.py "${RESULTS[@]}"
+          ```
+
+      - name: "結果記録フォーマット"
+        signature: "results/<scenario>/stats.json"
+        description: |
+          統計量を含む結果フォーマット。
+          ```json
+          {
+            "rps": {
+              "mean": 42.64,
+              "stddev": 2.3,
+              "min": 39.8,
+              "max": 45.1,
+              "samples": 3,
+              "confidence_interval_95": [40.2, 45.1]
+            },
+            "p99_latency_ms": {
+              "mean": 27120,
+              "stddev": 1500,
+              "samples": 3
+            }
+          }
+          ```
+
+      - name: "有意性判定関数（Welch の t 検定）"
+        signature: "def is_significant_change(before_samples, after_samples) -> Tuple[bool, float]"
+        description: |
+          Welch の t 検定を使用して統計的有意性を判定する純粋関数。
+          ```python
+          from scipy import stats
+          from typing import List, Tuple
+
+          def is_significant_change(
+              before_samples: List[float],
+              after_samples: List[float],
+              alpha: float = 0.05
+          ) -> Tuple[bool, float]:
+              """
+              Welch の t 検定を使用して有意性を判定。
+
+              Args:
+                  before_samples: 変更前の測定値リスト
+                  after_samples: 変更後の測定値リスト
+                  alpha: 有意水準（デフォルト 0.05）
+
+              Returns:
+                  (is_significant, p_value): 有意かどうかと p 値のタプル
+              """
+              # Welch の t 検定（等分散を仮定しない）
+              statistic, p_value = stats.ttest_ind(
+                  before_samples,
+                  after_samples,
+                  equal_var=False  # Welch's t-test
+              )
+
+              is_significant = p_value < alpha
+              return (is_significant, p_value)
+          ```
+
+# 非機能要件
+non_functional_requirements:
+  performance:
+    - metric: "ベンチマーク実行時間"
+      target: "各シナリオ 30秒以内"
+      measurement: "wrk の -d オプション"
+    - metric: "統計的信頼性"
+      target: "95%信頼区間を記録、CI幅 < 平均値の10%"
+      measurement: "最小3回、最大10回の反復測定、t分布による信頼区間計算"
+    - metric: "測定オーバーヘッド"
+      target: "5%未満"
+      measurement: "計測なしの baseline と比較"
+
+  compatibility:
+    - "既存の API ベンチマークシナリオとの互換性維持"
+    - "Criterion / IAI Callgrind との統合"
+    - "CI/CD パイプラインとの統合"
+    - "wrk / Lua スクリプトの既存構造維持"
+
+  testing:
+    - "各ベンチマークの動作確認"
+    - "統計計算ロジックのユニットテスト"
+    - "結果フォーマットのスキーマ検証"
+    - "有意性判定ロジックのテスト"
+
+  code_quality:
+    - "Lua スクリプトの可読性維持"
+    - "Python スクリプトの型ヒント追加"
+    - "ドキュメントコメントの充実"
+    - "エラーハンドリングの適切な実装"
+
+# 実装優先度
+implementation_priority:
+  critical:
+    - id: "REQ-BENCH-COV-002"
+      name: "tasks_bulk のスケール別測定"
+      reason: "tasks_bulk の RPS 低下問題の分析に直結"
+      estimated_effort: "2-3日"
+
+    - id: "REQ-BENCH-COV-006"
+      name: "統計的信頼性"
+      reason: "全ての測定結果の信頼性を担保する基盤。他の測定の前提条件"
+      estimated_effort: "2-3日"
+
+  high:
+    - id: "REQ-BENCH-COV-001"
+      name: "AsyncIO 専用ベンチマーク"
+      reason: "AsyncIO 微退行の真偽判断に必要"
+      estimated_effort: "1-2日"
+
+    - id: "REQ-BENCH-COV-004"
+      name: "HTTPステータス別エラー集計"
+      reason: "tasks_update の error_rate 分析に必要"
+      estimated_effort: "1-2日"
+
+  medium:
+    - id: "REQ-BENCH-COV-003"
+      name: "IAI Callgrind 測定問題"
+      reason: "決定的測定の精度向上"
+      estimated_effort: "1-2日"
+
+    - id: "REQ-BENCH-COV-005"
+      name: "cache hit/miss の実測"
+      reason: "キャッシュ最適化に有用"
+      estimated_effort: "2-3日"
+
+# 将来の拡張
+future_extensions:
+  - id: "BENCH-COV-EXT-001"
+    name: "自動退行検出システム"
+    description: |
+      CI/CD パイプラインで自動的に性能退行を検出し、
+      PR マージをブロックするシステム。
+    rationale: |
+      現状は手動でベンチマーク結果を確認している。
+      自動化により、退行の早期検出と対応が可能になる。
+
+  - id: "BENCH-COV-EXT-002"
+    name: "ベンチマークダッシュボード"
+    description: |
+      ベンチマーク結果の可視化ダッシュボード。
+      トレンド分析、異常検出、比較機能を提供。
+    rationale: |
+      現状はテキストベースの結果ファイルのみ。
+      可視化により、傾向把握が容易になる。
+
+  - id: "BENCH-COV-EXT-003"
+    name: "プロファイリングの自動化"
+    description: |
+      ベンチマーク実行時に自動的にプロファイリングを実行し、
+      ホットスポットを特定するシステム。
+    rationale: |
+      現状は手動で perf record を実行している。
+      自動化により、ボトルネック特定が迅速になる。
+
+# 関連Issue
+related_issues:
+  github:
+    - number: null
+      title: "ベンチマーク網羅性の改善"
+      status: "to_be_created"
+
+  internal:
+    - path: "docs/internal/requirements/20260122_2011_api_benchmark_coverage.yaml"
+      relation: "API ベンチマーク網羅化の親要件"
+    - path: "docs/internal/requirements/20260201_1050_async_io_unboxed_execution_bottleneck.yaml"
+      relation: "AsyncIO ボトルネック分析（ベンチマーク不足を指摘）"
+    - path: "docs/internal/requirements/20260201_1120_tasks_bulk_bottleneck_remediation.yaml"
+      relation: "tasks_bulk ボトルネック改善（スケール別測定の必要性を指摘）"
+
+# メタ情報
+metadata:
+  created_at: "2026-02-01T13:00:00Z"
+  created_by: "Claude Code"
+  codex_reviewed: true
+  codex_review_date: "2026-02-01T14:15:00Z"
+  codex_approved: true
+  status: "approved"
+  phase: "requirement_definition"
+  priority: "high"
+  estimated_effort: "9-13日（全要件合計）"
+  dependencies:
+    - "既存ベンチマークインフラの理解"
+    - "wrk / Lua スクリプトの知識"
+    - "Criterion / IAI Callgrind の設定"
+    - "scipy / 統計計算ライブラリ（Python）"
+  revision_history:
+    - version: "1.0.0"
+      date: "2026-02-01T13:00:00Z"
+      description: "初版作成"
+    - version: "1.1.0"
+      date: "2026-02-01T13:30:00Z"
+      description: |
+        Codex MCP レビュー指摘への対応（全6件）:
+        1. [High] REQ-BENCH-COV-001: 同一runtime/warmup/固定入力/疑似IOの条件を明記
+        2. [High] REQ-BENCH-COV-002: 100000エントリの実行条件と自動打ち切り基準を追加
+        3. [High] REQ-BENCH-COV-004: wrk のスレッド分離問題に対する setup()+thread:get() 方式を追加
+        4. [Medium] REQ-BENCH-COV-005: Redis INFO stats 差分を優先、MONITOR は調査用途に限定
+        5. [Medium] REQ-BENCH-COV-003: 再現条件と受け入れ基準、死コード除去対策を追加
+        6. [Medium] REQ-BENCH-COV-006: 反復回数の自動決定、t分布CI、環境ノイズ対策を追加、優先度をcriticalに変更
+    - version: "1.2.0"
+      date: "2026-02-01T13:45:00Z"
+      description: |
+        Codex MCP 再レビュー指摘への対応（全3件）:
+        1. [Medium] REQ-BENCH-COV-006 の priority を high から critical に統一
+        2. [Medium] 非機能要件とサンプルスクリプトを「反復回数の自動決定」に合わせて更新
+        3. [Low] REQ-BENCH-COV-004 の methods 例を setup()+thread:get() 方式に更新
+    - version: "1.3.0"
+      date: "2026-02-01T14:00:00Z"
+      description: |
+        Codex MCP 最終レビュー指摘への対応（全1件）:
+        1. [Medium] 有意性判定関数を「Welch の t 検定」に合わせて scipy.stats.ttest_ind を使用する例に更新
+    - version: "1.4.0"
+      date: "2026-02-01T14:15:00Z"
+      description: |
+        Codex MCP 最終レビュー指摘への対応（全1件）:
+        1. [Low] 有意性判定の入力定義を「サンプル列」に統一（(mean1, stddev1, mean2, stddev2) -> (before_samples, after_samples)）

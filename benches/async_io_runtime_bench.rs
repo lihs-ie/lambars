@@ -53,6 +53,8 @@ use lambars::effect::AsyncIO;
 use lambars::effect::async_io::pool::AsyncPool;
 use lambars::effect::async_io::runtime::{global, handle, runtime_id, try_run_blocking};
 use std::hint::black_box;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 // =============================================================================
 // Runtime Reuse Benchmarks
@@ -671,6 +673,191 @@ fn benchmark_comparison(criterion: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmarks retry operation performance.
+///
+/// Note: Uses `Ordering::Relaxed` since the runtime is single-threaded (current_thread).
+/// The `Arc<AtomicUsize>` is required because `retry_with_factory` has `Send + 'static` bounds.
+fn benchmark_async_io_retry_detailed(criterion: &mut Criterion) {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .expect("Failed to create runtime");
+    let mut group = criterion.benchmark_group("async_io_runtime_retry");
+
+    group.bench_function("retry_success_first", |bencher| {
+        bencher.to_async(&runtime).iter(|| async {
+            let counter = Arc::new(AtomicUsize::new(0));
+            let result = AsyncIO::retry_with_factory(
+                {
+                    let counter = Arc::clone(&counter);
+                    move || {
+                        let count = counter.fetch_add(1, Ordering::Relaxed);
+                        if count == 0 {
+                            AsyncIO::pure(Ok::<i32, &str>(black_box(42)))
+                        } else {
+                            AsyncIO::pure(Err("should not reach"))
+                        }
+                    }
+                },
+                3,
+            )
+            .await;
+            black_box(result)
+        });
+    });
+
+    group.bench_function("retry_success_second", |bencher| {
+        bencher.to_async(&runtime).iter(|| async {
+            let counter = Arc::new(AtomicUsize::new(0));
+            let result = AsyncIO::retry_with_factory(
+                {
+                    let counter = Arc::clone(&counter);
+                    move || {
+                        let count = counter.fetch_add(1, Ordering::Relaxed);
+                        if count == 1 {
+                            AsyncIO::pure(Ok::<i32, &str>(black_box(42)))
+                        } else {
+                            AsyncIO::pure(Err("retry"))
+                        }
+                    }
+                },
+                3,
+            )
+            .await;
+            black_box(result)
+        });
+    });
+
+    group.bench_function("retry_all_fail", |bencher| {
+        bencher.to_async(&runtime).iter(|| async {
+            let result = AsyncIO::retry_with_factory(
+                || AsyncIO::pure(Err::<i32, &str>(black_box("error"))),
+                3,
+            )
+            .await;
+            black_box(result)
+        });
+    });
+
+    group.finish();
+}
+
+/// Benchmarks bracket/finally operation performance.
+///
+/// Uses `tokio::task::yield_now()` instead of `tokio::time::sleep()` to avoid
+/// timer resolution variance and ensure deterministic measurements.
+fn benchmark_async_io_bracket_detailed(criterion: &mut Criterion) {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .expect("Failed to create runtime");
+    let mut group = criterion.benchmark_group("async_io_runtime_bracket");
+
+    group.bench_function("finally_async_simple", |bencher| {
+        bencher.to_async(&runtime).iter(|| async {
+            let result = AsyncIO::pure(black_box(42))
+                .finally_async(|| async {
+                    tokio::task::yield_now().await;
+                })
+                .await;
+            black_box(result)
+        });
+    });
+
+    group.bench_function("on_error_success", |bencher| {
+        bencher.to_async(&runtime).iter(|| async {
+            let result: Result<i32, &str> = AsyncIO::pure(Ok::<i32, &str>(black_box(42)))
+                .on_error(|_| async {
+                    tokio::task::yield_now().await;
+                })
+                .await;
+            black_box(result)
+        });
+    });
+
+    group.bench_function("on_error_fail", |bencher| {
+        bencher.to_async(&runtime).iter(|| async {
+            let result: Result<i32, &str> = AsyncIO::pure(Err::<i32, &str>(black_box("error")))
+                .on_error(|_| async {
+                    tokio::task::yield_now().await;
+                })
+                .await;
+            black_box(result)
+        });
+    });
+
+    group.finish();
+}
+
+/// Benchmarks parallel execution performance.
+///
+/// Uses `tokio::task::yield_now()` instead of `tokio::time::sleep()` to avoid
+/// timer resolution variance and ensure deterministic measurements.
+/// Uses `iter_batched` to separate setup (Vec allocation) from the measured operation.
+fn benchmark_async_io_par_detailed(criterion: &mut Criterion) {
+    use criterion::BatchSize;
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_time()
+        .build()
+        .expect("Failed to create runtime");
+    let mut group = criterion.benchmark_group("async_io_runtime_par");
+
+    group.bench_function("par_pure_2", |bencher| {
+        bencher.to_async(&runtime).iter(|| async {
+            let first = AsyncIO::pure(black_box(1));
+            let second = AsyncIO::pure(black_box(2));
+            black_box(first.par(second).await)
+        });
+    });
+
+    group.bench_function("par_pure_10", |bencher| {
+        bencher.to_async(&runtime).iter_batched(
+            || {
+                (0..10)
+                    .map(|i| AsyncIO::pure(black_box(i)))
+                    .collect::<Vec<_>>()
+            },
+            |actions| async move { black_box(AsyncIO::batch_run(actions).await) },
+            BatchSize::SmallInput,
+        );
+    });
+
+    group.bench_function("par_io_2", |bencher| {
+        bencher.to_async(&runtime).iter(|| async {
+            let first = AsyncIO::new(|| async {
+                tokio::task::yield_now().await;
+                black_box(1)
+            });
+            let second = AsyncIO::new(|| async {
+                tokio::task::yield_now().await;
+                black_box(2)
+            });
+            black_box(first.par(second).await)
+        });
+    });
+
+    group.bench_function("par_io_10", |bencher| {
+        bencher.to_async(&runtime).iter_batched(
+            || {
+                (0..10)
+                    .map(|i| {
+                        AsyncIO::new(move || async move {
+                            tokio::task::yield_now().await;
+                            black_box(i)
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            },
+            |actions| async move { black_box(AsyncIO::batch_run(actions).await) },
+            BatchSize::SmallInput,
+        );
+    });
+
+    group.finish();
+}
+
 // =============================================================================
 // Criterion Group and Main
 // =============================================================================
@@ -683,7 +870,10 @@ criterion_group!(
     benchmark_async_io_flat_map,
     benchmark_async_pool_spawn_drain,
     benchmark_async_io_batch_run,
-    benchmark_comparison
+    benchmark_comparison,
+    benchmark_async_io_retry_detailed,
+    benchmark_async_io_bracket_detailed,
+    benchmark_async_io_par_detailed
 );
 
 criterion_main!(benches);
