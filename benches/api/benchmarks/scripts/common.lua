@@ -200,11 +200,49 @@ function M.load_test_ids()
     local ok, ids = pcall(require, "test_ids")
     if ok then return ids end
     local fallback = M.fallback_test_ids
+    -- Initialize version tracking for fallback
+    fallback.task_versions = fallback.task_versions or {}
+    for i = 1, #fallback.task_ids do
+        fallback.task_versions[i] = fallback.task_versions[i] or 1
+    end
     fallback.get_task_id = function(index)
-        return fallback.task_ids[((index - 1) % #fallback.task_ids) + 1]
+        return fallback.task_ids[((index - 1) % #fallback.task_ids) + 1], nil
     end
     fallback.get_project_id = function(index)
-        return fallback.project_ids[((index - 1) % #fallback.project_ids) + 1]
+        return fallback.project_ids[((index - 1) % #fallback.project_ids) + 1], nil
+    end
+    fallback.get_task_count = function()
+        return #fallback.task_ids
+    end
+    fallback.get_project_count = function()
+        return #fallback.project_ids
+    end
+    fallback.get_task_state = function(index)
+        local actual_index = ((index - 1) % #fallback.task_ids) + 1
+        return { id = fallback.task_ids[actual_index], version = fallback.task_versions[actual_index] }, nil
+    end
+    fallback.set_version = function(index, version)
+        local actual_index = ((index - 1) % #fallback.task_ids) + 1
+        fallback.task_versions[actual_index] = version
+        return true, nil
+    end
+    fallback.increment_version = function(index)
+        local actual_index = ((index - 1) % #fallback.task_ids) + 1
+        fallback.task_versions[actual_index] = fallback.task_versions[actual_index] + 1
+        return fallback.task_versions[actual_index], nil
+    end
+    fallback.reset_versions = function()
+        for i = 1, #fallback.task_ids do fallback.task_versions[i] = 1 end
+    end
+    fallback.get_all_task_ids = function()
+        local copy = {}
+        for i, id in ipairs(fallback.task_ids) do copy[i] = id end
+        return copy
+    end
+    fallback.get_all_project_ids = function()
+        local copy = {}
+        for i, id in ipairs(fallback.project_ids) do copy[i] = id end
+        return copy
     end
     return fallback
 end
