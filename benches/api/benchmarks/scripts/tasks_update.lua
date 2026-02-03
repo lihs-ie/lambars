@@ -43,15 +43,16 @@ function setup(thread)
     end
 
     local ids_per_thread = math.floor(pool_size / total_threads)
-    local start_index = thread.id * ids_per_thread
+    local thread_id = tonumber(thread.id) or 0
+    local start_index = thread_id * ids_per_thread
 
-    thread:set("id", thread.id)
+    thread:set("id", thread_id)
     thread:set("id_start", start_index)
     thread:set("id_end", start_index + ids_per_thread - 1)
     thread:set("id_range", ids_per_thread)
 
     io.write(string.format("[Thread %d] ID range: %d-%d (%d IDs)\n",
-        thread.id, start_index, start_index + ids_per_thread - 1, ids_per_thread))
+        thread_id, start_index, start_index + ids_per_thread - 1, ids_per_thread))
 end
 
 local function generate_update_body(update_type, version, request_counter)
@@ -92,10 +93,18 @@ function request()
             reset_retry_state()
             state = "fallback"
             last_request_is_update = false
-            return wrk.format("GET", "/health")
+            if wrk and wrk.format then
+                return wrk.format("GET", "/health")
+            else
+                return ""
+            end
         end
         last_request_is_update = true
-        return wrk.format("GET", "/tasks/" .. task_id, {["Accept"] = "application/json"})
+        if wrk and wrk.format then
+            return wrk.format("GET", "/tasks/" .. task_id, {["Accept"] = "application/json"})
+        else
+            return ""
+        end
     elseif state == "retry_put" then
         local task_id, err = test_ids.get_task_id(retry_index)
         if err or not retry_body then
@@ -103,10 +112,18 @@ function request()
             reset_retry_state()
             state = "fallback"
             last_request_is_update = false
-            return wrk.format("GET", "/health")
+            if wrk and wrk.format then
+                return wrk.format("GET", "/health")
+            else
+                return ""
+            end
         end
         last_request_is_update = true
-        return wrk.format("PUT", "/tasks/" .. task_id, {["Content-Type"] = "application/json"}, retry_body)
+        if wrk and wrk.format then
+            return wrk.format("PUT", "/tasks/" .. task_id, {["Content-Type"] = "application/json"}, retry_body)
+        else
+            return ""
+        end
     elseif state == "fallback" then
         state = "update"
     end
@@ -114,7 +131,7 @@ function request()
     local id_start = 0
     local id_range = test_ids.get_task_count()
 
-    if wrk.thread then
+    if wrk and wrk.thread then
         id_start = tonumber(wrk.thread:get("id_start")) or 0
         id_range = tonumber(wrk.thread:get("id_range")) or test_ids.get_task_count()
     end
@@ -127,7 +144,11 @@ function request()
         io.stderr:write("[tasks_update] Error getting task state: " .. err .. "\n")
         state = "fallback"
         last_request_is_update = false
-        return wrk.format("GET", "/health")
+        if wrk and wrk.format then
+            return wrk.format("GET", "/health")
+        else
+            return ""
+        end
     end
 
     last_request_index = global_index
@@ -136,10 +157,15 @@ function request()
     local update_type = update_types[(counter % #update_types) + 1]
     local body = generate_update_body(update_type, task_state.version, counter)
 
-    return wrk.format("PUT", "/tasks/" .. task_state.id, {["Content-Type"] = "application/json"}, body)
+    if wrk and wrk.format then
+        return wrk.format("PUT", "/tasks/" .. task_state.id, {["Content-Type"] = "application/json"}, body)
+    else
+        return ""
+    end
 end
 
 function response(status, headers, body)
+    if not status then return end
     common.track_response(status, headers)
     if error_tracker then error_tracker.track_thread_response(status) end
     if not last_request_is_update then return end
