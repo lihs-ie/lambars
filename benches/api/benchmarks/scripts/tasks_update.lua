@@ -23,18 +23,22 @@ end
 function setup(thread)
     if error_tracker then error_tracker.setup_thread(thread) end
 
-    local total_threads = tonumber(os.getenv("WRK_THREADS")) or 1
+    -- WRK_THREADS は wrk2 の -t オプションと同じ値を設定することを推奨
+    -- 未設定の場合は、wrk2 が自動的にスレッドを割り当てるため、
+    -- スレッド数は実行時に決定される（デフォルト: 1）
+    local total_threads = tonumber(os.getenv("WRK_THREADS"))
     local pool_size = tonumber(os.getenv("ID_POOL_SIZE")) or 10
 
-    if total_threads <= 0 then
-        io.stderr:write("[tasks_update] WARN: WRK_THREADS must be > 0, using 1\n")
+    -- WRK_THREADS が未設定の場合、wrk2 のデフォルトスレッド数（1）を仮定
+    -- または、thread.id の最大値から推定する（複雑化を避けるため、1 を仮定）
+    if not total_threads or total_threads <= 0 then
         total_threads = 1
     end
 
     if pool_size < total_threads then
         io.stderr:write(string.format(
-            "[tasks_update] WARN: ID_POOL_SIZE (%d) < WRK_THREADS (%d), using pool_size\n",
-            pool_size, total_threads))
+            "[tasks_update] WARN: ID_POOL_SIZE (%d) < WRK_THREADS (%d), using pool_size=%d\n",
+            pool_size, total_threads, pool_size))
         total_threads = pool_size
     end
 
