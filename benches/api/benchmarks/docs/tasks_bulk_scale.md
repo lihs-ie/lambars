@@ -279,10 +279,8 @@ cd benches/api/benchmarks
 各スケール個別に手動実行する場合。
 
 ```bash
-# 環境変数でシードを指定（再現性確保）
-export SEED=42
-
-# 注: 各スケール専用のLuaスクリプトは今後実装予定
+# 注1: SEED は test_ids.lua 専用で、ペイロード生成には影響しません
+# 注2: 各スケール専用のLuaスクリプトは今後実装予定
 # 現時点では tasks_bulk.lua のバッチサイズを変更して使用
 
 # Small（将来: tasks_bulk_10.lua）
