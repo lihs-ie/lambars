@@ -111,8 +111,13 @@ function request()
         state = "update"
     end
 
-    local id_start = tonumber(wrk.thread:get("id_start")) or 0
-    local id_range = tonumber(wrk.thread:get("id_range")) or test_ids.get_task_count()
+    local id_start = 0
+    local id_range = test_ids.get_task_count()
+
+    if wrk.thread then
+        id_start = tonumber(wrk.thread:get("id_start")) or 0
+        id_range = tonumber(wrk.thread:get("id_range")) or test_ids.get_task_count()
+    end
 
     counter = counter + 1
     local global_index = id_start + (counter % id_range) + 1
