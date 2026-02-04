@@ -1,0 +1,155 @@
+# Production Load 生成/直列化最適化 要件定義
+#
+# 概要:
+#   production_load シナリオで支配的な生成処理と JSON 直列化のコストを低減する。
+#
+# 設計方針:
+#   1. 文字列生成と JSON 直列化のアロケーションを最小化する。
+#   2. 生成処理は純粋関数として分離し、参照透過性を維持する。
+#   3. 既存の API スキーマとレスポンス互換性を維持する。
+#
+# 参照:
+#   - profiling-results/api-profiling-all/production_load/flamegraph.svg
+#   - profiling-results/api-profiling-all/production_load/stacks.folded
+#   - profiling-results/api-profiling-all/api-profiling-summary.json
+
+version: "1.0.0"
+name: "production_load_serialization"
+description: |
+  production_load シナリオのホットパスである SimulatedSubTask の生成と
+  JSON 直列化のボトルネックを解消するための要件定義。
+  生成・直列化の責務を分離し、バッファ再利用とアロケーション削減を中心に改善する。
+
+# 背景・動機
+background:
+  problem: |
+    production_load の CPU サンプルで以下のコストが支配的である。
+    - SimulatedSubTask::generate_tree の生成処理
+    - alloc::fmt::format::format_inner 由来の文字列生成
+    - serde_json::Serializer::serialize_str 由来のエスケープと書き込み
+    これによりレスポンス生成が CPU とアロケーションに偏り、スループットが頭打ちになる。
+  motivation: |
+    生成と直列化のコストを下げることで、同一負荷に対する RPS を向上させ、
+    メモリ割り当てと GC フリー処理の揺れを低減したい。
+  prior_art:
+    - name: "production_load flamegraph"
+      description: "SimulatedSubTask::generate_tree と serde_json 直列化が高比率"
+
+# 要件一覧
+requirements:
+  # ======================================================================
+  # 1. 生成処理の最適化
+  # ======================================================================
+  - id: PL-001
+    name: "生成処理の純粋化と再利用"
+    description: |
+      生成処理は副作用を持たない純粋関数として分離し、
+      参照透過性を維持したままデータ生成を行う。
+      同一入力に対して同一出力を返すことを保証する。
+
+    laws:
+      - name: "DeterministicGeneration"
+        description: |
+          同じ入力パラメータに対し常に同じ生成結果を返す。
+        equation: "generate(params) == generate(params)"
+        property_test: |
+          #[test]
+          fn deterministic_generation() {
+              let params = SimulatedTreeParams::default();
+              let a = generate_tree(&params);
+              let b = generate_tree(&params);
+              assert_eq!(a, b);
+          }
+
+    methods:
+      - name: "generate_tree"
+        signature: "fn generate_tree(params: &SimulatedTreeParams) -> SimulatedSubTask"
+        description: |
+          入力パラメータのみからタスクツリーを生成する純粋関数。
+        examples:
+          - description: "同一パラメータでの再現性"
+            code: |
+              let params = SimulatedTreeParams::default();
+              let tree = generate_tree(&params);
+              assert!(!tree.subtasks.is_empty());
+
+    implementations:
+      - type: "SimulatedSubTask"
+        description: |
+          生成ロジックを純粋関数に切り出し、内部での外部状態参照を禁止する。
+
+  # ======================================================================
+  # 2. 文字列生成の削減
+  # ======================================================================
+  - id: PL-002
+    name: "文字列生成とアロケーションの削減"
+    description: |
+      format! に依存する文字列構築を最小化し、
+      String の容量見積もりと再利用バッファを採用する。
+      タスク ID 等の数値を文字列化する際は、
+      事前確保と write! を使って余分な再割り当てを避ける。
+
+    methods:
+      - name: "build_task_id"
+        signature: "fn build_task_id(prefix: &str, index: usize, buffer: &mut String) -> String"
+        description: |
+          事前確保済みバッファに書き込み、余分なフォーマット生成を抑制する。
+        examples:
+          - description: "バッファ再利用"
+            code: |
+              let mut buffer = String::with_capacity(32);
+              let id = build_task_id("task", 42, &mut buffer);
+              assert!(id.starts_with("task"));
+
+    implementations:
+      - type: "String"
+        description: |
+          with_capacity と clear を使った再利用を標準化する。
+
+  # ======================================================================
+  # 3. JSON 直列化の最適化
+  # ======================================================================
+  - id: PL-003
+    name: "JSON 直列化の効率化"
+    description: |
+      JSON 直列化は to_writer を基本とし、
+      使い捨て String 生成を避ける。
+      エスケープ処理の発生頻度を抑えるため、
+      生成文字列の構造を見直し、不要な変換を排除する。
+
+    methods:
+      - name: "serialize_dependency_response"
+        signature: "fn serialize_dependency_response<W: std::io::Write>(writer: W, value: &DependencyResolutionResponse) -> std::io::Result<()>"
+        description: |
+          Writer へ直接書き込み、バッファ再利用を可能にする。
+        examples:
+          - description: "Vec への直列化"
+            code: |
+              let mut buffer = Vec::new();
+              serialize_dependency_response(&mut buffer, &response)?;
+
+    implementations:
+      - type: "DependencyResolutionResponse"
+        description: |
+          直列化処理は既存スキーマを変更せず、書き込み経路のみ最適化する。
+
+# 非機能要件
+non_functional_requirements:
+  performance:
+    - "production_load で format_inner と serialize_str の CPU サンプル比率を 30% 以上削減する。"
+    - "同一負荷条件で p95 レイテンシを 20% 以上改善する。"
+  compatibility:
+    - "既存 API の JSON スキーマと順序を変更しない。"
+  testing:
+    - "生成処理の参照透過性を検証するテストを追加する。"
+    - "直列化バッファ再利用が有効であることをベンチマークで確認する。"
+
+# 将来の拡張
+future_extensions:
+  - id: "PL-FUTURE-001"
+    name: "ゼロコピー JSON 書き込み"
+    description: |
+      直列化の最終段階をゼロコピー化し、
+      文字列エスケープを極小化する手法を検討する。
+    rationale: |
+      既存のレスポンス構造が複雑であり、まずはバッファ再利用の効果を測定するため。

@@ -27,6 +27,9 @@ use lambars::typeclass::Semigroup;
 
 use super::error::{ApiErrorResponse, FieldError};
 use super::handlers::AppState;
+use super::string_buffer::{
+    build_child_task_id, build_subtask_title, build_task_id, build_task_title_with_level,
+};
 use crate::domain::{Task, TaskId, TaskStatus};
 
 // =============================================================================
@@ -171,8 +174,8 @@ impl SimulatedSubTask {
 
         (0..breadth)
             .map(|i| {
-                let id = format!("{parent_id}-{i}");
-                let title = format!("Subtask at depth {current_depth}, index {i}");
+                let id = build_task_id(parent_id, i);
+                let title = build_subtask_title(current_depth, i);
                 let children = Self::generate_tree(depth, breadth, current_depth + 1, &id);
                 Self {
                     id,
@@ -700,8 +703,8 @@ fn build_simulated_task_tree(tasks: &[Task], max_depth: usize) -> Vec<SimulatedT
                 }
                 let task = &tasks[child_index];
                 Some(SimulatedTaskNode {
-                    task_id: format!("{}-child-{i}", task.task_id),
-                    title: format!("{} (level {})", task.title, current_depth),
+                    task_id: build_child_task_id(&task.task_id.to_string(), i),
+                    title: build_task_title_with_level(&task.title, current_depth),
                     status: task.status,
                     estimated_duration: 30,
                     children: build_children(tasks, child_index, current_depth + 1, max_depth),
@@ -1016,6 +1019,91 @@ mod tests {
         assert!(!result.is_empty());
         assert!(iterations > 0);
         assert_eq!(max_depth, 14); // 0-indexed depth
+    }
+
+    // -------------------------------------------------------------------------
+    // SimulatedSubTask::generate_tree Referential Transparency Tests (PL-001)
+    // -------------------------------------------------------------------------
+
+    /// Recursively compares two trees for deep equality.
+    fn trees_equal(tree1: &[SimulatedSubTask], tree2: &[SimulatedSubTask]) -> bool {
+        if tree1.len() != tree2.len() {
+            return false;
+        }
+        for (node1, node2) in tree1.iter().zip(tree2.iter()) {
+            if node1.id != node2.id || node1.title != node2.title {
+                return false;
+            }
+            if !trees_equal(&node1.children, &node2.children) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Flattens a tree into a list of (id, title) pairs for comparison.
+    fn flatten_tree(tree: &[SimulatedSubTask]) -> Vec<(String, String)> {
+        let mut result = Vec::new();
+        for node in tree {
+            result.push((node.id.clone(), node.title.clone()));
+            result.extend(flatten_tree(&node.children));
+        }
+        result
+    }
+
+    #[rstest]
+    fn test_generate_tree_referential_transparency() {
+        // Same inputs must produce identical outputs (deterministic generation)
+        let tree1 = SimulatedSubTask::generate_tree(5, 2, 0, "root");
+        let tree2 = SimulatedSubTask::generate_tree(5, 2, 0, "root");
+
+        // Deep recursive comparison of entire tree structure
+        assert!(
+            trees_equal(&tree1, &tree2),
+            "Trees should be identical for same inputs"
+        );
+
+        // Additional verification via flatten comparison
+        let flat1 = flatten_tree(&tree1);
+        let flat2 = flatten_tree(&tree2);
+        assert_eq!(flat1, flat2, "Flattened trees should be identical");
+    }
+
+    #[rstest]
+    fn test_generate_tree_deterministic_ids() {
+        // IDs must be deterministically generated based on depth and index
+        let tree = SimulatedSubTask::generate_tree(3, 2, 0, "root");
+
+        assert_eq!(tree.len(), 2); // breadth = 2 at depth 0
+        assert_eq!(tree[0].id, "root-0");
+        assert_eq!(tree[1].id, "root-1");
+
+        // Check children of first node
+        assert_eq!(tree[0].children.len(), 2);
+        assert_eq!(tree[0].children[0].id, "root-0-0");
+        assert_eq!(tree[0].children[1].id, "root-0-1");
+    }
+
+    #[rstest]
+    fn test_generate_tree_deterministic_titles() {
+        let tree = SimulatedSubTask::generate_tree(2, 2, 0, "root");
+
+        // Titles follow deterministic pattern
+        assert_eq!(tree[0].title, "Subtask at depth 0, index 0");
+        assert_eq!(tree[1].title, "Subtask at depth 0, index 1");
+
+        // Children at depth 1
+        assert_eq!(tree[0].children[0].title, "Subtask at depth 1, index 0");
+    }
+
+    #[rstest]
+    fn test_generate_tree_empty_when_depth_exceeded() {
+        // When current_depth >= depth, returns empty vec
+        let tree = SimulatedSubTask::generate_tree(0, 5, 0, "root");
+        assert!(tree.is_empty());
+
+        let tree2 = SimulatedSubTask::generate_tree(3, 5, 3, "root");
+        assert!(tree2.is_empty());
     }
 
     // -------------------------------------------------------------------------

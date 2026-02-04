@@ -21,6 +21,7 @@ pub mod ordered;
 pub mod project;
 pub mod query;
 pub mod recursive;
+pub mod string_buffer;
 pub mod transaction;
 pub mod traversable;
 pub mod typeclass;
