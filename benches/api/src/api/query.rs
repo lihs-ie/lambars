@@ -1571,6 +1571,93 @@ impl std::fmt::Display for BuildError {
 
 impl std::error::Error for BuildError {}
 
+// =============================================================================
+// SearchIndexError - Error type for apply_bulk
+// =============================================================================
+
+/// Type of change that is not allowed in `apply_bulk`.
+///
+/// This enum is used to provide specific error information when
+/// non-Add changes are passed to [`SearchIndex::apply_bulk`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChangeType {
+    /// An Update change was encountered.
+    Update,
+    /// A Remove change was encountered.
+    Remove,
+}
+
+impl std::fmt::Display for ChangeType {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Update => write!(formatter, "Update"),
+            Self::Remove => write!(formatter, "Remove"),
+        }
+    }
+}
+
+/// Error type for [`SearchIndex::apply_bulk`] operations.
+///
+/// This error is returned when `apply_bulk` fails due to invalid input.
+/// `apply_bulk` is optimized for Add-only batches and does not support
+/// Update or Remove changes.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use task_management_benchmark_api::api::query::{SearchIndex, SearchIndexError, TaskChange};
+///
+/// let index = SearchIndex::build_with_config(&tasks, config);
+/// let changes = vec![TaskChange::Remove(task_id)]; // Not allowed
+///
+/// match index.apply_bulk(&changes) {
+///     Err(SearchIndexError::NonAddChangeNotAllowed { change_type }) => {
+///         println!("Cannot use apply_bulk with {} changes", change_type);
+///     }
+///     _ => {}
+/// }
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SearchIndexError {
+    /// Non-Add change encountered in `apply_bulk`.
+    ///
+    /// `apply_bulk` only accepts Add changes. For Update or Remove changes,
+    /// use [`SearchIndex::apply_changes`] instead.
+    NonAddChangeNotAllowed {
+        /// The type of change that was not allowed.
+        change_type: ChangeType,
+    },
+    /// The number of changes exceeds the maximum allowed limit.
+    TooManyChanges {
+        /// The actual number of changes.
+        count: usize,
+        /// The maximum allowed number of changes.
+        limit: usize,
+    },
+}
+
+impl std::fmt::Display for SearchIndexError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NonAddChangeNotAllowed { change_type } => {
+                write!(
+                    formatter,
+                    "apply_bulk only accepts Add changes, but received {change_type} change. \
+                     Use apply_changes() for Update/Remove operations."
+                )
+            }
+            Self::TooManyChanges { count, limit } => {
+                write!(
+                    formatter,
+                    "apply_bulk failed: {count} changes exceeds maximum of {limit}."
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for SearchIndexError {}
+
 /// A builder for efficiently constructing n-gram indexes in bulk.
 ///
 /// This builder collects entries and then constructs an n-gram index in a single
@@ -4938,6 +5025,91 @@ impl SearchIndex {
         } else {
             self.apply_changes_delta(changes)
         }
+    }
+
+    /// Applies Add-only changes in bulk, optimized for large batches of new tasks.
+    ///
+    /// This method is specifically designed for Add-only batches and provides
+    /// better error handling through `Result` compared to [`apply_changes`](Self::apply_changes).
+    ///
+    /// # Arguments
+    ///
+    /// * `changes` - A slice of task changes. All changes must be `TaskChange::Add`.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(SearchIndex)` - A new index with the changes applied
+    /// * `Err(SearchIndexError)` - If validation fails
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SearchIndexError::NonAddChangeNotAllowed`] if any change is not
+    /// a `TaskChange::Add`. For Update/Remove operations, use [`apply_changes`](Self::apply_changes).
+    ///
+    /// Returns [`SearchIndexError::TooManyChanges`] if the number of changes
+    /// exceeds [`MAX_BULK_ENTRIES`].
+    ///
+    /// # Empty Changes
+    ///
+    /// If `changes` is empty, returns `Ok(self.clone())` to match the behavior
+    /// of [`apply_changes`](Self::apply_changes).
+    ///
+    /// # Immutability
+    ///
+    /// The original `SearchIndex` is not modified. A new index is returned.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use task_management_benchmark_api::api::query::{SearchIndex, TaskChange};
+    ///
+    /// let index = SearchIndex::build_with_config(&tasks, config);
+    /// let new_tasks: Vec<TaskChange> = tasks.iter()
+    ///     .map(|t| TaskChange::Add(t.clone()))
+    ///     .collect();
+    ///
+    /// match index.apply_bulk(&new_tasks) {
+    ///     Ok(new_index) => {
+    ///         // Use the new index
+    ///     }
+    ///     Err(e) => {
+    ///         // Handle error (e.g., non-Add changes)
+    ///     }
+    /// }
+    /// ```
+    pub fn apply_bulk(&self, changes: &[TaskChange]) -> Result<Self, SearchIndexError> {
+        // Empty changes: return clone (consistent with apply_changes)
+        if changes.is_empty() {
+            return Ok(self.clone());
+        }
+
+        // Validate: all changes must be Add
+        for change in changes {
+            match change {
+                TaskChange::Add(_) => {}
+                TaskChange::Update { .. } => {
+                    return Err(SearchIndexError::NonAddChangeNotAllowed {
+                        change_type: ChangeType::Update,
+                    });
+                }
+                TaskChange::Remove(_) => {
+                    return Err(SearchIndexError::NonAddChangeNotAllowed {
+                        change_type: ChangeType::Remove,
+                    });
+                }
+            }
+        }
+
+        // Check entry count limit
+        if changes.len() > MAX_BULK_ENTRIES {
+            return Err(SearchIndexError::TooManyChanges {
+                count: changes.len(),
+                limit: MAX_BULK_ENTRIES,
+            });
+        }
+
+        // Delegate to apply_changes (which will use the bulk path if conditions are met)
+        Ok(self.apply_changes(changes))
     }
 
     /// Applies changes using the delta path (handles Add, Remove, and Update).
@@ -18401,5 +18573,247 @@ mod merge_ngram_delta_optimization_tests {
         let new_index = index.apply_changes(&changes);
 
         assert_eq!(new_index.tasks_by_id.len(), 10);
+    }
+}
+
+// =============================================================================
+// SearchIndexError and apply_bulk Tests (RUST-003, RUST-004)
+// =============================================================================
+
+#[cfg(test)]
+mod search_index_error_tests {
+    use super::*;
+    use crate::domain::{Tag, Timestamp};
+    use rstest::rstest;
+
+    fn create_test_task(title: &str) -> Task {
+        Task::new(TaskId::generate(), title, Timestamp::now()).add_tag(Tag::new("test"))
+    }
+
+    // =========================================================================
+    // SearchIndexError Tests (RUST-003)
+    // =========================================================================
+
+    #[rstest]
+    fn test_change_type_display() {
+        assert_eq!(format!("{}", ChangeType::Update), "Update");
+        assert_eq!(format!("{}", ChangeType::Remove), "Remove");
+    }
+
+    #[rstest]
+    fn test_search_index_error_non_add_change_display() {
+        let error = SearchIndexError::NonAddChangeNotAllowed {
+            change_type: ChangeType::Update,
+        };
+        let message = format!("{error}");
+        assert!(message.contains("apply_bulk"));
+        assert!(message.contains("Add"));
+        assert!(message.contains("Update"));
+        assert!(message.contains("apply_changes"));
+    }
+
+    #[rstest]
+    fn test_search_index_error_too_many_changes_display() {
+        let error = SearchIndexError::TooManyChanges {
+            count: 200_000,
+            limit: 100_000,
+        };
+        let message = format!("{error}");
+        assert!(message.contains("200000"));
+        assert!(message.contains("100000"));
+    }
+
+    #[rstest]
+    fn test_search_index_error_debug_clone_eq() {
+        let error1 = SearchIndexError::NonAddChangeNotAllowed {
+            change_type: ChangeType::Remove,
+        };
+        let error2 = error1.clone();
+
+        // Test Debug
+        let debug_str = format!("{error1:?}");
+        assert!(debug_str.contains("NonAddChangeNotAllowed"));
+        assert!(debug_str.contains("Remove"));
+
+        // Test Clone and PartialEq
+        assert_eq!(error1, error2);
+
+        // Test inequality
+        let error3 = SearchIndexError::TooManyChanges { count: 1, limit: 1 };
+        assert_ne!(error1, error3);
+    }
+
+    #[rstest]
+    fn test_search_index_error_is_std_error() {
+        let error: Box<dyn std::error::Error> =
+            Box::new(SearchIndexError::NonAddChangeNotAllowed {
+                change_type: ChangeType::Update,
+            });
+        // This should compile if std::error::Error is implemented
+        let _ = error.to_string();
+    }
+
+    // =========================================================================
+    // apply_bulk Tests (RUST-004)
+    // =========================================================================
+
+    #[rstest]
+    fn test_apply_bulk_empty_changes_returns_clone() {
+        let empty_tasks: PersistentVector<Task> = PersistentVector::new();
+        let index = SearchIndex::build_with_config(&empty_tasks, SearchIndexConfig::default());
+        let original_len = index.tasks_by_id.len();
+
+        let result = index.apply_bulk(&[]);
+
+        assert!(result.is_ok());
+        let new_index = result.unwrap();
+        assert_eq!(new_index.tasks_by_id.len(), original_len);
+    }
+
+    #[rstest]
+    fn test_apply_bulk_add_only_succeeds() {
+        let empty_tasks: PersistentVector<Task> = PersistentVector::new();
+        let index = SearchIndex::build_with_config(&empty_tasks, SearchIndexConfig::default());
+
+        let task1 = create_test_task("Task 1");
+        let task2 = create_test_task("Task 2");
+        let changes = vec![
+            TaskChange::Add(task1.clone()),
+            TaskChange::Add(task2.clone()),
+        ];
+
+        let result = index.apply_bulk(&changes);
+
+        assert!(result.is_ok());
+        let new_index = result.unwrap();
+        assert_eq!(new_index.tasks_by_id.len(), 2);
+        assert!(new_index.tasks_by_id.get(&task1.task_id).is_some());
+        assert!(new_index.tasks_by_id.get(&task2.task_id).is_some());
+    }
+
+    #[rstest]
+    fn test_apply_bulk_update_change_returns_error() {
+        let task = create_test_task("Original");
+        let tasks: PersistentVector<Task> = vec![task.clone()].into_iter().collect();
+        let index = SearchIndex::build_with_config(&tasks, SearchIndexConfig::default());
+
+        let mut updated_task = task.clone();
+        updated_task.title = "Updated".to_string();
+        let changes = vec![TaskChange::Update {
+            old: task,
+            new: updated_task,
+        }];
+
+        let result = index.apply_bulk(&changes);
+
+        assert!(result.is_err());
+        match result {
+            Err(SearchIndexError::NonAddChangeNotAllowed { change_type }) => {
+                assert_eq!(change_type, ChangeType::Update);
+            }
+            _ => panic!("Expected NonAddChangeNotAllowed error with Update type"),
+        }
+    }
+
+    #[rstest]
+    fn test_apply_bulk_remove_change_returns_error() {
+        let task = create_test_task("Test task");
+        let tasks: PersistentVector<Task> = vec![task.clone()].into_iter().collect();
+        let index = SearchIndex::build_with_config(&tasks, SearchIndexConfig::default());
+
+        let changes = vec![TaskChange::Remove(task.task_id.clone())];
+
+        let result = index.apply_bulk(&changes);
+
+        assert!(result.is_err());
+        match result {
+            Err(SearchIndexError::NonAddChangeNotAllowed { change_type }) => {
+                assert_eq!(change_type, ChangeType::Remove);
+            }
+            _ => panic!("Expected NonAddChangeNotAllowed error with Remove type"),
+        }
+    }
+
+    #[rstest]
+    fn test_apply_bulk_mixed_changes_returns_error_on_first_non_add() {
+        let empty_tasks: PersistentVector<Task> = PersistentVector::new();
+        let index = SearchIndex::build_with_config(&empty_tasks, SearchIndexConfig::default());
+
+        let task1 = create_test_task("Task 1");
+        let task_id_to_remove = TaskId::generate();
+        let changes = vec![
+            TaskChange::Add(task1),
+            TaskChange::Remove(task_id_to_remove), // This should cause the error
+        ];
+
+        let result = index.apply_bulk(&changes);
+
+        assert!(result.is_err());
+        match result {
+            Err(SearchIndexError::NonAddChangeNotAllowed { change_type }) => {
+                assert_eq!(change_type, ChangeType::Remove);
+            }
+            _ => panic!("Expected NonAddChangeNotAllowed error"),
+        }
+    }
+
+    #[rstest]
+    fn test_apply_bulk_preserves_original_index() {
+        let task = create_test_task("Existing task");
+        let tasks: PersistentVector<Task> = vec![task.clone()].into_iter().collect();
+        let index = SearchIndex::build_with_config(&tasks, SearchIndexConfig::default());
+
+        let new_task = create_test_task("New task");
+        let changes = vec![TaskChange::Add(new_task)];
+
+        let _ = index.apply_bulk(&changes);
+
+        // Original index should be unchanged
+        assert_eq!(index.tasks_by_id.len(), 1);
+        assert!(index.tasks_by_id.get(&task.task_id).is_some());
+    }
+
+    #[rstest]
+    fn test_apply_bulk_equivalence_with_apply_changes_for_add_only() {
+        let empty_tasks: PersistentVector<Task> = PersistentVector::new();
+        let index = SearchIndex::build_with_config(&empty_tasks, SearchIndexConfig::default());
+
+        let tasks: Vec<Task> = (0..5)
+            .map(|i| create_test_task(&format!("Task {i}")))
+            .collect();
+        let changes: Vec<TaskChange> = tasks.into_iter().map(TaskChange::Add).collect();
+
+        // Via apply_bulk
+        let via_bulk = index
+            .apply_bulk(&changes)
+            .expect("apply_bulk should succeed");
+
+        // Via apply_changes
+        let via_changes = index.apply_changes(&changes);
+
+        // Both should have the same task count
+        assert_eq!(via_bulk.tasks_by_id.len(), via_changes.tasks_by_id.len());
+
+        // Both should have the same tasks
+        for (task_id, task) in &via_bulk.tasks_by_id {
+            assert_eq!(via_changes.tasks_by_id.get(task_id), Some(task));
+        }
+    }
+
+    #[rstest]
+    fn test_apply_bulk_large_batch() {
+        let empty_tasks: PersistentVector<Task> = PersistentVector::new();
+        let index = SearchIndex::build_with_config(&empty_tasks, SearchIndexConfig::default());
+
+        let changes: Vec<TaskChange> = (0..1000)
+            .map(|i| create_test_task(&format!("Task {i}")))
+            .map(TaskChange::Add)
+            .collect();
+
+        let result = index.apply_bulk(&changes);
+
+        assert!(result.is_ok());
+        let new_index = result.unwrap();
+        assert_eq!(new_index.tasks_by_id.len(), 1000);
     }
 }
