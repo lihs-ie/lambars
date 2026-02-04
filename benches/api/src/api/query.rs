@@ -5119,6 +5119,8 @@ impl SearchIndex {
         // BENCH-002: use_apply_bulk flag takes priority for Add-only changes
         // This uses the new apply_bulk method which provides better error handling
         // and is optimized for bulk Add operations.
+        // Note: apply_bulk internally checks InfixMode::Ngram and falls back to delta
+        // path for other modes, so this is safe for all infix modes.
         if self.config.use_apply_bulk && all_adds {
             // apply_bulk returns Result, so we handle the error case
             // by falling back to the delta path
@@ -5202,6 +5204,13 @@ impl SearchIndex {
 
         // TB-002: Use separated validation function for clarity and testability
         validate_changes_for_bulk(changes)?;
+
+        // apply_changes_bulk uses from_changes_without_ngrams which is designed for
+        // InfixMode::Ngram only. For other modes (LegacyAllSuffix, Disabled), fall back
+        // to delta path to ensure suffix indexes are properly constructed.
+        if self.config.infix_mode != InfixMode::Ngram {
+            return Ok(self.apply_changes_delta(changes));
+        }
 
         // Use the bulk path directly (avoids infinite recursion with apply_changes)
         Ok(self.apply_changes_bulk(changes))
