@@ -336,7 +336,48 @@ local function print_status_distribution(aggregated, lua_total, summary)
         request_categories.backoff, request_categories.suppressed, request_categories.fallback))
 end
 
+-- 純粋関数: カテゴリ別集計
+local function aggregate_categories(categories)
+    return {
+        executed = categories.executed,
+        backoff = categories.backoff,
+        suppressed = categories.suppressed,
+        fallback = categories.fallback
+    }
+end
+
+-- 純粋関数: 整合性検証
+local function verify_consistency(categories, total_requests)
+    local sum = categories.executed + categories.backoff +
+                categories.suppressed + categories.fallback
+    return sum == total_requests, sum
+end
+
 function done(summary, latency, requests)
+    -- カテゴリ別集計（純粋関数）
+    local categories = aggregate_categories(request_categories)
+
+    -- 整合性検証（純粋関数）
+    local is_consistent, sum = verify_consistency(categories, summary.requests)
+
+    -- 副作用: 出力
+    if not is_consistent then
+        io.stderr:write(string.format(
+            "[tasks_update] WARN: Inconsistency detected: total=%d, sum(categories)=%d\n",
+            summary.requests, sum))
+    end
+
+    -- 副作用: カテゴリ別集計の出力
+    io.write("\n--- Request Categories (REQ-MEASURE-401) ---\n")
+    io.write(string.format("  Executed:   %d\n", categories.executed))
+    io.write(string.format("  Backoff:    %d\n", categories.backoff))
+    io.write(string.format("  Suppressed: %d\n", categories.suppressed))
+    io.write(string.format("  Fallback:   %d\n", categories.fallback))
+    io.write(string.format("  Total:      %d\n", sum))
+    io.write(string.format("  Excluded:   %d (backoff + suppressed + fallback)\n",
+        categories.backoff + categories.suppressed + categories.fallback))
+    io.write("\n")
+
     print_excluded_requests()
     common.print_summary("tasks_update", summary)
 
