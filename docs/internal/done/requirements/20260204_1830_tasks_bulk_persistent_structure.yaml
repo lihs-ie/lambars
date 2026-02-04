@@ -1,0 +1,148 @@
+# Tasks Bulk 永続構造最適化 要件定義
+#
+# 概要:
+#   tasks_bulk シナリオで支配的な永続ハッシュマップ操作とソートを最適化する。
+#
+# 設計方針:
+#   1. 永続構造の不変性を保ちつつバルク更新経路を最適化する。
+#   2. 一時的な transient を用いて構築コストを削減する。
+#   3. 既存 API の結果整合性と順序保証を維持する。
+#
+# 参照:
+#   - profiling-results/api-profiling-all/tasks_bulk/flamegraph.svg
+#   - profiling-results/api-profiling-all/tasks_bulk/stacks.folded
+#   - profiling-results/api-profiling-all/api-profiling-summary.json
+
+version: "1.0.0"
+name: "tasks_bulk_persistent_structure"
+description: |
+  tasks_bulk のホットパスである PersistentHashMap の insert/advance、
+  並び替え処理のコストを削減するための要件定義。
+  永続構造の性質を維持しつつ、バルク更新と容量見積もりを重視する。
+
+# 背景・動機
+background:
+  problem: |
+    tasks_bulk では TransientHashMap::insert_into_node_cow や
+    PersistentHashMapIterator::advance、stable::quicksort が高比率を占めている。
+    これによりバルク更新が O(n log n) 以上に拡大し、
+    アロケーションと解放のコストが増大している。
+  motivation: |
+    永続構造の効率的なバルク操作を確立し、
+    CPU とメモリ負荷を同時に低減したい。
+  prior_art:
+    - name: "tasks_bulk flamegraph"
+      description: "insert_into_node_cow と quicksort が支配的"
+
+# 要件一覧
+requirements:
+  # ======================================================================
+  # 1. バルク更新の最適化
+  # ======================================================================
+  - id: TB-001
+    name: "バルク更新の transient 化"
+    description: |
+      バルク更新は一時的な transient 構造で集約して処理し、
+      その後 persistent に変換することで insert の COW コストを削減する。
+      処理は入力から出力への純粋変換として設計する。
+
+    laws:
+      - name: "ImmutabilityPreserved"
+        description: |
+          永続構造の既存インスタンスは変更されず、新しい値を返す。
+        equation: "apply_bulk(x, changes) != mutate(x)"
+        property_test: |
+          #[test]
+          fn persistent_structure_not_mutated() {
+              let original = build_index();
+              let updated = apply_bulk(&original, &changes).expect("ok");
+              assert_ne!(original, updated);
+          }
+
+    methods:
+      - name: "apply_bulk"
+        signature: "fn apply_bulk(index: &SearchIndex, changes: &[Change]) -> Result<SearchIndex, RepositoryError>"
+        description: |
+          変更集合を一括適用し、新しい SearchIndex を返す。
+        examples:
+          - description: "バルク更新"
+            code: |
+              let updated = apply_bulk(&index, &changes)?;
+              assert!(updated.size() >= index.size());
+
+    implementations:
+      - type: "SearchIndex"
+        description: |
+          バルク更新は transient 経由で構築し、COW の多重発生を避ける。
+
+  # ======================================================================
+  # 2. 事前確保とソート削減
+  # ======================================================================
+  - id: TB-002
+    name: "容量見積もりとソート削減"
+    description: |
+      変更件数に基づいて必要容量を事前確保し、
+      sort が必要なケースを最小化する。
+      並び順が固定である場合は安定ソートを回避し、
+      既存順序の再利用を優先する。
+
+    methods:
+      - name: "reserve_for_changes"
+        signature: "fn reserve_for_changes(map: &mut TransientHashMap<TaskId, Task>, change_count: usize)"
+        description: |
+          事前確保により insert 時の再割り当てを抑制する。
+        examples:
+          - description: "事前確保"
+            code: |
+              let mut transient = TransientHashMap::new();
+              reserve_for_changes(&mut transient, changes.len());
+
+    implementations:
+      - type: "TransientHashMap<TaskId, Task>"
+        description: |
+          バルク更新時のみ一時構造として使用し、参照透過性を保持する。
+
+  # ======================================================================
+  # 3. 参照透過性と例外制御
+  # ======================================================================
+  - id: TB-003
+    name: "Result 型による失敗表現"
+    description: |
+      失敗は例外的制御フローではなく Result 型で表現し、
+      バルク処理全体を純粋な変換として扱えるようにする。
+
+    methods:
+      - name: "validate_changes"
+        signature: "fn validate_changes(changes: &[Change]) -> Result<(), RepositoryError>"
+        description: |
+          変更集合の事前検証を行い、失敗は Result で返す。
+        examples:
+          - description: "検証"
+            code: |
+              validate_changes(&changes)?;
+
+    implementations:
+      - type: "RepositoryError"
+        description: |
+          エラーは明示的に型で表現し、panic を制御フローに使用しない。
+
+# 非機能要件
+non_functional_requirements:
+  performance:
+    - "tasks_bulk で insert_into_node_cow と iterator::advance の CPU サンプル比率を 30% 以上削減する。"
+    - "バルク更新の実行時間を 25% 以上短縮する。"
+  compatibility:
+    - "既存のインデックス結果と API 返却内容の整合性を維持する。"
+  testing:
+    - "バルク更新後の不変性を検証するテストを追加する。"
+    - "ベンチマークでソート削減と事前確保の効果を確認する。"
+
+# 将来の拡張
+future_extensions:
+  - id: "TB-FUTURE-001"
+    name: "メモリプールによるノード再利用"
+    description: |
+      頻出ノードの再利用を行い、アロケーション頻度をさらに下げる。
+    rationale: |
+      現段階では transient 化の効果測定を優先し、
+      メモリプールは複雑性が高いため後回しとする。
