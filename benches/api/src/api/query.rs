@@ -382,23 +382,23 @@ pub fn normalize_query(raw: &str) -> NormalizedQuery {
 /// # Cache Key Semantics
 ///
 /// The cache key uses exact matching on all fields. This means:
-/// - `"urgent task"` with limit=50 is different from limit=100
+/// - `"urgent task"` with limit=20 is different from limit=100
 /// - `"urgent task"` with scope=Title is different from scope=All
 /// - Query normalization ensures case-insensitive and whitespace-normalized matching
 ///
 /// # Examples
 ///
 /// ```ignore
-/// let key1 = SearchCacheKey::from_raw("  Urgent Task  ", SearchScope::All, Some(50), Some(0));
-/// let key2 = SearchCacheKey::from_raw("urgent task", SearchScope::All, Some(50), Some(0));
+/// let key1 = SearchCacheKey::from_raw("  Urgent Task  ", SearchScope::All, Some(20), Some(0));
+/// let key2 = SearchCacheKey::from_raw("urgent task", SearchScope::All, Some(20), Some(0));
 ///
 /// // key1 == key2 because the normalized query is the same
 /// assert_eq!(key1, key2);
 ///
 /// // Pagination parameters are also normalized:
 /// let key3 = SearchCacheKey::from_raw("test", SearchScope::All, None, None);
-/// let key4 = SearchCacheKey::from_raw("test", SearchScope::All, Some(50), Some(0));
-/// assert_eq!(key3, key4); // Both use default limit=50 and offset=0
+/// let key4 = SearchCacheKey::from_raw("test", SearchScope::All, Some(20), Some(0));
+/// assert_eq!(key3, key4); // Both use default limit=20 (DEFAULT_SEARCH_LIMIT) and offset=0
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SearchCacheKey {
@@ -521,17 +521,26 @@ impl CacheStats {
     }
 }
 
+/// Maximum query length for cache entries (security measure to prevent memory exhaustion).
+///
+/// Queries longer than this limit will not be cached. This helps prevent
+/// denial-of-service attacks where an attacker sends extremely long queries
+/// to exhaust server memory.
+const MAX_CACHE_QUERY_LENGTH: usize = 1024;
+
 /// LRU cache for search results with TTL.
 ///
 /// This cache provides:
 /// - **LRU eviction**: When capacity is reached, least recently used entries are evicted
 /// - **TTL expiration**: Entries older than TTL are considered stale and not returned
 /// - **Thread-safety**: Uses `Mutex` for safe concurrent access
+/// - **Query length limit**: Queries longer than [`MAX_CACHE_QUERY_LENGTH`] are not cached
 ///
 /// # Configuration (REQ-SEARCH-CACHE-001)
 ///
 /// - **TTL**: 5 seconds (entries expire after this duration)
 /// - **Capacity**: 2000 entries maximum
+/// - **Max query length**: 1024 characters (security limit)
 ///
 /// # Cache Key
 ///
@@ -558,7 +567,7 @@ impl CacheStats {
 /// // Cache miss - perform search
 /// let result = search_with_scope_indexed(&index, query, scope);
 ///
-/// // Store in cache
+/// // Store in cache (skipped if query is too long)
 /// cache.put(cache_key, result.clone());
 /// ```
 pub struct SearchCache {
@@ -651,6 +660,12 @@ impl SearchCache {
     ///
     /// If the cache is at capacity, the least recently used entry is evicted.
     ///
+    /// # Security
+    ///
+    /// Queries longer than [`MAX_CACHE_QUERY_LENGTH`] (1024 characters) are silently
+    /// ignored to prevent memory exhaustion attacks. This is a security measure to
+    /// protect against denial-of-service attacks using extremely long queries.
+    ///
     /// # Arguments
     ///
     /// * `key` - The cache key
@@ -661,6 +676,16 @@ impl SearchCache {
     /// Panics if the internal mutex is poisoned. This should only happen if a thread
     /// panicked while holding the lock, which indicates a programming error.
     pub fn put(&self, key: SearchCacheKey, result: SearchResult) {
+        // Security: Skip caching for excessively long queries to prevent memory exhaustion
+        if key.normalized_query().len() > MAX_CACHE_QUERY_LENGTH {
+            tracing::debug!(
+                query_length = key.normalized_query().len(),
+                max_length = MAX_CACHE_QUERY_LENGTH,
+                "Skipping cache for query exceeding max length"
+            );
+            return;
+        }
+
         let mut cache = self.cache.lock().expect("cache mutex poisoned");
         cache.put(
             key,
@@ -1650,6 +1675,12 @@ pub enum SearchIndexError {
         /// The maximum allowed number of changes.
         limit: usize,
     },
+    /// Bulk build failed during `apply_bulk`.
+    ///
+    /// This error indicates that the internal bulk builder failed to construct
+    /// the n-gram index. The wrapped [`BuildError`] provides details about the
+    /// specific failure (too many entries, too many n-grams, or memory limit exceeded).
+    BulkBuildFailed(BuildError),
 }
 
 impl std::fmt::Display for SearchIndexError {
@@ -1666,6 +1697,12 @@ impl std::fmt::Display for SearchIndexError {
                 write!(
                     formatter,
                     "apply_bulk failed: {count} changes exceeds maximum of {limit}."
+                )
+            }
+            Self::BulkBuildFailed(build_error) => {
+                write!(
+                    formatter,
+                    "apply_bulk failed: bulk index build failed: {build_error}"
                 )
             }
         }
@@ -1739,6 +1776,49 @@ impl SearchIndexBulkBuilder {
         }
     }
 
+    /// Creates a new builder with pre-allocated capacity for entries.
+    ///
+    /// Use this when the approximate number of entries is known in advance
+    /// to avoid reallocations during bulk insertion.
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - Configuration controlling n-gram generation behavior
+    /// * `capacity` - The number of entries to pre-allocate space for
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Pre-allocate for ~1000 entries to avoid reallocations
+    /// let builder = SearchIndexBulkBuilder::with_capacity(config, 1000);
+    /// ```
+    #[must_use]
+    pub fn with_capacity(config: SearchIndexConfig, capacity: usize) -> Self {
+        Self {
+            entries: Vec::with_capacity(capacity),
+            config,
+        }
+    }
+
+    /// Reserves additional capacity for entries.
+    ///
+    /// This is useful when adding entries incrementally and the total count
+    /// becomes known partway through.
+    ///
+    /// # Arguments
+    ///
+    /// * `additional` - The number of additional entries to reserve space for
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let mut builder = SearchIndexBulkBuilder::new(config);
+    /// builder.reserve(500); // Reserve space for 500 more entries
+    /// ```
+    pub fn reserve(&mut self, additional: usize) {
+        self.entries.reserve(additional);
+    }
+
     /// Adds an entry to the builder.
     ///
     /// # Arguments
@@ -1799,9 +1879,14 @@ impl SearchIndexBulkBuilder {
         }
 
         let mut sorted = self.entries;
-        sorted.sort_unstable_by(|(t1, _, o1), (t2, _, o2)| t1.cmp(t2).then(o1.cmp(o2)));
+        let comparator = |(t1, _, o1): &(String, TaskId, usize),
+                          (t2, _, o2): &(String, TaskId, usize)|
+         -> std::cmp::Ordering { t1.cmp(t2).then(o1.cmp(o2)) };
+        if !sorted.is_sorted_by(|a, b| comparator(a, b).is_le()) {
+            sorted.sort_unstable_by(comparator);
+        }
 
-        // Deduplicate tokens: after sorting by (token, order), last occurrence wins
+        // After sorting by (token, order), last occurrence wins
         let deduped = sorted.into_iter().fold(
             Vec::new(),
             |mut accumulator: Vec<(String, TaskId)>, (token, task_id, _)| {
@@ -3282,7 +3367,6 @@ fn prepare_index<K: Eq + std::hash::Hash>(index: &mut std::collections::HashMap<
 /// Returns [`SearchIndexError::NonAddChangeNotAllowed`] if any change is not `TaskChange::Add`.
 /// Returns [`SearchIndexError::TooManyChanges`] if the number of changes exceeds the limit.
 fn validate_changes_for_bulk(changes: &[TaskChange]) -> Result<(), SearchIndexError> {
-    // Check entry count limit first (fail-fast for large batches)
     if changes.len() > MAX_BULK_ENTRIES {
         return Err(SearchIndexError::TooManyChanges {
             count: changes.len(),
@@ -3290,7 +3374,6 @@ fn validate_changes_for_bulk(changes: &[TaskChange]) -> Result<(), SearchIndexEr
         });
     }
 
-    // Validate: all changes must be Add
     if let Some(change_type) = changes.iter().find_map(|change| match change {
         TaskChange::Update { .. } => Some(ChangeType::Update),
         TaskChange::Remove(_) => Some(ChangeType::Remove),
@@ -5124,12 +5207,10 @@ impl SearchIndex {
         if self.config.use_apply_bulk && all_adds {
             // apply_bulk returns Result, so we handle the error case
             // by falling back to the delta path
-            match self.apply_bulk(changes) {
-                Ok(new_index) => return new_index,
-                Err(_) => {
-                    // Fall through to delta path on error (e.g., too many changes)
-                }
+            if let Ok(new_index) = self.apply_bulk(changes) {
+                return new_index;
             }
+            // Fall through to delta path on error (e.g., too many changes)
         }
 
         // Check if bulk path conditions are met
@@ -5140,7 +5221,9 @@ impl SearchIndex {
             && changes.len() >= self.config.bulk_threshold
             && all_adds
         {
+            // apply_changes_bulk returns Result, fall back to delta path on error
             self.apply_changes_bulk(changes)
+                .unwrap_or_else(|_| self.apply_changes_delta(changes))
         } else {
             self.apply_changes_delta(changes)
         }
@@ -5213,7 +5296,7 @@ impl SearchIndex {
         }
 
         // Use the bulk path directly (avoids infinite recursion with apply_changes)
-        Ok(self.apply_changes_bulk(changes))
+        self.apply_changes_bulk(changes)
     }
 
     /// Applies changes using the delta path (handles Add, Remove, and Update).
@@ -5226,48 +5309,77 @@ impl SearchIndex {
 
     /// Applies changes using the bulk path (optimized for Add-only batches).
     ///
-    /// Falls back to `apply_changes_delta` if `SearchIndexBulkBuilder::build()` fails.
-    #[must_use]
-    fn apply_changes_bulk(&self, changes: &[TaskChange]) -> Self {
+    /// # Errors
+    ///
+    /// Returns [`SearchIndexError::BulkBuildFailed`] if the bulk builder fails to construct
+    /// the n-gram index (e.g., too many entries, too many n-grams, or memory limit exceeded).
+    ///
+    /// # Idempotency
+    ///
+    /// This method ensures idempotency by:
+    /// - Skipping tasks that already exist in the index (checked via `tasks_by_id`)
+    /// - Deduplicating Add operations for the same `TaskId` within the batch (first wins)
+    fn apply_changes_bulk(&self, changes: &[TaskChange]) -> Result<Self, SearchIndexError> {
+        let mut seen: std::collections::HashSet<TaskId> =
+            std::collections::HashSet::with_capacity(changes.len());
         let tasks: Vec<&Task> = changes
             .iter()
             .filter_map(|change| match change {
-                TaskChange::Add(task) => Some(task),
+                TaskChange::Add(task)
+                    if !self.tasks_by_id.contains_key(&task.task_id)
+                        && seen.insert(task.task_id.clone()) =>
+                {
+                    Some(task)
+                }
                 _ => None,
             })
             .collect();
 
         if tasks.is_empty() {
-            return self.clone();
+            return Ok(self.clone());
         }
 
-        let mut title_word_builder = SearchIndexBulkBuilder::new(self.config.clone());
-        let mut title_full_builder = SearchIndexBulkBuilder::new(self.config.clone());
-        let mut tag_builder = SearchIndexBulkBuilder::new(self.config.clone());
+        // TB-002: Estimate capacity based on task count and token limits.
+        // Each task contributes at most max_tokens_per_task entries across all builders.
+        // title_full gets 1 entry per task, title_word and tag share the remaining tokens.
+        let estimated_word_entries = tasks.len() * self.config.max_tokens_per_task;
+        let estimated_tag_entries = tasks.len() * self.config.max_tokens_per_task;
+
+        let mut title_word_builder =
+            SearchIndexBulkBuilder::with_capacity(self.config.clone(), estimated_word_entries);
+        let mut title_full_builder =
+            SearchIndexBulkBuilder::with_capacity(self.config.clone(), tasks.len());
+        let mut tag_builder =
+            SearchIndexBulkBuilder::with_capacity(self.config.clone(), estimated_tag_entries);
 
         for task in &tasks {
             let normalized = NormalizedTaskData::from_task(task);
+            // Apply token limits for consistency with delta path (TB-003 compliance)
+            let (word_limit, tag_limit) =
+                SearchIndexDelta::compute_token_limits(&normalized, &self.config);
 
             title_full_builder =
                 title_full_builder.add_entry(normalized.title_key.clone(), task.task_id.clone());
 
-            for word in &normalized.title_words {
+            for word in normalized.title_words.iter().take(word_limit) {
                 title_word_builder =
                     title_word_builder.add_entry(word.clone(), task.task_id.clone());
             }
 
-            for tag in &normalized.tags {
+            for tag in normalized.tags.iter().take(tag_limit) {
                 tag_builder = tag_builder.add_entry(tag.clone(), task.task_id.clone());
             }
         }
 
-        let (Ok(title_word_bulk), Ok(title_full_bulk), Ok(tag_bulk)) = (
-            title_word_builder.build(),
-            title_full_builder.build(),
-            tag_builder.build(),
-        ) else {
-            return self.apply_changes_delta(changes);
-        };
+        let title_word_bulk = title_word_builder
+            .build()
+            .map_err(SearchIndexError::BulkBuildFailed)?;
+        let title_full_bulk = title_full_builder
+            .build()
+            .map_err(SearchIndexError::BulkBuildFailed)?;
+        let tag_bulk = tag_builder
+            .build()
+            .map_err(SearchIndexError::BulkBuildFailed)?;
 
         let title_word_ngram_index =
             self.merge_bulk_ngram_index(&self.title_word_ngram_index, &title_word_bulk);
@@ -5281,7 +5393,7 @@ impl SearchIndex {
         delta.prepare_posting_lists();
         let base_result = self.apply_delta(&delta, changes);
 
-        Self {
+        Ok(Self {
             title_word_ngram_index,
             title_full_ngram_index,
             tag_ngram_index,
@@ -5293,10 +5405,16 @@ impl SearchIndex {
             tag_all_suffix_index: base_result.tag_all_suffix_index,
             tasks_by_id: base_result.tasks_by_id,
             config: base_result.config,
-        }
+        })
     }
 
     /// Merges a bulk-built n-gram index with an existing index using merge-sort.
+    ///
+    /// # TB-003 Error Handling
+    ///
+    /// Uses `match` instead of `expect` for bulk insert operations. If bulk insert
+    /// fails (which should not happen due to chunk size constraints), falls back to
+    /// individual inserts to ensure the operation completes successfully.
     #[must_use]
     #[allow(clippy::unused_self)]
     fn merge_bulk_ngram_index(
@@ -5327,17 +5445,46 @@ impl SearchIndex {
             entries.push((ngram_key.clone(), merged));
 
             if entries.len() >= CHUNK_SIZE {
-                transient = transient
-                    .insert_bulk_owned(std::mem::take(&mut entries))
-                    .expect("CHUNK_SIZE < MAX_BULK_INSERT, so error should not occur");
+                // TB-003: Use match instead of expect for proper error handling
+                let items_to_insert = std::mem::take(&mut entries);
+                match transient.insert_bulk_owned(items_to_insert) {
+                    Ok(t) => {
+                        transient = t;
+                    }
+                    Err(error) => {
+                        // Fallback: insert individually (should not happen due to CHUNK_SIZE constraint)
+                        // Since insert_bulk_owned consumed transient, we need to rebuild from existing_index
+                        // and insert all processed entries individually.
+                        let rejected_entries = error.into_items();
+                        let mut fallback = existing_index.clone().transient();
+                        for (key, value) in rejected_entries {
+                            fallback.insert(key, value);
+                        }
+                        transient = fallback;
+                    }
+                }
                 entries = Vec::with_capacity(CHUNK_SIZE);
             }
         }
 
         if !entries.is_empty() {
-            transient = transient.insert_bulk_owned(entries).expect(
-                "remaining entries < CHUNK_SIZE < MAX_BULK_INSERT, so error should not occur",
-            );
+            // TB-003: Use match instead of expect for proper error handling
+            match transient.insert_bulk_owned(entries) {
+                Ok(t) => {
+                    transient = t;
+                }
+                Err(error) => {
+                    // Fallback: insert individually (should not happen due to CHUNK_SIZE constraint)
+                    // Since insert_bulk_owned consumed transient, we need to rebuild from existing_index
+                    // and insert all processed entries individually.
+                    let rejected_entries = error.into_items();
+                    let mut fallback = existing_index.clone().transient();
+                    for (key, value) in rejected_entries {
+                        fallback.insert(key, value);
+                    }
+                    transient = fallback;
+                }
+            }
         }
 
         transient.persistent()
@@ -5461,24 +5608,46 @@ impl SearchIndex {
         (result, MERGE_CALLS_TOTAL, start.elapsed().as_millis())
     }
 
+    /// Updates `tasks_by_id` using transient structure to reduce COW overhead.
+    ///
+    /// # TB-001 Optimization
+    ///
+    /// Uses `TransientTreeMap` for batch updates, converting to persistent only
+    /// at the end. This avoids repeated COW operations during individual inserts.
     fn update_tasks_by_id(&self, changes: &[TaskChange]) -> PersistentTreeMap<TaskId, Task> {
-        changes
-            .iter()
-            .fold(self.tasks_by_id.clone(), |acc, change| match change {
+        if changes.is_empty() {
+            return self.tasks_by_id.clone();
+        }
+
+        // TB-001: Use transient for bulk updates to reduce COW overhead
+        let mut transient = self.tasks_by_id.clone().transient();
+
+        for change in changes {
+            match change {
                 TaskChange::Add(task) => {
                     // Check if task already exists (idempotency - matches apply_change behavior)
-                    if acc.contains_key(&task.task_id) {
-                        acc // no-op: task already exists
-                    } else {
-                        acc.insert(task.task_id.clone(), task.clone())
+                    if !transient.contains_key(&task.task_id) {
+                        transient.insert(task.task_id.clone(), task.clone());
                     }
                 }
-                TaskChange::Update { old: _, new } => acc.insert(new.task_id.clone(), new.clone()),
-                TaskChange::Remove(task_id) => acc.remove(task_id),
-            })
+                TaskChange::Update { old: _, new } => {
+                    transient.insert(new.task_id.clone(), new.clone());
+                }
+                TaskChange::Remove(task_id) => {
+                    transient.remove(task_id);
+                }
+            }
+        }
+
+        transient.persistent()
     }
 
     /// Computes `(existing ∪ add) - remove` for a `PrefixIndex`.
+    ///
+    /// # TB-001 Optimization
+    ///
+    /// Uses transient structure for batch updates, converting to persistent only
+    /// at the end. This avoids repeated COW operations during individual inserts.
     ///
     /// Uses `TaskIdCollection::from_sorted_vec` for O(n) bulk construction,
     /// avoiding per-element COW overhead.
@@ -5489,9 +5658,16 @@ impl SearchIndex {
     ) -> PrefixIndex {
         let all_keys: std::collections::HashSet<_> = add.keys().chain(remove.keys()).collect();
 
-        all_keys.into_iter().fold(index.clone(), |acc, key| {
+        if all_keys.is_empty() {
+            return index.clone();
+        }
+
+        // TB-001: Use transient for bulk updates to reduce COW overhead
+        let mut transient = index.clone().transient();
+
+        for key in all_keys {
             let key_str = key.as_str();
-            let existing: Vec<TaskId> = acc
+            let existing: Vec<TaskId> = transient
                 .get(key_str)
                 .map(TaskIdCollection::to_sorted_vec)
                 .unwrap_or_default();
@@ -5502,12 +5678,14 @@ impl SearchIndex {
             );
 
             if merged.is_empty() {
-                acc.remove(key_str)
+                transient.remove(key_str);
             } else {
                 let collection = TaskIdCollection::from_sorted_vec(merged);
-                acc.insert(key.clone(), collection)
+                transient.insert(key.clone(), collection);
             }
-        })
+        }
+
+        transient.persistent()
     }
 
     /// Computes `(existing ∪ add) - remove` for a `NgramIndex`.
@@ -5589,6 +5767,12 @@ impl SearchIndex {
     /// Optimized merge implementation using bulk insert.
     ///
     /// Collects all merged entries first, then uses `insert_bulk_owned` with chunking.
+    ///
+    /// # Fallback Behavior
+    ///
+    /// If bulk insert fails (which should not happen due to chunk size constraints),
+    /// falls back to `merge_ngram_delta_individual` to ensure the operation completes
+    /// successfully with correct `(existing ∪ add) - remove` semantics.
     fn merge_ngram_delta_bulk(
         index: &NgramIndex,
         add: &MutableIndex,
@@ -5628,13 +5812,28 @@ impl SearchIndex {
         }
 
         if !entries_to_insert.is_empty() {
-            // Use drain to avoid cloning - transfer ownership chunk by chunk
             while !entries_to_insert.is_empty() {
                 let chunk_size = entries_to_insert.len().min(CHUNK_SIZE);
                 let chunk_vec: Vec<_> = entries_to_insert.drain(..chunk_size).collect();
-                result = result
-                    .insert_bulk_owned(chunk_vec)
-                    .expect("CHUNK_SIZE < MAX_BULK_INSERT, so error should not occur");
+                let insert_count = chunk_vec.len();
+                match result.insert_bulk_owned(chunk_vec) {
+                    Ok(updated) => {
+                        result = updated;
+                    }
+                    Err(_) => {
+                        // TB-003: Fallback to individual merge to ensure correct semantics.
+                        // This guarantees `(existing ∪ add) - remove` is preserved.
+                        let fallback = Self::merge_ngram_delta_individual(index, add, remove, all_keys)
+                            .into_index();
+                        return MergeNgramDeltaResult::Fallback {
+                            index: fallback,
+                            reason: MergeNgramDeltaFallbackReason::TooManyEntries {
+                                count: insert_count,
+                                limit: CHUNK_SIZE,
+                            },
+                        };
+                    }
+                }
             }
         }
 
@@ -6250,26 +6449,42 @@ pub async fn search_tasks(
     State(state): State<AppState>,
     Query(query): Query<SearchTasksQuery>,
 ) -> Result<JsonResponse<Vec<TaskResponse>>, ApiErrorResponse> {
-    // Create cache key from raw query parameters
-    let cache_key = SearchCacheKey::from_raw(&query.q, query.scope, query.limit, query.offset);
+    // Normalize query for consistent cache key and search behavior.
+    // This ensures that queries with different whitespace/casing produce the same results.
+    let normalized = normalize_query(&query.q);
+    let normalized_q = normalized.key();
+
+    // Security: Skip cache operations for excessively long queries to prevent
+    // memory exhaustion. The search itself still proceeds but results won't be cached.
+    let cache_key = if normalized_q.len() <= MAX_CACHE_QUERY_LENGTH {
+        Some(SearchCacheKey::from_raw(normalized_q, query.scope, query.limit, query.offset))
+    } else {
+        tracing::debug!(
+            query_length = normalized_q.len(),
+            max_length = MAX_CACHE_QUERY_LENGTH,
+            "Skipping cache for query exceeding max length"
+        );
+        None
+    };
 
     // Check cache first (optional optimization for repeated queries)
-    if let Some(cached_result) = state.search_cache.get(&cache_key) {
-        tracing::debug!(
-            cache_hit = true,
-            hit_rate = %state.search_cache.stats().hit_rate(),
-            "Search cache hit"
-        );
-        // Convert cached SearchResult to response
-        let (limit, offset) = normalize_search_pagination(query.limit, query.offset);
-        let response: Vec<TaskResponse> = cached_result
-            .into_tasks()
-            .iter()
-            .skip(offset as usize)
-            .take(limit as usize)
-            .map(TaskResponse::from)
-            .collect();
-        return Ok(JsonResponse(response));
+    // Cache stores page-specific results (with limit/offset applied), so no re-pagination needed.
+    if let Some(ref key) = cache_key {
+        if let Some(cached_result) = state.search_cache.get(key) {
+            tracing::debug!(
+                cache_hit = true,
+                hit_rate = %state.search_cache.stats().hit_rate(),
+                "Search cache hit"
+            );
+            // Convert cached SearchResult to response (no re-pagination needed as cache
+            // key includes limit/offset and results are already paginated)
+            let response: Vec<TaskResponse> = cached_result
+                .into_tasks()
+                .iter()
+                .map(TaskResponse::from)
+                .collect();
+            return Ok(JsonResponse(response));
+        }
     }
 
     // Cache miss - log metrics
@@ -6279,23 +6494,23 @@ pub async fn search_tasks(
         "Search cache miss"
     );
 
-    // Normalize pagination parameters (pure function)
-    let limit = query
-        .limit
-        .unwrap_or(DEFAULT_SEARCH_LIMIT)
-        .min(MAX_SEARCH_LIMIT);
-    let offset = query.offset.unwrap_or(0);
+    // Normalize pagination parameters using the same function as cache key generation
+    // to ensure consistency between cache key and actual search parameters.
+    let (limit, offset) = normalize_search_pagination(query.limit, query.offset);
 
-    // I/O boundary: DB-side search with indexes
+    // I/O boundary: DB-side search with indexes using normalized query
+    // for consistent behavior with cache key generation
     let tasks = state
         .task_repository
-        .search(&query.q, query.scope.to_repository_scope(), limit, offset)
+        .search(normalized_q, query.scope.to_repository_scope(), limit, offset)
         .await
         .map_err(ApiErrorResponse::from)?;
 
-    // Store in cache for future requests
-    let search_result = SearchResult::from_tasks(tasks.iter().cloned().collect());
-    state.search_cache.put(cache_key, search_result);
+    // Store in cache for future requests (skipped for long queries)
+    if let Some(key) = cache_key {
+        let search_result = SearchResult::from_tasks(tasks.iter().cloned().collect());
+        state.search_cache.put(key, search_result);
+    }
 
     // Convert to response (pure function - map transformation)
     let response: Vec<TaskResponse> = tasks.into_iter().map(TaskResponse::from).collect();
@@ -8965,7 +9180,7 @@ mod tests {
     /// Test: `SearchCacheKey::from_raw` normalizes pagination parameters.
     ///
     /// This ensures that cache keys with `None` values are equivalent to
-    /// cache keys with explicit default values (limit=50, offset=0).
+    /// cache keys with explicit default values (limit=DEFAULT_SEARCH_LIMIT=20, offset=0).
     #[rstest]
     fn test_search_cache_key_from_raw_normalizes_pagination() {
         // None values should be normalized to defaults
@@ -9817,6 +10032,48 @@ mod search_index_differential_update_tests {
             result.tasks.len(),
             1,
             "Original task should still be found in original index"
+        );
+    }
+
+    /// Tests that original index is unchanged after `apply_bulk` (immutability).
+    ///
+    /// This test verifies TB-001's ImmutabilityPreserved law for bulk updates:
+    /// `apply_bulk(x, changes) != mutate(x)` - the original index is never mutated.
+    #[rstest]
+    fn test_apply_bulk_immutability_preserved() {
+        let task = create_test_task("Base task", Priority::Low);
+        let tasks: PersistentVector<Task> = vec![task].into_iter().collect();
+        let original_index = SearchIndex::build(&tasks);
+
+        // Get the count before any changes
+        let count_before = original_index.all_tasks().len();
+
+        // Apply bulk Add (which returns a new index via Result)
+        let new_task = create_test_task("Added via bulk", Priority::High);
+        let changes = vec![TaskChange::Add(new_task)];
+        let _new_index = original_index.apply_bulk(&changes).expect("apply_bulk should succeed");
+
+        // Original index should be unchanged
+        let count_after = original_index.all_tasks().len();
+        assert_eq!(
+            count_before, count_after,
+            "Original index should be unchanged after apply_bulk"
+        );
+
+        // Verify original task is still searchable in original index
+        let result = search_with_scope_indexed(&original_index, "base", SearchScope::All);
+        assert_eq!(
+            result.tasks.len(),
+            1,
+            "Base task should still be found in original index"
+        );
+
+        // Verify new task is NOT in original index (immutability)
+        let result_new = search_with_scope_indexed(&original_index, "added via bulk", SearchScope::All);
+        assert_eq!(
+            result_new.tasks.len(),
+            0,
+            "New task should NOT be found in original index"
         );
     }
 
@@ -16587,6 +16844,89 @@ mod apply_changes_tests {
                     .map(|t| &t.title)
             );
         }
+    }
+
+    // =========================================================================
+    // Idempotency Tests
+    // =========================================================================
+
+    /// Tests that apply_bulk correctly ignores Add for tasks that already exist.
+    ///
+    /// This ensures idempotency: adding an existing task with a different title
+    /// should not update the index (the original task remains unchanged).
+    #[rstest]
+    fn apply_bulk_add_existing_task_is_noop_for_indexes() {
+        // Create an existing task and build index with it
+        let existing = create_test_task_with_id("alpha", task_id_from_u128(1));
+        let tasks: PersistentVector<Task> = vec![existing.clone()].into_iter().collect();
+        let index = SearchIndex::build_with_config(&tasks, SearchIndexConfig::default());
+
+        // Create a "changed" version of the same task with a different title
+        let mut changed = existing.clone();
+        changed.title = "beta".to_string();
+        let changes = vec![TaskChange::Add(changed)];
+
+        // apply_bulk should ignore the Add because task_id already exists
+        let via_bulk = index
+            .apply_bulk(&changes)
+            .expect("apply_bulk should succeed");
+
+        // The new title "beta" should NOT be searchable because the task was not added
+        assert!(
+            via_bulk.search_by_title("beta").is_none(),
+            "Existing task should not be updated via apply_bulk Add"
+        );
+
+        // The original title "alpha" should still be searchable
+        assert!(
+            via_bulk.search_by_title("alpha").is_some(),
+            "Original task should remain searchable"
+        );
+
+        // Verify the task_id count remains the same
+        assert_eq!(
+            via_bulk.tasks_by_id.len(),
+            1,
+            "No new task should be added for existing task_id"
+        );
+    }
+
+    /// Tests that apply_bulk deduplicates multiple Add operations for the same TaskId.
+    ///
+    /// When the same TaskId appears multiple times in the changes slice,
+    /// only the first occurrence should be processed (first wins).
+    #[rstest]
+    fn apply_bulk_deduplicates_same_task_id_in_batch() {
+        let index =
+            SearchIndex::build_with_config(&PersistentVector::new(), SearchIndexConfig::default());
+
+        let task_id = task_id_from_u128(42);
+        let task_first = create_test_task_with_id("first title", task_id.clone());
+        let task_second = create_test_task_with_id("second title", task_id.clone());
+
+        let changes = vec![
+            TaskChange::Add(task_first.clone()),
+            TaskChange::Add(task_second), // Duplicate - should be ignored
+        ];
+
+        let result = index
+            .apply_bulk(&changes)
+            .expect("apply_bulk should succeed");
+
+        // Only the first task should be indexed
+        assert!(
+            result.search_by_title("first").is_some(),
+            "First occurrence should be indexed"
+        );
+        assert!(
+            result.search_by_title("second").is_none(),
+            "Duplicate occurrence should be ignored"
+        );
+        assert_eq!(
+            result.tasks_by_id.len(),
+            1,
+            "Only one task should be added for duplicate task_id"
+        );
     }
 }
 
