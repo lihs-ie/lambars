@@ -19,6 +19,14 @@ local fallback_request_count = 0
 local suppressed_request_count = 0
 local is_backoff_request, is_suppressed_request, is_fallback_request = false, false, false
 
+-- REQ-MEASURE-401: リクエストカテゴリの追加
+request_categories = {
+    executed = 0,
+    backoff = 0,
+    suppressed = 0,
+    fallback = 0
+}
+
 local error_tracker = pcall(require, "error_tracker") and require("error_tracker") or nil
 local benchmark_initialized = false
 
@@ -124,6 +132,7 @@ local function fallback_request()
     last_request_is_update = false
     is_fallback_request = true
     fallback_request_count = fallback_request_count + 1
+    request_categories.fallback = request_categories.fallback + 1
     return wrk and wrk.format and wrk.format("GET", "/health") or ""
 end
 
@@ -133,6 +142,7 @@ function request()
         if suppressed == true or suppressed == "true" then
             is_suppressed_request = true
             suppressed_request_count = suppressed_request_count + 1
+            request_categories.suppressed = request_categories.suppressed + 1
             return wrk and wrk.format and wrk.format("GET", "/health") or ""
         end
     end
@@ -142,6 +152,7 @@ function request()
         backoff_skip_counter = backoff_skip_counter + 1
         is_backoff_request = true
         backoff_request_count = backoff_request_count + 1
+        request_categories.backoff = request_categories.backoff + 1
         return wrk and wrk.format and wrk.format("GET", "/health") or ""
     end
     backoff_skip_counter = 0
@@ -208,6 +219,7 @@ function response(status, headers, body)
     end
 
     common.track_response(status, headers)
+    request_categories.executed = request_categories.executed + 1
     if error_tracker then error_tracker.track_thread_response(status) end
     if not last_request_is_update then return end
 
