@@ -1,10 +1,9 @@
--- Benchmark: POST /tasks/bulk
-
 package.path = package.path .. ";scripts/?.lua"
 local common = require("common")
 
 local counter = 0
 local batch_sizes = {10, 50, 100}
+local benchmark_initialized = false
 
 function request()
     counter = counter + 1
@@ -31,14 +30,19 @@ function request()
 end
 
 function init(args)
-    common.init_benchmark({
-        scenario_name = "tasks_bulk",
-        output_format = "json"
-    })
+    common.init_benchmark({scenario_name = "tasks_bulk", output_format = "json"})
 end
 
 local handlers = common.create_threaded_handlers("tasks_bulk")
-setup = handlers.setup
+
+function setup(thread)
+    if not benchmark_initialized then
+        common.init_benchmark({scenario_name = "tasks_bulk", output_format = "json"})
+        benchmark_initialized = true
+    end
+    handlers.setup(thread)
+end
+
 response = handlers.response
 
 function done(summary, latency, requests)
