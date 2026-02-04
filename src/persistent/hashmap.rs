@@ -2748,6 +2748,58 @@ impl std::fmt::Display for BulkInsertError {
 
 impl std::error::Error for BulkInsertError {}
 
+/// Result type for [`TransientHashMap::insert_bulk_with_metrics`].
+///
+/// Contains statistics about the bulk insertion operation, including counts of
+/// new insertions, updates, and the values that were replaced.
+///
+/// # Type Parameter
+///
+/// * `V` - The value type. Only values (not keys) are stored in `replaced_values`
+///   to avoid the cost of cloning keys.
+///
+/// # Example
+///
+/// ```rust
+/// use lambars::persistent::{TransientHashMap, BulkInsertResult};
+///
+/// let mut transient: TransientHashMap<String, i32> = TransientHashMap::new();
+/// transient.insert("existing".to_string(), 100);
+///
+/// let items = vec![
+///     ("existing".to_string(), 200), // Update
+///     ("new".to_string(), 300),      // Insert
+/// ];
+///
+/// let result = transient.insert_bulk_with_metrics(items).unwrap();
+/// assert_eq!(result.inserted_count, 1);  // "new"
+/// assert_eq!(result.updated_count, 1);   // "existing"
+/// assert_eq!(result.replaced_values, vec![100]); // Old value of "existing"
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BulkInsertResult<V> {
+    /// Number of new keys inserted (keys that did not exist before).
+    pub inserted_count: usize,
+    /// Number of existing keys updated (keys that already existed).
+    pub updated_count: usize,
+    /// Values that were replaced during updates.
+    ///
+    /// Only values are stored (not keys) to avoid unnecessary cloning.
+    /// The order of values in this vector corresponds to the order of
+    /// updates encountered during the bulk operation.
+    pub replaced_values: Vec<V>,
+}
+
+impl<V> Default for BulkInsertResult<V> {
+    fn default() -> Self {
+        Self {
+            inserted_count: 0,
+            updated_count: 0,
+            replaced_values: Vec::new(),
+        }
+    }
+}
+
 /// Error type for [`TransientHashMap::insert_bulk_owned`] that includes the original items.
 ///
 /// This error type allows callers to recover the original items that could not be inserted,
@@ -4558,6 +4610,93 @@ impl<K: Clone + Hash + Eq, V: Clone> TransientHashMap<K, V> {
         }
 
         Ok(self)
+    }
+
+    /// Performs a bulk insert with detailed metrics collection.
+    ///
+    /// This method is similar to [`insert_bulk`](Self::insert_bulk) but returns
+    /// statistics about the operation, including counts of new insertions,
+    /// updates, and the values that were replaced.
+    ///
+    /// # Arguments
+    ///
+    /// * `items` - An iterator of key-value pairs to insert. Must implement
+    ///   [`ExactSizeIterator`] to allow pre-validation of entry count.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(BulkInsertResult<V>)` - On success, contains insertion metrics
+    /// * `Err(BulkInsertError::TooManyEntries)` - If item count exceeds [`MAX_BULK_INSERT`]
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BulkInsertError::TooManyEntries`] if the number of items exceeds
+    /// [`MAX_BULK_INSERT`] (100,000 entries). To handle large datasets, chunk the
+    /// input into smaller batches of 10,000 entries.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use lambars::persistent::TransientHashMap;
+    ///
+    /// let mut transient: TransientHashMap<String, i32> = TransientHashMap::new();
+    /// transient.insert("existing".to_string(), 100);
+    ///
+    /// let items = vec![
+    ///     ("existing".to_string(), 200),
+    ///     ("new".to_string(), 300),
+    /// ];
+    ///
+    /// let result = transient.insert_bulk_with_metrics(items).unwrap();
+    /// assert_eq!(result.inserted_count, 1);
+    /// assert_eq!(result.updated_count, 1);
+    /// assert_eq!(result.replaced_values, vec![100]);
+    /// ```
+    pub fn insert_bulk_with_metrics<I>(
+        &mut self,
+        items: I,
+    ) -> Result<BulkInsertResult<V>, BulkInsertError>
+    where
+        I: IntoIterator<Item = (K, V)>,
+        I::IntoIter: ExactSizeIterator,
+    {
+        let iter = items.into_iter();
+        let count = iter.len();
+
+        if count > MAX_BULK_INSERT {
+            return Err(BulkInsertError::TooManyEntries {
+                count,
+                limit: MAX_BULK_INSERT,
+            });
+        }
+
+        if count == 0 {
+            return Ok(BulkInsertResult::default());
+        }
+
+        self.reserve(count);
+
+        let mut inserted_count = 0;
+        let mut updated_count = 0;
+        let mut replaced_values = Vec::new();
+
+        for (key, value) in iter {
+            match self.insert_without_cow(key, value) {
+                Some(old_value) => {
+                    updated_count += 1;
+                    replaced_values.push(old_value);
+                }
+                None => {
+                    inserted_count += 1;
+                }
+            }
+        }
+
+        Ok(BulkInsertResult {
+            inserted_count,
+            updated_count,
+            replaced_values,
+        })
     }
 
     /// Converts this transient map into a persistent map.
@@ -7412,6 +7551,222 @@ mod transient_hashmap_tests {
             total > initial_total,
             "Expected BitmapNode creations to increase from transient operations: initial={initial_total}, after={total}"
         );
+    }
+
+    // =========================================================================
+    // RUST-001: BulkInsertResult<V> Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_bulk_insert_result_default() {
+        let result: BulkInsertResult<i32> = BulkInsertResult::default();
+        assert_eq!(result.inserted_count, 0);
+        assert_eq!(result.updated_count, 0);
+        assert!(result.replaced_values.is_empty());
+    }
+
+    #[rstest]
+    fn test_bulk_insert_result_debug_clone_eq() {
+        let result1 = BulkInsertResult {
+            inserted_count: 5,
+            updated_count: 3,
+            replaced_values: vec![10, 20, 30],
+        };
+        let result2 = result1.clone();
+
+        // Test Debug
+        let debug_str = format!("{result1:?}");
+        assert!(debug_str.contains("BulkInsertResult"));
+        assert!(debug_str.contains("inserted_count"));
+        assert!(debug_str.contains("updated_count"));
+        assert!(debug_str.contains("replaced_values"));
+
+        // Test Clone and PartialEq
+        assert_eq!(result1, result2);
+
+        // Test inequality
+        let result3 = BulkInsertResult {
+            inserted_count: 10,
+            updated_count: 0,
+            replaced_values: vec![],
+        };
+        assert_ne!(result1, result3);
+    }
+
+    #[rstest]
+    fn test_bulk_insert_result_replaced_values_is_vec_of_values_only() {
+        // Ensure replaced_values is Vec<V>, not Vec<(K, V)>
+        let result: BulkInsertResult<String> = BulkInsertResult {
+            inserted_count: 1,
+            updated_count: 2,
+            replaced_values: vec!["old1".to_string(), "old2".to_string()],
+        };
+
+        // This should compile - replaced_values is Vec<V>
+        let values: Vec<String> = result.replaced_values;
+        assert_eq!(values.len(), 2);
+    }
+
+    // =========================================================================
+    // RUST-002: insert_bulk_with_metrics Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_insert_bulk_with_metrics_empty() {
+        let mut transient: TransientHashMap<String, i32> = TransientHashMap::new();
+        let result = transient
+            .insert_bulk_with_metrics(Vec::<(String, i32)>::new())
+            .expect("empty insert should succeed");
+
+        assert_eq!(result.inserted_count, 0);
+        assert_eq!(result.updated_count, 0);
+        assert!(result.replaced_values.is_empty());
+        assert_eq!(transient.len(), 0);
+    }
+
+    #[rstest]
+    fn test_insert_bulk_with_metrics_all_new() {
+        let mut transient: TransientHashMap<String, i32> = TransientHashMap::new();
+        let items = vec![
+            ("a".to_string(), 1),
+            ("b".to_string(), 2),
+            ("c".to_string(), 3),
+        ];
+
+        let result = transient
+            .insert_bulk_with_metrics(items)
+            .expect("insert should succeed");
+
+        assert_eq!(result.inserted_count, 3);
+        assert_eq!(result.updated_count, 0);
+        assert!(result.replaced_values.is_empty());
+        assert_eq!(transient.len(), 3);
+    }
+
+    #[rstest]
+    fn test_insert_bulk_with_metrics_with_updates() {
+        let mut transient: TransientHashMap<String, i32> = TransientHashMap::new();
+        transient.insert("a".to_string(), 100);
+        transient.insert("b".to_string(), 200);
+
+        let items = vec![
+            ("a".to_string(), 1), // Update: 100 -> 1
+            ("c".to_string(), 3), // New
+            ("b".to_string(), 2), // Update: 200 -> 2
+            ("d".to_string(), 4), // New
+        ];
+
+        let result = transient
+            .insert_bulk_with_metrics(items)
+            .expect("insert should succeed");
+
+        assert_eq!(result.inserted_count, 2); // c, d
+        assert_eq!(result.updated_count, 2); // a, b
+        assert_eq!(result.replaced_values.len(), 2);
+        // replaced_values should contain old values (100, 200) in some order
+        assert!(result.replaced_values.contains(&100));
+        assert!(result.replaced_values.contains(&200));
+        assert_eq!(transient.len(), 4);
+    }
+
+    #[rstest]
+    fn test_insert_bulk_with_metrics_duplicate_keys_in_batch() {
+        let mut transient: TransientHashMap<String, i32> = TransientHashMap::new();
+        let items = vec![
+            ("a".to_string(), 1),
+            ("b".to_string(), 2),
+            ("a".to_string(), 10), // Duplicate - overwrites first
+            ("c".to_string(), 3),
+        ];
+
+        let result = transient
+            .insert_bulk_with_metrics(items)
+            .expect("insert should succeed");
+
+        // First "a" insert: inserted_count++
+        // Second "a" insert: updated_count++, replaced_values += 1
+        assert_eq!(result.inserted_count, 3); // a, b, c
+        assert_eq!(result.updated_count, 1); // a (overwritten)
+        assert_eq!(result.replaced_values.len(), 1);
+        assert_eq!(result.replaced_values[0], 1); // Old value of "a"
+        assert_eq!(transient.get("a"), Some(&10)); // Last value wins
+    }
+
+    #[rstest]
+    fn test_insert_bulk_with_metrics_too_many_entries() {
+        let mut transient: TransientHashMap<usize, usize> = TransientHashMap::new();
+        let items: Vec<(usize, usize)> = (0..(MAX_BULK_INSERT + 100)).map(|i| (i, i)).collect();
+
+        let result = transient.insert_bulk_with_metrics(items);
+
+        match result {
+            Err(BulkInsertError::TooManyEntries { count, limit }) => {
+                // ExactSizeIterator provides exact count, so we get the full count
+                assert_eq!(count, MAX_BULK_INSERT + 100);
+                assert_eq!(limit, MAX_BULK_INSERT);
+            }
+            Ok(_) => panic!("Expected TooManyEntries error"),
+        }
+    }
+
+    #[rstest]
+    fn test_insert_bulk_with_metrics_requires_exact_size_iterator() {
+        // This test verifies the ExactSizeIterator requirement
+        let mut transient: TransientHashMap<i32, i32> = TransientHashMap::new();
+
+        // Vec provides ExactSizeIterator
+        let items: Vec<(i32, i32)> = vec![(1, 1), (2, 2)];
+        let result = transient.insert_bulk_with_metrics(items);
+        assert!(result.is_ok());
+    }
+
+    #[rstest]
+    fn test_insert_bulk_with_metrics_equivalence_with_sequential() {
+        // Property: insert_bulk_with_metrics should produce same map state
+        // as sequential insert_without_cow calls
+        let items: Vec<(String, i32)> = vec![
+            ("a".to_string(), 1),
+            ("b".to_string(), 2),
+            ("a".to_string(), 3), // Duplicate
+            ("c".to_string(), 4),
+        ];
+
+        // Via insert_bulk_with_metrics
+        let mut via_bulk = TransientHashMap::new();
+        let _ = via_bulk.insert_bulk_with_metrics(items.clone());
+        let via_bulk = via_bulk.persistent();
+
+        // Via sequential insert_without_cow
+        let mut via_sequential = TransientHashMap::new();
+        for (key, value) in items {
+            via_sequential.insert_without_cow(key, value);
+        }
+        let via_sequential = via_sequential.persistent();
+
+        // Both should have same entries
+        assert_eq!(via_bulk.len(), via_sequential.len());
+        for (key, value) in &via_bulk {
+            assert_eq!(via_sequential.get(key), Some(value));
+        }
+    }
+
+    #[rstest]
+    fn test_insert_bulk_with_metrics_large_batch() {
+        let mut transient: TransientHashMap<i32, i32> = TransientHashMap::new();
+        let items: Vec<(i32, i32)> = (0..10_000).map(|i| (i, i * 2)).collect();
+
+        let result = transient
+            .insert_bulk_with_metrics(items)
+            .expect("insert should succeed");
+
+        assert_eq!(result.inserted_count, 10_000);
+        assert_eq!(result.updated_count, 0);
+        assert_eq!(transient.len(), 10_000);
+
+        // Verify contents
+        for i in 0..10_000 {
+            assert_eq!(transient.get(&i), Some(&(i * 2)));
+        }
     }
 }
 
