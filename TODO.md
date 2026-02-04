@@ -2,14 +2,11 @@
 
 ## In Progress
 
-- [GREEN] RUST-008: SearchIndexDelta ソート最適化 - 実装完了
-  - Started: 2026-02-04
-  - Goal: バルク操作時のソートを最小化する
+(なし)
 
 ## Next
 
-- [ ] BENCH-001: SearchIndexConfig への use_apply_bulk フラグ追加
-- [ ] BENCH-002: save_tasks_bulk_optimized の apply_bulk 対応
+(なし)
 
 ## Done
 
@@ -20,3 +17,6 @@
 - [x] RUST-005: NodePool 構造体の実装 (2026-02-04)
 - [x] RUST-006: NodePoolMetrics 構造体の実装 (2026-02-04)
 - [x] RUST-007: insert_bulk_with_pool メソッドの実装 (2026-02-04)
+- [x] RUST-008: SearchIndexDelta ソート最適化 (2026-02-04)
+- [x] BENCH-001: SearchIndexConfig への use_apply_bulk フラグ追加 (2026-02-04)
+- [x] BENCH-002: apply_changes の apply_bulk 対応 (2026-02-04)

@@ -1003,6 +1003,14 @@ pub struct SearchIndexConfig {
     ///
     /// Uses bulk insertion for n-gram index updates instead of individual inserts.
     pub use_merge_ngram_delta_bulk_insert: bool,
+
+    /// Whether to use [`SearchIndex::apply_bulk`] for Add-only changes (Phase 5).
+    ///
+    /// When enabled and all changes are `TaskChange::Add`, the optimized
+    /// `apply_bulk` method is used instead of `apply_changes`.
+    ///
+    /// Default: `false` (existing behavior maintained)
+    pub use_apply_bulk: bool,
 }
 
 impl Default for SearchIndexConfig {
@@ -1017,6 +1025,7 @@ impl Default for SearchIndexConfig {
             use_bulk_builder: true,
             bulk_threshold: 100,
             use_merge_ngram_delta_bulk_insert: true,
+            use_apply_bulk: false,
         }
     }
 }
@@ -1122,6 +1131,13 @@ impl SearchIndexConfigBuilder {
     #[must_use]
     pub const fn use_merge_ngram_delta_bulk_insert(mut self, value: bool) -> Self {
         self.config.use_merge_ngram_delta_bulk_insert = value;
+        self
+    }
+
+    /// Sets whether to use [`SearchIndex::apply_bulk`] for Add-only changes (Phase 5).
+    #[must_use]
+    pub const fn use_apply_bulk(mut self, value: bool) -> Self {
+        self.config.use_apply_bulk = value;
         self
     }
 }
@@ -5053,13 +5069,30 @@ impl SearchIndex {
             return self.clone();
         }
 
+        // Check if all changes are Add operations
+        let all_adds = changes.iter().all(|c| matches!(c, TaskChange::Add(_)));
+
+        // BENCH-002: use_apply_bulk flag takes priority for Add-only changes
+        // This uses the new apply_bulk method which provides better error handling
+        // and is optimized for bulk Add operations.
+        if self.config.use_apply_bulk && all_adds {
+            // apply_bulk returns Result, so we handle the error case
+            // by falling back to the delta path
+            match self.apply_bulk(changes) {
+                Ok(new_index) => return new_index,
+                Err(_) => {
+                    // Fall through to delta path on error (e.g., too many changes)
+                }
+            }
+        }
+
         // Check if bulk path conditions are met
         // Bulk path is only beneficial for Ngram mode because SearchIndexBulkBuilder
         // constructs n-gram indexes. For other infix modes, the delta path is sufficient.
         if self.config.use_bulk_builder
             && self.config.infix_mode == InfixMode::Ngram
             && changes.len() >= self.config.bulk_threshold
-            && changes.iter().all(|c| matches!(c, TaskChange::Add(_)))
+            && all_adds
         {
             self.apply_changes_bulk(changes)
         } else {
@@ -5148,8 +5181,8 @@ impl SearchIndex {
             });
         }
 
-        // Delegate to apply_changes (which will use the bulk path if conditions are met)
-        Ok(self.apply_changes(changes))
+        // Use the bulk path directly (avoids infinite recursion with apply_changes)
+        Ok(self.apply_changes_bulk(changes))
     }
 
     /// Applies changes using the delta path (handles Add, Remove, and Update).
@@ -10644,6 +10677,41 @@ mod search_index_config_tests {
         assert!(config.use_bulk_builder);
         assert_eq!(config.bulk_threshold, 150);
         assert_eq!(config.ngram_size, 2);
+    }
+
+    // -------------------------------------------------------------------------
+    // BENCH-001: use_apply_bulk Flag Tests
+    // -------------------------------------------------------------------------
+
+    /// Tests that `use_apply_bulk` flag is present in config and defaults to false.
+    #[rstest]
+    fn config_use_apply_bulk_default_is_false() {
+        let config = SearchIndexConfig::default();
+        assert!(!config.use_apply_bulk);
+    }
+
+    /// Tests that `use_apply_bulk` flag can be set via explicit construction.
+    #[rstest]
+    fn config_use_apply_bulk_can_be_enabled() {
+        let config = SearchIndexConfig {
+            use_apply_bulk: true,
+            ..Default::default()
+        };
+        assert!(config.use_apply_bulk);
+    }
+
+    /// Tests that `SearchIndexConfigBuilder` can set `use_apply_bulk` flag.
+    #[rstest]
+    fn config_builder_use_apply_bulk() {
+        let config = SearchIndexConfigBuilder::new()
+            .use_apply_bulk(true)
+            .build();
+        assert!(config.use_apply_bulk);
+
+        let config2 = SearchIndexConfigBuilder::new()
+            .use_apply_bulk(false)
+            .build();
+        assert!(!config2.use_apply_bulk);
     }
 }
 
@@ -16388,6 +16456,106 @@ mod apply_changes_tests {
                 .expect("search should succeed");
             assert_eq!(result.tasks().len(), 1);
             assert_eq!(&result.tasks().get(0).unwrap().task_id, expected_id);
+        }
+    }
+
+    // =========================================================================
+    // BENCH-002: use_apply_bulk Flag Tests
+    // =========================================================================
+
+    /// Tests that apply_changes uses apply_bulk when use_apply_bulk is true and all changes are Add.
+    #[rstest]
+    fn apply_changes_uses_apply_bulk_when_flag_enabled_and_all_adds() {
+        let config = SearchIndexConfigBuilder::new()
+            .use_apply_bulk(true)
+            .build();
+        let index = SearchIndex::build_with_config(&PersistentVector::new(), config);
+
+        let tasks: Vec<Task> = (0..10)
+            .map(|i| create_test_task(&format!("Task {i}")))
+            .collect();
+        let changes: Vec<TaskChange> = tasks.iter().map(|t| TaskChange::Add(t.clone())).collect();
+
+        let result = index.apply_changes(&changes);
+
+        // All tasks should be added
+        assert_eq!(result.tasks_by_id.len(), 10);
+        for task in &tasks {
+            assert!(result.tasks_by_id.contains_key(&task.task_id));
+        }
+    }
+
+    /// Tests that apply_changes falls back to delta path when use_apply_bulk is true but changes include non-Add.
+    #[rstest]
+    fn apply_changes_uses_delta_when_flag_enabled_but_mixed_changes() {
+        let config = SearchIndexConfigBuilder::new()
+            .use_apply_bulk(true)
+            .build();
+        let existing_task = create_test_task("Existing");
+        let tasks: PersistentVector<Task> = vec![existing_task.clone()].into_iter().collect();
+        let index = SearchIndex::build_with_config(&tasks, config);
+
+        let new_task = create_test_task("New Task");
+        let changes = vec![
+            TaskChange::Add(new_task.clone()),
+            TaskChange::Remove(existing_task.task_id.clone()),
+        ];
+
+        let result = index.apply_changes(&changes);
+
+        // New task should be added, existing task should be removed
+        assert!(result.tasks_by_id.contains_key(&new_task.task_id));
+        assert!(!result.tasks_by_id.contains_key(&existing_task.task_id));
+    }
+
+    /// Tests that apply_changes uses delta path when use_apply_bulk is false.
+    #[rstest]
+    fn apply_changes_uses_delta_when_flag_disabled() {
+        let config = SearchIndexConfigBuilder::new()
+            .use_apply_bulk(false)
+            .build();
+        let index = SearchIndex::build_with_config(&PersistentVector::new(), config);
+
+        let tasks: Vec<Task> = (0..10)
+            .map(|i| create_test_task(&format!("Task {i}")))
+            .collect();
+        let changes: Vec<TaskChange> = tasks.iter().map(|t| TaskChange::Add(t.clone())).collect();
+
+        let result = index.apply_changes(&changes);
+
+        // All tasks should still be added (via delta path)
+        assert_eq!(result.tasks_by_id.len(), 10);
+    }
+
+    /// Tests that apply_changes with use_apply_bulk produces same result as without.
+    #[rstest]
+    fn apply_changes_with_apply_bulk_equals_without() {
+        let tasks: Vec<Task> = (0..50)
+            .map(|i| create_test_task_with_tags(&format!("Task {i}"), vec!["tag1", "tag2"]))
+            .collect();
+        let changes: Vec<TaskChange> = tasks.iter().map(|t| TaskChange::Add(t.clone())).collect();
+
+        // With use_apply_bulk enabled
+        let config_with = SearchIndexConfigBuilder::new()
+            .use_apply_bulk(true)
+            .build();
+        let index_with = SearchIndex::build_with_config(&PersistentVector::new(), config_with);
+        let result_with = index_with.apply_changes(&changes);
+
+        // With use_apply_bulk disabled
+        let config_without = SearchIndexConfigBuilder::new()
+            .use_apply_bulk(false)
+            .build();
+        let index_without = SearchIndex::build_with_config(&PersistentVector::new(), config_without);
+        let result_without = index_without.apply_changes(&changes);
+
+        // Results should be identical
+        assert_eq!(result_with.tasks_by_id.len(), result_without.tasks_by_id.len());
+        for task in &tasks {
+            assert_eq!(
+                result_with.tasks_by_id.get(&task.task_id).map(|t| &t.title),
+                result_without.tasks_by_id.get(&task.task_id).map(|t| &t.title)
+            );
         }
     }
 }
