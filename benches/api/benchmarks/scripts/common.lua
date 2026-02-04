@@ -1,6 +1,3 @@
--- Common utilities for wrk benchmark scripts
--- Provides JSON encoding, random data generation, and response tracking
-
 local M = {}
 
 M.status_counts = {[200] = 0, [201] = 0, [400] = 0, [404] = 0, [422] = 0, [500] = 0, other = 0}
@@ -186,8 +183,6 @@ function M.getenv_number(name, default)
     return tonumber(os.getenv(name)) or default
 end
 
--- SEED is reserved for test_ids.lua (independent RNG for reproducible ID generation)
--- common.lua always uses os.time() to ensure random payload generation
 math.randomseed(os.time())
 
 M.fallback_test_ids = {
@@ -196,55 +191,55 @@ M.fallback_test_ids = {
     project_ids = {"f6a7b8c9-d0e1-4234-fabc-345678901234", "a7b8c9d0-e1f2-4345-abcd-456789012345"}
 }
 
-function M.load_test_ids()
-    local ok, ids = pcall(require, "test_ids")
-    if ok then return ids end
-    local fallback = M.fallback_test_ids
-    -- Initialize version tracking for fallback
+local function create_fallback_interface(fallback)
     fallback.task_versions = fallback.task_versions or {}
     for i = 1, #fallback.task_ids do
         fallback.task_versions[i] = fallback.task_versions[i] or 1
     end
+
+    local function get_actual_index(index, ids)
+        return ((index - 1) % #ids) + 1
+    end
+
+    local function copy_table(tbl)
+        local copy = {}
+        for i, v in ipairs(tbl) do copy[i] = v end
+        return copy
+    end
+
     fallback.get_task_id = function(index)
-        return fallback.task_ids[((index - 1) % #fallback.task_ids) + 1], nil
+        return fallback.task_ids[get_actual_index(index, fallback.task_ids)], nil
     end
     fallback.get_project_id = function(index)
-        return fallback.project_ids[((index - 1) % #fallback.project_ids) + 1], nil
+        return fallback.project_ids[get_actual_index(index, fallback.project_ids)], nil
     end
-    fallback.get_task_count = function()
-        return #fallback.task_ids
-    end
-    fallback.get_project_count = function()
-        return #fallback.project_ids
-    end
+    fallback.get_task_count = function() return #fallback.task_ids end
+    fallback.get_project_count = function() return #fallback.project_ids end
     fallback.get_task_state = function(index)
-        local actual_index = ((index - 1) % #fallback.task_ids) + 1
+        local actual_index = get_actual_index(index, fallback.task_ids)
         return { id = fallback.task_ids[actual_index], version = fallback.task_versions[actual_index] }, nil
     end
     fallback.set_version = function(index, version)
-        local actual_index = ((index - 1) % #fallback.task_ids) + 1
-        fallback.task_versions[actual_index] = version
+        fallback.task_versions[get_actual_index(index, fallback.task_ids)] = version
         return true, nil
     end
     fallback.increment_version = function(index)
-        local actual_index = ((index - 1) % #fallback.task_ids) + 1
+        local actual_index = get_actual_index(index, fallback.task_ids)
         fallback.task_versions[actual_index] = fallback.task_versions[actual_index] + 1
         return fallback.task_versions[actual_index], nil
     end
     fallback.reset_versions = function()
         for i = 1, #fallback.task_ids do fallback.task_versions[i] = 1 end
     end
-    fallback.get_all_task_ids = function()
-        local copy = {}
-        for i, id in ipairs(fallback.task_ids) do copy[i] = id end
-        return copy
-    end
-    fallback.get_all_project_ids = function()
-        local copy = {}
-        for i, id in ipairs(fallback.project_ids) do copy[i] = id end
-        return copy
-    end
+    fallback.get_all_task_ids = function() return copy_table(fallback.task_ids) end
+    fallback.get_all_project_ids = function() return copy_table(fallback.project_ids) end
     return fallback
+end
+
+function M.load_test_ids()
+    local ok, ids = pcall(require, "test_ids")
+    if ok then return ids end
+    return create_fallback_interface(M.fallback_test_ids)
 end
 
 function M.create_response_handler(script_name)

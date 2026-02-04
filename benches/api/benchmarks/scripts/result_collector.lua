@@ -1,6 +1,3 @@
--- Result Collector Module for wrk benchmarks
--- Collects and formats benchmark results including latency, errors, RPS, and payload info
-
 local M = {}
 
 M.NULL = {}
@@ -164,6 +161,27 @@ function M.set_payload(payload_metadata)
     if payload_metadata then M.results.payload = payload_metadata end
 end
 
+local function calculate_thread_requests()
+    local total = 0
+    for _, count in pairs(M.status_counts) do
+        if type(count) == "number" then
+            total = total + count
+        end
+    end
+    return total
+end
+
+local function calculate_failed_requests()
+    local failed = 0
+    for code, count in pairs(M.status_counts) do
+        local code_num = tonumber(code)
+        if code_num and code_num >= 400 and type(count) == "number" then
+            failed = failed + count
+        end
+    end
+    return failed
+end
+
 function M.finalize(summary, latency, requests)
     if not summary then
         M.results.total_requests = M.response_count
@@ -178,30 +196,12 @@ function M.finalize(summary, latency, requests)
     M.results.duration_seconds = duration_seconds
     M.results.execution.duration_seconds = duration_seconds
 
-    -- Use thread-local status_counts sum for total_requests in lua_metrics.json
-    -- This ensures http_status sum equals total_requests (REQ-PIPELINE-006)
-    -- wrk's summary.requests is global, but M.status_counts is thread-local
-    local thread_total_requests = 0
-    for _, count in pairs(M.status_counts) do
-        if type(count) == "number" then
-            thread_total_requests = thread_total_requests + count
-        end
-    end
-
-    -- Use thread-local count if available, otherwise fall back to summary
-    -- Thread-local count is preferred for consistency with http_status
+    local thread_total_requests = calculate_thread_requests()
     local use_thread_local = thread_total_requests > 0
     M.results.total_requests = use_thread_local and thread_total_requests or summary.requests
 
-    -- Calculate failed_requests from thread-local status_counts (4xx + 5xx)
-    local thread_failed_requests = 0
     if use_thread_local then
-        for code, count in pairs(M.status_counts) do
-            local code_num = tonumber(code)
-            if code_num and code_num >= 400 and type(count) == "number" then
-                thread_failed_requests = thread_failed_requests + count
-            end
-        end
+        local thread_failed_requests = calculate_failed_requests()
         M.results.failed_requests = thread_failed_requests
         M.results.successful_requests = thread_total_requests - thread_failed_requests
     else
@@ -215,39 +215,25 @@ function M.finalize(summary, latency, requests)
         M.results.rps.actual = M.results.total_requests / duration_seconds
     end
 
-    -- Throughput: use thread-local requests, but bytes are global (wrk limitation)
-    -- When use_thread_local, bytes metrics are not meaningful for this thread's portion
     M.results.throughput.requests_total = M.results.total_requests
     M.results.throughput.requests_per_second = M.results.rps.actual
+
     if use_thread_local then
-        -- Bytes are global and cannot be attributed to this thread
-        -- Set to null to indicate unavailability in thread-local mode
         M.results.throughput.bytes_total = M.NULL
         M.results.throughput.bytes_per_second = M.NULL
+        M.results.errors = {
+            connect = M.NULL, read = M.NULL, write = M.NULL, timeout = M.NULL,
+            status = { ["4xx"] = 0, ["5xx"] = 0 }
+        }
+        M.results.errors.status_total = M.NULL
     else
         M.results.throughput.bytes_total = summary.bytes or 0
         if duration_seconds > 0 then
             M.results.throughput.bytes_per_second = (summary.bytes or 0) / duration_seconds
         end
-    end
-
-    -- Network errors: global (wrk limitation), not available in thread-local mode
-    if use_thread_local then
-        -- Network errors cannot be attributed to specific threads
         M.results.errors = {
-            connect = M.NULL,
-            read = M.NULL,
-            write = M.NULL,
-            timeout = M.NULL,
-            status = { ["4xx"] = 0, ["5xx"] = 0 }
-        }
-        M.results.errors.status_total = M.NULL
-    else
-        M.results.errors = {
-            connect = summary.errors.connect,
-            read = summary.errors.read,
-            write = summary.errors.write,
-            timeout = summary.errors.timeout,
+            connect = summary.errors.connect, read = summary.errors.read,
+            write = summary.errors.write, timeout = summary.errors.timeout,
             status = { ["4xx"] = 0, ["5xx"] = 0 }
         }
         M.results.errors.status_total = summary.errors.status
@@ -326,165 +312,128 @@ function M.finalize(summary, latency, requests)
 
     if cache_metrics then M.results.cache = cache_metrics.get_summary() end
 
-    if error_tracker then
-        error_tracker.aggregate_from_summary(summary)
+local function aggregate_error_counts()
+    local counts = {
+        total = 0, count_400 = 0, count_404 = 0, count_409 = 0, count_422 = 0, count_500 = 0,
+        count_4xx_total = 0, count_4xx_excluding_409 = 0, count_5xx_total = 0
+    }
 
-        local http_error_counts = {
-            total = 0, count_400 = 0, count_404 = 0, count_409 = 0, count_422 = 0, count_500 = 0,
-            count_4xx_total = 0, count_4xx_excluding_409 = 0, count_5xx_total = 0
-        }
+    if not M.results.status_distribution or type(M.results.status_distribution) ~= "table" or not next(M.results.status_distribution) then
+        return counts
+    end
 
-        if M.results.status_distribution and type(M.results.status_distribution) == "table" and next(M.results.status_distribution) then
-            for status, count in pairs(M.results.status_distribution) do
-                local status_num = tonumber(status)
-                if status_num and type(count) == "number" then
-                    if status_num >= 400 and status_num < 500 then
-                        http_error_counts.count_4xx_total = http_error_counts.count_4xx_total + count
-                        http_error_counts.total = http_error_counts.total + count
-                        if status_num ~= 409 then
-                            http_error_counts.count_4xx_excluding_409 = http_error_counts.count_4xx_excluding_409 + count
-                        end
-                    elseif status_num >= 500 and status_num < 600 then
-                        http_error_counts.count_5xx_total = http_error_counts.count_5xx_total + count
-                        http_error_counts.total = http_error_counts.total + count
-                    end
-
-                    if status_num == 400 then http_error_counts.count_400 = count
-                    elseif status_num == 404 then http_error_counts.count_404 = count
-                    elseif status_num == 409 then http_error_counts.count_409 = count
-                    elseif status_num == 422 then http_error_counts.count_422 = count
-                    elseif status_num == 500 then http_error_counts.count_500 = count
-                    end
+    for status, count in pairs(M.results.status_distribution) do
+        local status_num = tonumber(status)
+        if status_num and type(count) == "number" then
+            if status_num >= 400 and status_num < 500 then
+                counts.count_4xx_total = counts.count_4xx_total + count
+                counts.total = counts.total + count
+                if status_num ~= 409 then
+                    counts.count_4xx_excluding_409 = counts.count_4xx_excluding_409 + count
                 end
+            elseif status_num >= 500 and status_num < 600 then
+                counts.count_5xx_total = counts.count_5xx_total + count
+                counts.total = counts.total + count
             end
-        elseif summary and summary.errors and summary.errors.status then
-            http_error_counts.total = summary.errors.status
-        end
 
-        error_tracker.set_http_error_counts(http_error_counts)
-        M.results.errors_detail = error_tracker.get_summary()
-
-        if M.results.total_requests > 0 then
-            if M.results.status_distribution and type(M.results.status_distribution) == "table" and next(M.results.status_distribution) then
-                M.results.error_rate = http_error_counts.count_5xx_total / M.results.total_requests
-                M.results.client_error_rate = http_error_counts.count_4xx_excluding_409 / M.results.total_requests
-                M.results.conflict_count = http_error_counts.count_409
-                M.results.conflict_rate = http_error_counts.count_409 / M.results.total_requests
-                M.results.http_error_rate = (http_error_counts.count_4xx_total + http_error_counts.count_5xx_total) / M.results.total_requests
-                M.results.status_code_counts = {
-                    count_400 = http_error_counts.count_400,
-                    count_404 = http_error_counts.count_404,
-                    count_409 = http_error_counts.count_409,
-                    count_422 = http_error_counts.count_422,
-                    count_500 = http_error_counts.count_500,
-                }
-            else
-                M.results.error_rate = M.NULL
-                M.results.client_error_rate = M.NULL
-                M.results.conflict_rate = M.NULL
-                M.results.conflict_count = M.NULL
-                local http_errors = (summary and summary.errors and summary.errors.status) or 0
-                M.results.http_error_rate = http_errors / M.results.total_requests
-                M.results.status_code_counts = {
-                    count_400 = M.NULL,
-                    count_404 = M.NULL,
-                    count_409 = M.NULL,
-                    count_422 = M.NULL,
-                    count_500 = M.NULL,
-                }
+            if status_num == 400 then counts.count_400 = count
+            elseif status_num == 404 then counts.count_404 = count
+            elseif status_num == 409 then counts.count_409 = count
+            elseif status_num == 422 then counts.count_422 = count
+            elseif status_num == 500 then counts.count_500 = count
             end
-            -- Network error rate: only available when not in thread-local mode
-            if M.results.errors.connect == M.NULL then
-                M.results.network_error_rate = M.NULL
-            else
-                local network_errors = (summary and summary.errors) and
-                    ((summary.errors.connect or 0) + (summary.errors.read or 0) +
-                     (summary.errors.write or 0) + (summary.errors.timeout or 0)) or 0
-                M.results.network_error_rate = network_errors / M.results.total_requests
-            end
-        else
-            M.results.error_rate = 0
-            M.results.client_error_rate = 0
-            M.results.http_error_rate = 0
-            M.results.network_error_rate = 0
-            M.results.conflict_rate = 0
-            M.results.conflict_count = 0
         end
-    else
-        if M.results.total_requests > 0 then
-            if M.results.status_distribution and type(M.results.status_distribution) == "table" and next(M.results.status_distribution) then
-                local count_400, count_404, count_409, count_422, count_500 = 0, 0, 0, 0, 0
-                local count_4xx, count_5xx, count_4xx_excluding_409 = 0, 0, 0
-                for status, count in pairs(M.results.status_distribution) do
-                    local status_num = tonumber(status)
-                    if status_num and type(count) == "number" then
-                        if status_num >= 400 and status_num < 500 then
-                            count_4xx = count_4xx + count
-                            if status_num == 409 then count_409 = count
-                            else count_4xx_excluding_409 = count_4xx_excluding_409 + count end
-                        elseif status_num >= 500 and status_num < 600 then
-                            count_5xx = count_5xx + count
-                        end
+    end
+    return counts
+end
 
-                        if status_num == 400 then count_400 = count
-                        elseif status_num == 404 then count_404 = count
-                        elseif status_num == 409 then count_409 = count
-                        elseif status_num == 422 then count_422 = count
-                        elseif status_num == 500 then count_500 = count
-                        end
-                    end
-                end
-                M.results.error_rate = count_5xx / M.results.total_requests
-                M.results.client_error_rate = count_4xx_excluding_409 / M.results.total_requests
-                M.results.conflict_count = count_409
-                M.results.conflict_rate = count_409 / M.results.total_requests
-                M.results.http_error_rate = (count_4xx + count_5xx) / M.results.total_requests
-                M.results.status_code_counts = {
-                    count_400 = count_400,
-                    count_404 = count_404,
-                    count_409 = count_409,
-                    count_422 = count_422,
-                    count_500 = count_500,
-                }
-            else
-                M.results.error_rate = M.NULL
-                M.results.client_error_rate = M.NULL
-                M.results.conflict_rate = M.NULL
-                M.results.conflict_count = M.NULL
-                local http_errors = (summary and summary.errors and summary.errors.status) or 0
-                M.results.http_error_rate = http_errors / M.results.total_requests
-                M.results.status_code_counts = {
-                    count_400 = M.NULL,
-                    count_404 = M.NULL,
-                    count_409 = M.NULL,
-                    count_422 = M.NULL,
-                    count_500 = M.NULL,
-                }
-            end
-            -- Network error rate: only available when not in thread-local mode
-            if M.results.errors.connect == M.NULL then
-                M.results.network_error_rate = M.NULL
-            else
-                local network_errors = (summary and summary.errors) and
-                    ((summary.errors.connect or 0) + (summary.errors.read or 0) +
-                     (summary.errors.write or 0) + (summary.errors.timeout or 0)) or 0
-                M.results.network_error_rate = network_errors / M.results.total_requests
-            end
-        else
-            M.results.error_rate = 0
-            M.results.client_error_rate = 0
-            M.results.http_error_rate = 0
-            M.results.network_error_rate = 0
-            M.results.conflict_rate = 0
-            M.results.conflict_count = 0
-        end
+local function set_error_metrics(http_error_counts, summary)
+    if M.results.total_requests <= 0 then
+        M.results.error_rate = 0
+        M.results.client_error_rate = 0
+        M.results.http_error_rate = 0
+        M.results.network_error_rate = 0
+        M.results.conflict_rate = 0
+        M.results.conflict_count = 0
+        return
     end
 
     if M.results.status_distribution and type(M.results.status_distribution) == "table" and next(M.results.status_distribution) then
-        for status, count in pairs(M.results.status_distribution) do
-            local status_num = tonumber(status)
-            if status_num and type(count) == "number" then
-                M.results.http_status[status] = count
+        M.results.error_rate = http_error_counts.count_5xx_total / M.results.total_requests
+        M.results.client_error_rate = http_error_counts.count_4xx_excluding_409 / M.results.total_requests
+        M.results.conflict_count = http_error_counts.count_409
+        M.results.conflict_rate = http_error_counts.count_409 / M.results.total_requests
+        M.results.http_error_rate = (http_error_counts.count_4xx_total + http_error_counts.count_5xx_total) / M.results.total_requests
+        M.results.status_code_counts = {
+            count_400 = http_error_counts.count_400,
+            count_404 = http_error_counts.count_404,
+            count_409 = http_error_counts.count_409,
+            count_422 = http_error_counts.count_422,
+            count_500 = http_error_counts.count_500,
+        }
+    else
+        M.results.error_rate = M.NULL
+        M.results.client_error_rate = M.NULL
+        M.results.conflict_rate = M.NULL
+        M.results.conflict_count = M.NULL
+        local http_errors = (summary and summary.errors and summary.errors.status) or 0
+        M.results.http_error_rate = http_errors / M.results.total_requests
+        M.results.status_code_counts = {
+            count_400 = M.NULL, count_404 = M.NULL, count_409 = M.NULL,
+            count_422 = M.NULL, count_500 = M.NULL,
+        }
+    end
+
+    if M.results.errors.connect == M.NULL then
+        M.results.network_error_rate = M.NULL
+    else
+        local network_errors = (summary and summary.errors) and
+            ((summary.errors.connect or 0) + (summary.errors.read or 0) +
+             (summary.errors.write or 0) + (summary.errors.timeout or 0)) or 0
+        M.results.network_error_rate = network_errors / M.results.total_requests
+    end
+end
+
+    if error_tracker then
+        error_tracker.aggregate_from_summary(summary)
+        local http_error_counts = aggregate_error_counts()
+        if http_error_counts.total == 0 and summary and summary.errors and summary.errors.status then
+            http_error_counts.total = summary.errors.status
+        end
+        error_tracker.set_http_error_counts(http_error_counts)
+        M.results.errors_detail = error_tracker.get_summary()
+        set_error_metrics(http_error_counts, summary)
+    else
+        local http_error_counts = aggregate_error_counts()
+        set_error_metrics(http_error_counts, summary)
+    end
+    if error_tracker and type(error_tracker.get_all_threads_aggregated_summary) == "function" then
+        local aggregated = error_tracker.get_all_threads_aggregated_summary()
+        M.results.http_status = {}
+        local http_status_total = 0
+
+        for key, count in pairs(aggregated) do
+            local status_code = key:match("^status_(.+)$")
+            if status_code and count > 0 then
+                if status_code ~= "other" then
+                    M.results.http_status[status_code] = count
+                else
+                    M.results.http_status["other"] = count
+                end
+                http_status_total = http_status_total + count
+            end
+        end
+
+        if http_status_total > 0 then
+            M.results.total_requests = http_status_total
+        end
+    elseif not M.results.http_status or not next(M.results.http_status) then
+        if M.results.status_distribution and type(M.results.status_distribution) == "table" and next(M.results.status_distribution) then
+            M.results.http_status = {}
+            for status, count in pairs(M.results.status_distribution) do
+                if tonumber(status) and type(count) == "number" then
+                    M.results.http_status[status] = count
+                end
             end
         end
     end

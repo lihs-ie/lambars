@@ -1562,18 +1562,78 @@ generate_meta_json() {
     #   - wrk's "Non-2xx or 3xx responses" as fallback (also HTTP errors only)
     # Socket errors are reported separately in errors.socket_errors
     # Use 10# prefix to force decimal interpretation (avoid octal with leading zeros)
-    if ((10#${total_requests:-0} > 0)); then
-        # Calculate error_rate and ensure valid JSON number format
-        # Per JSON schema: error_rate must be in range [0, 1]
-        # Clamp values > 1 to 1.0 (can happen with retry/duplicate counting)
-        # awk's printf "%.6f" automatically includes leading zero (0.123, not .123)
-        error_rate=$(awk -v errors="${http_status_total}" -v total="${total_requests}" 'BEGIN {
-            rate = errors / total
-            if (rate < 0) rate = 0
-            if (rate > 1) rate = 1
-            printf "%.6f", rate
-        }')
-    else
+
+    # error_rate 計算のフォールバック順序
+    error_rate="null"
+
+    # 0. 最初に http_4xx, http_5xx を lua_metrics.json から取得
+    # 注意: error_rate 計算より前に確定させる必要がある
+    # has_lua_http_metrics フラグで lua_metrics から取得できたかを追跡
+    # 両方のキーが存在し、かつ有効な数値である場合のみ true
+    local has_lua_http_metrics=false
+    if [[ -f "${lua_metrics_file}" ]] && command -v jq &> /dev/null; then
+        # jq で http_4xx, http_5xx の両方のキーが存在し数値であることを確認
+        # jq の出力を捨てて終了コードのみ利用（標準出力混入を防ぐ）
+        if jq -e 'has("http_4xx") and has("http_5xx") and (.http_4xx | type == "number") and (.http_5xx | type == "number")' "${lua_metrics_file}" >/dev/null 2>&1; then
+            http_4xx=$(jq -r '.http_4xx' "${lua_metrics_file}" 2>/dev/null)
+            http_5xx=$(jq -r '.http_5xx' "${lua_metrics_file}" 2>/dev/null)
+            # 追加のバリデーション: 整数であること
+            if [[ "${http_4xx}" =~ ^[0-9]+$ ]] && [[ "${http_5xx}" =~ ^[0-9]+$ ]]; then
+                has_lua_http_metrics=true
+            else
+                # 数値でない場合はリセットして wrk フォールバックへ
+                http_4xx=0
+                http_5xx=0
+            fi
+        fi
+    fi
+
+    # 1. lua_metrics.json の error_rate を最優先
+    # 注意: error_rate が数値型で、0-1 の範囲内であることを検証
+    if [[ -f "${lua_metrics_file}" ]] && command -v jq &> /dev/null; then
+        # error_rate が存在し、数値型で、0以上1以下であることを確認
+        if jq -e 'has("error_rate") and (.error_rate | type == "number") and (.error_rate >= 0) and (.error_rate <= 1)' "${lua_metrics_file}" >/dev/null 2>&1; then
+            local lua_error_rate
+            lua_error_rate=$(jq -r '.error_rate' "${lua_metrics_file}" 2>/dev/null)
+            if [[ -n "${lua_error_rate}" && "${lua_error_rate}" != "null" ]]; then
+                error_rate="${lua_error_rate}"
+                echo -e "${CYAN}Using error_rate from lua_metrics.json: ${error_rate}${NC}" >&2
+            fi
+        fi
+    fi
+
+    # 2. http_4xx + http_5xx から直接計算（lua_metrics に error_rate がない場合）
+    # 注意: has_lua_http_metrics=true の場合のみ計算（lua_metrics から取得できた場合）
+    # lua_metrics が無い/古い場合は step 3 (wrk) にフォールバック
+    if [[ "${error_rate}" == "null" && "${has_lua_http_metrics}" == "true" ]]; then
+        local errors_4xx_5xx
+        errors_4xx_5xx=$((${http_4xx:-0} + ${http_5xx:-0}))
+        if ((10#${total_requests:-0} > 0)); then
+            error_rate=$(awk -v errors="${errors_4xx_5xx}" -v total="${total_requests}" 'BEGIN {
+                rate = errors / total
+                if (rate < 0) rate = 0
+                if (rate > 1) rate = 1
+                printf "%.6f", rate
+            }')
+            echo -e "${CYAN}Calculated error_rate from http_4xx + http_5xx: ${error_rate}${NC}" >&2
+        fi
+    fi
+
+    # 3. wrk の値から計算（最終手段）
+    if [[ "${error_rate}" == "null" ]]; then
+        if ((10#${total_requests:-0} > 0 && 10#${http_status_total:-0} >= 0)); then
+            error_rate=$(awk -v errors="${http_status_total}" -v total="${total_requests}" 'BEGIN {
+                rate = errors / total
+                if (rate < 0) rate = 0
+                if (rate > 1) rate = 1
+                printf "%.6f", rate
+            }')
+            echo -e "${YELLOW}WARNING: Using wrk-based error_rate (less accurate): ${error_rate}${NC}" >&2
+        fi
+    fi
+
+    # error_rate が null のままの場合は "null" として保持
+    if [[ "${error_rate}" == "null" ]]; then
         error_rate="null"
     fi
 

@@ -1,0 +1,987 @@
+# tasks_update エラー率測定の正確性改善 実装計画
+#
+# 要件定義: docs/internal/requirements/20260204_1400_tasks_update_error_rate_accuracy.yaml
+# 分析: docs/internal/analysis/20260204_tasks_update_error_rate_investigation.yaml
+#
+# 概要:
+#   tasks_update および tasks_update_conflict ベンチマークにおける
+#   HTTPステータスコード分布とエラー率の測定精度を改善する
+#
+# 根本原因（分析結果より）:
+#   1. wrk の done() はメインスレッドで一度だけ実行される（各スレッドではない）
+#   2. error_tracker.get_thread_aggregated_summary() は wrk.thread を参照するため、
+#      done() 時点ではメインスレッドの値のみ取得（他スレッドの集計は不可能）
+#   3. setup(thread) で thread 参照を保持し、done() で全スレッドを集計する必要あり
+#
+# 解決方針:
+#   error_tracker.lua に以下の機能を追加:
+#   1. setup_thread(thread) で thread 参照を M.threads 配列に保持
+#   2. get_all_threads_aggregated_summary() で全スレッドの値を集計
+#   3. result_collector.lua の finalize() で全スレッド集計を http_status に反映
+
+version: "1.0.0"
+name: "tasks_update_error_rate_accuracy_implementation_plan"
+created_at: "2026-02-04T15:00:00Z"
+updated_at: "2026-02-04T17:30:00Z"
+created_by: "Claude Code"
+status: "approved"
+priority: "P0"
+estimated_effort: "3 days"
+codex_reviewed: true
+codex_review_iterations: 8
+codex_review_final_result: "ok: true"
+
+# ============================================================================
+# Codex レビュー結果（第1回）
+# ============================================================================
+codex_review_1:
+  date: "2026-02-04T15:30:00Z"
+  result: "REJECTED"
+  findings:
+    - severity: "critical"
+      issue: "wrk のスレッドモデル前提が誤り"
+      detail: |
+        計画は done() が各スレッドで実行される前提だったが、
+        wrk は done() をメインスレッドで一度だけ実行する。
+        error_tracker.get_thread_aggregated_summary() は wrk.thread を参照するため、
+        done() ではメインスレッドの値のみ取得され、全スレッド集計は不可能。
+      resolution: |
+        setup(thread) で thread 参照を M.threads 配列に保持し、
+        done() で全スレッドから thread:get() で値を取得して集計する方式に変更。
+
+    - severity: "high"
+      issue: "error_rate の定義不一致"
+      detail: |
+        result_collector.lua の error_rate は 5xx のみ、
+        wrk 側は 4xx+5xx を error_rate としている。
+        要件定義の期待値（409 を含む）とも定義が不一致。
+      resolution: |
+        error_rate の定義を統一。
+        merge_lua_metrics.py で http_status から 4xx+5xx を再計算して error_rate に上書き。
+        run_benchmark.sh は merge_lua_metrics.py の再計算済み error_rate を使用。
+
+    - severity: "medium"
+      issue: "http_status が空でもスキップする問題"
+      detail: |
+        提案コードは continue のままでファイル全体をスキップ。
+        latency などの有用なメトリクスが失われる。
+      resolution: |
+        http_status が空でも latency 等はマージ対象に含める。
+        total_requests のみ除外するロジックを明示。
+
+    - severity: "medium"
+      issue: "リスク評価の前提誤り"
+      detail: |
+        「各スレッドが独自の lua_metrics.json を書く」とあったが、
+        実際は wrk 実行（フェーズ）単位で 1 ファイル。
+      resolution: |
+        リスクと軽減策を「フェーズ単位で 1 ファイル」「done() はメインスレッド」
+        の事実に合わせて更新。
+
+    - severity: "low"
+      issue: "テスト戦略の不足"
+      detail: |
+        threads>1 で http_status が全スレッド合算になっていることを
+        直接確認する項目がない。
+      resolution: |
+        threads=2/4 で http_status の合計が summary.requests と一致すること、
+        error_tracker が無い場合にフォールバックが機能することを
+        明示的に検証項目へ追加。
+
+# ============================================================================
+# 実装対象の分類（修正版）
+# ============================================================================
+implementation_categories:
+  lua_scripts:
+    description: "Lua スクリプトの改善"
+    files:
+      - benches/api/benchmarks/scripts/error_tracker.lua
+      - benches/api/benchmarks/scripts/result_collector.lua
+    estimated_effort: "1 day"
+
+  python_scripts:
+    description: "Python スクリプトの改善"
+    files:
+      - benches/api/benchmarks/scripts/merge_lua_metrics.py
+    estimated_effort: "0.5 days"
+
+  shell_scripts:
+    description: "シェルスクリプトの改善"
+    files:
+      - benches/api/benchmarks/run_benchmark.sh
+    estimated_effort: "0.5 days"
+
+  validation:
+    description: "検証とテスト"
+    files:
+      - なし（ベンチマーク実行による検証）
+    estimated_effort: "1 day"
+
+# ============================================================================
+# フェーズ1: error_tracker.lua の改善
+# ============================================================================
+phase_1:
+  id: "PHASE-001"
+  name: "error_tracker.lua の全スレッド集計機能の追加"
+  priority: "P0"
+  estimated_effort: "0.5 days"
+  blocking: true
+
+  objective: |
+    wrk のスレッドモデルに適合した全スレッド集計機能を実装する。
+
+    wrk のスレッド管理:
+    - setup(thread) は各スレッドで1回呼ばれ、thread 参照を受け取る
+    - response() は各スレッドで実行され、thread:set() で値を保存できる
+    - done() はメインスレッドで1回だけ実行される
+    - done() で全スレッドの値を取得するには、setup() で保持した thread 参照を使う
+
+  current_implementation:
+    file: "benches/api/benchmarks/scripts/error_tracker.lua"
+    analysis: |
+      現在の実装:
+      - M.threads = {} が定義されているが未使用
+      - setup_thread(thread) は thread:set() でステータスカウンターを初期化するが、
+        thread 参照を M.threads に保持していない
+      - get_thread_aggregated_summary() は wrk.thread を参照するため、
+        done() 時点ではメインスレッドの値のみ取得される
+
+  proposed_implementation:
+    description: |
+      1. setup_thread(thread) で thread 参照を M.threads 配列に保持
+      2. 新しい関数 get_all_threads_aggregated_summary() を追加
+         - M.threads 配列から全スレッドの値を thread:get() で取得
+         - 全スレッドの値を合算して返す
+
+    code_setup_thread: |
+      function M.setup_thread(thread)
+          -- thread 参照を保持（done() で全スレッド集計に使用）
+          table.insert(M.threads, thread)
+
+          -- 各スレッドにステータスカウンターを初期化
+          for _, code in ipairs({"200", "201", "207", "400", "404", "409", "422", "500", "502", "other"}) do
+              thread:set("status_" .. code, 0)
+          end
+      end
+
+    code_get_all_threads: |
+      -- 全スレッドの集計を取得（done() から呼び出す）
+      function M.get_all_threads_aggregated_summary()
+          local aggregated = {
+              status_200 = 0, status_201 = 0, status_207 = 0,
+              status_400 = 0, status_404 = 0, status_409 = 0,
+              status_422 = 0, status_500 = 0, status_502 = 0,
+              status_other = 0,
+          }
+
+          -- 全スレッドから値を取得して合算
+          for _, thread in ipairs(M.threads) do
+              for _, code in ipairs({"200", "201", "207", "400", "404", "409", "422", "500", "502", "other"}) do
+                  local key = "status_" .. code
+                  local count = tonumber(thread:get(key)) or 0
+                  aggregated[key] = aggregated[key] + count
+              end
+          end
+
+          return aggregated
+      end
+
+  tasks:
+    - id: "TASK-001-1"
+      name: "setup_thread() で thread 参照を M.threads に保持"
+      description: |
+        setup_thread(thread) 関数を修正し、thread 参照を M.threads 配列に追加する。
+        これにより、done() 時点で全スレッドにアクセス可能になる。
+      implementation_location: "benches/api/benchmarks/scripts/error_tracker.lua:154-158"
+      dependencies: []
+      estimated_effort: "1 hour"
+
+    - id: "TASK-001-2"
+      name: "get_all_threads_aggregated_summary() 関数の追加"
+      description: |
+        新しい関数を追加し、M.threads 配列から全スレッドの値を取得して合算する。
+        この関数は done() から呼び出される想定。
+      implementation_location: "benches/api/benchmarks/scripts/error_tracker.lua"
+      dependencies:
+        - "TASK-001-1"
+      estimated_effort: "2 hours"
+
+    - id: "TASK-001-3"
+      name: "M.threads の初期化をリセット"
+      description: |
+        M.init() で M.threads = {} を呼び出し、複数回の実行で
+        前回の thread 参照が残らないようにする。
+      implementation_location: "benches/api/benchmarks/scripts/error_tracker.lua:25-42"
+      dependencies:
+        - "TASK-001-1"
+      estimated_effort: "30 minutes"
+
+  expected_result: |
+    done() で get_all_threads_aggregated_summary() を呼び出すと、
+    全スレッドのステータスカウントが合算された結果が返される。
+
+    例（threads=4 の場合）:
+    {
+      status_200 = 15000,  -- 全4スレッドの合計
+      status_201 = 500,
+      status_409 = 800,
+      status_500 = 10,
+      ...
+    }
+
+# ============================================================================
+# フェーズ2: result_collector.lua の改善
+# ============================================================================
+phase_2:
+  id: "PHASE-002"
+  name: "result_collector.lua の http_status 構築ロジックの改善"
+  priority: "P0"
+  estimated_effort: "0.5 days"
+  blocking: true
+
+  objective: |
+    finalize() 関数において、error_tracker.get_all_threads_aggregated_summary() の
+    結果を M.results.http_status に反映する。
+
+    また、error_rate の定義を http_error_rate（4xx+5xx）に統一する。
+
+  current_implementation:
+    file: "benches/api/benchmarks/scripts/result_collector.lua"
+    line_range: "483-490"
+    problem: |
+      M.results.status_distribution は M.status_counts から作られるが、
+      done() 時点では M.status_counts は空（スレッドローカルのため）。
+
+      また、error_rate は 5xx のみを計算しており、
+      wrk の error_rate（4xx+5xx）と定義が不一致。
+
+  proposed_implementation:
+    description: |
+      1. error_tracker.get_all_threads_aggregated_summary() から全スレッド集計を取得
+      2. http_status を構築（"status_200" -> "200" に変換）
+      3. error_rate の定義を http_error_rate（4xx+5xx）に統一
+
+    code: |
+      -- error_tracker の全スレッド集計結果を使用（done() から呼び出される）
+      -- 注意: error_tracker が存在し、かつ get_all_threads_aggregated_summary 関数が存在する場合のみ実行
+      if error_tracker and type(error_tracker.get_all_threads_aggregated_summary) == "function" then
+          -- 全スレッドの集計を取得
+          local aggregated = error_tracker.get_all_threads_aggregated_summary()
+
+          -- http_status を構築
+          M.results.http_status = {}
+          for key, count in pairs(aggregated) do
+              -- "status_200" -> "200" に変換
+              local status_code = key:match("^status_(.+)$")
+              if status_code and status_code ~= "other" and count > 0 then
+                  M.results.http_status[status_code] = count
+              end
+          end
+
+          -- status_other がある場合は "other" キーで保存
+          if aggregated.status_other and aggregated.status_other > 0 then
+              M.results.http_status["other"] = aggregated.status_other
+          end
+
+          -- total_requests を http_status の合計から計算（整合性確保）
+          local http_status_total = 0
+          for _, count in pairs(M.results.http_status) do
+              if type(count) == "number" then
+                  http_status_total = http_status_total + count
+              end
+          end
+          if http_status_total > 0 then
+              M.results.total_requests = http_status_total
+          end
+      end
+
+      -- 従来の方法もフォールバックとして維持（error_tracker が無い環境用）
+      if not M.results.http_status or not next(M.results.http_status) then
+          if M.results.status_distribution and type(M.results.status_distribution) == "table" and next(M.results.status_distribution) then
+              M.results.http_status = {}
+              for status, count in pairs(M.results.status_distribution) do
+                  local status_num = tonumber(status)
+                  if status_num and type(count) == "number" then
+                      M.results.http_status[status] = count
+                  end
+              end
+          end
+      end
+
+  tasks:
+    - id: "TASK-002-1"
+      name: "get_all_threads_aggregated_summary() の結果を http_status に反映"
+      description: |
+        finalize() 関数内で、error_tracker.get_all_threads_aggregated_summary() を呼び出し、
+        返された全スレッド集計結果を M.results.http_status に変換・保存する。
+
+        変換ルール:
+        - "status_200" -> "200"
+        - "status_409" -> "409"
+        - "status_other" -> "other"
+      implementation_location: "benches/api/benchmarks/scripts/result_collector.lua:483-490"
+      dependencies:
+        - "TASK-001-2"
+      estimated_effort: "2 hours"
+
+    - id: "TASK-002-2"
+      name: "total_requests と http_status の整合性確保"
+      description: |
+        http_status の合計を total_requests として使用し、整合性を確保する。
+        これにより、summary.requests と http_status の合計が一致しない問題を回避。
+      implementation_location: "benches/api/benchmarks/scripts/result_collector.lua"
+      dependencies:
+        - "TASK-002-1"
+      estimated_effort: "1 hour"
+
+    - id: "TASK-002-3"
+      name: "フォールバックロジックの維持"
+      description: |
+        error_tracker が無い環境（古いベンチマークスクリプト等）でも
+        従来通り M.status_counts から http_status を構築できるようにする。
+      implementation_location: "benches/api/benchmarks/scripts/result_collector.lua"
+      dependencies:
+        - "TASK-002-1"
+      estimated_effort: "1 hour"
+
+  expected_result: |
+    lua_metrics.json に正確な http_status が保存される。
+
+    例:
+    {
+      "http_status": {
+        "200": 15000,
+        "201": 500,
+        "409": 800,
+        "500": 10
+      },
+      "total_requests": 16310
+    }
+
+# ============================================================================
+# フェーズ3: merge_lua_metrics.py の改善
+# ============================================================================
+phase_3:
+  id: "PHASE-003"
+  name: "merge_lua_metrics.py の改善"
+  priority: "P0"
+  estimated_effort: "0.5 days"
+  blocking: true
+
+  objective: |
+    1. http_4xx, http_5xx をマージ結果に追加
+    2. error_rate を http_status から再計算（4xx+5xx の合計 / total_requests）
+    3. http_status が空でも latency 等はマージ対象に含める
+
+  current_implementation:
+    file: "benches/api/benchmarks/scripts/merge_lua_metrics.py"
+    analysis: |
+      現在の実装:
+      - http_status のマージ: merge_http_status() 関数 (line 16-46)
+      - http_status が空のファイルをスキップ: line 212-214
+      - error_rate の計算: http_status から 4xx+5xx を計算 (line 243-247)
+
+      問題点:
+      - http_4xx, http_5xx の個別集計がない
+      - http_status が空のファイルを完全にスキップ（latency 等も失われる）
+
+  proposed_improvement:
+    description: |
+      1. http_4xx, http_5xx を計算してマージ結果に追加
+      2. http_status が空でも latency 等はマージ対象に含める
+         （total_requests のみ除外）
+      3. error_rate を http_status から再計算して統一
+
+    code_http_4xx_5xx: |
+      # http_4xx, http_5xx を計算
+      http_4xx = sum(
+          count for code_str, count in http_status.items()
+          if isinstance(count, (int, float)) and code_str.isdigit() and 400 <= int(code_str) < 500
+      )
+      http_5xx = sum(
+          count for code_str, count in http_status.items()
+          if isinstance(count, (int, float)) and code_str.isdigit() and 500 <= int(code_str) < 600
+      )
+
+      merged = {
+          "scenario": scenario,
+          "execution": execution,
+          "total_requests": total_requests_sum,
+          "error_rate": error_rate,  # http_status から再計算済み (4xx+5xx) / total
+          "http_status": http_status,
+          "http_4xx": http_4xx,
+          "http_5xx": http_5xx,
+          "status_distribution": status_distribution,
+          "latency": latency,
+      }
+
+    code_empty_http_status: |
+      # http_status が空でも他のメトリクス（latency等）は活用
+      # 注意: continue せずに latency のマージを先に実行する設計に変更
+
+      # latency を先にマージ（http_status が空でも有効なら含める）
+      latency_data = data.get("latency", {})
+      if isinstance(latency_data, dict) and latency_data:
+          # latency は http_status の有無に関わらずマージ対象
+          latency_files.append((file, latency_data))
+
+      # http_status が空の場合は total_requests のみ除外
+      if http_status_sum == 0:
+          print(f"Warning: Empty http_status in {file}, excluding from request counts (latency is still merged)", file=sys.stderr)
+          # total_requests には含めない（valid_requests に追加しない）
+          # ただし latency は上記で既にマージ対象に含まれている
+          continue
+
+  tasks:
+    - id: "TASK-003-1"
+      name: "http_4xx, http_5xx の集計ロジック追加"
+      description: |
+        マージ後の http_status から、4xx エラーと 5xx エラーの
+        合計をそれぞれ計算し、マージ結果に追加する。
+      implementation_location: "benches/api/benchmarks/scripts/merge_lua_metrics.py:264-272"
+      dependencies: []
+      estimated_effort: "1 hour"
+
+    - id: "TASK-003-2"
+      name: "http_status が空でも latency はマージ対象に含める"
+      description: |
+        http_status が空のファイルでも、latency 等の有用なメトリクスは
+        マージ対象に含める。total_requests のみ除外する。
+      implementation_location: "benches/api/benchmarks/scripts/merge_lua_metrics.py:212-215"
+      dependencies: []
+      estimated_effort: "2 hours"
+
+    - id: "TASK-003-3"
+      name: "error_rate の定義統一（4xx+5xx）"
+      description: |
+        error_rate を http_status から再計算し、4xx+5xx の合計 / total_requests とする。
+        これにより、run_benchmark.sh と定義が統一される。
+      implementation_location: "benches/api/benchmarks/scripts/merge_lua_metrics.py:243-247"
+      dependencies:
+        - "TASK-003-1"
+      estimated_effort: "1 hour"
+
+  expected_result: |
+    マージ後の lua_metrics.json に以下が含まれる:
+
+    {
+      "total_requests": 24000,
+      "error_rate": 0.0834,  // (1500 + 500) / 24000 = 4xx+5xx / total
+      "http_status": {
+        "200": 20000,
+        "201": 2000,
+        "409": 1500,
+        "500": 500
+      },
+      "http_4xx": 1500,
+      "http_5xx": 500,
+      "latency": { ... }
+    }
+
+# ============================================================================
+# フェーズ4: run_benchmark.sh の改善
+# ============================================================================
+phase_4:
+  id: "PHASE-004"
+  name: "run_benchmark.sh の改善"
+  priority: "P1"
+  estimated_effort: "0.5 days"
+  blocking: false
+
+  objective: |
+    error_rate 計算のフォールバック順序を改善し、
+    lua_metrics.json の値を優先的に使用する。
+
+    lua_metrics.json の error_rate は http_status から再計算済み（4xx+5xx）であるため、
+    定義の統一が達成される。
+
+  proposed_improvement:
+    description: |
+      フォールバック順序を明確化:
+      1. lua_metrics.json の error_rate を最優先（http_status から再計算済み）
+      2. lua_metrics.json の http_status から直接計算
+      3. wrk の summary.errors.status から計算（最終手段）
+
+      また、lua_metrics.json の http_4xx, http_5xx を使用するように変更。
+
+    code: |
+      # error_rate 計算のフォールバック順序
+      error_rate="null"
+
+      # 0. 最初に http_4xx, http_5xx を lua_metrics.json から取得
+      # 注意: error_rate 計算より前に確定させる必要がある
+      # has_lua_http_metrics フラグで lua_metrics から取得できたかを追跡
+      # 両方のキーが存在し、かつ有効な数値である場合のみ true
+      local has_lua_http_metrics=false
+      if [[ -f "${lua_metrics_file}" ]] && command -v jq &> /dev/null; then
+          # jq で http_4xx, http_5xx の両方のキーが存在し数値であることを確認
+          # jq の出力を捨てて終了コードのみ利用（標準出力混入を防ぐ）
+          if jq -e 'has("http_4xx") and has("http_5xx") and (.http_4xx | type == "number") and (.http_5xx | type == "number")' "${lua_metrics_file}" >/dev/null 2>&1; then
+              http_4xx=$(jq -r '.http_4xx' "${lua_metrics_file}" 2>/dev/null)
+              http_5xx=$(jq -r '.http_5xx' "${lua_metrics_file}" 2>/dev/null)
+              # 追加のバリデーション: 整数であること
+              if [[ "${http_4xx}" =~ ^[0-9]+$ ]] && [[ "${http_5xx}" =~ ^[0-9]+$ ]]; then
+                  has_lua_http_metrics=true
+              else
+                  # 数値でない場合はリセットして wrk フォールバックへ
+                  http_4xx=0
+                  http_5xx=0
+              fi
+          fi
+      fi
+
+      # 1. lua_metrics.json の error_rate を最優先
+      # 注意: error_rate が数値型で、0-1 の範囲内であることを検証
+      if [[ -f "${lua_metrics_file}" ]] && command -v jq &> /dev/null; then
+          # error_rate が存在し、数値型で、0以上1以下であることを確認
+          if jq -e 'has("error_rate") and (.error_rate | type == "number") and (.error_rate >= 0) and (.error_rate <= 1)' "${lua_metrics_file}" >/dev/null 2>&1; then
+              local lua_error_rate
+              lua_error_rate=$(jq -r '.error_rate' "${lua_metrics_file}" 2>/dev/null)
+              if [[ -n "${lua_error_rate}" && "${lua_error_rate}" != "null" ]]; then
+                  error_rate="${lua_error_rate}"
+                  echo -e "${CYAN}Using error_rate from lua_metrics.json: ${error_rate}${NC}" >&2
+              fi
+          fi
+      fi
+
+      # 2. http_4xx + http_5xx から直接計算（lua_metrics に error_rate がない場合）
+      # 注意: has_lua_http_metrics=true の場合のみ計算（lua_metrics から取得できた場合）
+      # lua_metrics が無い/古い場合は step 3 (wrk) にフォールバック
+      if [[ "${error_rate}" == "null" && "${has_lua_http_metrics}" == "true" ]]; then
+          local errors_4xx_5xx
+          errors_4xx_5xx=$((${http_4xx:-0} + ${http_5xx:-0}))
+          if ((10#${total_requests:-0} > 0)); then
+              error_rate=$(awk -v errors="${errors_4xx_5xx}" -v total="${total_requests}" 'BEGIN {
+                  rate = errors / total
+                  if (rate < 0) rate = 0
+                  if (rate > 1) rate = 1
+                  printf "%.6f", rate
+              }')
+              echo -e "${CYAN}Calculated error_rate from http_4xx + http_5xx: ${error_rate}${NC}" >&2
+          fi
+      fi
+
+      # 3. wrk の値から計算（最終手段）
+      if [[ "${error_rate}" == "null" ]]; then
+          if ((10#${total_requests:-0} > 0 && 10#${http_errors_from_wrk:-0} >= 0)); then
+              error_rate=$(awk -v errors="${http_errors_from_wrk}" -v total="${total_requests}" 'BEGIN {
+                  rate = errors / total
+                  if (rate < 0) rate = 0
+                  if (rate > 1) rate = 1
+                  printf "%.6f", rate
+              }')
+              echo -e "${YELLOW}WARNING: Using wrk-based error_rate (less accurate): ${error_rate}${NC}" >&2
+          fi
+      fi
+
+  tasks:
+    - id: "TASK-004-1"
+      name: "lua_metrics.json の error_rate を優先使用"
+      description: |
+        lua_metrics.json に error_rate が含まれている場合は、
+        その値を直接使用する。
+      implementation_location: "benches/api/benchmarks/run_benchmark.sh:1565-1578"
+      dependencies:
+        - "TASK-003-3"
+      estimated_effort: "2 hours"
+
+    - id: "TASK-004-2"
+      name: "http_4xx, http_5xx の読み取り改善"
+      description: |
+        lua_metrics.json に http_4xx, http_5xx が含まれている場合は、
+        その値を使用する。
+      implementation_location: "benches/api/benchmarks/run_benchmark.sh:1495-1521"
+      dependencies:
+        - "TASK-003-1"
+      estimated_effort: "1 hour"
+
+    - id: "TASK-004-3"
+      name: "警告メッセージの追加"
+      description: |
+        どのソースから error_rate を取得したかを示す
+        情報メッセージを追加する。
+      implementation_location: "benches/api/benchmarks/run_benchmark.sh"
+      dependencies:
+        - "TASK-004-1"
+      estimated_effort: "30 minutes"
+
+  expected_result: |
+    ベンチマーク実行時に以下のようなログが出力される:
+
+    - 正常時: "Using error_rate from lua_metrics.json: 0.083333"
+    - フォールバック時: "WARNING: Using wrk-based error_rate (less accurate): 0.415000"
+
+# ============================================================================
+# フェーズ5: 検証とテスト
+# ============================================================================
+phase_5:
+  id: "PHASE-005"
+  name: "検証とテスト"
+  priority: "P0"
+  estimated_effort: "1 day"
+  blocking: true
+
+  objective: |
+    改善後、tasks_update および tasks_update_conflict ベンチマークを実行し、
+    http_status が正確に取得できることを検証する。
+
+    特に以下を重点的に確認:
+    - threads>1 で http_status が全スレッド合算になっていること
+    - http_status の合計が summary.requests と一致すること
+    - error_tracker が無い場合にフォールバックが機能すること
+
+  tasks:
+    - id: "TASK-005-1"
+      name: "threads=2 での http_status 検証"
+      description: |
+        threads=2 で tasks_update ベンチマークを実行し、
+        http_status の合計と total_requests の整合性を確認。
+
+        検証対象の明確化:
+        - .results.total_requests: http_status の合計から再計算された値
+        - http_status_sum: http_status の各ステータスコードの合計
+
+        THREADS=2 ./run_benchmark.sh tasks_update
+        jq '{
+          http_status_sum: (.results.http_status | to_entries | map(.value) | add),
+          total_requests: .results.total_requests,
+          match: ((.results.http_status | to_entries | map(.value) | add) == .results.total_requests)
+        }' benches/results/tasks_update/benchmark/meta/tasks_update.json
+
+        http_status_sum == total_requests であることを確認。
+      dependencies:
+        - "PHASE-001"
+        - "PHASE-002"
+      estimated_effort: "1 hour"
+
+    - id: "TASK-005-2"
+      name: "threads=4 での http_status 検証"
+      description: |
+        threads=4 で tasks_update ベンチマークを実行し、
+        http_status の合計と total_requests の整合性を確認。
+
+        THREADS=4 ./run_benchmark.sh tasks_update
+        jq '{
+          http_status_sum: (.results.http_status | to_entries | map(.value) | add),
+          total_requests: .results.total_requests,
+          match: ((.results.http_status | to_entries | map(.value) | add) == .results.total_requests)
+        }' benches/results/tasks_update/benchmark/meta/tasks_update.json
+
+        http_status_sum == total_requests であることを確認。
+      dependencies:
+        - "TASK-005-1"
+      estimated_effort: "1 hour"
+
+    - id: "TASK-005-3"
+      name: "tasks_update_conflict での http_status 検証"
+      description: |
+        tasks_update_conflict ベンチマークを実行し、以下を確認:
+        1. http_status が空でないこと
+        2. 409 Conflict の割合が妥当であること（5-15%）
+        3. error_rate と http_status の整合性
+
+        ./run_benchmark.sh tasks_update_conflict
+        jq '{
+          http_status: .results.http_status,
+          conflict_count: .results.http_status["409"],
+          total_requests: .results.total_requests,
+          conflict_rate: ((.results.http_status["409"] // 0) / .results.total_requests)
+        }' benches/results/tasks_update_conflict/benchmark/meta/tasks_update.json
+      dependencies:
+        - "TASK-005-2"
+      estimated_effort: "1 hour"
+
+    - id: "TASK-005-4"
+      name: "http_status と error_rate の整合性検証"
+      description: |
+        以下のコマンドで整合性を検証:
+
+        jq '{
+          error_rate: .results.error_rate,
+          http_4xx: .errors.http_4xx,
+          http_5xx: .errors.http_5xx,
+          total_requests: .results.total_requests,
+          calculated_error_rate: (
+            (.errors.http_4xx + .errors.http_5xx) / .results.total_requests
+          ),
+          diff: ((.results.error_rate - ((.errors.http_4xx + .errors.http_5xx) / .results.total_requests)) | fabs),
+          match: (((.results.error_rate - ((.errors.http_4xx + .errors.http_5xx) / .results.total_requests)) | fabs) <= 0.000001)
+        }' benches/results/tasks_update/benchmark/meta/tasks_update.json
+
+        error_rate と calculated_error_rate が一致することを確認。
+        許容誤差: 0.000001（1e-6、%.6f の精度に合わせる）
+        error_rate = (http_4xx + http_5xx) / total_requests
+      dependencies:
+        - "TASK-005-3"
+      estimated_effort: "30 minutes"
+
+    - id: "TASK-005-5"
+      name: "http_4xx, http_5xx の検証"
+      description: |
+        以下のコマンドで http_4xx, http_5xx の正確性を検証:
+
+        jq '{
+          http_4xx: .errors.http_4xx,
+          http_5xx: .errors.http_5xx,
+          http_status_4xx_sum: (.results.http_status | to_entries | map(select(.key | test("^[4][0-9]{2}$"))) | map(.value) | add // 0),
+          http_status_5xx_sum: (.results.http_status | to_entries | map(select(.key | test("^[5][0-9]{2}$"))) | map(.value) | add // 0)
+        }' benches/results/tasks_update/benchmark/meta/tasks_update.json
+
+        http_4xx == http_status_4xx_sum
+        http_5xx == http_status_5xx_sum
+      dependencies:
+        - "TASK-005-4"
+      estimated_effort: "30 minutes"
+
+    - id: "TASK-005-6"
+      name: "error_tracker 無しでのフォールバック検証"
+      description: |
+        error_tracker を使用しないベンチマーク（profile_wrk.lua 等）で
+        フォールバックが機能することを確認。
+
+        http_status は空でも、wrk からの error_rate が使用されることを確認。
+      dependencies: []
+      estimated_effort: "1 hour"
+      optional: true
+
+  expected_results:
+    tasks_update:
+      description: "正常な更新シナリオ"
+      expected:
+        http_status_sum: "== total_requests"
+        error_rate: "(http_4xx + http_5xx) / total_requests"
+        http_4xx: "主に 409 Conflict"
+        http_5xx: "数件以下"
+
+    tasks_update_conflict:
+      description: "競合発生シナリオ"
+      expected:
+        http_status_sum: "== total_requests"
+        conflict_rate: "5-15%"
+        http_4xx: "主に 409 Conflict"
+        http_5xx: "数件以下"
+
+# ============================================================================
+# 実装順序とタスクリスト
+# ============================================================================
+task_summary:
+  lua_scripts:
+    - id: "TASK-001-1"
+      name: "setup_thread() で thread 参照を M.threads に保持"
+      file: "benches/api/benchmarks/scripts/error_tracker.lua"
+      priority: "P0"
+      estimated_effort: "1 hour"
+
+    - id: "TASK-001-2"
+      name: "get_all_threads_aggregated_summary() 関数の追加"
+      file: "benches/api/benchmarks/scripts/error_tracker.lua"
+      priority: "P0"
+      estimated_effort: "2 hours"
+
+    - id: "TASK-001-3"
+      name: "M.threads の初期化をリセット"
+      file: "benches/api/benchmarks/scripts/error_tracker.lua"
+      priority: "P0"
+      estimated_effort: "30 minutes"
+
+    - id: "TASK-002-1"
+      name: "get_all_threads_aggregated_summary() の結果を http_status に反映"
+      file: "benches/api/benchmarks/scripts/result_collector.lua"
+      priority: "P0"
+      estimated_effort: "2 hours"
+
+    - id: "TASK-002-2"
+      name: "total_requests と http_status の整合性確保"
+      file: "benches/api/benchmarks/scripts/result_collector.lua"
+      priority: "P0"
+      estimated_effort: "1 hour"
+
+    - id: "TASK-002-3"
+      name: "フォールバックロジックの維持"
+      file: "benches/api/benchmarks/scripts/result_collector.lua"
+      priority: "P0"
+      estimated_effort: "1 hour"
+
+  python_scripts:
+    - id: "TASK-003-1"
+      name: "http_4xx, http_5xx の集計ロジック追加"
+      file: "benches/api/benchmarks/scripts/merge_lua_metrics.py"
+      priority: "P0"
+      estimated_effort: "1 hour"
+
+    - id: "TASK-003-2"
+      name: "http_status が空でも latency はマージ対象に含める"
+      file: "benches/api/benchmarks/scripts/merge_lua_metrics.py"
+      priority: "P1"
+      estimated_effort: "2 hours"
+
+    - id: "TASK-003-3"
+      name: "error_rate の定義統一（4xx+5xx）"
+      file: "benches/api/benchmarks/scripts/merge_lua_metrics.py"
+      priority: "P0"
+      estimated_effort: "1 hour"
+
+  shell_scripts:
+    - id: "TASK-004-1"
+      name: "lua_metrics.json の error_rate を優先使用"
+      file: "benches/api/benchmarks/run_benchmark.sh"
+      priority: "P1"
+      estimated_effort: "2 hours"
+
+    - id: "TASK-004-2"
+      name: "http_4xx, http_5xx の読み取り改善"
+      file: "benches/api/benchmarks/run_benchmark.sh"
+      priority: "P1"
+      estimated_effort: "1 hour"
+
+    - id: "TASK-004-3"
+      name: "警告メッセージの追加"
+      file: "benches/api/benchmarks/run_benchmark.sh"
+      priority: "P2"
+      estimated_effort: "30 minutes"
+
+  validation:
+    - id: "TASK-005-1"
+      name: "threads=2 での http_status 検証"
+      priority: "P0"
+      estimated_effort: "1 hour"
+
+    - id: "TASK-005-2"
+      name: "threads=4 での http_status 検証"
+      priority: "P0"
+      estimated_effort: "1 hour"
+
+    - id: "TASK-005-3"
+      name: "tasks_update_conflict での http_status 検証"
+      priority: "P0"
+      estimated_effort: "1 hour"
+
+    - id: "TASK-005-4"
+      name: "http_status と error_rate の整合性検証"
+      priority: "P0"
+      estimated_effort: "30 minutes"
+
+    - id: "TASK-005-5"
+      name: "http_4xx, http_5xx の検証"
+      priority: "P0"
+      estimated_effort: "30 minutes"
+
+    - id: "TASK-005-6"
+      name: "error_tracker 無しでのフォールバック検証"
+      priority: "P2"
+      estimated_effort: "1 hour"
+      optional: true
+
+# ============================================================================
+# 依存関係
+# ============================================================================
+dependencies:
+  graph: |
+    TASK-001-1 --> TASK-001-2 --> TASK-001-3
+                       |
+                       v
+    TASK-002-1 --> TASK-002-2 --> TASK-002-3
+         |
+         v
+    TASK-003-1 --> TASK-003-2 --> TASK-003-3
+         |              |
+         v              v
+    TASK-004-1 --> TASK-004-2 --> TASK-004-3
+         |
+         v
+    TASK-005-1 --> TASK-005-2 --> TASK-005-3 --> TASK-005-4 --> TASK-005-5 --> TASK-005-6
+
+  critical_path:
+    - "TASK-001-1"  # error_tracker: thread 参照保持
+    - "TASK-001-2"  # error_tracker: 全スレッド集計関数
+    - "TASK-002-1"  # result_collector: http_status 構築
+    - "TASK-003-1"  # merge_lua_metrics: http_4xx/http_5xx
+    - "TASK-005-1"  # 検証: threads=2
+    - "TASK-005-4"  # 検証: 整合性
+
+# ============================================================================
+# リスクと軽減策（修正版）
+# ============================================================================
+risks:
+  - id: "RISK-001"
+    description: "setup(thread) で保持した thread 参照が done() で無効になる"
+    probability: "Low"
+    impact: "High"
+    mitigation: |
+      wrk の公式ドキュメントに記載されている方法であり、
+      多くの wrk スクリプトで使用されている実績のある手法。
+
+      万が一アクセスできない場合は、M.threads が空になるため、
+      フォールバックとして wrk の summary を使用する。
+
+  - id: "RISK-002"
+    description: "フェーズ単位で 1 ファイルの lua_metrics.json が生成される"
+    probability: "High（現状の仕様）"
+    impact: "Low"
+    mitigation: |
+      done() で全スレッドの集計を取得して lua_metrics.json に書き込むため、
+      フェーズ単位で 1 ファイルでも問題ない。
+
+      マルチフェーズベンチマークの場合は、merge_lua_metrics.py で
+      全フェーズの lua_metrics.json をマージする。
+
+  - id: "RISK-003"
+    description: "error_rate の定義変更による既存の比較への影響"
+    probability: "Medium"
+    impact: "Medium"
+    mitigation: |
+      error_rate の定義を 4xx+5xx に変更するため、
+      過去のベンチマーク結果との比較に注意が必要。
+
+      - 変更後の最初のベンチマークでは、ベースラインを再測定する
+      - http_error_rate と error_rate を同じ定義に統一することで、
+        今後の混乱を防ぐ
+
+  - id: "RISK-004"
+    description: "http_status の合計と summary.requests が一致しない"
+    probability: "Low"
+    impact: "Medium"
+    mitigation: |
+      http_status の合計を total_requests として使用し、整合性を確保。
+
+      summary.requests と http_status の合計が一致しない場合は、
+      http_status の合計を優先する（スレッドローカルの正確な値）。
+
+      merge_lua_metrics.py でも同様のロジックが既に実装されている。
+
+# ============================================================================
+# 受け入れ基準
+# ============================================================================
+acceptance_criteria:
+  minimum:
+    - "error_tracker.lua に get_all_threads_aggregated_summary() 関数が追加されている"
+    - "result_collector.lua が全スレッド集計結果を http_status に反映している"
+    - "threads=2/4 で http_status の合計が total_requests と一致する"
+    - "tasks_update で http_status が空でないこと"
+    - "error_rate と http_status の整合性が取れていること（4xx+5xx / total）"
+
+  recommended:
+    - "merge_lua_metrics.py に http_4xx, http_5xx が出力されている"
+    - "run_benchmark.sh が lua_metrics.json の error_rate を優先使用"
+    - "409 Conflict の割合が測定できること"
+    - "マルチスレッド環境（threads=4, 8）で動作すること"
+
+  stretch:
+    - "error_tracker が無い場合にフォールバックが機能すること"
+    - "全ベンチマークで http_status が正確に取得できること"
+    - "RETRY_COUNT の効果が測定できること"
+
+# ============================================================================
+# メタ情報
+# ============================================================================
+metadata:
+  codex_review_required: true
+  codex_review_focus:
+    - "wrk のスレッドモデルに適合しているか（setup で thread 参照保持、done で全スレッド集計）"
+    - "error_rate の定義が統一されているか（4xx+5xx / total）"
+    - "http_status の合計と total_requests の整合性が確保されているか"
+    - "テスト戦略が十分か（threads>1 での検証が含まれているか）"
+
+  related_documents:
+    - "docs/internal/requirements/20260204_1400_tasks_update_error_rate_accuracy.yaml"
+    - "docs/internal/analysis/20260204_tasks_update_error_rate_investigation.yaml"

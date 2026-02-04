@@ -1,18 +1,3 @@
--- Benchmark: PUT /tasks/{id} with conflict retry logic
---
--- IMPORTANT REQUIREMENTS:
---   - This script REQUIRES threads == connections (1 thread = 1 connection)
---   - Version state is managed per-thread using thread-local variables
---   - Multiple connections per thread would cause version state desynchronization
---   - When threads != connections, the following issues occur:
---     * Version conflicts (409 Conflict) due to stale version in thread state
---     * is_backoff_request flag response mismatch (request/response pairing breaks)
---     * Incorrect metrics (error rate calculation becomes unreliable)
---   - Use WRK_THREADS environment variable to match wrk's -t option
---   - Use ID_POOL_SIZE to control the number of task IDs (default: 10)
---   - Use RETRY_COUNT to set max retry attempts on 409 Conflict (default: 0)
---   - Use RETRY_BACKOFF_MAX to set backoff upper limit (default: 16)
-
 package.path = package.path .. ";scripts/?.lua"
 local common = require("common")
 local test_ids = common.load_test_ids()
@@ -41,24 +26,20 @@ function init(args)
     common.init_benchmark({scenario_name = "tasks_update", output_format = "json"})
 end
 
+local function validate_and_clamp(value, min_val, default_val, name)
+    if not value or value < min_val then
+        io.stderr:write(string.format("[tasks_update] WARN: Invalid %s, defaulting to %d\n", name, default_val))
+        return default_val
+    end
+    return value
+end
+
 function setup(thread)
     if error_tracker then error_tracker.setup_thread(thread) end
 
-    local total_threads = tonumber(os.getenv("WRK_THREADS")) or 1
-    local pool_size = tonumber(os.getenv("ID_POOL_SIZE")) or 10
+    local total_threads = validate_and_clamp(tonumber(os.getenv("WRK_THREADS")), 1, 1, "WRK_THREADS")
+    local pool_size = validate_and_clamp(tonumber(os.getenv("ID_POOL_SIZE")), 1, 10, "ID_POOL_SIZE")
     local thread_id = tonumber(thread.id) or 0
-
-    -- Validate total_threads to prevent division by zero
-    if not total_threads or total_threads < 1 then
-        io.stderr:write("[tasks_update] WARN: Invalid WRK_THREADS, defaulting to 1\n")
-        total_threads = 1
-    end
-
-    -- Validate pool_size to prevent division by zero
-    if not pool_size or pool_size < 1 then
-        io.stderr:write("[tasks_update] WARN: Invalid ID_POOL_SIZE, defaulting to 10\n")
-        pool_size = 10
-    end
 
     if pool_size < total_threads then
         io.stderr:write(string.format(
@@ -67,11 +48,8 @@ function setup(thread)
         total_threads = pool_size
     end
 
-    -- Suppress excess threads beyond pool_size
     if thread_id >= pool_size then
-        io.stderr:write(string.format(
-            "[tasks_update] Thread %d suppressed (ID_POOL_SIZE=%d)\n",
-            thread_id, pool_size))
+        io.stderr:write(string.format("[tasks_update] Thread %d suppressed (ID_POOL_SIZE=%d)\n", thread_id, pool_size))
         thread:set("suppressed", true)
         thread:set("id", thread_id)
         thread:set("id_start", 0)
@@ -82,16 +60,15 @@ function setup(thread)
 
     local ids_per_thread = math.floor(pool_size / total_threads)
     local start_index = thread_id * ids_per_thread
-    local end_index = start_index + ids_per_thread - 1
 
     thread:set("suppressed", false)
     thread:set("id", thread_id)
     thread:set("id_start", start_index)
-    thread:set("id_end", end_index)
+    thread:set("id_end", start_index + ids_per_thread - 1)
     thread:set("id_range", ids_per_thread)
 
     io.write(string.format("[Thread %d] ID range: %d-%d (%d IDs)\n",
-        thread_id, start_index, end_index, ids_per_thread))
+        thread_id, start_index, start_index + ids_per_thread - 1, ids_per_thread))
 end
 
 local function generate_update_body(update_type, version, request_counter)
@@ -126,8 +103,7 @@ local function reset_retry_state()
 end
 
 local function apply_backoff()
-    local delay = math.min(BACKOFF_BASE ^ retry_attempt, BACKOFF_MAX)
-    backoff_skip_target = delay
+    backoff_skip_target = math.min(BACKOFF_BASE ^ retry_attempt, BACKOFF_MAX)
     backoff_skip_counter = 0
 end
 
@@ -291,7 +267,14 @@ function response(status, headers, body)
     end
 end
 
-function done(summary, latency, requests)
+local STATUS_LABELS = {
+    {"200 OK", "status_200"}, {"201 Created", "status_201"}, {"207 Multi-Status", "status_207"},
+    {"400 Bad Request", "status_400"}, {"404 Not Found", "status_404"}, {"409 Conflict", "status_409"},
+    {"422 Unprocessable Entity", "status_422"}, {"500 Internal Server Error", "status_500"},
+    {"502 Bad Gateway", "status_502"}, {"Other Status", "status_other"}
+}
+
+local function print_excluded_requests()
     if backoff_request_count > 0 then
         io.stderr:write(string.format("[tasks_update] Backoff requests (excluded): %d\n", backoff_request_count))
     end
@@ -301,50 +284,40 @@ function done(summary, latency, requests)
     if fallback_request_count > 0 then
         io.stderr:write(string.format("[tasks_update] Fallback requests (excluded from error rate): %d\n", fallback_request_count))
     end
+end
 
+local function print_status_distribution(aggregated, lua_total, summary)
+    io.write("\n--- tasks_update HTTP Status Distribution (single-thread estimate) ---\n")
+    if lua_total <= 0 then
+        io.write("  No requests completed\n")
+        return
+    end
+
+    local error_count = 0
+    for _, label in ipairs(STATUS_LABELS) do
+        local code, key = label[1], label[2]
+        local count = aggregated[key] or 0
+        if count > 0 then
+            io.write(string.format("  %s: %d (%.1f%%)\n", code, count, (count / lua_total) * 100))
+            if key ~= "status_200" and key ~= "status_201" and key ~= "status_207" then
+                error_count = error_count + count
+            end
+        end
+    end
+
+    local actual_error_rate = (error_count / lua_total) * 100
+    io.write(string.format("\nActual Error Rate (backoff/suppressed/fallback excluded): %.2f%% (%d errors / %d update requests)\n",
+        actual_error_rate, error_count, lua_total))
+    io.write(string.format("Note: wrk summary.requests=%d includes %d backoff + %d suppressed + %d fallback requests\n",
+        summary.requests or 0, backoff_request_count, suppressed_request_count, fallback_request_count))
+end
+
+function done(summary, latency, requests)
+    print_excluded_requests()
     common.print_summary("tasks_update", summary)
-    local lua_total = common.total_requests
 
     if error_tracker then
-        local aggregated = error_tracker.get_thread_aggregated_summary()
-
-        io.write("\n--- tasks_update HTTP Status Distribution (single-thread estimate) ---\n")
-        if lua_total > 0 then
-            local status_codes = {
-                {"200 OK", aggregated.status_200},
-                {"201 Created", aggregated.status_201},
-                {"207 Multi-Status", aggregated.status_207},
-                {"400 Bad Request", aggregated.status_400},
-                {"404 Not Found", aggregated.status_404},
-                {"409 Conflict", aggregated.status_409},
-                {"422 Unprocessable Entity", aggregated.status_422},
-                {"500 Internal Server Error", aggregated.status_500},
-                {"502 Bad Gateway", aggregated.status_502},
-                {"Other Status", aggregated.status_other}
-            }
-
-            for _, pair in ipairs(status_codes) do
-                local code, count = pair[1], pair[2]
-                if count > 0 then
-                    io.write(string.format("  %s: %d (%.1f%%)\n", code, count, (count / lua_total) * 100))
-                end
-            end
-
-            local error_count = (aggregated.status_400 or 0) + (aggregated.status_404 or 0) +
-                                (aggregated.status_409 or 0) + (aggregated.status_422 or 0) +
-                                (aggregated.status_500 or 0) + (aggregated.status_502 or 0) +
-                                (aggregated.status_other or 0)
-            -- lua_total already excludes backoff/suppressed/fallback (track_response not called for them)
-            local update_request_total = lua_total
-            local actual_error_rate = update_request_total > 0 and (error_count / update_request_total * 100) or 0
-
-            io.write(string.format("\nActual Error Rate (backoff/suppressed/fallback excluded): %.2f%% (%d errors / %d update requests)\n",
-                actual_error_rate, error_count, update_request_total))
-            io.write(string.format("Note: wrk summary.requests=%d includes %d backoff + %d suppressed + %d fallback requests\n",
-                summary.requests or 0, backoff_request_count, suppressed_request_count, fallback_request_count))
-        else
-            io.write("  No requests completed\n")
-        end
+        print_status_distribution(error_tracker.get_thread_aggregated_summary(), common.total_requests, summary)
     end
 
     io.stderr:write(string.format("[tasks_update] Retry config: RETRY_COUNT=%d, BACKOFF_MAX=%d\n", RETRY_COUNT, BACKOFF_MAX))

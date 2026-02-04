@@ -22,14 +22,7 @@ M.state = {
     errors_by_type = {timeout = 0, connect = 0, read = 0, write = 0, other = 0},
 }
 
-function M.init()
-    M.state.timeout_ms = tonumber(os.getenv("REQUEST_TIMEOUT_MS")) or 30000
-    M.state.connect_timeout_ms = tonumber(os.getenv("CONNECT_TIMEOUT_MS")) or 5000
-    M.state.max_retries = tonumber(os.getenv("MAX_RETRIES")) or 0
-    M.state.retry_delay_ms = tonumber(os.getenv("RETRY_DELAY_MS")) or 1000
-    M.state.expected_error_rate = tonumber(os.getenv("EXPECTED_ERROR_RATE"))
-    M.state.fail_on_error_threshold = os.getenv("FAIL_ON_ERROR_THRESHOLD") == "1"
-    M.state.inject_error_rate = tonumber(os.getenv("INJECT_ERROR_RATE"))
+local function reset_counters()
     M.state.total_requests = 0
     M.state.http_error_count = 0
     M.state.network_error_count = 0
@@ -39,6 +32,18 @@ function M.init()
     M.state.conflict_count = 0
     M.state.errors_by_status = {}
     M.state.errors_by_type = {timeout = 0, connect = 0, read = 0, write = 0, other = 0}
+end
+
+function M.init()
+    M.state.timeout_ms = tonumber(os.getenv("REQUEST_TIMEOUT_MS")) or 30000
+    M.state.connect_timeout_ms = tonumber(os.getenv("CONNECT_TIMEOUT_MS")) or 5000
+    M.state.max_retries = tonumber(os.getenv("MAX_RETRIES")) or 0
+    M.state.retry_delay_ms = tonumber(os.getenv("RETRY_DELAY_MS")) or 1000
+    M.state.expected_error_rate = tonumber(os.getenv("EXPECTED_ERROR_RATE"))
+    M.state.fail_on_error_threshold = os.getenv("FAIL_ON_ERROR_THRESHOLD") == "1"
+    M.state.inject_error_rate = tonumber(os.getenv("INJECT_ERROR_RATE"))
+    reset_counters()
+    M.threads = {}
 end
 
 local function safe_rate(count)
@@ -151,11 +156,16 @@ function M.get_config()
     }
 end
 
+local STATUS_CODES = {"200", "201", "207", "400", "404", "409", "422", "500", "502", "other"}
+
 function M.setup_thread(thread)
-    for _, code in ipairs({"200", "201", "207", "400", "404", "409", "422", "500", "502", "other"}) do
+    table.insert(M.threads, thread)
+    for _, code in ipairs(STATUS_CODES) do
         thread:set("status_" .. code, 0)
     end
 end
+
+local STANDARD_CODES = {200, 201, 207, 400, 404, 409, 422, 500, 502}
 
 function M.track_thread_response(status)
     local thread = wrk.thread
@@ -165,7 +175,7 @@ function M.track_thread_response(status)
     thread:set(key, (tonumber(thread:get(key)) or 0) + 1)
 
     local is_standard = false
-    for _, code in ipairs({200, 201, 207, 400, 404, 409, 422, 500, 502}) do
+    for _, code in ipairs(STANDARD_CODES) do
         if status == code then is_standard = true break end
     end
     if not is_standard and status >= 400 then
@@ -173,21 +183,35 @@ function M.track_thread_response(status)
     end
 end
 
+local function create_empty_status_summary()
+    local summary = {}
+    for _, code in ipairs(STATUS_CODES) do
+        summary["status_" .. code] = 0
+    end
+    return summary
+end
+
 function M.get_thread_aggregated_summary()
     local thread = wrk.thread
-    if not thread then
-        return {
-            status_200 = 0, status_201 = 0, status_207 = 0,
-            status_400 = 0, status_404 = 0, status_409 = 0,
-            status_422 = 0, status_500 = 0, status_502 = 0,
-            status_other = 0,
-        }
-    end
+    if not thread then return create_empty_status_summary() end
 
     local aggregated = {}
-    for _, code in ipairs({"200", "201", "207", "400", "404", "409", "422", "500", "502", "other"}) do
+    for _, code in ipairs(STATUS_CODES) do
         aggregated["status_" .. code] = tonumber(thread:get("status_" .. code)) or 0
     end
+    return aggregated
+end
+
+function M.get_all_threads_aggregated_summary()
+    local aggregated = create_empty_status_summary()
+
+    for _, thread in ipairs(M.threads) do
+        for _, code in ipairs(STATUS_CODES) do
+            local key = "status_" .. code
+            aggregated[key] = aggregated[key] + (tonumber(thread:get(key)) or 0)
+        end
+    end
+
     return aggregated
 end
 

@@ -1,0 +1,467 @@
+# tasks_update エラー率測定問題の調査結果
+#
+# 調査日: 2026-02-04
+# 対象ブランチ: feature/async-io-unboxed-execution
+# 調査対象: tasks_update, tasks_update_conflict ベンチマーク
+# Codex分析: 実施済み（read-only モード）
+
+metadata:
+  analysis_date: "2026-02-04T14:00:00Z"
+  branch: "feature/async-io-unboxed-execution"
+  analyzer: "Claude Code + Codex MCP"
+  status: "completed"
+  severity: "critical"
+
+# エグゼクティブサマリー
+executive_summary:
+  verdict: "測定ロジックに重大な欠陥あり、要修正"
+
+  overall_assessment: |
+    tasks_update および tasks_update_conflict ベンチマークにおいて、
+    HTTPステータスコード分布とエラー率の測定に重大な問題が発見された。
+
+    現状:
+    - **error_rate**: 41.4%と表示されているが、内訳不明
+    - **http_status**: 空（{}）
+    - **http_4xx, http_5xx**: ゼロ
+
+    この状態では、以下の影響が発生:
+    - エラーの内訳が不明（409 Conflict の割合が分からない）
+    - リトライ戦略の効果測定が困難
+    - ベンチマーク結果の信頼性が低下
+    - CI/CDでのしきい値判定が不正確
+
+  key_findings:
+    - finding: "result_collector.lua のスレッドローカル集計の欠落"
+      severity: "critical"
+      impact: |
+        M.status_counts はスレッドローカルで、done() 時に空になる。
+        結果として http_status が作られず、分布が欠落する。
+
+    - finding: "error_tracker.lua のスレッド集計機能が未活用"
+      severity: "high"
+      impact: |
+        error_tracker.lua には既にスレッドローカルストレージを使用した
+        集計機能が実装されているが、result_collector.lua で活用されていない。
+
+        tasks_update.lua では、この機能を使用してステータス分布を
+        標準出力には出力しているが、lua_metrics.json には保存していない。
+
+    - finding: "merge_lua_metrics.py の http_status マージ失敗"
+      severity: "high"
+      impact: |
+        http_status が空のファイルを全スキップするため、
+        全ファイルが無効化されるとマージ自体が失敗する。
+
+    - finding: "run_benchmark.sh のフォールバック不足"
+      severity: "medium"
+      impact: |
+        http_status が取れない場合、http_4xx/http_5xx を更新できず0のまま。
+        error_rate のみwrk由来で計算されるため、
+        「エラー率はあるがhttp_statusが空」という状態になる。
+
+  recommendation: |
+    以下の優先順位で修正を実施:
+
+    1. **最優先**: result_collector.lua で error_tracker の集計結果を http_status に反映
+    2. **次点**: merge_lua_metrics.py で http_status のマージロジックを改善
+    3. **次点**: run_benchmark.sh で error_rate 計算のフォールバック順序を改善
+
+    既存の error_tracker.lua のスレッド集計機能を活用することで、
+    最小限の変更で問題を解決可能。
+
+# 問題の詳細分析
+problem_analysis:
+  # ========================================
+  # 根本原因1: スレッドローカル集計の欠落
+  # ========================================
+  - id: "PROBLEM-001"
+    name: "result_collector.lua のスレッドローカル集計の欠落"
+    priority: "P0"
+
+    problem:
+      description: |
+        result_collector.lua の M.status_counts は
+        response() 関数で更新されるが、wrk のマルチスレッド環境では
+        各スレッドが独立したLua状態を持つため、
+        done() 実行時に M.status_counts が空になる可能性が高い。
+
+        result_collector.lua:181, 256, 483
+
+      evidence:
+        - file: "benches/api/benchmarks/scripts/result_collector.lua"
+          line: 110
+          code: |
+            function M.record_response(status, latency_us, headers, endpoint)
+                M.response_count = M.response_count + 1
+                local status_key = tostring(status)
+                M.status_counts[status_key] = (M.status_counts[status_key] or 0) + 1
+                if status >= 400 then M.error_count = M.error_count + 1 end
+
+        - file: "benches/api/benchmarks/scripts/result_collector.lua"
+          line: 483
+          code: |
+            if M.results.status_distribution and type(M.results.status_distribution) == "table" and next(M.results.status_distribution) then
+                for status, count in pairs(M.results.status_distribution) do
+                    local status_num = tonumber(status)
+                    if status_num and type(count) == "number" then
+                        M.results.http_status[status] = count
+                    end
+                end
+            end
+
+          observation: |
+            M.results.status_distribution は M.status_counts から作られるが、
+            スレッド分離により M.status_counts が空になる可能性が高い。
+
+      root_cause:
+        description: |
+          wrk のマルチスレッド環境では、各スレッドが独立したLua状態を持つ。
+
+          1. response() 関数は各リクエストの応答時に呼ばれる
+          2. M.status_counts はグローバル変数だが、スレッドローカル
+          3. done() 関数は各スレッドで独立して実行される
+          4. done() 時に M.status_counts が空になる可能性
+
+          これは wrk の設計上の制約であり、
+          スレッドローカルストレージ（wrk.thread:set/get）を使用する必要がある。
+
+    solution:
+      approach: "error_tracker.lua のスレッド集計機能を活用"
+      method: |
+        error_tracker.lua には既にスレッドローカルストレージを使用した
+        集計機能が実装されている:
+
+        - setup_thread(thread): 各スレッドに status_200 等を初期化
+        - track_thread_response(status): wrk.thread:set() でカウント
+        - get_thread_aggregated_summary(): wrk.thread:get() で集計取得
+
+        result_collector.lua の finalize() 関数で、
+        error_tracker.get_thread_aggregated_summary() を使用することで、
+        正確な http_status を構築できる。
+
+      expected_improvement: |
+        - 各スレッドの lua_metrics.json に正確な http_status が保存される
+        - merge_lua_metrics.py で全スレッドの http_status をマージ
+        - 最終的な meta/tasks_update.json に正確なステータス分布が反映される
+
+  # ========================================
+  # 根本原因2: lua_metrics.json のマージ失敗
+  # ========================================
+  - id: "PROBLEM-002"
+    name: "merge_lua_metrics.py の http_status マージ失敗"
+    priority: "P0"
+
+    problem:
+      description: |
+        merge_lua_metrics.py は http_status が空のファイルを全スキップするため、
+        全ファイルが無効化されるとマージ自体が失敗する。
+
+        merge_lua_metrics.py:184, 212
+
+      evidence:
+        - file: "benches/api/benchmarks/scripts/merge_lua_metrics.py"
+          line: 184
+          code: |
+            if not metrics.get("http_status"):
+                print(f"WARNING: {file} has empty http_status, skipping", file=sys.stderr)
+                continue
+
+          observation: |
+            http_status が空のファイルを全スキップするため、
+            全ファイルが無効化されるとマージ対象が0件になる。
+
+      root_cause:
+        description: |
+          厳格な検証ロジックにより、http_status が空のファイルを
+          全スキップする設計になっている。
+
+          これは、正常なケースでは http_status が存在することを
+          前提としているが、スレッドローカル集計の欠落により
+          http_status が空になる場合がある。
+
+    solution:
+      approach: "http_status が空でも他のメトリクスを活用"
+      method: |
+        http_status が空でもスキップせずに処理を継続し、
+        他のメトリクス（error_rate等）は集計対象とする。
+
+        また、各スレッドの http_status を合算し、
+        error_rate を http_status から再計算する。
+
+      expected_improvement: |
+        - 一部のスレッドで http_status が欠落してもマージが成功
+        - 正確な error_rate を http_status から再計算
+        - http_4xx、http_5xx を正確に集計
+
+  # ========================================
+  # 根本原因3: run_benchmark.sh のフォールバック不足
+  # ========================================
+  - id: "PROBLEM-003"
+    name: "run_benchmark.sh の error_rate 計算のフォールバック不足"
+    priority: "P1"
+
+    problem:
+      description: |
+        run_benchmark.sh の error_rate 計算において、
+        http_status が取れない場合、http_4xx/http_5xx を更新できず0のまま。
+
+        error_rate のみwrk由来で計算されるため、
+        「エラー率はあるがhttp_statusが空」という状態になる。
+
+        run_benchmark.sh:1432, 1475, 1559
+
+      evidence:
+        - file: "benches/api/benchmarks/run_benchmark.sh"
+          line: 1432
+          code: |
+            error_rate=$(awk -v errors="${http_status_total}" -v total="${total_requests}" 'BEGIN {
+                rate = errors / total
+                if (rate < 0) rate = 0
+                if (rate > 1) rate = 1
+                printf "%.6f", rate
+            }')
+
+          observation: |
+            http_status_total は wrk の summary.errors.status から取得されるが、
+            この値は信頼性が低い（スレッド集計の問題）。
+
+      root_cause:
+        description: |
+          フォールバック順序が不適切:
+
+          1. http_status_total から計算（wrk 由来、信頼性低い）
+          2. lua_metrics.json の error_rate を使用（フォールバック）
+
+          本来は逆の順序であるべき:
+
+          1. lua_metrics.json の error_rate を優先（http_status から計算済み）
+          2. http_status から直接計算
+          3. wrk の summary.errors.status から計算（最終手段）
+
+    solution:
+      approach: "フォールバック順序の改善"
+      method: |
+        1. lua_metrics.json の error_rate を最優先
+        2. http_status から直接計算（フォールバック1）
+        3. wrk の summary.errors.status から計算（フォールバック2）
+
+        各段階で警告メッセージを出力し、どの値を使用したか明確化。
+
+      expected_improvement: |
+        - http_status から計算された正確な error_rate を使用
+        - http_4xx、http_5xx を正確に集計
+        - フォールバック順序が明確化
+
+# 既存の実装状況
+existing_implementation:
+  implemented:
+    - name: "error_tracker.lua のスレッド集計機能"
+      description: |
+        benches/api/benchmarks/scripts/error_tracker.lua:154-192
+
+        既に実装されているスレッドローカルストレージを使用した集計:
+
+        - setup_thread(thread): 各スレッドに status_200 等を初期化
+        - track_thread_response(status): wrk.thread:set() でカウント
+        - get_thread_aggregated_summary(): wrk.thread:get() で集計取得
+
+      usage:
+        - file: "benches/api/benchmarks/scripts/tasks_update.lua"
+          line: 308
+          description: |
+            tasks_update.lua では、この機能を使用してステータス分布を
+            標準出力には出力している（line 308-348）が、
+            lua_metrics.json には保存していない。
+
+  not_implemented:
+    - name: "result_collector.lua での error_tracker 活用"
+      description: |
+        result_collector.lua の finalize() 関数で、
+        error_tracker.get_thread_aggregated_summary() の結果を
+        M.results.http_status に反映する必要がある。
+
+        現在は、M.results.status_distribution（空になりやすい）から
+        http_status を構築している。
+
+    - name: "merge_lua_metrics.py の http_status マージロジック"
+      description: |
+        各スレッドの http_status を合算し、
+        error_rate を http_status から再計算するロジックが必要。
+
+        現在は、http_status が空のファイルを全スキップする。
+
+    - name: "run_benchmark.sh のフォールバック順序改善"
+      description: |
+        lua_metrics.json の error_rate を最優先し、
+        http_status から直接計算するフォールバックが必要。
+
+        現在は、wrk の summary.errors.status から計算する順序が不適切。
+
+# 修正の優先順位
+fix_priority:
+  phase_1_critical:
+    - id: "FIX-001"
+      title: "result_collector.lua の改善"
+      priority: "P0"
+      estimated_effort: "0.5 days"
+      blocking: true
+      description: |
+        finalize() 関数で error_tracker.get_thread_aggregated_summary() を使用し、
+        http_status を構築する。
+
+        影響範囲: 全ベンチマーク（error_tracker を使用するもの）
+
+  phase_2_high:
+    - id: "FIX-002"
+      title: "merge_lua_metrics.py の改善"
+      priority: "P0"
+      estimated_effort: "1 day"
+      blocking: true
+      description: |
+        http_status のマージロジックを追加し、
+        error_rate を http_status から再計算する。
+
+        影響範囲: 全ベンチマーク（マルチスレッド環境）
+
+    - id: "FIX-003"
+      title: "run_benchmark.sh の改善"
+      priority: "P1"
+      estimated_effort: "0.5 days"
+      blocking: false
+      description: |
+        error_rate 計算のフォールバック順序を改善し、
+        http_4xx、http_5xx を正確に集計する。
+
+        影響範囲: 全ベンチマーク
+
+  phase_3_validation:
+    - id: "FIX-004"
+      title: "検証とテスト"
+      priority: "P0"
+      estimated_effort: "1 day"
+      blocking: true
+      description: |
+        tasks_update および tasks_update_conflict ベンチマークを実行し、
+        http_status が正確に取得できることを確認。
+
+        検証項目:
+        - http_status が空でないこと
+        - error_rate と http_status の整合性
+        - http_4xx, http_5xx の正確性
+        - 409 Conflict の割合測定
+        - RETRY_COUNT の効果測定
+
+# 期待される改善効果
+expected_improvements:
+  measurement_accuracy:
+    - metric: "http_status の取得成功率"
+      current: "0%（空）"
+      target: "100%"
+
+    - metric: "error_rate の精度"
+      current: "不正確（wrk 由来）"
+      target: "正確（http_status から計算）"
+
+    - metric: "http_4xx, http_5xx の精度"
+      current: "0（取得できていない）"
+      target: "正確（http_status から集計）"
+
+  benchmark_reliability:
+    - improvement: "エラー内訳の可視化"
+      description: "409 Conflict, 500 Internal Server Error 等の内訳が明確になる"
+
+    - improvement: "リトライ戦略の効果測定"
+      description: "RETRY_COUNT による conflict_rate の変化が測定可能になる"
+
+    - improvement: "CI/CD しきい値判定の正確化"
+      description: "許容可能なエラー（409）と致命的なエラー（500）を区別可能"
+
+  merge_readiness:
+    - status: "tasks_update の真のエラー率が測定可能"
+      description: |
+        現在の error_rate 41.4% は不正確である可能性が高い。
+        真のエラー率が測定できれば、マージ可否を正確に判断可能。
+
+    - status: "tasks_update_conflict の真のエラー率が測定可能"
+      description: |
+        現在の error_rate 41.4% は不正確である可能性が高い。
+        真のエラー率が測定できれば、リトライ戦略の効果を評価可能。
+
+# 関連ドキュメント
+related_documents:
+  requirements:
+    - path: "docs/internal/requirements/20260204_1400_tasks_update_error_rate_accuracy.yaml"
+      description: "tasks_update エラー率測定の正確性改善 要件定義"
+
+  analysis:
+    - path: "docs/internal/analysis/20260202_tasks_bulk_post_integration_analysis.yaml"
+      description: "tasks_bulk の分析レポート（参考）"
+
+  evidence:
+    - path: "benches/results/feature-async-io-unboxed-execution/tasks_update/benchmark/meta/tasks_update.json"
+      description: "tasks_update ベンチマーク結果（error_rate 41.5%, http_status 空）"
+
+    - path: "benches/results/feature-async-io-unboxed-execution/tasks_update_conflict/benchmark/meta/tasks_update.json"
+      description: "tasks_update_conflict ベンチマーク結果（error_rate 41.4%, http_status 空）"
+
+# 次のステップ
+next_steps:
+  immediate:
+    - action: "要件定義のCodexレビュー"
+      owner: "TBD"
+      deadline: "2026-02-04"
+
+    - action: "result_collector.lua の改善実装"
+      owner: "TBD"
+      deadline: "2026-02-05"
+
+  short_term:
+    - action: "merge_lua_metrics.py の改善実装"
+      owner: "TBD"
+      deadline: "2026-02-06"
+
+    - action: "run_benchmark.sh の改善実装"
+      owner: "TBD"
+      deadline: "2026-02-06"
+
+  medium_term:
+    - action: "tasks_update ベンチマークの実行と検証"
+      owner: "TBD"
+      deadline: "2026-02-07"
+
+    - action: "tasks_update_conflict ベンチマークの実行と検証"
+      owner: "TBD"
+      deadline: "2026-02-07"
+
+  success_criteria:
+    - "http_status が空でないこと"
+    - "error_rate と http_status の整合性が取れていること"
+    - "http_4xx, http_5xx が正確に集計されていること"
+    - "409 Conflict の割合が測定できること"
+    - "RETRY_COUNT の効果が測定できること"
+
+# メタ情報
+metadata_summary:
+  created_at: "2026-02-04T14:00:00Z"
+  created_by: "Claude Code + Codex MCP"
+  status: "completed"
+  phase: "investigation_completed"
+  next_phase: "requirement_codex_review"
+  estimated_completion: "2026-02-07"
+
+  conclusion: |
+    tasks_update および tasks_update_conflict ベンチマークにおける
+    HTTPステータスコード分布とエラー率の測定に重大な問題が発見された。
+
+    根本原因:
+    1. result_collector.lua のスレッドローカル集計の欠落
+    2. merge_lua_metrics.py の http_status マージ失敗
+    3. run_benchmark.sh のフォールバック不足
+
+    既存の error_tracker.lua のスレッド集計機能を活用することで、
+    最小限の変更で問題を解決可能。
+
+    修正により、tasks_update および tasks_update_conflict の
+    真のエラー率が測定可能になり、feature/async-io-unboxed-execution の
+    マージ可否を正確に判断できる。
