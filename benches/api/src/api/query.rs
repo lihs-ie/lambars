@@ -3191,6 +3191,46 @@ impl SearchIndexDelta {
         assert_index_prepared(&self.tag_all_suffix_add);
         assert_index_prepared(&self.tag_all_suffix_remove);
     }
+
+    // =========================================================================
+    // RUST-008: Add-only detection for sort optimization
+    // =========================================================================
+
+    /// Returns `true` if this delta contains only Add operations (no Remove).
+    ///
+    /// This method is useful for applying sort optimizations when processing
+    /// Add-only changes. When `is_add_only()` returns `true`, the delta can
+    /// be merged with existing sorted indexes using O(n+m) merge instead of
+    /// O(n log n) sort.
+    ///
+    /// # Returns
+    ///
+    /// `true` if all remove indexes are empty, `false` otherwise.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let mut delta = SearchIndexDelta::default();
+    /// assert!(delta.is_add_only()); // Empty delta is add-only
+    ///
+    /// delta.title_full_add.insert(key, vec![task_id]);
+    /// assert!(delta.is_add_only()); // Still add-only
+    ///
+    /// delta.title_full_remove.insert(key, vec![task_id]);
+    /// assert!(!delta.is_add_only()); // Now has removes
+    /// ```
+    #[must_use]
+    pub fn is_add_only(&self) -> bool {
+        self.title_full_remove.is_empty()
+            && self.title_word_remove.is_empty()
+            && self.tag_remove.is_empty()
+            && self.title_full_ngram_remove.is_empty()
+            && self.title_word_ngram_remove.is_empty()
+            && self.tag_ngram_remove.is_empty()
+            && self.title_full_all_suffix_remove.is_empty()
+            && self.title_word_all_suffix_remove.is_empty()
+            && self.tag_all_suffix_remove.is_empty()
+    }
 }
 
 /// Prepares posting lists by sorting and deduplicating task IDs.
@@ -14068,6 +14108,76 @@ mod search_index_delta_tests {
         assert!(!delta.title_full_add.is_empty());
         assert!(!delta.title_word_add.is_empty());
         assert!(!delta.tag_add.is_empty());
+    }
+
+    // -------------------------------------------------------------------------
+    // RUST-008: is_add_only Tests
+    // -------------------------------------------------------------------------
+
+    /// Tests that `is_add_only` returns true for an empty delta.
+    #[rstest]
+    fn is_add_only_empty_delta_returns_true() {
+        let delta = SearchIndexDelta::default();
+        assert!(delta.is_add_only());
+    }
+
+    /// Tests that `is_add_only` returns true when only add indexes have entries.
+    #[rstest]
+    fn is_add_only_with_only_adds_returns_true() {
+        let mut delta = SearchIndexDelta::default();
+        let task_id = task_id_from_u128(1);
+
+        delta
+            .title_full_add
+            .insert(NgramKey::new("test"), vec![task_id.clone()]);
+        delta
+            .title_word_add
+            .insert(NgramKey::new("word"), vec![task_id.clone()]);
+        delta.tag_add.insert(NgramKey::new("tag"), vec![task_id]);
+
+        assert!(delta.is_add_only());
+    }
+
+    /// Tests that `is_add_only` returns false when remove indexes have entries.
+    #[rstest]
+    fn is_add_only_with_removes_returns_false() {
+        let mut delta = SearchIndexDelta::default();
+        let task_id = task_id_from_u128(1);
+
+        delta
+            .title_full_add
+            .insert(NgramKey::new("test"), vec![task_id.clone()]);
+        delta
+            .title_full_remove
+            .insert(NgramKey::new("old"), vec![task_id]);
+
+        assert!(!delta.is_add_only());
+    }
+
+    /// Tests that `is_add_only` returns false for ngram remove indexes.
+    #[rstest]
+    fn is_add_only_with_ngram_removes_returns_false() {
+        let mut delta = SearchIndexDelta::default();
+        let task_id = task_id_from_u128(1);
+
+        delta
+            .title_full_ngram_remove
+            .insert(NgramKey::new("ngr"), vec![task_id]);
+
+        assert!(!delta.is_add_only());
+    }
+
+    /// Tests that `is_add_only` returns false for all-suffix remove indexes.
+    #[rstest]
+    fn is_add_only_with_suffix_removes_returns_false() {
+        let mut delta = SearchIndexDelta::default();
+        let task_id = task_id_from_u128(1);
+
+        delta
+            .tag_all_suffix_remove
+            .insert(NgramKey::new("suf"), vec![task_id]);
+
+        assert!(!delta.is_add_only());
     }
 }
 
