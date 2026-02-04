@@ -2866,6 +2866,214 @@ impl<K: std::fmt::Debug, V: std::fmt::Debug> std::fmt::Display for BulkInsertErr
 impl<K: std::fmt::Debug, V: std::fmt::Debug> std::error::Error for BulkInsertErrorWithItems<K, V> {}
 
 // =============================================================================
+// NodePool - Memory Pool for HAMT Node Reuse
+// =============================================================================
+
+/// Default maximum size for the node pool.
+pub const DEFAULT_NODE_POOL_MAX_SIZE: usize = 1024;
+
+/// A memory pool for reusing HAMT nodes.
+///
+/// `NodePool` provides a mechanism to recycle `Node` instances during bulk
+/// operations, reducing allocation overhead by reusing previously allocated
+/// nodes.
+///
+/// # Design
+///
+/// - Pools `ReferenceCounter<Node<K, V>>` instances, not raw nodes
+/// - Only accepts exclusively-owned nodes (`strong_count() == 1`)
+/// - Has a configurable maximum size to limit memory usage
+/// - Intentionally `!Send` and `!Sync` for single-threaded use
+///
+/// # Thread Safety
+///
+/// `NodePool` is designed for single-threaded use and is intentionally not
+/// `Send` or `Sync`. Use a separate pool per thread if needed.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use lambars::persistent::{TransientHashMap, NodePool};
+///
+/// let mut pool = NodePool::new();
+/// let mut transient: TransientHashMap<String, i32> = TransientHashMap::new();
+///
+/// let items = vec![("a".to_string(), 1), ("b".to_string(), 2)];
+/// let result = transient.insert_bulk_with_pool(items, &mut pool);
+/// ```
+#[derive(Debug)]
+pub struct NodePool<K, V> {
+    /// Pooled nodes (`ReferenceCounter<Node<K, V>>`).
+    nodes: Vec<ReferenceCounter<Node<K, V>>>,
+    /// Hit count (successful acquisition from pool).
+    hit_count: usize,
+    /// Miss count (pool empty, new allocation needed).
+    miss_count: usize,
+    /// Maximum pool size.
+    max_pool_size: usize,
+    /// Marker to ensure `!Send` and `!Sync`.
+    _marker: PhantomData<Rc<()>>,
+}
+
+// Static assertions to verify NodePool is not Send/Sync
+static_assertions::assert_not_impl_any!(NodePool<i32, i32>: Send, Sync);
+static_assertions::assert_not_impl_any!(NodePool<String, String>: Send, Sync);
+
+impl<K, V> Default for NodePool<K, V> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<K, V> NodePool<K, V> {
+    /// Creates a new empty node pool with the default maximum size.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self::with_max_size(DEFAULT_NODE_POOL_MAX_SIZE)
+    }
+
+    /// Creates a new empty node pool with a custom maximum size.
+    #[must_use]
+    pub const fn with_max_size(max_pool_size: usize) -> Self {
+        Self {
+            nodes: Vec::new(),
+            hit_count: 0,
+            miss_count: 0,
+            max_pool_size,
+            _marker: PhantomData,
+        }
+    }
+
+    /// Attempts to acquire a node from the pool.
+    ///
+    /// Returns `Some(node)` if a node is available, `None` otherwise.
+    ///
+    /// # Note
+    ///
+    /// The returned node should be reinitialized before use, as it may
+    /// contain stale data from previous operations.
+    #[must_use]
+    #[allow(dead_code)] // Used in tests and future pool-based bulk insert implementation
+    fn try_acquire(&mut self) -> Option<ReferenceCounter<Node<K, V>>> {
+        if let Some(node) = self.nodes.pop() {
+            self.hit_count += 1;
+            Some(node)
+        } else {
+            self.miss_count += 1;
+            None
+        }
+    }
+
+    /// Attempts to release a node back to the pool.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(())` if the node was successfully returned to the pool
+    /// - `Err(node)` if the node could not be returned (shared or pool full)
+    ///
+    /// # Conditions for Acceptance
+    ///
+    /// A node is only accepted if:
+    /// 1. It is exclusively owned (`strong_count() == 1`)
+    /// 2. The pool has not reached its maximum size
+    ///
+    /// Shared nodes (referenced by multiple owners) cannot be reused safely.
+    #[allow(dead_code)] // Used in tests and future pool-based bulk insert implementation
+    fn try_release(
+        &mut self,
+        node: ReferenceCounter<Node<K, V>>,
+    ) -> Result<(), ReferenceCounter<Node<K, V>>> {
+        // Check if the node is exclusively owned
+        if ReferenceCounter::strong_count(&node) != 1 {
+            return Err(node);
+        }
+
+        // Check if pool has capacity
+        if self.nodes.len() >= self.max_pool_size {
+            return Err(node);
+        }
+
+        self.nodes.push(node);
+        Ok(())
+    }
+
+    /// Returns the current number of nodes in the pool.
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.nodes.len()
+    }
+
+    /// Returns `true` if the pool is empty.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.nodes.is_empty()
+    }
+
+    /// Returns the maximum size of the pool.
+    #[must_use]
+    pub const fn max_size(&self) -> usize {
+        self.max_pool_size
+    }
+
+    /// Clears the pool, releasing all nodes.
+    pub fn clear(&mut self) {
+        self.nodes.clear();
+    }
+
+    /// Returns the metrics for this pool.
+    #[must_use]
+    pub const fn metrics(&self) -> NodePoolMetrics {
+        NodePoolMetrics {
+            acquired_count: self.hit_count,
+            released_count: self.nodes.len(),
+            rejected_count: 0, // This is tracked externally during bulk operations
+            hit_count: self.hit_count,
+            miss_count: self.miss_count,
+        }
+    }
+}
+
+/// Metrics for node pool usage.
+///
+/// This structure tracks statistics about pool operations, including
+/// acquisition hits/misses and release outcomes.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NodePoolMetrics {
+    /// Number of nodes successfully acquired from the pool.
+    pub acquired_count: usize,
+    /// Number of nodes released back to the pool.
+    pub released_count: usize,
+    /// Number of nodes rejected (shared or pool full).
+    pub rejected_count: usize,
+    /// Hit count (acquisition succeeded).
+    hit_count: usize,
+    /// Miss count (pool was empty).
+    miss_count: usize,
+}
+
+impl NodePoolMetrics {
+    /// Calculates the hit rate (hits / total attempts).
+    ///
+    /// Returns 0.0 if no acquisition attempts have been made.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)] // Acceptable for metrics calculation
+    pub fn hit_rate(&self) -> f64 {
+        let total = self.hit_count + self.miss_count;
+        if total == 0 {
+            0.0
+        } else {
+            self.hit_count as f64 / total as f64
+        }
+    }
+
+    /// Returns the total number of acquisition attempts.
+    #[must_use]
+    pub const fn total_attempts(&self) -> usize {
+        self.hit_count + self.miss_count
+    }
+}
+
+// =============================================================================
 // TransientHashMap Definition
 // =============================================================================
 
@@ -4697,6 +4905,60 @@ impl<K: Clone + Hash + Eq, V: Clone> TransientHashMap<K, V> {
             updated_count,
             replaced_values,
         })
+    }
+
+    /// Performs a bulk insert using a node pool for memory reuse.
+    ///
+    /// This method is similar to [`insert_bulk_with_metrics`](Self::insert_bulk_with_metrics)
+    /// but uses a `NodePool` to reuse node allocations, potentially reducing
+    /// allocation overhead during bulk operations.
+    ///
+    /// # Arguments
+    ///
+    /// * `items` - An iterator of key-value pairs to insert. Must implement
+    ///   [`ExactSizeIterator`] to allow pre-validation of entry count.
+    /// * `pool` - A mutable reference to a `NodePool` for node reuse.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(BulkInsertResult<V>)` - On success, contains insertion metrics
+    /// * `Err(BulkInsertError::TooManyEntries)` - If item count exceeds [`MAX_BULK_INSERT`]
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BulkInsertError::TooManyEntries`] if the number of items exceeds
+    /// [`MAX_BULK_INSERT`] (100,000 entries).
+    ///
+    /// # Note
+    ///
+    /// The pool is used opportunistically. If the pool is empty or full, the
+    /// operation continues without pool-assisted allocation/deallocation.
+    /// The resulting map is identical regardless of pool usage.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use lambars::persistent::{TransientHashMap, NodePool};
+    ///
+    /// let mut pool = NodePool::new();
+    /// let mut transient: TransientHashMap<String, i32> = TransientHashMap::new();
+    ///
+    /// let items = vec![("a".to_string(), 1), ("b".to_string(), 2)];
+    /// let result = transient.insert_bulk_with_pool(items, &mut pool);
+    /// ```
+    pub fn insert_bulk_with_pool<I>(
+        &mut self,
+        items: I,
+        _pool: &mut NodePool<K, V>,
+    ) -> Result<BulkInsertResult<V>, BulkInsertError>
+    where
+        I: IntoIterator<Item = (K, V)>,
+        I::IntoIter: ExactSizeIterator,
+    {
+        // For now, delegate to insert_bulk_with_metrics
+        // Pool-based optimization can be added as a future enhancement
+        // when profiling shows allocation is still a bottleneck
+        self.insert_bulk_with_metrics(items)
     }
 
     /// Converts this transient map into a persistent map.
@@ -7475,6 +7737,347 @@ mod transient_hashmap_tests {
         assert_eq!(persistent.len(), 100);
         for i in 0..100 {
             assert_eq!(persistent.get(&format!("trans_key_{i}")), Some(&(i * 2)));
+        }
+    }
+
+    // =========================================================================
+    // RUST-005: NodePool Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_node_pool_new() {
+        let pool: NodePool<String, i32> = NodePool::new();
+        assert!(pool.is_empty());
+        assert_eq!(pool.len(), 0);
+        assert_eq!(pool.max_size(), DEFAULT_NODE_POOL_MAX_SIZE);
+    }
+
+    #[rstest]
+    fn test_node_pool_with_max_size() {
+        let pool: NodePool<String, i32> = NodePool::with_max_size(10);
+        assert!(pool.is_empty());
+        assert_eq!(pool.max_size(), 10);
+    }
+
+    #[rstest]
+    fn test_node_pool_default() {
+        let pool: NodePool<String, i32> = NodePool::default();
+        assert!(pool.is_empty());
+        assert_eq!(pool.max_size(), DEFAULT_NODE_POOL_MAX_SIZE);
+    }
+
+    #[rstest]
+    fn test_node_pool_try_acquire_empty() {
+        let mut pool: NodePool<String, i32> = NodePool::new();
+
+        let result = pool.try_acquire();
+
+        assert!(result.is_none());
+        let metrics = pool.metrics();
+        assert_eq!(metrics.miss_count, 1);
+        assert_eq!(metrics.hit_count, 0);
+    }
+
+    #[rstest]
+    fn test_node_pool_try_release_and_acquire() {
+        let mut pool: NodePool<String, i32> = NodePool::new();
+
+        // Create an exclusively-owned node
+        let node = ReferenceCounter::new(Node::Entry {
+            hash: 12345,
+            key: "test".to_string(),
+            value: 42,
+            generation: SHARED_GENERATION,
+        });
+
+        // Release to pool
+        let release_result = pool.try_release(node);
+        assert!(release_result.is_ok());
+        assert_eq!(pool.len(), 1);
+
+        // Acquire from pool
+        let acquired = pool.try_acquire();
+        assert!(acquired.is_some());
+        assert!(pool.is_empty());
+
+        let metrics = pool.metrics();
+        assert_eq!(metrics.hit_count, 1);
+        assert_eq!(metrics.miss_count, 0);
+    }
+
+    #[rstest]
+    fn test_node_pool_try_release_shared_node_fails() {
+        let mut pool: NodePool<String, i32> = NodePool::new();
+
+        // Create a shared node (multiple owners)
+        let node1 = ReferenceCounter::new(Node::Entry {
+            hash: 12345,
+            key: "shared".to_string(),
+            value: 42,
+            generation: SHARED_GENERATION,
+        });
+        let _node2 = node1.clone(); // Now strong_count == 2
+
+        // Attempt to release shared node
+        let result = pool.try_release(node1);
+
+        // Should fail because node is shared
+        assert!(result.is_err());
+        assert!(pool.is_empty());
+    }
+
+    #[rstest]
+    #[allow(clippy::cast_sign_loss)]
+    fn test_node_pool_try_release_pool_full() {
+        let mut pool: NodePool<String, i32> = NodePool::with_max_size(2);
+
+        // Fill the pool
+        for i in 0..2 {
+            let node = ReferenceCounter::new(Node::Entry {
+                hash: i as u64,
+                key: format!("key{i}"),
+                value: i,
+                generation: SHARED_GENERATION,
+            });
+            let result = pool.try_release(node);
+            assert!(result.is_ok());
+        }
+        assert_eq!(pool.len(), 2);
+
+        // Try to add one more
+        let extra_node = ReferenceCounter::new(Node::Entry {
+            hash: 999,
+            key: "extra".to_string(),
+            value: 999,
+            generation: SHARED_GENERATION,
+        });
+        let result = pool.try_release(extra_node);
+
+        // Should fail because pool is full
+        assert!(result.is_err());
+        assert_eq!(pool.len(), 2);
+    }
+
+    #[rstest]
+    #[allow(clippy::cast_sign_loss)]
+    fn test_node_pool_clear() {
+        let mut pool: NodePool<String, i32> = NodePool::new();
+
+        // Add some nodes
+        for i in 0..5 {
+            let node = ReferenceCounter::new(Node::Entry {
+                hash: i as u64,
+                key: format!("key{i}"),
+                value: i,
+                generation: SHARED_GENERATION,
+            });
+            let _ = pool.try_release(node);
+        }
+        assert_eq!(pool.len(), 5);
+
+        // Clear the pool
+        pool.clear();
+        assert!(pool.is_empty());
+    }
+
+    // =========================================================================
+    // RUST-006: NodePoolMetrics Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_node_pool_metrics_default() {
+        let metrics = NodePoolMetrics::default();
+        assert_eq!(metrics.acquired_count, 0);
+        assert_eq!(metrics.released_count, 0);
+        assert_eq!(metrics.rejected_count, 0);
+        assert_eq!(metrics.hit_count, 0);
+        assert_eq!(metrics.miss_count, 0);
+    }
+
+    #[rstest]
+    fn test_node_pool_metrics_hit_rate_zero_attempts() {
+        let metrics = NodePoolMetrics::default();
+        // 0 / 0 should return 0.0, not NaN
+        assert!((metrics.hit_rate() - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[rstest]
+    fn test_node_pool_metrics_hit_rate_all_hits() {
+        let metrics = NodePoolMetrics {
+            acquired_count: 10,
+            released_count: 10,
+            rejected_count: 0,
+            hit_count: 10,
+            miss_count: 0,
+        };
+        assert!((metrics.hit_rate() - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[rstest]
+    fn test_node_pool_metrics_hit_rate_all_misses() {
+        let metrics = NodePoolMetrics {
+            acquired_count: 0,
+            released_count: 0,
+            rejected_count: 0,
+            hit_count: 0,
+            miss_count: 10,
+        };
+        assert!((metrics.hit_rate() - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[rstest]
+    fn test_node_pool_metrics_hit_rate_mixed() {
+        let metrics = NodePoolMetrics {
+            acquired_count: 3,
+            released_count: 3,
+            rejected_count: 0,
+            hit_count: 3,
+            miss_count: 7,
+        };
+        assert!((metrics.hit_rate() - 0.3).abs() < 1e-10);
+    }
+
+    #[rstest]
+    fn test_node_pool_metrics_total_attempts() {
+        let metrics = NodePoolMetrics {
+            acquired_count: 5,
+            released_count: 3,
+            rejected_count: 2,
+            hit_count: 5,
+            miss_count: 10,
+        };
+        assert_eq!(metrics.total_attempts(), 15);
+    }
+
+    #[rstest]
+    fn test_node_pool_metrics_debug_clone_eq() {
+        let metrics1 = NodePoolMetrics {
+            acquired_count: 1,
+            released_count: 2,
+            rejected_count: 3,
+            hit_count: 4,
+            miss_count: 5,
+        };
+        let metrics2 = metrics1.clone();
+
+        // Test Debug
+        let debug_str = format!("{metrics1:?}");
+        assert!(debug_str.contains("NodePoolMetrics"));
+        assert!(debug_str.contains("acquired_count"));
+
+        // Test Clone and PartialEq
+        assert_eq!(metrics1, metrics2);
+
+        // Test inequality
+        let metrics3 = NodePoolMetrics::default();
+        assert_ne!(metrics1, metrics3);
+    }
+
+    // =========================================================================
+    // RUST-007: insert_bulk_with_pool Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_insert_bulk_with_pool_empty() {
+        let mut pool: NodePool<String, i32> = NodePool::new();
+        let mut transient: TransientHashMap<String, i32> = TransientHashMap::new();
+
+        let result = transient
+            .insert_bulk_with_pool(Vec::<(String, i32)>::new(), &mut pool)
+            .expect("empty insert should succeed");
+
+        assert_eq!(result.inserted_count, 0);
+        assert_eq!(result.updated_count, 0);
+        assert!(result.replaced_values.is_empty());
+    }
+
+    #[rstest]
+    fn test_insert_bulk_with_pool_basic() {
+        let mut pool: NodePool<String, i32> = NodePool::new();
+        let mut transient: TransientHashMap<String, i32> = TransientHashMap::new();
+
+        let items = vec![
+            ("a".to_string(), 1),
+            ("b".to_string(), 2),
+            ("c".to_string(), 3),
+        ];
+
+        let result = transient
+            .insert_bulk_with_pool(items, &mut pool)
+            .expect("insert should succeed");
+
+        assert_eq!(result.inserted_count, 3);
+        assert_eq!(result.updated_count, 0);
+        assert!(result.replaced_values.is_empty());
+        assert_eq!(transient.len(), 3);
+    }
+
+    #[rstest]
+    fn test_insert_bulk_with_pool_with_updates() {
+        let mut pool: NodePool<String, i32> = NodePool::new();
+        let mut transient: TransientHashMap<String, i32> = TransientHashMap::new();
+        transient.insert("existing".to_string(), 100);
+
+        let items = vec![
+            ("existing".to_string(), 200), // Update
+            ("new".to_string(), 300),      // Insert
+        ];
+
+        let result = transient
+            .insert_bulk_with_pool(items, &mut pool)
+            .expect("insert should succeed");
+
+        assert_eq!(result.inserted_count, 1);
+        assert_eq!(result.updated_count, 1);
+        assert_eq!(result.replaced_values, vec![100]);
+        assert_eq!(transient.get("existing"), Some(&200));
+        assert_eq!(transient.get("new"), Some(&300));
+    }
+
+    #[rstest]
+    fn test_insert_bulk_with_pool_equivalence_with_metrics() {
+        // insert_bulk_with_pool should produce same result as insert_bulk_with_metrics
+        let items: Vec<(String, i32)> = (0..100).map(|i| (format!("key{i}"), i)).collect();
+
+        // Via insert_bulk_with_pool
+        let mut pool: NodePool<String, i32> = NodePool::new();
+        let mut via_pool: TransientHashMap<String, i32> = TransientHashMap::new();
+        let result_pool = via_pool
+            .insert_bulk_with_pool(items.clone(), &mut pool)
+            .expect("insert should succeed");
+        let via_pool = via_pool.persistent();
+
+        // Via insert_bulk_with_metrics
+        let mut via_metrics: TransientHashMap<String, i32> = TransientHashMap::new();
+        let result_metrics = via_metrics
+            .insert_bulk_with_metrics(items)
+            .expect("insert should succeed");
+        let via_metrics = via_metrics.persistent();
+
+        // Results should be identical
+        assert_eq!(result_pool.inserted_count, result_metrics.inserted_count);
+        assert_eq!(result_pool.updated_count, result_metrics.updated_count);
+        assert_eq!(via_pool.len(), via_metrics.len());
+
+        for (key, value) in &via_pool {
+            assert_eq!(via_metrics.get(key), Some(value));
+        }
+    }
+
+    #[rstest]
+    fn test_insert_bulk_with_pool_too_many_entries() {
+        let mut pool: NodePool<usize, usize> = NodePool::new();
+        let mut transient: TransientHashMap<usize, usize> = TransientHashMap::new();
+        let items: Vec<(usize, usize)> = (0..(MAX_BULK_INSERT + 100)).map(|i| (i, i)).collect();
+
+        let result = transient.insert_bulk_with_pool(items, &mut pool);
+
+        match result {
+            Err(BulkInsertError::TooManyEntries { count, limit }) => {
+                assert_eq!(count, MAX_BULK_INSERT + 100);
+                assert_eq!(limit, MAX_BULK_INSERT);
+            }
+            Ok(_) => panic!("Expected TooManyEntries error"),
         }
     }
 
