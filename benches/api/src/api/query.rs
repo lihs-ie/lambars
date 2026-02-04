@@ -2036,7 +2036,7 @@ impl NormalizedTaskData {
     fn from_task(task: &Task) -> Self {
         let title = normalize_query(&task.title);
         let mut sorted_tags: Vec<_> = task.tags.iter().collect();
-        sorted_tags.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        sorted_tags.sort_unstable_by(|a, b| a.as_str().cmp(b.as_str()));
         let tags: Vec<String> = sorted_tags
             .into_iter()
             .map(|tag| normalize_query(tag.as_str()).key)
@@ -3147,26 +3147,29 @@ impl SearchIndexDelta {
     }
 
     pub fn prepare_posting_lists(&mut self) {
+        // Always prepare add indexes
         prepare_index(&mut self.title_full_add);
-        prepare_index(&mut self.title_full_remove);
         prepare_index(&mut self.title_word_add);
-        prepare_index(&mut self.title_word_remove);
         prepare_index(&mut self.tag_add);
-        prepare_index(&mut self.tag_remove);
-
         prepare_index(&mut self.title_full_ngram_add);
-        prepare_index(&mut self.title_full_ngram_remove);
         prepare_index(&mut self.title_word_ngram_add);
-        prepare_index(&mut self.title_word_ngram_remove);
         prepare_index(&mut self.tag_ngram_add);
-        prepare_index(&mut self.tag_ngram_remove);
-
         prepare_index(&mut self.title_full_all_suffix_add);
-        prepare_index(&mut self.title_full_all_suffix_remove);
         prepare_index(&mut self.title_word_all_suffix_add);
-        prepare_index(&mut self.title_word_all_suffix_remove);
         prepare_index(&mut self.tag_all_suffix_add);
-        prepare_index(&mut self.tag_all_suffix_remove);
+
+        // TB-002: Skip remove index preparation when delta is add-only
+        if !self.is_add_only() {
+            prepare_index(&mut self.title_full_remove);
+            prepare_index(&mut self.title_word_remove);
+            prepare_index(&mut self.tag_remove);
+            prepare_index(&mut self.title_full_ngram_remove);
+            prepare_index(&mut self.title_word_ngram_remove);
+            prepare_index(&mut self.tag_ngram_remove);
+            prepare_index(&mut self.title_full_all_suffix_remove);
+            prepare_index(&mut self.title_word_all_suffix_remove);
+            prepare_index(&mut self.tag_all_suffix_remove);
+        }
     }
 
     /// Debug assertion helper to validate that all posting lists are prepared.
@@ -3256,6 +3259,47 @@ fn prepare_index<K: Eq + std::hash::Hash>(index: &mut std::collections::HashMap<
         posting_list.dedup();
         !posting_list.is_empty()
     });
+}
+
+/// Validates changes for `apply_bulk` (Add-only validation).
+///
+/// This pure function performs validation checks required by [`SearchIndex::apply_bulk`].
+/// It validates that:
+/// 1. All changes are `TaskChange::Add` (no Update or Remove)
+/// 2. The number of changes does not exceed [`MAX_BULK_ENTRIES`]
+///
+/// # Arguments
+///
+/// * `changes` - A slice of task changes to validate.
+///
+/// # Returns
+///
+/// * `Ok(())` - If all validations pass
+/// * `Err(SearchIndexError)` - If validation fails
+///
+/// # Errors
+///
+/// Returns [`SearchIndexError::NonAddChangeNotAllowed`] if any change is not `TaskChange::Add`.
+/// Returns [`SearchIndexError::TooManyChanges`] if the number of changes exceeds the limit.
+fn validate_changes_for_bulk(changes: &[TaskChange]) -> Result<(), SearchIndexError> {
+    // Check entry count limit first (fail-fast for large batches)
+    if changes.len() > MAX_BULK_ENTRIES {
+        return Err(SearchIndexError::TooManyChanges {
+            count: changes.len(),
+            limit: MAX_BULK_ENTRIES,
+        });
+    }
+
+    // Validate: all changes must be Add
+    if let Some(change_type) = changes.iter().find_map(|change| match change {
+        TaskChange::Update { .. } => Some(ChangeType::Update),
+        TaskChange::Remove(_) => Some(ChangeType::Remove),
+        TaskChange::Add(_) => None,
+    }) {
+        return Err(SearchIndexError::NonAddChangeNotAllowed { change_type });
+    }
+
+    Ok(())
 }
 
 /// Generates n-grams from a normalized token using UTF-8 safe sliding window.
@@ -4071,7 +4115,7 @@ impl SearchIndex {
             // Sort tags to ensure deterministic iteration order (PersistentHashSet has
             // non-deterministic order based on hash values)
             let mut sorted_tags: Vec<_> = task.tags.iter().collect();
-            sorted_tags.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+            sorted_tags.sort_unstable_by(|a, b| a.as_str().cmp(b.as_str()));
             for tag in sorted_tags.into_iter().take(tag_limit) {
                 // Normalize tag using normalize_query() for consistency
                 let normalized_tag = normalize_query(tag.as_str()).into_key();
@@ -4738,7 +4782,7 @@ impl SearchIndex {
         // Remove from tag_index and infix index
         // Sort tags for deterministic iteration order (PersistentHashSet has non-deterministic order)
         let mut sorted_tags: Vec<_> = task.tags.iter().collect();
-        sorted_tags.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        sorted_tags.sort_unstable_by(|a, b| a.as_str().cmp(b.as_str()));
 
         let mut tag_index = self.tag_index.clone();
         let mut tag_all_suffix_index = self.tag_all_suffix_index.clone();
@@ -5156,30 +5200,8 @@ impl SearchIndex {
             return Ok(self.clone());
         }
 
-        // Validate: all changes must be Add
-        for change in changes {
-            match change {
-                TaskChange::Add(_) => {}
-                TaskChange::Update { .. } => {
-                    return Err(SearchIndexError::NonAddChangeNotAllowed {
-                        change_type: ChangeType::Update,
-                    });
-                }
-                TaskChange::Remove(_) => {
-                    return Err(SearchIndexError::NonAddChangeNotAllowed {
-                        change_type: ChangeType::Remove,
-                    });
-                }
-            }
-        }
-
-        // Check entry count limit
-        if changes.len() > MAX_BULK_ENTRIES {
-            return Err(SearchIndexError::TooManyChanges {
-                count: changes.len(),
-                limit: MAX_BULK_ENTRIES,
-            });
-        }
+        // TB-002: Use separated validation function for clarity and testability
+        validate_changes_for_bulk(changes)?;
 
         // Use the bulk path directly (avoids infinite recursion with apply_changes)
         Ok(self.apply_changes_bulk(changes))
@@ -10703,9 +10725,7 @@ mod search_index_config_tests {
     /// Tests that `SearchIndexConfigBuilder` can set `use_apply_bulk` flag.
     #[rstest]
     fn config_builder_use_apply_bulk() {
-        let config = SearchIndexConfigBuilder::new()
-            .use_apply_bulk(true)
-            .build();
+        let config = SearchIndexConfigBuilder::new().use_apply_bulk(true).build();
         assert!(config.use_apply_bulk);
 
         let config2 = SearchIndexConfigBuilder::new()
@@ -16466,9 +16486,7 @@ mod apply_changes_tests {
     /// Tests that apply_changes uses apply_bulk when use_apply_bulk is true and all changes are Add.
     #[rstest]
     fn apply_changes_uses_apply_bulk_when_flag_enabled_and_all_adds() {
-        let config = SearchIndexConfigBuilder::new()
-            .use_apply_bulk(true)
-            .build();
+        let config = SearchIndexConfigBuilder::new().use_apply_bulk(true).build();
         let index = SearchIndex::build_with_config(&PersistentVector::new(), config);
 
         let tasks: Vec<Task> = (0..10)
@@ -16488,9 +16506,7 @@ mod apply_changes_tests {
     /// Tests that apply_changes falls back to delta path when use_apply_bulk is true but changes include non-Add.
     #[rstest]
     fn apply_changes_uses_delta_when_flag_enabled_but_mixed_changes() {
-        let config = SearchIndexConfigBuilder::new()
-            .use_apply_bulk(true)
-            .build();
+        let config = SearchIndexConfigBuilder::new().use_apply_bulk(true).build();
         let existing_task = create_test_task("Existing");
         let tasks: PersistentVector<Task> = vec![existing_task.clone()].into_iter().collect();
         let index = SearchIndex::build_with_config(&tasks, config);
@@ -16536,9 +16552,7 @@ mod apply_changes_tests {
         let changes: Vec<TaskChange> = tasks.iter().map(|t| TaskChange::Add(t.clone())).collect();
 
         // With use_apply_bulk enabled
-        let config_with = SearchIndexConfigBuilder::new()
-            .use_apply_bulk(true)
-            .build();
+        let config_with = SearchIndexConfigBuilder::new().use_apply_bulk(true).build();
         let index_with = SearchIndex::build_with_config(&PersistentVector::new(), config_with);
         let result_with = index_with.apply_changes(&changes);
 
@@ -16546,15 +16560,22 @@ mod apply_changes_tests {
         let config_without = SearchIndexConfigBuilder::new()
             .use_apply_bulk(false)
             .build();
-        let index_without = SearchIndex::build_with_config(&PersistentVector::new(), config_without);
+        let index_without =
+            SearchIndex::build_with_config(&PersistentVector::new(), config_without);
         let result_without = index_without.apply_changes(&changes);
 
         // Results should be identical
-        assert_eq!(result_with.tasks_by_id.len(), result_without.tasks_by_id.len());
+        assert_eq!(
+            result_with.tasks_by_id.len(),
+            result_without.tasks_by_id.len()
+        );
         for task in &tasks {
             assert_eq!(
                 result_with.tasks_by_id.get(&task.task_id).map(|t| &t.title),
-                result_without.tasks_by_id.get(&task.task_id).map(|t| &t.title)
+                result_without
+                    .tasks_by_id
+                    .get(&task.task_id)
+                    .map(|t| &t.title)
             );
         }
     }

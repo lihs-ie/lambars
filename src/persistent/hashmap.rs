@@ -2909,6 +2909,10 @@ pub struct NodePool<K, V> {
     hit_count: usize,
     /// Miss count (pool empty, new allocation needed).
     miss_count: usize,
+    /// Count of nodes successfully released back to the pool.
+    released_count: usize,
+    /// Count of nodes rejected (shared or pool full).
+    rejected_count: usize,
     /// Maximum pool size.
     max_pool_size: usize,
     /// Marker to ensure `!Send` and `!Sync`.
@@ -2939,6 +2943,8 @@ impl<K, V> NodePool<K, V> {
             nodes: Vec::new(),
             hit_count: 0,
             miss_count: 0,
+            released_count: 0,
+            rejected_count: 0,
             max_pool_size,
             _marker: PhantomData,
         }
@@ -2985,14 +2991,17 @@ impl<K, V> NodePool<K, V> {
     ) -> Result<(), ReferenceCounter<Node<K, V>>> {
         // Check if the node is exclusively owned
         if ReferenceCounter::strong_count(&node) != 1 {
+            self.rejected_count += 1;
             return Err(node);
         }
 
         // Check if pool has capacity
         if self.nodes.len() >= self.max_pool_size {
+            self.rejected_count += 1;
             return Err(node);
         }
 
+        self.released_count += 1;
         self.nodes.push(node);
         Ok(())
     }
@@ -3025,8 +3034,8 @@ impl<K, V> NodePool<K, V> {
     pub const fn metrics(&self) -> NodePoolMetrics {
         NodePoolMetrics {
             acquired_count: self.hit_count,
-            released_count: self.nodes.len(),
-            rejected_count: 0, // This is tracked externally during bulk operations
+            released_count: self.released_count,
+            rejected_count: self.rejected_count,
             hit_count: self.hit_count,
             miss_count: self.miss_count,
         }
