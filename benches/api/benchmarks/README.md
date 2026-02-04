@@ -109,6 +109,46 @@ benchmarks/
 ./run_benchmark.sh --scenario scenarios/tasks_eff.yaml
 ```
 
+### 環境変数
+
+ベンチマークの動作を制御する環境変数を以下に示します。
+これらの環境変数は、シナリオファイルの `metadata` セクションを優先し、
+トップレベルの設定値や `error_config` セクション、デフォルト値で補完されます。
+手動で上書きすることも可能です。
+
+#### tasks_update 関連の環境変数
+
+| 環境変数 | 説明 | デフォルト値 | シナリオファイルでの設定 |
+|---------|------|-------------|----------------------|
+| `ID_POOL_SIZE` | 更新ベンチマークで使用するタスク ID の数。小さい値ほど競合が増加する。 | 10 | `metadata.id_pool_size` または `id_pool_size` |
+| `RETRY_COUNT` | 409 Conflict 発生時の最大再試行回数 | 0 | `metadata.retry_count` または `error_config.max_retries` |
+| `WRK_THREADS` | wrk スレッド数（Lua スクリプトのスレッドローカル状態用）。通常は wrk の `-t` オプションと同じ値を設定する。 | `THREADS` と同じ | 自動設定 |
+| `RETRY_BACKOFF_MAX` | 擬似指数バックオフの上限（スキップするリクエスト数）。再試行時のバックオフ遅延を制御する。 | 16 | 手動設定のみ |
+
+#### 使用例
+
+```bash
+# シナリオファイルで設定（推奨）
+# scenarios/tasks_update.yaml
+metadata:
+  id_pool_size: 1000
+  retry_count: 3
+
+# 環境変数で上書き
+ID_POOL_SIZE=500 RETRY_COUNT=5 ./run_benchmark.sh --scenario scenarios/tasks_update.yaml
+
+# バックオフ上限を調整
+RETRY_BACKOFF_MAX=32 ./run_benchmark.sh --scenario scenarios/tasks_update.yaml
+```
+
+#### 重要な注意事項
+
+**tasks_update シナリオの制約:**
+- `threads == connections` が必須です（1 thread = 1 connection）
+- version 状態管理がスレッド単位で行われるため、threads != connections の場合は version 不整合により 409 Conflict が多発します
+- HTTP Status Distribution は単一スレッドからの推定値です（wrk2 の制約により全スレッド集計は不可）
+- 詳細は `scripts/tasks_update.lua` のコメントを参照してください
+
 ### Lua スクリプト互換性テスト
 
 全ての Lua スクリプトが wrk2 で正常に動作することを確認します:

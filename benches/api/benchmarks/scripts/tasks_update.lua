@@ -1,38 +1,63 @@
 -- Benchmark: PUT /tasks/{id} with conflict retry logic
+--
+-- IMPORTANT REQUIREMENTS:
+--   - This script REQUIRES threads == connections (1 thread = 1 connection)
+--   - Version state is managed per-thread using thread-local variables
+--   - Multiple connections per thread would cause version state desynchronization
+--   - When threads != connections, the following issues occur:
+--     * Version conflicts (409 Conflict) due to stale version in thread state
+--     * is_backoff_request flag response mismatch (request/response pairing breaks)
+--     * Incorrect metrics (error rate calculation becomes unreliable)
+--   - Use WRK_THREADS environment variable to match wrk's -t option
+--   - Use ID_POOL_SIZE to control the number of task IDs (default: 10)
+--   - Use RETRY_COUNT to set max retry attempts on 409 Conflict (default: 0)
+--   - Use RETRY_BACKOFF_MAX to set backoff upper limit (default: 16)
 
 package.path = package.path .. ";scripts/?.lua"
 local common = require("common")
 local test_ids = common.load_test_ids()
 
 local RETRY_COUNT = tonumber(os.getenv("RETRY_COUNT")) or 0
+local BACKOFF_BASE = 2
+local BACKOFF_MAX = tonumber(os.getenv("RETRY_BACKOFF_MAX")) or 16
 local state = "update"
 local retry_index, retry_body, retry_attempt = nil, nil, 0
 local counter = 0
 local last_request_index, last_request_is_update = nil, false
 local thread_retry_count, thread_retry_exhausted_count = 0, 0
 local update_types = {"priority", "status", "description", "title", "full"}
+local backoff_skip_counter, backoff_skip_target = 0, 0
+local is_backoff_request = false
+local backoff_request_count = 0
+local fallback_request_count = 0
+local suppressed_request_count = 0
+local is_suppressed_request = false
+local is_fallback_request = false
+
 local error_tracker = pcall(require, "error_tracker") and require("error_tracker") or nil
 
 function init(args)
-    common.init_benchmark({
-        scenario_name = "tasks_update",
-        output_format = "json"
-    })
+    if error_tracker then error_tracker.init() end
+    common.init_benchmark({scenario_name = "tasks_update", output_format = "json"})
 end
 
 function setup(thread)
     if error_tracker then error_tracker.setup_thread(thread) end
 
-    -- WRK_THREADS は wrk2 の -t オプションと同じ値を設定することを推奨
-    -- 未設定の場合は、wrk2 が自動的にスレッドを割り当てるため、
-    -- スレッド数は実行時に決定される（デフォルト: 1）
-    local total_threads = tonumber(os.getenv("WRK_THREADS"))
+    local total_threads = tonumber(os.getenv("WRK_THREADS")) or 1
     local pool_size = tonumber(os.getenv("ID_POOL_SIZE")) or 10
+    local thread_id = tonumber(thread.id) or 0
 
-    -- WRK_THREADS が未設定の場合、wrk2 のデフォルトスレッド数（1）を仮定
-    -- または、thread.id の最大値から推定する（複雑化を避けるため、1 を仮定）
-    if not total_threads or total_threads <= 0 then
+    -- Validate total_threads to prevent division by zero
+    if not total_threads or total_threads < 1 then
+        io.stderr:write("[tasks_update] WARN: Invalid WRK_THREADS, defaulting to 1\n")
         total_threads = 1
+    end
+
+    -- Validate pool_size to prevent division by zero
+    if not pool_size or pool_size < 1 then
+        io.stderr:write("[tasks_update] WARN: Invalid ID_POOL_SIZE, defaulting to 10\n")
+        pool_size = 10
     end
 
     if pool_size < total_threads then
@@ -42,17 +67,31 @@ function setup(thread)
         total_threads = pool_size
     end
 
-    local ids_per_thread = math.floor(pool_size / total_threads)
-    local thread_id = tonumber(thread.id) or 0
-    local start_index = thread_id * ids_per_thread
+    -- Suppress excess threads beyond pool_size
+    if thread_id >= pool_size then
+        io.stderr:write(string.format(
+            "[tasks_update] Thread %d suppressed (ID_POOL_SIZE=%d)\n",
+            thread_id, pool_size))
+        thread:set("suppressed", true)
+        thread:set("id", thread_id)
+        thread:set("id_start", 0)
+        thread:set("id_end", 0)
+        thread:set("id_range", 0)
+        return
+    end
 
+    local ids_per_thread = math.floor(pool_size / total_threads)
+    local start_index = thread_id * ids_per_thread
+    local end_index = start_index + ids_per_thread - 1
+
+    thread:set("suppressed", false)
     thread:set("id", thread_id)
     thread:set("id_start", start_index)
-    thread:set("id_end", start_index + ids_per_thread - 1)
+    thread:set("id_end", end_index)
     thread:set("id_range", ids_per_thread)
 
     io.write(string.format("[Thread %d] ID range: %d-%d (%d IDs)\n",
-        thread_id, start_index, start_index + ids_per_thread - 1, ids_per_thread))
+        thread_id, start_index, end_index, ids_per_thread))
 end
 
 local function generate_update_body(update_type, version, request_counter)
@@ -83,47 +122,61 @@ end
 local function reset_retry_state()
     state = "update"
     retry_index, retry_body, retry_attempt = nil, nil, 0
+    backoff_skip_target = 0
+end
+
+local function apply_backoff()
+    local delay = math.min(BACKOFF_BASE ^ retry_attempt, BACKOFF_MAX)
+    backoff_skip_target = delay
+    backoff_skip_counter = 0
 end
 
 function request()
+    -- Suppressed threads send /health requests (excluded from metrics)
+    if wrk and wrk.thread then
+        local suppressed = wrk.thread:get("suppressed")
+        if suppressed == true or suppressed == "true" then
+            is_suppressed_request = true
+            suppressed_request_count = suppressed_request_count + 1
+            return wrk and wrk.format and wrk.format("GET", "/health") or ""
+        end
+    end
+    is_suppressed_request = false
+
+    if backoff_skip_counter < backoff_skip_target then
+        backoff_skip_counter = backoff_skip_counter + 1
+        is_backoff_request = true
+        backoff_request_count = backoff_request_count + 1
+        return wrk and wrk.format and wrk.format("GET", "/health") or ""
+    end
+    backoff_skip_counter = 0
+    is_backoff_request = false
+
+    local fallback_request = function()
+        reset_retry_state()
+        state = "fallback"
+        last_request_is_update = false
+        is_fallback_request = true
+        fallback_request_count = fallback_request_count + 1
+        return wrk and wrk.format and wrk.format("GET", "/health") or ""
+    end
+
     if state == "retry_get" then
         local task_id, err = test_ids.get_task_id(retry_index)
         if err then
             io.stderr:write("[tasks_update] Error getting task ID for retry: " .. err .. "\n")
-            reset_retry_state()
-            state = "fallback"
-            last_request_is_update = false
-            if wrk and wrk.format then
-                return wrk.format("GET", "/health")
-            else
-                return ""
-            end
+            return fallback_request()
         end
         last_request_is_update = true
-        if wrk and wrk.format then
-            return wrk.format("GET", "/tasks/" .. task_id, {["Accept"] = "application/json"})
-        else
-            return ""
-        end
+        return wrk and wrk.format and wrk.format("GET", "/tasks/" .. task_id, {["Accept"] = "application/json"}) or ""
     elseif state == "retry_put" then
         local task_id, err = test_ids.get_task_id(retry_index)
         if err or not retry_body then
             io.stderr:write("[tasks_update] Error in retry_put: " .. (err or "retry_body is nil") .. "\n")
-            reset_retry_state()
-            state = "fallback"
-            last_request_is_update = false
-            if wrk and wrk.format then
-                return wrk.format("GET", "/health")
-            else
-                return ""
-            end
+            return fallback_request()
         end
         last_request_is_update = true
-        if wrk and wrk.format then
-            return wrk.format("PUT", "/tasks/" .. task_id, {["Content-Type"] = "application/json"}, retry_body)
-        else
-            return ""
-        end
+        return wrk and wrk.format and wrk.format("PUT", "/tasks/" .. task_id, {["Content-Type"] = "application/json"}, retry_body) or ""
     elseif state == "fallback" then
         state = "update"
     end
@@ -142,13 +195,7 @@ function request()
     local task_state, err = test_ids.get_task_state(global_index)
     if err then
         io.stderr:write("[tasks_update] Error getting task state: " .. err .. "\n")
-        state = "fallback"
-        last_request_is_update = false
-        if wrk and wrk.format then
-            return wrk.format("GET", "/health")
-        else
-            return ""
-        end
+        return fallback_request()
     end
 
     last_request_index = global_index
@@ -156,16 +203,24 @@ function request()
 
     local update_type = update_types[(counter % #update_types) + 1]
     local body = generate_update_body(update_type, task_state.version, counter)
-
-    if wrk and wrk.format then
-        return wrk.format("PUT", "/tasks/" .. task_state.id, {["Content-Type"] = "application/json"}, body)
-    else
-        return ""
-    end
+    return wrk and wrk.format and wrk.format("PUT", "/tasks/" .. task_state.id, {["Content-Type"] = "application/json"}, body) or ""
 end
 
 function response(status, headers, body)
     if not status then return end
+    if is_backoff_request then
+        is_backoff_request = false
+        return
+    end
+    if is_suppressed_request then
+        is_suppressed_request = false
+        return
+    end
+    if is_fallback_request then
+        is_fallback_request = false
+        return
+    end
+
     common.track_response(status, headers)
     if error_tracker then error_tracker.track_thread_response(status) end
     if not last_request_is_update then return end
@@ -204,6 +259,7 @@ function response(status, headers, body)
                 reset_retry_state()
             else
                 io.stderr:write(string.format("[tasks_update] Retry PUT got 409 (attempt %d/%d)\n", retry_attempt, RETRY_COUNT))
+                apply_backoff()
                 state = "retry_get"
             end
         else
@@ -225,6 +281,7 @@ function response(status, headers, body)
                     thread_retry_exhausted_count = thread_retry_exhausted_count + 1
                     reset_retry_state()
                 else
+                    apply_backoff()
                     state = "retry_get"
                 end
             end
@@ -235,14 +292,24 @@ function response(status, headers, body)
 end
 
 function done(summary, latency, requests)
+    if backoff_request_count > 0 then
+        io.stderr:write(string.format("[tasks_update] Backoff requests (excluded): %d\n", backoff_request_count))
+    end
+    if suppressed_request_count > 0 then
+        io.stderr:write(string.format("[tasks_update] Suppressed thread requests (excluded): %d\n", suppressed_request_count))
+    end
+    if fallback_request_count > 0 then
+        io.stderr:write(string.format("[tasks_update] Fallback requests (excluded from error rate): %d\n", fallback_request_count))
+    end
+
     common.print_summary("tasks_update", summary)
+    local lua_total = common.total_requests
 
     if error_tracker then
         local aggregated = error_tracker.get_thread_aggregated_summary()
-        local total = summary.requests or 0
 
-        io.write("\n--- tasks_update HTTP Status Distribution ---\n")
-        if total > 0 then
+        io.write("\n--- tasks_update HTTP Status Distribution (single-thread estimate) ---\n")
+        if lua_total > 0 then
             local status_codes = {
                 {"200 OK", aggregated.status_200},
                 {"201 Created", aggregated.status_201},
@@ -259,20 +326,28 @@ function done(summary, latency, requests)
             for _, pair in ipairs(status_codes) do
                 local code, count = pair[1], pair[2]
                 if count > 0 then
-                    io.write(string.format("  %s: %d (%.1f%%)\n", code, count, (count / total) * 100))
+                    io.write(string.format("  %s: %d (%.1f%%)\n", code, count, (count / lua_total) * 100))
                 end
             end
 
-            local errors = aggregated.status_400 + aggregated.status_404 + aggregated.status_409 +
-                           aggregated.status_422 + aggregated.status_500 + aggregated.status_502 +
-                           aggregated.status_other
-            io.write(string.format("Error Rate: %.2f%% (%d errors / %d requests)\n", (errors / total) * 100, errors, total))
+            local error_count = (aggregated.status_400 or 0) + (aggregated.status_404 or 0) +
+                                (aggregated.status_409 or 0) + (aggregated.status_422 or 0) +
+                                (aggregated.status_500 or 0) + (aggregated.status_502 or 0) +
+                                (aggregated.status_other or 0)
+            -- lua_total already excludes backoff/suppressed/fallback (track_response not called for them)
+            local update_request_total = lua_total
+            local actual_error_rate = update_request_total > 0 and (error_count / update_request_total * 100) or 0
+
+            io.write(string.format("\nActual Error Rate (backoff/suppressed/fallback excluded): %.2f%% (%d errors / %d update requests)\n",
+                actual_error_rate, error_count, update_request_total))
+            io.write(string.format("Note: wrk summary.requests=%d includes %d backoff + %d suppressed + %d fallback requests\n",
+                summary.requests or 0, backoff_request_count, suppressed_request_count, fallback_request_count))
         else
             io.write("  No requests completed\n")
         end
     end
 
-    io.stderr:write(string.format("[tasks_update] Retry config: RETRY_COUNT=%d\n", RETRY_COUNT))
+    io.stderr:write(string.format("[tasks_update] Retry config: RETRY_COUNT=%d, BACKOFF_MAX=%d\n", RETRY_COUNT, BACKOFF_MAX))
     if thread_retry_count > 0 then
         io.stderr:write(string.format("[tasks_update] Thread successful retries: %d\n", thread_retry_count))
     end

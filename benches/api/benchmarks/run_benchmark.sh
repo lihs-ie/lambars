@@ -449,6 +449,12 @@ load_scenario_env_vars() {
         export THREADS
     fi
 
+    # WRK_THREADS: Number of wrk threads for Lua script thread-local state
+    # Used by tasks_update.lua for ID range partitioning
+    if [[ -z "${WRK_THREADS:-}" ]]; then
+        export WRK_THREADS="${THREADS}"
+    fi
+
     # ==========================================================================
     # Concurrency Settings (WORKER_THREADS, POOL_SIZES)
     # ==========================================================================
@@ -610,6 +616,38 @@ load_scenario_env_vars() {
     export RETRY="${retry}"
 
     # ==========================================================================
+    # Tasks Update Configuration (ID_POOL_SIZE, RETRY_COUNT)
+    # ==========================================================================
+
+    load_numeric_param() {
+        local env_var="$1"
+        local yaml_path1="$2"
+        local yaml_path2="$3"
+        local default_value="$4"
+        local param_name="$5"
+
+        if [[ -n "${!env_var:-}" ]]; then
+            return 0
+        fi
+
+        local value
+        value=$(yq -r -e "${yaml_path1}" "${scenario_file}" 2>/dev/null) || value="null"
+        if [[ "${value}" == "null" || -z "${value}" ]]; then
+            value=$(yq -r "${yaml_path2}" "${scenario_file}" 2>/dev/null) || value="${default_value}"
+        fi
+
+        if ! [[ "${value}" =~ ^[0-9]+$ ]]; then
+            echo -e "${YELLOW}WARNING: Invalid ${param_name} '${value}', using default ${default_value}${NC}" >&2
+            value="${default_value}"
+        fi
+
+        export "${env_var}=${value}"
+    }
+
+    load_numeric_param "ID_POOL_SIZE" ".metadata.id_pool_size // null" ".id_pool_size // 10" "10" "id_pool_size"
+    load_numeric_param "RETRY_COUNT" ".metadata.retry_count // null" ".error_config.max_retries // 0" "0" "retry_count"
+
+    # ==========================================================================
     # Profiling Configuration
     # ==========================================================================
 
@@ -747,6 +785,10 @@ load_scenario_env_vars() {
     [[ -n "${POOL_SIZES:-}" ]] && echo "  Pool sizes: ${POOL_SIZES}"
     [[ -n "${SEED:-}" ]] && echo "  Seed: ${SEED}"
     [[ "${PROFILE_MODE}" == "true" ]] && echo "  Profiling: enabled"
+
+    if [[ "${SCENARIO_NAME}" =~ ^tasks_update ]]; then
+        echo "  tasks_update config: ID_POOL_SIZE=${ID_POOL_SIZE:-10}, RETRY_COUNT=${RETRY_COUNT:-0}, WRK_THREADS=${WRK_THREADS:-${THREADS}}"
+    fi
 
     # Show phase-specific parameters based on RPS profile
     case "${RPS_PROFILE}" in
@@ -1058,7 +1100,8 @@ if [[ "${QUICK_MODE}" == "true" ]]; then
     DURATION="5s"
     THREADS="1"
     CONNECTIONS="5"
-    export DURATION THREADS CONNECTIONS
+    WRK_THREADS="1"
+    export DURATION THREADS CONNECTIONS WRK_THREADS
 fi
 
 # Validate all parameters
@@ -2411,7 +2454,9 @@ log_resolved_params() {
         printf "POOL_SIZES=%s\n\n" "${POOL_SIZES:-24}"
         printf "## Error Configuration\n"
         printf "FAIL_RATE=%s\n" "${FAIL_RATE:-0}"
-        printf "RETRY=%s\n\n" "${RETRY:-false}"
+        printf "RETRY=%s\n" "${RETRY:-false}"
+        printf "RETRY_COUNT=%s\n" "${RETRY_COUNT:-0}"
+        printf "ID_POOL_SIZE=%s\n\n" "${ID_POOL_SIZE:-10}"
         printf "## Multi-Phase Load Profile Parameters\n"
         printf "MIN_RPS=%s\n" "${MIN_RPS:-10}"
         printf "STEP_COUNT=%s\n" "${STEP_COUNT:-4}"
@@ -3119,6 +3164,17 @@ run_benchmark() {
     if [[ ! -f "${script_path}" ]]; then
         echo -e "${YELLOW}Warning: Script not found: ${script_path}${NC}"
         return 1
+    fi
+
+    if [[ "${SCENARIO_NAME}" =~ ^tasks_update ]]; then
+        if [[ "${THREADS}" != "${CONNECTIONS}" || "${WRK_THREADS:-${THREADS}}" != "${THREADS}" ]]; then
+            echo -e "${RED}Error: tasks_update requires threads == connections == WRK_THREADS (current: threads=${THREADS}, connections=${CONNECTIONS}, WRK_THREADS=${WRK_THREADS:-${THREADS}})${NC}"
+            echo -e "${RED}Reason: Version state management and backoff exclusion require 1:1 mapping${NC}"
+            if [[ "${ALLOW_THREAD_CONNECTION_MISMATCH:-0}" != "1" ]]; then
+                exit 1
+            fi
+            echo -e "${YELLOW}WARNING: Proceeding with degraded accuracy (ALLOW_THREAD_CONNECTION_MISMATCH=1)${NC}"
+        fi
     fi
 
     echo ""
