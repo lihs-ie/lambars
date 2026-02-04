@@ -1,0 +1,683 @@
+id: PLAN-20260204-0841
+title: "tasks_update エラー率改善: 詳細実装計画"
+created: "2026-02-04"
+status: approved
+related_requirements:
+  - "docs/internal/requirements/20260204_0841_tasks_update_error_rate_remediation.yaml"
+related_analysis:
+  - "docs/internal/analysis/20260204_tasks_update_error_rate_bottleneck_analysis.yaml"
+
+overview: |
+  tasks_update と tasks_update_conflict のエラー率 74.99% を 10% 以下に改善するための
+  詳細実装計画。根本原因は設定不備（環境変数マッピング欠落、threads/connections 不整合）にある。
+
+codex_review:
+  final_review:
+    timestamp: "2026-02-04T10:30:00Z"
+    result: "ok: true"
+    issues: []
+    suggestions_applied:
+      - "GET /health 使用の矛盾を解消（集計除外フラグでメトリクス影響なしを明記）"
+      - "lua_metrics 整合性検証を SHELL-009 の acceptance_criteria に追加"
+
+  first_review:
+    timestamp: "2026-02-04T09:00:00Z"
+    result: "ok: false"
+    issues:
+      - severity: major
+        description: |
+          信頼性要件で指数バックオフ必須だが、SHELL-008 が「必要なら対応/延期」扱いで
+          要件未達の恐れがある。
+        resolution: |
+          SHELL-008 を必須タスクに変更。wrk2 制約下での最小実装（リクエスト間引き）を採用。
+          要件定義に wrk2 制約と代替実装方式を明記。
+      - severity: major
+        description: |
+          FR-001/FR-003 では run_benchmark.sh と scenario_env.sh の両方で環境変数マッピングを
+          求めているが、計画タスクは run_benchmark.sh のみ。
+        resolution: |
+          scenario_env.sh は既に対応済みであることを検証タスクとして追加（SHELL-010）。
+          分析ドキュメントの整合性を修正（DOC-004）。
+      - severity: minor
+        description: |
+          SHELL-003 の WRK_THREADS export が無条件で、CI/手動の上書きや
+          他シナリオへの影響を起こし得る。
+        resolution: |
+          ID_POOL_SIZE と同様に未設定時のみ export するよう修正。
+      - severity: minor
+        description: |
+          SHELL-001/002 の yq 取得が raw/exit 確認なしで、
+          文字列/失敗時に無効値が export される可能性がある。
+        resolution: |
+          yq は `-r -e` オプションを使用し、空/非数値はデフォルトまたはエラーとして扱う。
+    suggestions_applied:
+      - "threads=connections を増やす前に、WRK_THREADS による ID 範囲分割が実際に効いているか小規模で検証する"
+      - "SHELL-009 で lua_metrics.json 未生成時の存在チェックと警告を入れる"
+      - "result_collector の集計が finalize/flush 必要なら tasks_update.lua で明示的に呼び出す"
+
+implementation_summary:
+  total_tasks: 16
+  rust_tasks: 0
+  shell_script_tasks: 11
+  documentation_tasks: 5
+
+implementation_tasks:
+  shell_script:
+    # Phase 1: 環境変数マッピングの修正
+    - task_id: SHELL-001
+      phase: 1
+      priority: high
+      title: "run_benchmark.sh に ID_POOL_SIZE マッピングを追加"
+      description: |
+        load_scenario_env_vars 関数に metadata.id_pool_size を読み取り
+        ID_POOL_SIZE 環境変数として export するロジックを追加する。
+        既存の環境変数が設定されている場合は上書きしない（CI オーバーライド対応）。
+      files:
+        - "benches/api/benchmarks/run_benchmark.sh"
+      acceptance_criteria:
+        - metadata.id_pool_size から ID_POOL_SIZE が正しく export される
+        - トップレベルの id_pool_size もフォールバックとして対応
+        - 環境変数による上書きが可能
+        - デフォルト値は 10（現行動作維持）
+        - yq で -r -e オプションを使用し、無効値をハンドリング
+      implementation_details:
+        location: "load_scenario_env_vars 関数内、Error Handling セクション付近"
+        pattern: |
+          # ID_POOL_SIZE: Number of task IDs to use for update benchmark
+          # Prefer metadata.id_pool_size, fallback to id_pool_size, default to 10
+          local id_pool_size
+          id_pool_size=$(yq -r -e '.metadata.id_pool_size // null' "${scenario_file}" 2>/dev/null) || id_pool_size="null"
+          if [[ "${id_pool_size}" == "null" || -z "${id_pool_size}" ]]; then
+              id_pool_size=$(yq -r '.id_pool_size // 10' "${scenario_file}" 2>/dev/null) || id_pool_size="10"
+          fi
+          # Validate numeric value
+          if ! [[ "${id_pool_size}" =~ ^[0-9]+$ ]]; then
+              echo -e "${YELLOW}WARNING: Invalid id_pool_size '${id_pool_size}', using default 10${NC}" >&2
+              id_pool_size="10"
+          fi
+          if [[ -z "${ID_POOL_SIZE:-}" ]]; then
+              export ID_POOL_SIZE="${id_pool_size}"
+          fi
+
+    - task_id: SHELL-002
+      phase: 1
+      priority: high
+      title: "run_benchmark.sh に RETRY_COUNT マッピングを追加"
+      description: |
+        load_scenario_env_vars 関数に metadata.retry_count を読み取り
+        RETRY_COUNT 環境変数として export するロジックを追加する。
+      files:
+        - "benches/api/benchmarks/run_benchmark.sh"
+      acceptance_criteria:
+        - metadata.retry_count から RETRY_COUNT が正しく export される
+        - error_config.max_retries もフォールバックとして対応
+        - 環境変数による上書きが可能
+        - デフォルト値は 0（再試行なし）
+        - yq で -r -e オプションを使用し、無効値をハンドリング
+      implementation_details:
+        location: "load_scenario_env_vars 関数内、ID_POOL_SIZE の直後"
+        pattern: |
+          # RETRY_COUNT: Maximum retry attempts on 409 conflict
+          # Prefer metadata.retry_count, fallback to error_config.max_retries, default to 0
+          local retry_count
+          retry_count=$(yq -r -e '.metadata.retry_count // null' "${scenario_file}" 2>/dev/null) || retry_count="null"
+          if [[ "${retry_count}" == "null" || -z "${retry_count}" ]]; then
+              retry_count=$(yq -r '.error_config.max_retries // 0' "${scenario_file}" 2>/dev/null) || retry_count="0"
+          fi
+          # Validate numeric value
+          if ! [[ "${retry_count}" =~ ^[0-9]+$ ]]; then
+              echo -e "${YELLOW}WARNING: Invalid retry_count '${retry_count}', using default 0${NC}" >&2
+              retry_count="0"
+          fi
+          if [[ -z "${RETRY_COUNT:-}" ]]; then
+              export RETRY_COUNT="${retry_count}"
+          fi
+
+    - task_id: SHELL-003
+      phase: 1
+      priority: high
+      title: "run_benchmark.sh に WRK_THREADS マッピングを追加"
+      description: |
+        tasks_update.lua が WRK_THREADS 環境変数を参照しているため、
+        THREADS と同じ値を WRK_THREADS として export するロジックを追加する。
+        既存の環境変数が設定されている場合は上書きしない。
+      files:
+        - "benches/api/benchmarks/run_benchmark.sh"
+      acceptance_criteria:
+        - THREADS が設定された後に WRK_THREADS が同じ値で export される
+        - tasks_update.lua のスレッドごとの ID 範囲分割が正しく機能する
+        - 既存の WRK_THREADS 環境変数が設定されている場合は上書きしない
+      implementation_details:
+        location: "load_scenario_env_vars 関数内、THREADS export の直後"
+        pattern: |
+          # WRK_THREADS: Number of wrk threads for Lua script thread-local state
+          # Used by tasks_update.lua for ID range partitioning
+          if [[ -z "${WRK_THREADS:-}" ]]; then
+              export WRK_THREADS="${THREADS}"
+          fi
+
+    - task_id: SHELL-004
+      phase: 1
+      priority: medium
+      title: "環境変数の反映確認用ログ出力を追加"
+      description: |
+        load_scenario_env_vars 関数の最後に、tasks_update 関連の設定値を
+        ログに出力して反映確認を容易にする。
+      files:
+        - "benches/api/benchmarks/run_benchmark.sh"
+      acceptance_criteria:
+        - ID_POOL_SIZE, RETRY_COUNT, WRK_THREADS が出力される
+        - THREADS, CONNECTIONS との整合性が視覚的に確認できる
+      implementation_details:
+        location: "load_scenario_env_vars 関数の Summary Output セクション"
+        pattern: |
+          # tasks_update specific configuration
+          if [[ "${SCENARIO_NAME}" =~ ^tasks_update ]]; then
+              echo "  ID_POOL_SIZE=${ID_POOL_SIZE:-10}"
+              echo "  RETRY_COUNT=${RETRY_COUNT:-0}"
+              echo "  WRK_THREADS=${WRK_THREADS:-${THREADS}}"
+          fi
+
+    - task_id: SHELL-010
+      phase: 1
+      priority: medium
+      title: "scenario_env.sh の環境変数マッピングが正しく動作することを検証"
+      description: |
+        scenario_env.sh には既に ID_POOL_SIZE, RETRY_COUNT, WRK_THREADS のサポートが
+        実装されている。この実装が正しく動作することを検証するテストを追加する。
+      files:
+        - "benches/api/benchmarks/scripts/scenario_env.sh"
+      acceptance_criteria:
+        - load_scenario_env と export_scenario_env が正しく動作することを確認
+        - run_benchmark.sh と scenario_env.sh の両方で環境変数が設定される
+      implementation_details:
+        verification_method: |
+          # scenario_env.sh のテスト
+          cd benches/api/benchmarks
+          source scripts/scenario_env.sh
+          load_scenario_env "scenarios/tasks_update.yaml"
+          export_scenario_env
+          echo "ID_POOL_SIZE=${ID_POOL_SIZE}"
+          echo "RETRY_COUNT=${RETRY_COUNT}"
+          echo "WRK_THREADS=${WRK_THREADS}"
+
+    # Phase 2: threads と connections の整合性確保
+    - task_id: SHELL-005
+      phase: 2
+      priority: high
+      title: "threads と connections の整合性ガードを追加"
+      description: |
+        tasks_update.lua は「1 thread = 1 connection」前提で動作するため、
+        threads != connections の場合に警告を出力し、オプションで実行を停止する
+        ガードロジックを追加する。
+      files:
+        - "benches/api/benchmarks/run_benchmark.sh"
+      acceptance_criteria:
+        - tasks_update シナリオで threads != connections の場合はデフォルトでエラー停止
+        - ALLOW_THREAD_CONNECTION_MISMATCH=1 で警告付き実行が可能（非推奨）
+        - 他のシナリオには影響しない
+        - エラーメッセージに不一致の理由と修正方法が含まれる
+      implementation_details:
+        location: "validate_scenario_params 関数内、または run_wrk 関数の手前"
+        rationale: |
+          tasks_update.lua の version 状態管理とバックオフ除外ロジックは、
+          1 thread = 1 connection（パイプラインなし）を前提としている。
+          threads != connections の場合、以下の問題が発生する:
+          - version 状態の不整合による 409 Conflict 多発
+          - is_backoff_request フラグのレスポンス対応付けが崩れる
+          - 計測結果が不正確になる
+
+          そのため、tasks_update シナリオでは threads == connections を必須とし、
+          不一致の場合はエラーで実行を停止する。
+        pattern: |
+          # Check threads/connections alignment for tasks_update scenarios
+          # tasks_update.lua REQUIRES 1 thread = 1 connection for:
+          # - Proper version state management (avoiding 409 conflicts)
+          # - Correct backoff request exclusion (is_backoff_request flag)
+          if [[ "${SCENARIO_NAME}" =~ ^tasks_update ]]; then
+              if [[ "${THREADS}" != "${CONNECTIONS}" ]]; then
+                  echo -e "${RED}Error: tasks_update requires threads == connections${NC}"
+                  echo -e "${RED}  Current: threads=${THREADS}, connections=${CONNECTIONS}${NC}"
+                  echo -e "${RED}  Reason: Version state management and backoff exclusion require 1:1 mapping${NC}"
+                  echo -e "${YELLOW}  Fix: Set threads and connections to the same value in scenario file${NC}"
+                  if [[ "${ALLOW_THREAD_CONNECTION_MISMATCH:-0}" != "1" ]]; then
+                      exit 1
+                  else
+                      echo -e "${YELLOW}WARNING: ALLOW_THREAD_CONNECTION_MISMATCH=1 is set. Proceeding with degraded accuracy.${NC}"
+                  fi
+              fi
+          fi
+
+    - task_id: SHELL-011
+      phase: 2
+      priority: high
+      title: "WRK_THREADS による ID 範囲分割の検証テスト"
+      description: |
+        threads=connections を増やす前に、WRK_THREADS による ID 範囲分割が
+        実際に効いているか小規模で検証する。
+      files:
+        - "benches/api/benchmarks/scripts/tasks_update.lua"
+      acceptance_criteria:
+        - WRK_THREADS=2, ID_POOL_SIZE=100 で各スレッドが異なる ID 範囲を使用することを確認
+        - スレッドログ出力で ID 範囲が重複していないことを確認
+      implementation_details:
+        verification_method: |
+          # 小規模検証
+          WRK_THREADS=2 ID_POOL_SIZE=100 \
+          wrk -t2 -c2 -d5s -s scripts/tasks_update.lua http://localhost:8080/
+          # ログで "[Thread 0] ID range: 0-49" "[Thread 1] ID range: 50-99" を確認
+
+    - task_id: SHELL-006
+      phase: 2
+      priority: medium
+      title: "tasks_update.yaml の threads/connections を同一値に修正"
+      description: |
+        tasks_update.yaml の threads=4, connections=50 を threads=connections に統一する。
+        高スループットが必要な場合は threads/connections を両方増やす。
+      files:
+        - "benches/api/benchmarks/scenarios/tasks_update.yaml"
+      acceptance_criteria:
+        - threads == connections が成立
+        - target_rps に対して十分なスループットが確保される
+      implementation_details:
+        current_values:
+          threads: 4
+          connections: 50
+        proposed_values:
+          threads: 8
+          connections: 8
+        rationale: |
+          1 thread = 1 connection で version 状態管理を正しく行うため。
+          8 threads/connections で十分なスループットを確保。
+
+    # Phase 3: エラー内訳の可視化と再試行戦略
+    - task_id: SHELL-007
+      phase: 3
+      priority: medium
+      title: "tasks_update.lua に result_collector 初期化を追加"
+      description: |
+        tasks_update.lua の init 関数で error_tracker を初期化し、
+        http_status 内訳を集計できるようにする。
+        finalize 時に明示的に集計をフラッシュする。
+      files:
+        - "benches/api/benchmarks/scripts/tasks_update.lua"
+      acceptance_criteria:
+        - http_status の内訳（2xx, 4xx, 5xx）が出力される
+        - 409 Conflict の詳細件数が確認できる
+        - done 関数で集計が正しく出力される
+      implementation_details:
+        note: |
+          error_tracker.lua は既に存在し、tasks_update.lua は pcall で
+          読み込もうとしている。init 関数で error_tracker.init() を呼ぶ。
+          done 関数で集計を明示的にフラッシュする。
+        pattern: |
+          function init(args)
+              if error_tracker then
+                  error_tracker.init()
+              end
+              common.init_benchmark({
+                  scenario_name = "tasks_update",
+                  output_format = "json"
+              })
+          end
+
+    - task_id: SHELL-008
+      phase: 3
+      priority: high
+      title: "再試行に擬似指数バックオフを適用"
+      description: |
+        tasks_update.lua の再試行ロジックに擬似指数バックオフを導入し、
+        409 Conflict 発生時の負荷集中を緩和する。
+
+        wrk2 ではブロッキング関数（socket.sleep 等）が使えないため、
+        リクエスト間引き方式で擬似的なバックオフを実装する。
+      files:
+        - "benches/api/benchmarks/scripts/tasks_update.lua"
+      acceptance_criteria:
+        - 再試行時にバックオフ遅延が適用される（リクエスト間引き方式）
+        - バックオフ係数が指数的に増加する
+        - バックオフ上限が RETRY_BACKOFF_MAX で設定可能
+        - バックオフリクエストは tasks_update のエラー率集計から除外される
+        - バックオフリクエスト数が done 関数でログ出力される
+        - GET /health エンドポイントが存在し、アクセス可能であることを確認
+        - lua_metrics の total_requests にバックオフリクエストが含まれないこと
+        - lua_metrics の http_status 合計と total_requests が一致すること
+        - エラー率計算の母数は lua_metrics の total_requests を使用すること
+      implementation_details:
+        wrk2_constraint: |
+          wrk2 では socket.sleep() などのブロッキング関数が使用できない。
+          代わりに「スキップカウンター」を使用してリクエストを間引くことで
+          擬似的なバックオフを実現する。
+        backoff_request_handling: |
+          バックオフ中のリクエストが tasks_update のエラー率計測を希釈しないよう、
+          以下の方式を採用する:
+
+          方式: 状態フラグによる集計除外 + GET /health リクエスト
+          - バックオフ中は `is_backoff_request = true` フラグを設定
+          - response() でフラグを確認し、バックオフリクエストは集計から除外
+          - error_tracker の集計にバックオフリクエストを含めない
+          - GET /health を送信するが、is_backoff_request フラグにより
+            common.track_response() と error_tracker が呼ばれないためメトリクスに影響しない
+          - これにより正確なエラー率計測を維持
+
+          代替案（検討済み・不採用）:
+          - nil 返却: wrk2 で未定義動作のため不採用
+          - GET /health（集計除外なし）: 集計に混ざるため不採用
+          - 専用ヘッダー: response で判定可能だが複雑なため不採用
+
+          採用理由:
+          - GET /health を送信しつつ、is_backoff_request フラグで集計から除外
+          - wrk2 の request() が有効なリクエストを返す必要がある制約を満たす
+          - メトリクスの正確性を維持できる
+        implementation_pattern: |
+          local backoff_skip_counter = 0
+          local backoff_skip_target = 0
+          local BACKOFF_BASE = 2
+          local BACKOFF_MAX = tonumber(os.getenv("RETRY_BACKOFF_MAX")) or 16
+          local is_backoff_request = false
+          local backoff_request_count = 0
+
+          function request()
+              -- バックオフ中は軽量リクエストを返す（集計からは除外）
+              if backoff_skip_counter < backoff_skip_target then
+                  backoff_skip_counter = backoff_skip_counter + 1
+                  is_backoff_request = true
+                  backoff_request_count = backoff_request_count + 1
+                  -- 軽量な GET /health を返すが、集計には含めない
+                  return wrk.format("GET", "/health")
+              end
+              backoff_skip_counter = 0
+              is_backoff_request = false
+              -- ... 通常のリクエスト処理 ...
+          end
+
+          function response(status, headers, body)
+              -- バックオフリクエストは集計から除外
+              if is_backoff_request then
+                  is_backoff_request = false
+                  return  -- 集計しない
+              end
+              -- ... 通常の response 処理 ...
+              common.track_response(status, headers)
+              if error_tracker then error_tracker.track_thread_response(status) end
+          end
+
+          function done(summary, latency, requests)
+              -- バックオフリクエスト数をログ出力（デバッグ用）
+              if backoff_request_count > 0 then
+                  io.stderr:write(string.format(
+                      "[tasks_update] Backoff requests (excluded from metrics): %d\n",
+                      backoff_request_count))
+              end
+
+              -- エラー率の母数は common.total_requests を使用（バックオフ除外済み）
+              -- wrk の summary.requests にはバックオフリクエストが含まれるため使用しない
+              local lua_total = common.total_requests  -- バックオフ除外済み
+
+              -- エラー数は error_tracker.get_thread_aggregated_summary() から取得
+              -- error_tracker.state.http_error_count は track_response() で更新されないため使用不可
+              local error_count = 0
+              if error_tracker then
+                  local aggregated = error_tracker.get_thread_aggregated_summary()
+                  error_count = (aggregated.status_400 or 0) + (aggregated.status_404 or 0) +
+                                (aggregated.status_409 or 0) + (aggregated.status_422 or 0) +
+                                (aggregated.status_500 or 0) + (aggregated.status_502 or 0) +
+                                (aggregated.status_other or 0)
+              end
+
+              local actual_error_rate = lua_total > 0 and (error_count / lua_total * 100) or 0
+
+              io.write(string.format(
+                  "\nActual Error Rate (backoff excluded): %.2f%% (%d errors / %d requests)\n",
+                  actual_error_rate, error_count, lua_total))
+              io.write(string.format(
+                  "Note: wrk summary.requests=%d includes %d backoff requests\n",
+                  summary.requests, backoff_request_count))
+
+              -- ... 通常の done 処理 ...
+          end
+
+          -- 409 発生時にバックオフを設定
+          local function apply_backoff()
+              local delay = math.min(BACKOFF_BASE ^ retry_attempt, BACKOFF_MAX)
+              backoff_skip_target = delay
+              backoff_skip_counter = 0
+          end
+        note: |
+          この実装は完全な時間ベースのバックオフではないが、
+          連続リクエストの頻度を下げることで同等の効果を得る。
+          バックオフリクエストは集計から除外されるため、エラー率計測に影響しない。
+
+    - task_id: SHELL-009
+      phase: 3
+      priority: low
+      title: "ベンチマーク結果サマリーに http_status 内訳を追加"
+      description: |
+        run_benchmark.sh の結果出力に http_status 内訳を含める。
+        lua_metrics.json から http_status 情報を抽出して meta.json に追加。
+        lua_metrics.json が未生成の場合は警告を出力。
+      files:
+        - "benches/api/benchmarks/run_benchmark.sh"
+      acceptance_criteria:
+        - meta.json に http_status 内訳が含まれる
+        - CI でエラー原因の詳細が確認できる
+        - lua_metrics.json が存在しない場合は警告を出力
+        - lua_metrics の http_status 合計と total_requests が一致することを検証
+        - 検証ロジックは既存の test_http_status_pipeline.sh を参考に実装
+      implementation_details:
+        pattern: |
+          # Extract http_status from lua_metrics.json if available
+          if [[ -f "${phase_dir}/lua_metrics.json" ]]; then
+              local http_status
+              http_status=$(jq -r '.http_status // empty' "${phase_dir}/lua_metrics.json" 2>/dev/null)
+              if [[ -n "${http_status}" ]]; then
+                  export HTTP_STATUS_SUMMARY="${http_status}"
+              fi
+          else
+              echo -e "${YELLOW}WARNING: lua_metrics.json not found in ${phase_dir}${NC}" >&2
+          fi
+
+  documentation:
+    - task_id: DOC-001
+      phase: 2
+      priority: medium
+      title: "tasks_update.lua の前提条件をドキュメント化"
+      description: |
+        tasks_update.lua が「1 thread = 1 connection」前提で動作することを
+        シナリオファイルとスクリプトの両方にドキュメント化する。
+      files:
+        - "benches/api/benchmarks/scenarios/tasks_update.yaml"
+        - "benches/api/benchmarks/scripts/tasks_update.lua"
+      acceptance_criteria:
+        - 前提条件が明記されている
+        - threads != connections の場合の動作が説明されている
+
+    - task_id: DOC-002
+      phase: 3
+      priority: low
+      title: "ベンチマーク設定ガイドを更新"
+      description: |
+        ID_POOL_SIZE, RETRY_COUNT, WRK_THREADS, RETRY_BACKOFF_MAX の環境変数と
+        シナリオファイルでの設定方法をドキュメント化する。
+      files:
+        - "benches/api/benchmarks/README.md"
+      acceptance_criteria:
+        - 新規環境変数の説明が追加されている
+        - シナリオファイルでの設定例が含まれている
+        - RETRY_BACKOFF_MAX の意味とデフォルト値（16）が説明されている
+      environment_variables_to_document:
+        - name: ID_POOL_SIZE
+          description: "更新ベンチマークで使用するタスク ID の数"
+          default: 10
+        - name: RETRY_COUNT
+          description: "409 Conflict 発生時の最大再試行回数"
+          default: 0
+        - name: WRK_THREADS
+          description: "wrk スレッド数（Lua スクリプトのスレッドローカル状態用）"
+          default: THREADS と同じ
+        - name: RETRY_BACKOFF_MAX
+          description: "擬似指数バックオフの上限（スキップするリクエスト数）"
+          default: 16
+
+    - task_id: DOC-003
+      phase: 3
+      priority: low
+      title: "分析結果を要件定義完了後に done ディレクトリに移動"
+      description: |
+        実装完了後、関連する要件定義と分析ファイルを
+        docs/internal/done/ に移動する。
+      files:
+        - "docs/internal/requirements/20260204_0841_tasks_update_error_rate_remediation.yaml"
+        - "docs/internal/analysis/20260204_tasks_update_error_rate_bottleneck_analysis.yaml"
+
+    - task_id: DOC-004
+      phase: 1
+      priority: medium
+      title: "分析ドキュメントの整合性を修正"
+      description: |
+        分析ドキュメントで「scenario_env.sh に欠落」と記載されているが、
+        実際には scenario_env.sh には既に ID_POOL_SIZE/RETRY_COUNT/WRK_THREADS の
+        サポートが入っている。run_benchmark.sh のみ欠落している旨を明記する。
+      files:
+        - "docs/internal/analysis/20260204_tasks_update_error_rate_bottleneck_analysis.yaml"
+      acceptance_criteria:
+        - 欠落箇所が正確に記載されている
+        - scenario_env.sh は対応済みであることが明記されている
+
+    - task_id: DOC-005
+      phase: 3
+      priority: high
+      title: "要件定義に wrk2 制約と擬似指数バックオフ方式を明記"
+      description: |
+        要件定義の信頼性要件で「指数バックオフを採用」と記載されているが、
+        wrk2 の制約（ブロッキング関数が使用不可）により、
+        純粋な時間ベースの指数バックオフは実装できない。
+        擬似指数バックオフ（リクエスト間引き方式）で要件を満たすことを明記する。
+      files:
+        - "docs/internal/requirements/20260204_0841_tasks_update_error_rate_remediation.yaml"
+      acceptance_criteria:
+        - wrk2 制約が記載されている
+        - 擬似指数バックオフの実装方式が説明されている
+        - 代替実装が要件を満たすことが明記されている
+      implementation_details:
+        update_section: "non_functional_requirements.reliability"
+        new_content: |
+          - 再試行は擬似指数バックオフを採用し、衝突時の負荷集中を緩和する
+            - wrk2 制約: ブロッキング関数（socket.sleep 等）が使用不可
+            - 実装方式: リクエスト間引きによる擬似バックオフ
+            - バックオフ係数: 2^retry_attempt（上限: RETRY_BACKOFF_MAX、デフォルト 16）
+          - 再試行回数は設定値で決定される
+
+implementation_order:
+  phase_1:
+    title: "環境変数マッピングの修正（優先度: 即時）"
+    tasks:
+      - SHELL-001  # ID_POOL_SIZE マッピング
+      - SHELL-002  # RETRY_COUNT マッピング
+      - SHELL-003  # WRK_THREADS マッピング
+      - SHELL-004  # ログ出力
+      - SHELL-010  # scenario_env.sh 検証
+      - DOC-004    # 分析ドキュメント整合性修正
+    estimated_time: "2-3 hours"
+    expected_impact: "ID プールサイズが正しく反映され、衝突率が設定通りになる"
+
+  phase_2:
+    title: "threads と connections の整合性確保（優先度: 即時）"
+    tasks:
+      - SHELL-011  # ID 範囲分割の検証
+      - SHELL-005  # 整合性ガード
+      - SHELL-006  # tasks_update.yaml 修正
+      - DOC-001    # 前提条件ドキュメント化
+    estimated_time: "1-2 hours"
+    expected_impact: "version 状態管理が正しく機能し、409 エラーが大幅に減少"
+
+  phase_3:
+    title: "エラー内訳の可視化と再試行戦略（優先度: 必須）"
+    tasks:
+      - SHELL-007  # result_collector 初期化
+      - SHELL-008  # 擬似指数バックオフ（必須）
+      - SHELL-009  # 結果サマリー更新
+      - DOC-002    # 設定ガイド更新
+      - DOC-003    # ファイル移動
+      - DOC-005    # 要件定義更新（wrk2 制約と擬似指数バックオフ）
+    estimated_time: "2-3 hours"
+    expected_impact: "エラー原因の詳細把握が可能、再試行戦略の改善"
+
+dependencies:
+  - SHELL-001 と SHELL-002 は並行実施可能
+  - SHELL-003 は THREADS が設定される箇所の後に配置が必要
+  - SHELL-010 は SHELL-001/002/003 と並行で検証可能
+  - SHELL-011 は SHELL-005/006 の前に実施（効果確認後に設定変更）
+  - SHELL-005 は SHELL-006 の前に実装（ガードを先に入れてから設定変更）
+  - SHELL-007 は Phase 1, 2 完了後に実施
+  - SHELL-008 は要件定義の信頼性要件を満たすため必須タスク
+
+verification_plan:
+  unit_tests:
+    - task: "環境変数の読み取りテスト"
+      method: |
+        シナリオファイルを読み込み、期待する環境変数が設定されることを確認
+        source run_benchmark.sh の後に env | grep -E 'ID_POOL_SIZE|RETRY_COUNT|WRK_THREADS'
+
+    - task: "yq エラーハンドリングテスト"
+      method: |
+        不正な YAML や欠落キーでデフォルト値が適用されることを確認
+
+  integration_tests:
+    - task: "tasks_update ベンチマーク実行"
+      method: |
+        ./run_benchmark.sh -s scenarios/tasks_update.yaml --dry-run
+        環境変数ログを確認
+
+    - task: "threads=connections 条件での実行"
+      method: |
+        修正後の tasks_update.yaml で実際にベンチマークを実行し、
+        エラー率が改善されることを確認
+
+    - task: "ID 範囲分割の検証"
+      method: |
+        WRK_THREADS=2 ID_POOL_SIZE=100 で実行し、
+        スレッドログで ID 範囲の重複がないことを確認
+
+  performance_tests:
+    - task: "エラー率測定"
+      method: |
+        CI で tasks_update, tasks_update_conflict を実行し、
+        エラー率が 10% 以下であることを確認
+      acceptance_criteria:
+        - tasks_update: エラー率 <= 10%
+        - tasks_update_conflict: エラー率 <= 10%
+
+risks:
+  - risk: "threads と connections を統一すると同時接続数が減り、負荷が下がる"
+    mitigation: |
+      threads/connections の値を適切に調整し、target_rps を維持できるか検証。
+      必要に応じて threads=connections=8 や 16 に引き上げ。
+
+  - risk: "再試行の増加でベンチマーク時間が延びる"
+    mitigation: |
+      RETRY_COUNT のデフォルト値を低く設定（0 または 1）。
+      Phase 1, 2 の効果測定後に再試行戦略を調整。
+
+  - risk: "既存の CI ワークフローに影響を与える"
+    mitigation: |
+      既存の環境変数が設定されている場合は上書きしない設計。
+      dry-run モードで事前検証。
+
+  - risk: "擬似指数バックオフがスループットに影響する"
+    mitigation: |
+      バックオフ上限（RETRY_BACKOFF_MAX）を設定可能にし、
+      過度なスキップを防止。デフォルト上限は 16 リクエスト。
+
+notes:
+  - scenario_env.sh には既に ID_POOL_SIZE, RETRY_COUNT, WRK_THREADS のサポートが入っている
+  - run_benchmark.sh の load_scenario_env_vars 関数に同等のロジックを追加する必要がある
+  - error_tracker.lua は既に実装されており、tasks_update.lua から pcall で読み込もうとしている
+  - 指数バックオフは wrk2 の制約（ブロッキング不可）があるため、リクエスト間引き方式で実装
+  - SHELL-008 は信頼性要件を満たすため必須タスクとして扱う
+  - threads == connections 必須化に加えて、パイプライン深度も 1 に固定すること（wrk2 の -p オプションは使用しない）
+  - common.total_requests は既に common.lua に存在し、track_response() で更新される
+  - error_tracker.state.http_error_count は track_response() では更新されないため、
+    get_thread_aggregated_summary() から 4xx/5xx ステータスを合算してエラー数を取得する
+  - lua_metrics 整合性検証は benches/api/benchmarks/scripts/test_http_status_pipeline.sh の
+    既存チェックに寄せることを検討する

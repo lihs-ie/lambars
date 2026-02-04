@@ -53,6 +53,8 @@ For projects using `deny(warnings)`, add `#[allow(deprecated)]` to the specific 
 
 ### Bug Fixes
 
+- **benches**: Fix HTTP status collection not reflected in meta.json
+- **benches**: Fix thread-local status aggregation in result_collector
 - Documents directory
 - Clippy
 - Tests
@@ -70,6 +72,10 @@ For projects using `deny(warnings)`, add `#[allow(deprecated)]` to the specific 
 
 ### Features
 
+- **benches**: Add lua_metrics.json generation and phase merging pipeline
+- **benches**: Add HTTP status distribution to summary.txt
+- **benches**: Add raw_wrk.txt for done handler output preservation
+- **benches**: Add test_http_status_pipeline.sh for pipeline validation
 - AsyncIO
 - Sample application
 - Basic APIs

@@ -1,0 +1,142 @@
+id: REQ-20260204-0841
+title: "tasks_update エラー率改善: ベンチマーク設定の修正"
+created: "2026-02-04"
+status: draft
+priority: high
+category: performance
+related_issues:
+  - "docs/internal/issues/20260125_1814_tasks_update_conflict.yaml"
+tags:
+  - benchmark
+  - error-rate
+  - tasks-update
+
+overview: |
+  benches/api/benchmarks における tasks_update の高エラー率を、設定不備の修正で改善する。
+  主因は ID_POOL_SIZE と RETRY_COUNT の未反映、および threads と connections の前提不整合にある。
+
+background: |
+  metadata.id_pool_size=1000 が環境変数に反映されずデフォルト10件で高衝突。
+  tasks_update.lua は「1 thread = 1 connection」前提だが、実際は threads=4, connections=50。
+  version 状態が共有されず同一IDに古いversionでPUTが発生し 409 が多発。
+  retry_count 設定も未反映で再試行回数が制御できていない。
+  result_collector 未初期化のため http_status 内訳が取れない。
+
+objectives:
+  - tasks_update / tasks_update_conflict のエラー率を 10% 以下に削減
+  - 409 Conflict の発生率を大幅に低減
+  - ベンチマークの再現性を向上
+
+scope:
+  in_scope:
+    - benches/api/benchmarks の設定スクリプトとベンチマーク実行設定
+    - 環境変数マッピングの追加と検証
+    - threads と connections の整合性確保
+    - result_collector の有効化と内訳出力
+  out_of_scope:
+    - API 実装やDBスキーマの変更
+    - 本番環境の運用設定変更
+    - ベンチマーク対象以外のシナリオ改修
+
+functional_requirements:
+  - id: FR-001
+    description: ID_POOL_SIZE の環境変数マッピングを追加し、metadata.id_pool_size が反映されること
+    acceptance_criteria:
+      - run_benchmark.sh と scenario_env.sh で ID_POOL_SIZE が export される
+      - 実行ログまたは出力に id_pool_size=1000 が明示される
+  - id: FR-002
+    description: threads と connections の整合性を確保し、1 thread = 1 connection 前提を満たすこと
+    acceptance_criteria:
+      - threads と connections を同一値に揃える設定が導入される
+      - 不一致時に警告または実行停止ができる
+  - id: FR-003
+    description: RETRY_COUNT の環境変数マッピングを追加し、再試行回数が制御可能になること
+    acceptance_criteria:
+      - metadata.retry_count および error_config.max_retries に値が反映される
+      - 再試行回数の変更がベンチマーク結果に反映される
+  - id: FR-004
+    description: result_collector を初期化し、http_status の内訳を出力できること
+    acceptance_criteria:
+      - 2xx/4xx/5xx の集計が出力される
+      - 409/404 などの詳細内訳が確認できる
+
+non_functional_requirements:
+  performance:
+    - tasks_update エラー率 10% 以下
+    - tasks_update_conflict エラー率 10% 以下
+  reliability:
+    - |
+      再試行は擬似指数バックオフを採用し、衝突時の負荷集中を緩和する
+      - wrk2 制約: ブロッキング関数（socket.sleep 等）が使用不可
+      - 実装方式: リクエスト間引きによる擬似バックオフ
+        - スキップカウンターを使用して指定回数のリクエストを軽量リクエスト（GET /health）に置き換える
+        - バックオフ中のリクエストは is_backoff_request フラグを設定し、集計から除外
+        - これにより正確なエラー率計測を維持しつつ、バックオフ効果を得る
+      - バックオフ係数: 2^retry_attempt（上限: RETRY_BACKOFF_MAX、デフォルト 16）
+      - 代替実装の妥当性:
+        - 完全な時間ベースのバックオフではないが、連続リクエストの頻度を下げることで同等の効果を得る
+        - wrk2 の制約下で実装可能な現実的な解決策
+        - バックオフリクエストを集計から除外することで、エラー率計測の正確性を維持
+    - 再試行回数は設定値で決定される
+
+constraints:
+  technical:
+    - 対象コンポーネントは benches/api/benchmarks に限定する
+    - 既存のシナリオ仕様を破壊しない
+    - 型安全性を維持し、設定値の型不一致を許容しない
+    - |
+      wrk2 の制約:
+      - ブロッキング関数（socket.sleep, os.execute など）が使用不可
+      - request() 関数は常に有効な HTTP リクエストを返す必要がある（nil 返却は未定義動作）
+      - response() 関数で request() との対応が 1:1 になることを前提としている（threads == connections の場合）
+    - |
+      tasks_update.lua の制約:
+      - threads == connections（1 thread = 1 connection）が必須
+      - パイプライン深度 1（-p 1）を前提とする
+      - version 状態管理がスレッドローカル変数で行われるため、複数接続ではversion不整合が発生
+
+implementation_approach:
+  phases:
+    - phase: 1
+      title: 環境変数マッピングの修正
+      tasks:
+        - run_benchmark.sh と scenario_env.sh に ID_POOL_SIZE / RETRY_COUNT の export を追加
+        - 設定の反映確認用ログまたは出力を追加
+    - phase: 2
+      title: threads と connections の整合性確保
+      tasks:
+        - 設定値を統一するガードを追加
+        - ベンチマーク設定ドキュメントを更新
+    - phase: 3
+      title: エラー内訳の可視化と再試行戦略
+      tasks:
+        - result_collector を初期化して http_status を集計
+        - 再試行処理に指数バックオフを適用
+
+verification:
+  unit_tests:
+    - 環境変数の読み取りと設定反映のテスト
+  integration_tests:
+    - threads=connections の条件で tasks_update が 409 を抑制できることを確認
+  performance_tests:
+    - 修正後の tasks_update エラー率が 10% 以下であることを確認
+
+risks:
+  - risk: threads と connections を統一すると同時接続数が減り、負荷が下がる可能性
+    mitigation: ベンチマーク目標値を再定義し、必要なら threads/connection の上限を引き上げる
+  - risk: 再試行の増加でベンチマーク時間が延びる可能性
+    mitigation: 最大再試行回数とバックオフ上限を設定する
+
+notes:
+  - ボトルネックは version 状態管理の前提条件違反による 409 多発に起因する
+  - アルゴリズムはスレッド単位の状態管理と指数バックオフ再試行を前提とする
+  - wrk2 制約により純粋な時間ベースの指数バックオフは実装不可
+  - |
+    代替実装（リクエスト間引き方式）で要件を満たす:
+    - バックオフ中は軽量リクエスト（GET /health）を送信
+    - is_backoff_request フラグで集計から除外し、エラー率計測の正確性を維持
+    - スキップカウンターで擬似的なバックオフ遅延を実現
+  - |
+    環境変数マッピング状況:
+    - scenario_env.sh: ID_POOL_SIZE, RETRY_COUNT, WRK_THREADS のサポートが入っている
+    - run_benchmark.sh: 2026-02-04時点で load_numeric_param により対応完了済み

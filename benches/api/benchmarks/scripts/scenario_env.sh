@@ -40,6 +40,8 @@ _REDIS_POOL_SIZE=""
 _WORKER_THREADS=""
 _RETRY=""
 _FAIL_RATE=""
+_ID_POOL_SIZE=""
+_RETRY_COUNT=""
 
 # Parse YAML value with yq (preferred) or fallback to grep/sed
 parse_yaml_value() {
@@ -58,7 +60,24 @@ parse_yaml_value() {
             value=$(yq ".${key} // \"${default}\"" "${file}" 2>/dev/null | tr -d '"')
         fi
     else
-        value=$(grep "^${key}:" "${file}" 2>/dev/null | head -1 | sed 's/^[^:]*: *//' | tr -d '"' || echo "${default}")
+        # Fallback: support nested keys (e.g., "metadata.id_pool_size")
+        # WARNING: This fallback is limited and may fail with complex YAML structures.
+        # For production use, install yq: https://github.com/mikefarah/yq
+        local search_key="${key##*.}"
+        if [[ "${key}" =~ \. ]]; then
+            # Nested key: look for indented key under parent, stop at next non-indented line
+            local parent_key="${key%.*}"
+            # Find parent section, then search for child key with indentation, stop at block end
+            value=$(awk "
+                /${parent_key}:/ {flag=1; next}
+                flag && /^[^ ]/ {exit}
+                flag && /^  ${search_key}:/ {print; exit}
+            " "${file}" 2>/dev/null | sed 's/^[^:]*: *//' | tr -d '"' || echo "")
+        else
+            # Top-level key
+            value=$(grep "^${key}:" "${file}" 2>/dev/null | head -1 | sed 's/^[^:]*: *//' | tr -d '"' || echo "")
+        fi
+        [[ -z "${value}" ]] && value="${default}"
         if [[ "${required}" == "true" && -z "${value}" ]]; then
             echo "Error: Required key '${key}' not found in ${file} (yq not available for strict validation)" >&2
             return 1
@@ -145,6 +164,13 @@ load_scenario_env() {
     _WORKER_THREADS=$(parse_yaml_value "${scenario_file}" "worker_threads" "4")
     _RETRY=$(parse_yaml_value "${scenario_file}" "retry" "false")
     _FAIL_RATE=$(parse_yaml_value "${scenario_file}" "fail_rate" "0")
+
+    # REQ-ERROR-003: Support ID pool configuration for tasks_update
+    _ID_POOL_SIZE=$(parse_yaml_value "${scenario_file}" "metadata.id_pool_size" "")
+    [[ -z "${_ID_POOL_SIZE}" ]] && _ID_POOL_SIZE=$(parse_yaml_value "${scenario_file}" "id_pool_size" "10")
+    _RETRY_COUNT=$(parse_yaml_value "${scenario_file}" "metadata.retry_count" "")
+    [[ -z "${_RETRY_COUNT}" ]] && _RETRY_COUNT=$(parse_yaml_value "${scenario_file}" "error_config.max_retries" "")
+    [[ -z "${_RETRY_COUNT}" ]] && _RETRY_COUNT=$(parse_yaml_value "${scenario_file}" "retry_count" "0")
 }
 
 # Export loaded scenario variables to environment
@@ -166,6 +192,10 @@ export_scenario_env() {
     export WORKER_THREADS="${_WORKER_THREADS}"
     export RETRY="${_RETRY}"
     export FAIL_RATE="${_FAIL_RATE}"
+    # REQ-ERROR-003: Export ID pool and retry configuration for tasks_update
+    export ID_POOL_SIZE="${_ID_POOL_SIZE}"
+    export WRK_THREADS="${_THREADS}"
+    export RETRY_COUNT="${_RETRY_COUNT}"
 }
 
 # Display loaded scenario variables
@@ -189,5 +219,8 @@ Loaded scenario environment variables:
   WORKER_THREADS=${_WORKER_THREADS}
   RETRY=${_RETRY}
   FAIL_RATE=${_FAIL_RATE}
+  ID_POOL_SIZE=${_ID_POOL_SIZE}
+  WRK_THREADS=${_THREADS}
+  RETRY_COUNT=${_RETRY_COUNT}
 EOF
 }

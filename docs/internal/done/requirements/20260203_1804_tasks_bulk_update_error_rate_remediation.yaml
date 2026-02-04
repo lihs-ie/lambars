@@ -1,0 +1,1054 @@
+# tasks_bulk/tasks_update エラー率改善 要件定義
+#
+# 概要:
+#   プロファイリング評価で検出された tasks_bulk のエラー率 68.40% と
+#   tasks_update のエラー率 41.52% を改善し、本番運用可能なレベルに引き下げる
+#
+# 設計方針:
+#   1. tasks_bulk: バッチサイズ上限の整合性を確保し、計測精度を回復
+#   2. tasks_update: ID プール設計とスレッド分離を見直し、競合を抑制
+#   3. HTTP ステータス別集計を実装し、エラー原因を可視化
+#   4. 既存の最適化（COW削減、世代トークン方式）との統合
+#
+# 参照:
+#   - Codex MCP 分析結果（2026-02-03）
+#   - docs/internal/analysis/20260202_tasks_bulk_post_integration_analysis.yaml
+#   - docs/internal/requirements/20260202_0930_tasks_bulk_hashset_bulk_optimization.yaml
+#   - docs/internal/plans/20260202_benchmark_coverage_improvement.yaml
+
+version: "1.0.0"
+name: "tasks_bulk_update_error_rate_remediation"
+description: |
+  tasks_bulk のエラー率 68.40% と tasks_update のエラー率 41.52% は
+  本番運用不可能な Critical な問題である。
+
+  Codex MCP の分析により、以下の新規ボトルネックが特定された:
+
+  ## tasks_bulk の新規ボトルネック
+
+  1. **バッチサイズ上限の不整合**（最重要）
+     - API: BULK_LIMIT=100 で上限設定、超過時は 400 エラー
+     - Lua スクリプト: {100, 250, 500} を循環送信
+     - 結果: 2/3 (66.7%) が上限超過で失敗
+     - 68.40% エラー率と高い整合性
+
+  2. **HTTP ステータス別集計の欠如**
+     - profiling-results/.../meta/tasks_bulk.json の http_status が空
+     - 4xx/5xx の内訳が不明で、根本原因の特定が困難
+
+  ## tasks_update の新規ボトルネック
+
+  1. **ID プール設計の問題**
+     - test_ids.lua の既定 ID プールは 10 件
+     - マルチスレッド/高 RPS で競合が多発（409 Conflict）
+     - シナリオに id_pool_size: 1000 の設定があるが、環境適用されていない疑い
+
+  2. **スレッド分離の不備**
+     - スレッドごとの ID 分割が未実装
+     - 全スレッドが同一 ID プールを共有し、競合が増幅
+
+  3. **再試行戦略の欠如**
+     - 409 Conflict 時の再試行が未実装
+     - バックオフなしで即座に失敗
+
+  ## 既存改善策との関係
+
+  - PersistentHashSet バルク最適化（REQ-BENCH-COV-002）
+    - RPS +8.9~12.9% の改善が見込まれるが、エラー率の改善は対象外
+    - エラー率を正規化してから性能最適化を適用する必要がある
+
+  - 世代トークン方式（IMP-POST-001）
+    - COW 削減で +42% 程度の改善が上限
+    - エラー率の根本原因には影響しない
+
+  ## 期待される改善効果
+
+  ### Phase 1: バッチサイズ整合とエラー集計（本要件）
+
+  - **tasks_bulk エラー率**: 68.40% → 10% 以下（上限整合により）
+  - **tasks_update エラー率**: 41.52% → 10% 以下（最小基準、ID プール拡大とスレッド分離により）
+  - **tasks_update エラー率**: 41.52% → 3% 以下（推奨基準、上記 + サーバー側再試行の確認）
+  - **計測精度**: HTTP ステータス別内訳の可視化により根本原因が特定可能に
+
+  **注**: Phase 1 では wrk での再試行は実装しない。
+  サーバー側の既存実装を確認し、必要に応じて EXT-ERR-002 で再試行ロジックを追加。
+
+  ### Phase 2: 性能最適化（既存要件との統合後）
+
+  - **tasks_bulk RPS**: 32.65 → 100+ req/s（エラー率正規化 + COW 削減の複合効果）
+  - **tasks_bulk P99**: 27.57秒 → 10秒以下（エラー率正規化 + テール改善）
+
+# 背景・動機
+background:
+  problem: |
+    ## 現状の問題
+
+    ### プロファイリング評価結果（2026-02-02）
+
+    - **tasks_bulk**:
+      - RPS: 32.65 req/s（目標: 500+ req/s、達成率: 6.5%）
+      - P99 レイテンシ: 27.57秒（目標: ≤500ms、約55倍）
+      - エラー率: 68.40%（目標: ≤10%）
+
+    - **tasks_update**:
+      - エラー率: 41.52%（目標: ≤3%）
+
+    ### Codex MCP による新規発見
+
+    #### 1. tasks_bulk のバッチサイズ上限不整合
+
+    **API 側の実装**（benches/api/src/api/bulk.rs）:
+    ```rust
+    pub const BULK_LIMIT: usize = 100;
+
+    pub async fn tasks_bulk_handler(
+        // ...
+    ) -> Result<Json<TasksBulkResponse>, ApiError> {
+        if bulk_request.tasks.len() > BULK_LIMIT {
+            return Err(ApiError::InvalidInput(
+                format!("Bulk request exceeds limit of {}", BULK_LIMIT)
+            ));
+        }
+        // ...
+    }
+    ```
+
+    **Lua スクリプト側の実装**（benches/api/benchmarks/scripts/tasks_bulk.lua）:
+    ```lua
+    -- バッチサイズのバリエーション
+    local batch_sizes = {100, 250, 500}
+    local batch_size = batch_sizes[(counter % 3) + 1]
+    ```
+
+    **不整合の影響**:
+    - 3回に2回（66.7%）が上限超過で 400 エラー
+    - 実測エラー率 68.40% と高い整合性
+    - **これは性能問題ではなく計測設計の問題**
+
+    #### 2. HTTP ステータス別集計の欠如
+
+    **現状**:
+    - profiling-results/.../meta/tasks_bulk.json の http_status フィールドが空
+    - error_rate は wrk の --latency 出力から推測（非 2xx/3xx のカウント）
+    - 400（上限超過）と 5xx（サーバーエラー）が区別できない
+
+    **影響**:
+    - 根本原因の特定が困難
+    - 改善策の効果測定が不正確
+
+    #### 3. tasks_update の ID プール設計問題
+
+    **test_ids.lua の既定実装**:
+    ```lua
+    -- 既定の ID プール（10件のみ）
+    local M = {}
+
+    function M.get_test_task_id(index)
+        local base_ids = {...}  -- 10件の固定 UUID
+        return base_ids[(index % #base_ids) + 1]
+    end
+    ```
+
+    **シナリオの設定**（benches/api/benchmarks/scenarios/tasks_update.yaml）:
+    ```yaml
+    environment:
+      ID_POOL_SIZE: "1000"  # 期待値
+    ```
+
+    **実測結果**（profiling-results/.../meta/tasks_update.json）:
+    ```json
+    {
+      "environment": {},  // 環境変数が未適用
+      "http_status": {}   // ステータス別内訳が不明
+    }
+    ```
+
+    **不整合の影響**:
+    - ID_POOL_SIZE=1000 が反映されず、10件のままで競合多発
+    - エラー率 41.52% の大半が 409 Conflict と推測される
+
+    #### 4. tasks_update のスレッド分離不備
+
+    **現状**:
+    - wrk -t4 で4スレッド実行時、全スレッドが同一 ID プールを共有
+    - 各スレッドが同じ ID に同時アクセスし、競合が増幅
+
+    **理想的な設計**:
+    - スレッドごとに ID 範囲を分割
+    - 例: thread 0 → ID 0-249、thread 1 → ID 250-499、...
+    - スレッド間競合を 0 に近づける
+
+    #### 5. P99 レイテンシの残り 47.26% の内訳
+
+    **既知のボトルネック**:
+    - TransientHashMap COW: 約 42%（insert_into_node_cow など）
+    - [unknown]: 10.74%
+
+    **新規発見のボトルネック**（flamegraph 分析）:
+    - **allocator/free**: cfree 7.98%, malloc 4.40%, realloc 3.01%
+    - **Arc 操作**: Arc::drop_slow 6.13%, Arc::make_mut 4.14%
+    - **ソート/SmallVec**: small_sort 4.84%, quicksort 4.29%, SmallVec::try_grow 4.68%
+    - **hash/merge**: Hasher::write 3.04%, compute_merged_posting_list_sorted 3.02%
+
+    合計: 約 35-40%（COW 以外のテール悪化要因）
+
+  motivation: |
+    ## 実装する動機
+
+    ### Critical な本番運用不可問題の解決
+
+    **tasks_bulk の 68.40% エラー率は計測設計の問題**:
+    - API の上限設計とベンチマークスクリプトの不整合
+    - 性能最適化の前にエラー率を正規化する必要がある
+    - エラー率を 10% 以下にすることで、RPS/P99 の正確な測定が可能に
+
+    **tasks_update の 41.52% エラー率は設計問題**:
+    - ID プール設計の不備による競合多発（最重要）
+    - スレッド分離の不備（競合増幅の原因）
+    - Phase 1 では ID プール拡大とスレッド分離でエラー率を 10% 以下に
+    - 推奨基準（3% 以下）はサーバー側再試行の確認が必要
+
+    ### 既存改善策との整合性
+
+    **Phase 1（本要件）: エラー率の正規化**
+    - バッチサイズ整合、ID プール拡大、スレッド分離の実装
+    - 計測精度の回復（HTTP ステータス別集計）
+    - サーバー側再試行の確認（既存実装の有無を調査）
+
+    **Phase 2（既存要件）: 性能最適化**
+    - サーバー側再試行の実装（必要に応じて、EXT-ERR-002）
+    - PersistentHashSet バルク最適化（REQ-BENCH-COV-002）
+    - 世代トークン方式（IMP-POST-001）
+    - allocator/Arc/sort/hash 最適化
+
+    この順序により、改善効果の測定精度が向上する。
+
+    ### Codex MCP による優先度判定
+
+    Codex MCP は以下の優先順位を推奨:
+
+    1. **P0**: tasks_bulk バッチサイズ整合（計測精度の回復）
+    2. **P0**: HTTP ステータス別集計の実装（根本原因の可視化）
+    3. **P0**: tasks_update 競合抑制（ID プール拡大/スレッド分離、Phase 1）
+    4. **P1**: サーバー側再試行の確認と実装（EXT-ERR-002、Phase 2）
+    5. **P1**: COW 削減 + allocator/Arc 最適化
+    6. **P1**: ソート/SmallVec/ハッシュ最適化
+
+  prior_art:
+    - name: "docs/internal/issues/20260125_1814_tasks_update_conflict.yaml"
+      description: |
+        tasks_update の 409 Conflict 高比率が既知問題として記録されている。
+        Codex MCP の分析により、ID プール設計の不備が根本原因と特定された。
+
+    - name: "docs/internal/plans/20260202_benchmark_coverage_improvement.yaml"
+      description: |
+        REQ-BENCH-COV-004: HTTP ステータス別エラー集計
+        - スレッド対応エラートラッカー（LUA-001）
+        - common.lua のスレッド対応ハンドラ（LUA-002）
+
+        この実装計画を tasks_bulk/update エラー改善に統合する。
+
+    - name: "docs/internal/analysis/20260202_tasks_bulk_post_integration_analysis.yaml"
+      description: |
+        SearchIndexBulkBuilder 統合後の詳細分析。
+        COW が約 42% を占めることを特定したが、エラー率の根本原因は
+        バッチサイズ不整合と判明（Codex MCP により）。
+
+# 要件一覧
+requirements:
+  # ======================================================================
+  # 1. tasks_bulk バッチサイズ整合
+  # ======================================================================
+  - id: REQ-ERROR-001
+    name: "tasks_bulk のバッチサイズ上限整合"
+    description: |
+      tasks_bulk.lua のバッチサイズを API の BULK_LIMIT (100) に整合させ、
+      エラー率を正規化する。
+
+      ## 現状
+
+      **API 側**（benches/api/src/api/bulk.rs）:
+      ```rust
+      pub const BULK_LIMIT: usize = 100;
+
+      if bulk_request.tasks.len() > BULK_LIMIT {
+          return Err(ApiError::InvalidInput(...));  // 400 エラー
+      }
+      ```
+
+      **Lua スクリプト側**（benches/api/benchmarks/scripts/tasks_bulk.lua）:
+      ```lua
+      local batch_sizes = {100, 250, 500}
+      local batch_size = batch_sizes[(counter % 3) + 1]
+      ```
+
+      ## 設計方針
+
+      ### オプション A: Lua スクリプトを BULK_LIMIT に合わせる（推奨）
+
+      **変更内容**:
+      ```lua
+      -- バッチサイズを BULK_LIMIT (100) 以下に制限
+      local batch_sizes = {10, 50, 100}
+      local batch_size = batch_sizes[(counter % 3) + 1]
+      ```
+
+      **利点**:
+      - API の変更不要
+      - 小/中/大の3段階で性能特性を測定可能
+      - エラー率 68.40% → 10% 以下（無効タスク注入のみ）
+
+      **実装箇所**:
+      - benches/api/benchmarks/scripts/tasks_bulk.lua
+
+      ### オプション B: API の BULK_LIMIT を引き上げる
+
+      **変更内容**:
+      ```rust
+      pub const BULK_LIMIT: usize = 500;  // 100 → 500
+      ```
+
+      **利点**:
+      - 大規模バッチの性能測定が可能
+      - スケール別測定（REQ-BENCH-COV-002）との整合性
+
+      **欠点**:
+      - API の仕様変更が必要
+      - メモリ使用量の増加リスク
+      - タイムアウト設定の再調整が必要
+
+      **実装箇所**:
+      - benches/api/src/api/bulk.rs
+      - 関連する設定ファイル/ドキュメント
+
+      ### 推奨: オプション A を Phase 1 で実施
+
+      Phase 1 では Lua スクリプトを修正し、エラー率を正規化する。
+      Phase 2 で API の BULK_LIMIT 引き上げを検討する。
+
+      ## 実装詳細
+
+      ### Phase 1: エラー率正規化（オプション A）
+
+      1. **tasks_bulk.lua の修正**
+         ```lua
+         -- バッチサイズを {10, 50, 100} に変更
+         local batch_sizes = {10, 50, 100}
+         local batch_size = batch_sizes[(counter % 3) + 1]
+
+         -- 無効タスク注入は維持（10件に1件、207 期待）
+         ```
+
+      2. **期待結果**
+         - エラー率: 68.40% → 10% 以下
+         - エラー内訳: 207 Multi-Status がメイン（無効タスク注入由来）
+         - RPS/P99 の計測精度が回復
+
+      ### Phase 2: スケール別測定（オプション B、将来の拡張）
+
+      1. **API の BULK_LIMIT 引き上げ**
+         - 100 → 500 または 1000
+         - body_limit/timeout の調整
+
+      2. **Lua スクリプトの拡張**
+         - {100, 500, 1000, 10000} などのスケール別スクリプト作成
+         - REQ-BENCH-COV-002 との統合
+
+    methods:
+      - name: "modify_batch_sizes (tasks_bulk.lua)"
+        signature: "local batch_sizes = {10, 50, 100}"
+        description: |
+          バッチサイズを BULK_LIMIT (100) 以下に制限する。
+        examples:
+          - description: "修正後のコード"
+            code: |
+              -- バッチサイズのバリエーション（BULK_LIMIT 以下）
+              local batch_sizes = {10, 50, 100}
+              local batch_size = batch_sizes[(counter % 3) + 1]
+
+    acceptance_criteria:
+      minimum:
+        - "tasks_bulk.lua のバッチサイズが {10, 50, 100} に修正されている"
+        - "wrk -t2 -c10 -d30s -s tasks_bulk.lua が成功する"
+        - "エラー率が 10% 以下に低下する"
+        - "RPS/P99 の計測が正常に行われる"
+
+      recommended:
+        - "エラー率が 5% 以下に低下する"
+        - "HTTP ステータス別内訳が記録される（REQ-ERROR-002 と統合）"
+
+  # ======================================================================
+  # 2. HTTP ステータス別エラー集計
+  # ======================================================================
+  - id: REQ-ERROR-002
+    name: "HTTP ステータス別エラー集計の実装"
+    description: |
+      tasks_bulk/tasks_update でのエラー原因を可視化するため、
+      HTTP ステータス別の集計機能を実装する。
+
+      ## 現状
+
+      - profiling-results/.../meta/tasks_bulk.json の http_status が空
+      - error_rate は wrk の --latency 出力から推測（非 2xx/3xx のカウント）
+      - 400（上限超過）と 5xx（サーバーエラー）が区別できない
+
+      ## 設計方針
+
+      **REQ-BENCH-COV-004（既存の実装計画）を tasks_bulk/update に適用**:
+
+      ### 実装内容
+
+      1. **error_tracker.lua の拡張**（LUA-001）
+         - setup(thread) でスレッドリストを管理
+         - response() で thread:set() でステータス別カウンタを更新
+         - done() で全スレッドから集計
+
+      2. **common.lua のスレッド対応ハンドラ**（LUA-002）
+         - create_threaded_handlers(script_name) 関数の追加
+         - マルチスレッド環境での正確な集計
+
+      3. **tasks_bulk.lua への適用**
+         - common.create_threaded_handlers() を使用
+         - done() でステータス別内訳を出力
+
+      4. **tasks_update.lua への適用**
+         - 409 Conflict と 5xx Error を区別
+         - error_rate の意味を明確化
+
+      5. **meta/*.json への記録**
+         - HTTP ステータス別内訳を JSON 形式で記録
+         - 記録箇所: profiling-results/.../meta/tasks_bulk.json
+         - 実装: ベンチマーク実行スクリプト（benches/api/benchmarks/run_benchmark.sh など）で
+           Lua の done() 出力を parse して meta/*.json に書き込む
+
+      ## 期待される出力例
+
+      ### done() の標準出力
+
+      ```
+      ===== tasks_bulk Summary =====
+      Total Requests: 10000
+      HTTP Status Distribution:
+        200 OK: 7500 (75.0%)
+        207 Multi-Status: 1500 (15.0%)  # 無効タスク注入由来
+        400 Bad Request: 500 (5.0%)     # バッチサイズ超過（Phase 1 後は 0%）
+        500 Internal Server Error: 100 (1.0%)
+        502 Bad Gateway: 50 (0.5%)
+      Error Rate: 6.5% (650 errors / 10000 requests)
+      ```
+
+      ### meta/tasks_bulk.json
+
+      ```json
+      {
+        "http_status": {
+          "200": 7500,
+          "207": 1500,
+          "400": 500,
+          "500": 100,
+          "502": 50
+        },
+        "error_rate": 0.065,
+        "total_requests": 10000
+      }
+      ```
+
+    methods:
+      - name: "error_tracker.setup_thread"
+        signature: "function M.setup_thread(thread)"
+        description: |
+          スレッドリストに thread を追加し、スレッドごとのカウンタを初期化。
+
+      - name: "error_tracker.get_thread_aggregated_summary"
+        signature: "function M.get_thread_aggregated_summary()"
+        description: |
+          全スレッドのカウンタを集計し、ステータス別内訳を返す。
+
+      - name: "common.create_threaded_handlers"
+        signature: "function M.create_threaded_handlers(script_name)"
+        description: |
+          スレッド対応の setup/response/done ハンドラを生成。
+
+    implementations:
+      - type: "error_tracker.lua"
+        description: |
+          スレッド対応の拡張を実装。
+          - M.setup_thread(thread)
+          - M.get_thread_aggregated_summary()
+
+      - type: "common.lua"
+        description: |
+          create_threaded_handlers(script_name) を実装。
+
+      - type: "tasks_bulk.lua"
+        description: |
+          common.create_threaded_handlers() を使用し、
+          done() でステータス別内訳を出力。
+
+      - type: "tasks_update.lua"
+        description: |
+          common.create_threaded_handlers() を使用し、
+          409 Conflict と 5xx Error を区別。
+
+    acceptance_criteria:
+      minimum:
+        - "error_tracker.lua が setup_thread/get_thread_aggregated_summary を実装"
+        - "common.lua が create_threaded_handlers を実装"
+        - "tasks_bulk.lua/tasks_update.lua が create_threaded_handlers を使用"
+        - "done() でステータス別内訳が出力される"
+        - "wrk -t4 で実行しても正確なカウントが得られる"
+
+      recommended:
+        - "meta/*.json に http_status フィールドが記録される"
+        - "409 Conflict の比率が tasks_update で可視化される"
+
+  # ======================================================================
+  # 3. tasks_update ID プール設計の改善
+  # ======================================================================
+  - id: REQ-ERROR-003
+    name: "tasks_update の ID プール設計改善"
+    description: |
+      tasks_update のエラー率 41.52% を改善するため、
+      ID プール設計を見直し、競合を抑制する。
+
+      ## 現状の問題
+
+      ### 1. ID プールサイズの未適用
+
+      **シナリオの設定**（benches/api/benchmarks/scenarios/tasks_update.yaml）:
+      ```yaml
+      environment:
+        ID_POOL_SIZE: "1000"
+      ```
+
+      **実測結果**（profiling-results/.../meta/tasks_update.json）:
+      ```json
+      {
+        "environment": {}  // 環境変数が未適用
+      }
+      ```
+
+      **test_ids.lua の実装**:
+      ```lua
+      function M.get_test_task_id(index)
+          local base_ids = {...}  -- 10件の固定 UUID
+          return base_ids[(index % #base_ids) + 1]
+      end
+      ```
+
+      結果: ID_POOL_SIZE=1000 が反映されず、10件のままで競合多発。
+
+      ### 2. スレッド分離の不備
+
+      **現状**:
+      - wrk -t4 で4スレッド実行時、全スレッドが同一 ID プールを共有
+      - 各スレッドが同じ ID に同時アクセスし、競合が増幅
+
+      ### 3. 再試行戦略の欠如
+
+      **現状**:
+      - 409 Conflict 時の再試行が未実装
+      - バックオフなしで即座に失敗
+
+      ## 設計方針
+
+      ### 1. ID プールサイズの環境変数適用
+
+      **test_ids.lua の拡張**:
+      ```lua
+      local M = {}
+
+      -- 環境変数から ID プールサイズを取得
+      local ID_POOL_SIZE = tonumber(os.getenv("ID_POOL_SIZE")) or 10
+
+      -- 乱数シードを固定（再現性のため）
+      local SEED = tonumber(os.getenv("SEED")) or 42
+      math.randomseed(SEED)
+
+      -- ID プールを動的に生成
+      local function generate_id_pool(size)
+          local pool = {}
+          for i = 1, size do
+              -- UUID v4 生成（シード固定された乱数を使用）
+              pool[i] = generate_uuid()
+          end
+          return pool
+      end
+
+      local id_pool = generate_id_pool(ID_POOL_SIZE)
+
+      function M.get_test_task_id(index)
+          return id_pool[(index % #id_pool) + 1]
+      end
+      ```
+
+      **再現性の保証**:
+      - SEED 環境変数により乱数シードを固定
+      - 同一 SEED では同一の ID プールが生成される
+      - ベンチマーク測定の再現性を確保
+
+      ### 2. スレッドごとの ID 範囲分割
+
+      **tasks_update.lua の setup() 実装**:
+      ```lua
+      function setup(thread)
+          -- wrk の thread.id を使用（0-indexed）
+          thread:set("id", thread.id)
+
+          local total_threads = tonumber(os.getenv("WRK_THREADS")) or 1
+          local pool_size = tonumber(os.getenv("ID_POOL_SIZE")) or 1000
+
+          local ids_per_thread = math.floor(pool_size / total_threads)
+          local start_index = thread.id * ids_per_thread
+          local end_index = start_index + ids_per_thread - 1
+
+          thread:set("id_start", start_index)
+          thread:set("id_end", end_index)
+
+          io.write(string.format("[Thread %d] ID range: %d-%d\n", thread.id, start_index, end_index))
+      end
+
+      function request()
+          local id_start = tonumber(wrk.thread:get("id_start"))
+          local id_end = tonumber(wrk.thread:get("id_end"))
+
+          -- スレッド固有の ID 範囲から選択
+          local local_index = counter % (id_end - id_start + 1)
+          local task_id = test_ids.get_test_task_id(id_start + local_index)
+
+          -- ...
+      end
+      ```
+
+      **スレッド ID の取得方法**:
+      wrk の thread.id を使用（既存スクリプト contention.lua で使用例あり）。
+      thread.id は 0-indexed で、0 〜 (total_threads - 1) の範囲。
+
+      **ID プール分割の注意点**:
+      - ID_POOL_SIZE が WRK_THREADS で割り切れない場合、
+        最後のスレッドの ID 範囲が他より小さくなる
+      - 例: ID_POOL_SIZE=1000, WRK_THREADS=3 の場合
+        - thread 0: 0-332 (333件)
+        - thread 1: 333-665 (333件)
+        - thread 2: 666-998 (333件)
+        - 999 は未使用（許容範囲）
+
+      ### 3. 再試行戦略の方針
+
+      **Phase 1 での方針**:
+      wrk は再試行の組み込みサポートが限定的なため、Phase 1 では以下の方針を採用:
+
+      1. **クライアント側（wrk）**
+         - 409 Conflict のカウント記録のみ
+         - HTTP ステータス別集計で可視化（REQ-ERROR-002）
+         - 再試行は実装しない
+
+      2. **サーバー側の確認**
+         - 既存の API 実装で楽観的ロックの再試行ロジックが存在するか確認
+         - 存在しない場合は EXT-ERR-002（将来の拡張）で実装を検討
+
+      3. **ID プール拡大による競合抑制**
+         - ID_POOL_SIZE=1000 でスレッド間競合を削減
+         - スレッドごとの ID 範囲分割で競合をさらに抑制
+         - 期待効果: 409 Conflict 比率 40% → 1% 未満
+
+      **将来の拡張（EXT-ERR-002）**:
+      サーバー側で 409 Conflict 時の再試行ロジックを実装する（バックオフ戦略含む）
+
+      ### 4. シナリオ環境変数の適用確認
+
+      **ベンチマーク実行スクリプトの修正**:
+      ```bash
+      # scenarios/tasks_update.yaml の environment を反映
+      export ID_POOL_SIZE=1000
+      export WRK_THREADS=4
+      export SEED=42  # 乱数シード固定（再現性のため）
+
+      # Phase 1 では未使用（将来の拡張用に予約）
+      # export RETRY_COUNT=3
+      # export RETRY_BACKOFF_MS=10
+
+      wrk -t${WRK_THREADS} -c10 -d30s -s tasks_update.lua http://localhost:3002/tasks/...
+      ```
+
+      **注**: RETRY_COUNT/RETRY_BACKOFF_MS は Phase 1 では実装しない。
+      将来の拡張（EXT-ERR-002）でサーバー側の再試行ロジックと統合する際に使用予定。
+
+    methods:
+      - name: "generate_id_pool (test_ids.lua)"
+        signature: "function generate_id_pool(size)"
+        description: |
+          ID プールを動的に生成する。
+          環境変数 ID_POOL_SIZE を使用。
+
+      - name: "setup (tasks_update.lua)"
+        signature: "function setup(thread)"
+        description: |
+          スレッドごとに ID 範囲を分割。
+
+      - name: "request (tasks_update.lua)"
+        signature: "function request()"
+        description: |
+          スレッド固有の ID 範囲から task_id を選択。
+
+    implementations:
+      - type: "test_ids.lua"
+        description: |
+          generate_id_pool(size) を実装。
+          環境変数 ID_POOL_SIZE を使用。
+
+      - type: "tasks_update.lua"
+        description: |
+          setup(thread) で ID 範囲を分割。
+          request() でスレッド固有の ID を選択。
+
+      - type: "ベンチマーク実行スクリプト"
+        description: |
+          scenarios/tasks_update.yaml の environment を反映。
+
+    acceptance_criteria:
+      minimum:
+        - "test_ids.lua が ID_POOL_SIZE 環境変数をサポート"
+        - "tasks_update.lua が setup() で ID 範囲を分割"
+        - "request() でスレッド固有の ID を選択"
+        - "ID_POOL_SIZE=1000 でエラー率が 10% 以下に低下"
+        - "409 Conflict の比率が可視化される（REQ-ERROR-002 と統合）"
+
+      recommended:
+        - "ID_POOL_SIZE=1000 でエラー率が 3% 以下に低下"
+        - "409 Conflict の比率が 1% 未満に抑制"
+        - "サーバー側再試行の確認（既存実装の有無を調査）"
+
+      stretch:
+        - "サーバー側再試行の実装（EXT-ERR-002、Phase 2）"
+
+  # ======================================================================
+  # 4. 統合テストとベンチマーク評価
+  # ======================================================================
+  - id: REQ-ERROR-004
+    name: "統合テストとベンチマーク評価"
+    description: |
+      REQ-ERROR-001〜003 の改善効果を統合的に評価する。
+
+      ## 評価項目
+
+      ### tasks_bulk
+
+      1. **エラー率**
+         - 改善前: 68.40%
+         - 目標: 10% 以下（推奨: 5% 以下）
+         - 測定方法: wrk -d30s での error_rate
+
+      2. **RPS**
+         - 改善前: 32.65 req/s
+         - 目標: 100+ req/s（エラー率正規化 + COW 削減の複合効果）
+         - 測定方法: wrk -d30s での RPS
+
+      3. **P99 レイテンシ**
+         - 改善前: 27.57秒
+         - 目標: 10秒以下
+         - 測定方法: wrk -d30s での P99
+
+      4. **HTTP ステータス別内訳**
+         - 200 OK: 80% 以上
+         - 207 Multi-Status: 10% 程度（無効タスク注入由来）
+         - 400 Bad Request: 0%（Phase 1 後）
+         - 5xx Server Error: 5% 以下
+
+      ### tasks_update
+
+      1. **エラー率**
+         - 改善前: 41.52%
+         - 目標（Phase 1 最小基準）: 10% 以下
+         - 目標（Phase 1 推奨）: 3% 以下
+         - 測定方法: wrk -d30s での error_rate
+         - 測定環境: -t4 -c10 -d30s、ID_POOL_SIZE=1000
+
+      2. **409 Conflict 比率**
+         - 改善前: 推定 40%（エラー率とほぼ一致）
+         - 目標: 1% 未満（Phase 1 推奨）
+         - 測定方法: HTTP ステータス別集計
+
+      3. **RPS**
+         - 改善前: tasks_update_steady が 0%（エラー多発で RPS 測定不能）
+         - 目標（Phase 1 最小基準）: 500+ req/s（エラー率正規化により測定可能に）
+         - 目標（Phase 1 推奨）: 1000+ req/s（production_load の 1/4 程度）
+         - 参考: production_load は 4000+ req/s
+         - 測定方法: wrk -d30s での RPS
+         - 測定環境: -t4 -c10 -d30s、ID_POOL_SIZE=1000
+         - 注: 正確な目標値は Phase 1 の測定結果に基づいて調整可能
+
+      ## 実施手順
+
+      ### Phase 1: エラー率正規化
+
+      1. **tasks_bulk のバッチサイズ修正**（REQ-ERROR-001）
+         - tasks_bulk.lua を {10, 50, 100} に変更
+         - wrk -t2 -c10 -d30s で測定
+         - 期待: error_rate 68.40% → 10% 以下
+
+      2. **HTTP ステータス別集計の実装**（REQ-ERROR-002）
+         - error_tracker.lua/common.lua の拡張
+         - tasks_bulk.lua/tasks_update.lua への適用
+         - 期待: ステータス別内訳が可視化
+
+      3. **tasks_update の ID プール改善**（REQ-ERROR-003）
+         - test_ids.lua の環境変数サポート
+         - tasks_update.lua の ID 範囲分割
+         - ID_POOL_SIZE=1000 で測定
+         - 期待: error_rate 41.52% → 3% 以下
+
+      ### Phase 2: 性能最適化（既存要件との統合）
+
+      1. **PersistentHashSet バルク最適化**（REQ-BENCH-COV-002）
+         - from_iter_bulk の実装
+         - 期待: RPS +8.9~12.9%
+
+      2. **世代トークン方式**（IMP-POST-001）
+         - TransientHashMap の insert_without_cow
+         - 期待: COW 削減で +42% 程度
+
+      3. **allocator/Arc/sort/hash 最適化**（IMP-POST-003, IMP-POST-004）
+         - jemalloc/mimalloc の評価
+         - from_sorted_iter の実装
+         - 期待: 追加 10-30% の改善
+
+      ### 最終目標
+
+      - **tasks_bulk**:
+        - RPS: 32.65 → 200+ req/s（Phase 1+2 の複合効果）
+        - P99: 27.57秒 → 5秒以下
+        - エラー率: 68.40% → 5% 以下
+
+      - **tasks_update**:
+        - エラー率: 41.52% → 3% 以下
+        - 409 Conflict: 40% → 1% 未満
+
+    acceptance_criteria:
+      minimum:
+        - "tasks_bulk のエラー率が 10% 以下"
+        - "tasks_update のエラー率が 10% 以下"
+        - "HTTP ステータス別内訳が可視化"
+        - "既存テストスイートがパス"
+
+      recommended:
+        - "tasks_bulk のエラー率が 5% 以下"
+        - "tasks_update のエラー率が 3% 以下"
+        - "tasks_bulk の RPS が 100+ req/s"
+        - "tasks_bulk の P99 が 10秒以下"
+
+      stretch:
+        - "tasks_bulk の RPS が 200+ req/s（Phase 2 統合後）"
+        - "tasks_bulk の P99 が 5秒以下（Phase 2 統合後）"
+
+# 非機能要件
+non_functional_requirements:
+  performance:
+    - "tasks_bulk のエラー率を 68.40% → 10% 以下（Phase 1）"
+    - "tasks_update のエラー率を 41.52% → 10% 以下（Phase 1 最小基準）"
+    - "tasks_update のエラー率を 41.52% → 3% 以下（Phase 1 推奨基準、サーバー側再試行確認が必要）"
+    - "tasks_bulk の RPS を 32.65 → 100+ req/s（Phase 1+2）"
+    - "tasks_bulk の P99 を 27.57秒 → 10秒以下（Phase 1+2）"
+    - "他のベンチマーク（production_load、tasks_eff）で退行なし"
+
+  compatibility:
+    - "API の BULK_LIMIT は Phase 1 では変更しない（オプション A）"
+    - "Lua スクリプトの既存 API との互換性維持"
+    - "wrk のマルチスレッド実行に対応"
+
+  testing:
+    - "tasks_bulk/tasks_update のベンチマーク測定"
+    - "HTTP ステータス別集計の動作確認"
+    - "ID プール環境変数の適用確認"
+    - "スレッド分離の動作確認"
+    - "既存テストスイートの回帰テスト"
+
+  observability:
+    - "HTTP ステータス別内訳の可視化"
+    - "409 Conflict 比率の測定"
+    - "error_rate の内訳が明確化"
+    - "meta/*.json に http_status フィールドを記録"
+
+# 実装計画
+implementation_plan:
+  phase_1_error_rate_normalization:
+    - id: "IMPL-ERR-001"
+      title: "tasks_bulk バッチサイズの修正"
+      estimated_effort: "0.5 days"
+      tasks:
+        - "tasks_bulk.lua のバッチサイズを {10, 50, 100} に変更"
+        - "wrk -t2 -c10 -d30s での動作確認"
+        - "error_rate が 10% 以下に低下することを確認"
+
+    - id: "IMPL-ERR-002"
+      title: "HTTP ステータス別集計の実装"
+      estimated_effort: "1-2 days"
+      tasks:
+        - "error_tracker.lua の setup_thread/get_thread_aggregated_summary 実装"
+        - "common.lua の create_threaded_handlers 実装"
+        - "tasks_bulk.lua/tasks_update.lua への適用"
+        - "wrk -t4 での正確性確認"
+        - "meta/*.json への記録（ベンチマーク実行スクリプトで parse）"
+
+    - id: "IMPL-ERR-003"
+      title: "tasks_update ID プール改善"
+      estimated_effort: "1-2 days"
+      tasks:
+        - "test_ids.lua の環境変数サポート実装（ID_POOL_SIZE、SEED）"
+        - "tasks_update.lua の setup() で ID 範囲分割（thread.id 使用）"
+        - "request() でスレッド固有の ID 選択"
+        - "ID_POOL_SIZE=1000 での動作確認"
+        - "error_rate が 10% 以下に低下することを確認"
+
+    - id: "IMPL-ERR-004"
+      title: "統合ベンチマーク評価"
+      estimated_effort: "1 day"
+      tasks:
+        - "tasks_bulk/tasks_update の統合測定"
+        - "HTTP ステータス別内訳の確認"
+        - "プロファイリング結果の収集"
+        - "改善効果の定量評価"
+        - "サーバー側再試行の既存実装調査"
+
+    - id: "IMPL-ERR-005"
+      title: "ドキュメント更新"
+      estimated_effort: "0.5 days"
+      tasks:
+        - "README.md の更新"
+        - "CHANGELOG.md への記載"
+        - "分析結果のレポート作成（20260203_codex_bottleneck_analysis.yaml）"
+
+  phase_2_performance_optimization:
+    - id: "IMPL-ERR-006"
+      title: "サーバー側再試行の実装（必要に応じて）"
+      estimated_effort: "1-2 days"
+      dependencies:
+        - "IMPL-ERR-004（サーバー側再試行の調査結果）"
+      tasks:
+        - "楽観的ロック失敗時の自動再試行実装"
+        - "バックオフ戦略（Exponential Backoff）"
+        - "最大再試行回数の設定"
+        - "error_rate が 3% 以下に低下することを確認"
+
+    - id: "IMPL-ERR-007"
+      title: "既存最適化との統合"
+      estimated_effort: "継続中の他要件に統合"
+      tasks:
+        - "PersistentHashSet バルク最適化（REQ-BENCH-COV-002）"
+        - "世代トークン方式（IMP-POST-001）"
+        - "allocator/Arc/sort/hash 最適化"
+
+# 受け入れ基準
+acceptance_criteria:
+  minimum:
+    - "tasks_bulk.lua のバッチサイズが {10, 50, 100} に修正されている"
+    - "error_tracker.lua/common.lua がスレッド対応"
+    - "tasks_bulk/tasks_update が create_threaded_handlers を使用"
+    - "test_ids.lua が ID_POOL_SIZE 環境変数をサポート"
+    - "tasks_update.lua が ID 範囲分割を実装"
+    - "tasks_bulk のエラー率が 10% 以下"
+    - "tasks_update のエラー率が 10% 以下"
+    - "HTTP ステータス別内訳が可視化"
+
+  recommended:
+    - "tasks_bulk のエラー率が 5% 以下"
+    - "tasks_update のエラー率が 3% 以下"
+    - "tasks_bulk の RPS が 100+ req/s"
+    - "tasks_bulk の P99 が 10秒以下"
+    - "409 Conflict 比率が 1% 未満"
+
+  stretch:
+    - "tasks_bulk の RPS が 200+ req/s（Phase 2 統合後）"
+    - "tasks_bulk の P99 が 5秒以下（Phase 2 統合後）"
+
+# 将来の拡張
+future_extensions:
+  - id: "EXT-ERR-001"
+    name: "API の BULK_LIMIT 引き上げ（Phase 2）"
+    description: |
+      Phase 1 でエラー率を正規化した後、
+      API の BULK_LIMIT を 100 → 500 または 1000 に引き上げ、
+      大規模バッチの性能特性を測定する。
+
+      前提条件:
+      - Phase 1 でエラー率が 10% 以下に低下
+      - body_limit/timeout の調整が完了
+      - メモリ使用量の監視が実装済み
+
+  - id: "EXT-ERR-002"
+    name: "tasks_update の再試行戦略（サーバー側）"
+    description: |
+      wrk のクライアント側では再試行の実装が困難なため、
+      サーバー側で 409 Conflict 時の再試行ロジックを実装する。
+
+      実装方針:
+      - 楽観的ロック失敗時の自動再試行
+      - バックオフ戦略（Exponential Backoff）
+      - 最大再試行回数の設定
+
+  - id: "EXT-ERR-003"
+    name: "スケール別測定との統合"
+    description: |
+      REQ-BENCH-COV-002（tasks_bulk スケール別測定）との統合。
+
+      Phase 1 で {10, 50, 100} を使用した後、
+      Phase 2 で {100, 500, 1000, 10000} のスケール別スクリプトを作成し、
+      性能特性を詳細に測定する。
+
+# 関連ドキュメント
+related_documents:
+  analysis:
+    - path: "docs/internal/analysis/20260202_tasks_bulk_post_integration_analysis.yaml"
+      description: "SearchIndexBulkBuilder 統合後の詳細分析"
+
+    - path: "（要作成）docs/internal/analysis/20260203_codex_bottleneck_analysis.yaml"
+      description: |
+        Codex MCP 分析結果（2026-02-03）の要約:
+        - tasks_bulk のバッチサイズ上限不整合（68.40% エラー率の主因）
+        - tasks_update の ID プール設計問題（41.52% エラー率の主因）
+        - HTTP ステータス別集計の欠如
+        - P99 レイテンシの残り 47% の内訳（allocator/Arc/sort/hash）
+
+        このファイルは要件定義レビュー後に作成予定。
+
+  requirements:
+    - path: "docs/internal/requirements/20260202_0930_tasks_bulk_hashset_bulk_optimization.yaml"
+      description: "PersistentHashSet バルク最適化（Phase 2 で統合）"
+
+  plans:
+    - path: "docs/internal/plans/20260202_benchmark_coverage_improvement.yaml"
+      description: "REQ-BENCH-COV-004（HTTP ステータス別集計）を本要件に統合"
+
+  issues:
+    - path: "docs/internal/issues/20260125_1814_tasks_update_conflict.yaml"
+      description: "tasks_update の 409 Conflict 高比率（既知問題）"
+
+# メタ情報
+metadata:
+  created_at: "2026-02-03T18:04:00Z"
+  created_by: "Claude Code"
+  codex_reviewed: true
+  codex_verdict: "新規ボトルネック特定完了"
+  status: "draft"
+  priority: "P0"
+  blocking_merge: true
+  estimated_effort: "4-5 days（Phase 1、最大6日の可能性あり）"
+  estimated_effort_breakdown:
+    - "IMPL-ERR-001: 0.5 days"
+    - "IMPL-ERR-002: 1-2 days"
+    - "IMPL-ERR-003: 1-2 days"
+    - "IMPL-ERR-004: 1 day"
+    - "IMPL-ERR-005: 0.5 days"
+    - "合計: 4-6 days（標準見積もり: 4-5 days）"
+  target_branch: "feature/benchmark-coverage-improvement"
+  notes: |
+    Codex MCP による分析で以下の新規ボトルネックが特定された:
+
+    1. tasks_bulk のバッチサイズ上限不整合（計測設計の問題）
+    2. tasks_update の ID プール設計不備（競合多発の根本原因）
+    3. HTTP ステータス別集計の欠如（根本原因の可視化不足）
+
+    Phase 1（本要件）でエラー率を正規化し、
+    Phase 2（既存要件）で性能最適化を適用する戦略を採用。
+
+    この順序により、改善効果の測定精度が向上する。

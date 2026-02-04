@@ -449,6 +449,12 @@ load_scenario_env_vars() {
         export THREADS
     fi
 
+    # WRK_THREADS: Number of wrk threads for Lua script thread-local state
+    # Used by tasks_update.lua for ID range partitioning
+    if [[ -z "${WRK_THREADS:-}" ]]; then
+        export WRK_THREADS="${THREADS}"
+    fi
+
     # ==========================================================================
     # Concurrency Settings (WORKER_THREADS, POOL_SIZES)
     # ==========================================================================
@@ -610,6 +616,38 @@ load_scenario_env_vars() {
     export RETRY="${retry}"
 
     # ==========================================================================
+    # Tasks Update Configuration (ID_POOL_SIZE, RETRY_COUNT)
+    # ==========================================================================
+
+    load_numeric_param() {
+        local env_var="$1"
+        local yaml_path1="$2"
+        local yaml_path2="$3"
+        local default_value="$4"
+        local param_name="$5"
+
+        if [[ -n "${!env_var:-}" ]]; then
+            return 0
+        fi
+
+        local value
+        value=$(yq -r -e "${yaml_path1}" "${scenario_file}" 2>/dev/null) || value="null"
+        if [[ "${value}" == "null" || -z "${value}" ]]; then
+            value=$(yq -r "${yaml_path2}" "${scenario_file}" 2>/dev/null) || value="${default_value}"
+        fi
+
+        if ! [[ "${value}" =~ ^[0-9]+$ ]]; then
+            echo -e "${YELLOW}WARNING: Invalid ${param_name} '${value}', using default ${default_value}${NC}" >&2
+            value="${default_value}"
+        fi
+
+        export "${env_var}=${value}"
+    }
+
+    load_numeric_param "ID_POOL_SIZE" ".metadata.id_pool_size // null" ".id_pool_size // 10" "10" "id_pool_size"
+    load_numeric_param "RETRY_COUNT" ".metadata.retry_count // null" ".error_config.max_retries // 0" "0" "retry_count"
+
+    # ==========================================================================
     # Profiling Configuration
     # ==========================================================================
 
@@ -747,6 +785,10 @@ load_scenario_env_vars() {
     [[ -n "${POOL_SIZES:-}" ]] && echo "  Pool sizes: ${POOL_SIZES}"
     [[ -n "${SEED:-}" ]] && echo "  Seed: ${SEED}"
     [[ "${PROFILE_MODE}" == "true" ]] && echo "  Profiling: enabled"
+
+    if [[ "${SCENARIO_NAME}" =~ ^tasks_update ]]; then
+        echo "  tasks_update config: ID_POOL_SIZE=${ID_POOL_SIZE:-10}, RETRY_COUNT=${RETRY_COUNT:-0}, WRK_THREADS=${WRK_THREADS:-${THREADS}}"
+    fi
 
     # Show phase-specific parameters based on RPS profile
     case "${RPS_PROFILE}" in
@@ -1058,7 +1100,8 @@ if [[ "${QUICK_MODE}" == "true" ]]; then
     DURATION="5s"
     THREADS="1"
     CONNECTIONS="5"
-    export DURATION THREADS CONNECTIONS
+    WRK_THREADS="1"
+    export DURATION THREADS CONNECTIONS WRK_THREADS
 fi
 
 # Validate all parameters
@@ -1431,9 +1474,34 @@ generate_meta_json() {
 
     # Try to read lua_metrics.json if it exists and is valid JSON
     if [[ -f "${lua_metrics_file}" ]] && command -v jq &> /dev/null && jq -e . "${lua_metrics_file}" &>/dev/null; then
-        # Check if errors.status is an object with 4xx or 5xx keys (v3 schema)
-        if jq -e '.errors.status | type == "object" and (has("4xx") or has("5xx"))' "${lua_metrics_file}" &>/dev/null; then
-            # Extract values and validate they are integers
+        # Read http_status distribution from lua_metrics (REQ-PIPELINE-003)
+        # This is the primary source for HTTP status codes
+        if jq -e '.http_status | type == "object" and length > 0' "${lua_metrics_file}" &>/dev/null; then
+            http_status_json=$(jq -c '.http_status // {}' "${lua_metrics_file}" 2>/dev/null || echo "{}")
+
+            # Calculate 4xx and 5xx totals from http_status
+            local lua_4xx=0 lua_5xx=0
+            for code in $(jq -r '.http_status | keys[]' "${lua_metrics_file}" 2>/dev/null); do
+                if [[ "${code}" =~ ^4[0-9][0-9]$ ]]; then
+                    local count
+                    count=$(jq -r ".http_status.\"${code}\" // 0" "${lua_metrics_file}" 2>/dev/null)
+                    [[ "${count}" =~ ^[0-9]+$ ]] && lua_4xx=$((lua_4xx + count))
+                elif [[ "${code}" =~ ^5[0-9][0-9]$ ]]; then
+                    local count
+                    count=$(jq -r ".http_status.\"${code}\" // 0" "${lua_metrics_file}" 2>/dev/null)
+                    [[ "${count}" =~ ^[0-9]+$ ]] && lua_5xx=$((lua_5xx + count))
+                fi
+            done
+
+            local lua_total=$((lua_4xx + lua_5xx))
+
+            # Use lua_metrics breakdown if http_status is non-empty
+            # Even if errors are 0, this ensures consistency with http_status
+            http_4xx="${lua_4xx}"
+            http_5xx="${lua_5xx}"
+            http_status_total=${lua_total}
+        elif jq -e '.errors.status | type == "object" and (has("4xx") or has("5xx"))' "${lua_metrics_file}" &>/dev/null; then
+            # Fallback: Check if errors.status is an object with 4xx or 5xx keys (legacy v3 schema)
             local lua_4xx_raw lua_5xx_raw
             lua_4xx_raw=$(jq -r '.errors.status["4xx"] // 0' "${lua_metrics_file}" 2>/dev/null)
             lua_5xx_raw=$(jq -r '.errors.status["5xx"] // 0' "${lua_metrics_file}" 2>/dev/null)
@@ -1446,15 +1514,13 @@ generate_meta_json() {
 
             local lua_total=$((lua_4xx + lua_5xx))
 
-            # Use lua_metrics breakdown only if it has non-zero errors
-            # Otherwise keep wrk fallback (handles multi-thread aggregation issues)
-            if [[ ${lua_total} -gt 0 ]]; then
-                http_4xx="${lua_4xx}"
-                http_5xx="${lua_5xx}"
-                http_status_total=${lua_total}
-            fi
+            # Use lua_metrics breakdown if available
+            # Accept even if errors are 0 for consistency
+            http_4xx="${lua_4xx}"
+            http_5xx="${lua_5xx}"
+            http_status_total=${lua_total}
 
-            # v3: Get http_status distribution from lua_metrics
+            # Try to get http_status from legacy format
             http_status_json=$(jq -c '.http_status // {}' "${lua_metrics_file}" 2>/dev/null || echo "{}")
         fi
 
@@ -1496,18 +1562,78 @@ generate_meta_json() {
     #   - wrk's "Non-2xx or 3xx responses" as fallback (also HTTP errors only)
     # Socket errors are reported separately in errors.socket_errors
     # Use 10# prefix to force decimal interpretation (avoid octal with leading zeros)
-    if ((10#${total_requests:-0} > 0)); then
-        # Calculate error_rate and ensure valid JSON number format
-        # Per JSON schema: error_rate must be in range [0, 1]
-        # Clamp values > 1 to 1.0 (can happen with retry/duplicate counting)
-        # awk's printf "%.6f" automatically includes leading zero (0.123, not .123)
-        error_rate=$(awk -v errors="${http_status_total}" -v total="${total_requests}" 'BEGIN {
-            rate = errors / total
-            if (rate < 0) rate = 0
-            if (rate > 1) rate = 1
-            printf "%.6f", rate
-        }')
-    else
+
+    # error_rate 計算のフォールバック順序
+    error_rate="null"
+
+    # 0. 最初に http_4xx, http_5xx を lua_metrics.json から取得
+    # 注意: error_rate 計算より前に確定させる必要がある
+    # has_lua_http_metrics フラグで lua_metrics から取得できたかを追跡
+    # 両方のキーが存在し、かつ有効な数値である場合のみ true
+    local has_lua_http_metrics=false
+    if [[ -f "${lua_metrics_file}" ]] && command -v jq &> /dev/null; then
+        # jq で http_4xx, http_5xx の両方のキーが存在し数値であることを確認
+        # jq の出力を捨てて終了コードのみ利用（標準出力混入を防ぐ）
+        if jq -e 'has("http_4xx") and has("http_5xx") and (.http_4xx | type == "number") and (.http_5xx | type == "number")' "${lua_metrics_file}" >/dev/null 2>&1; then
+            http_4xx=$(jq -r '.http_4xx' "${lua_metrics_file}" 2>/dev/null)
+            http_5xx=$(jq -r '.http_5xx' "${lua_metrics_file}" 2>/dev/null)
+            # 追加のバリデーション: 整数であること
+            if [[ "${http_4xx}" =~ ^[0-9]+$ ]] && [[ "${http_5xx}" =~ ^[0-9]+$ ]]; then
+                has_lua_http_metrics=true
+            else
+                # 数値でない場合はリセットして wrk フォールバックへ
+                http_4xx=0
+                http_5xx=0
+            fi
+        fi
+    fi
+
+    # 1. lua_metrics.json の error_rate を最優先
+    # 注意: error_rate が数値型で、0-1 の範囲内であることを検証
+    if [[ -f "${lua_metrics_file}" ]] && command -v jq &> /dev/null; then
+        # error_rate が存在し、数値型で、0以上1以下であることを確認
+        if jq -e 'has("error_rate") and (.error_rate | type == "number") and (.error_rate >= 0) and (.error_rate <= 1)' "${lua_metrics_file}" >/dev/null 2>&1; then
+            local lua_error_rate
+            lua_error_rate=$(jq -r '.error_rate' "${lua_metrics_file}" 2>/dev/null)
+            if [[ -n "${lua_error_rate}" && "${lua_error_rate}" != "null" ]]; then
+                error_rate="${lua_error_rate}"
+                echo -e "${CYAN}Using error_rate from lua_metrics.json: ${error_rate}${NC}" >&2
+            fi
+        fi
+    fi
+
+    # 2. http_4xx + http_5xx から直接計算（lua_metrics に error_rate がない場合）
+    # 注意: has_lua_http_metrics=true の場合のみ計算（lua_metrics から取得できた場合）
+    # lua_metrics が無い/古い場合は step 3 (wrk) にフォールバック
+    if [[ "${error_rate}" == "null" && "${has_lua_http_metrics}" == "true" ]]; then
+        local errors_4xx_5xx
+        errors_4xx_5xx=$((${http_4xx:-0} + ${http_5xx:-0}))
+        if ((10#${total_requests:-0} > 0)); then
+            error_rate=$(awk -v errors="${errors_4xx_5xx}" -v total="${total_requests}" 'BEGIN {
+                rate = errors / total
+                if (rate < 0) rate = 0
+                if (rate > 1) rate = 1
+                printf "%.6f", rate
+            }')
+            echo -e "${CYAN}Calculated error_rate from http_4xx + http_5xx: ${error_rate}${NC}" >&2
+        fi
+    fi
+
+    # 3. wrk の値から計算（最終手段）
+    if [[ "${error_rate}" == "null" ]]; then
+        if ((10#${total_requests:-0} > 0 && 10#${http_status_total:-0} >= 0)); then
+            error_rate=$(awk -v errors="${http_status_total}" -v total="${total_requests}" 'BEGIN {
+                rate = errors / total
+                if (rate < 0) rate = 0
+                if (rate > 1) rate = 1
+                printf "%.6f", rate
+            }')
+            echo -e "${YELLOW}WARNING: Using wrk-based error_rate (less accurate): ${error_rate}${NC}" >&2
+        fi
+    fi
+
+    # error_rate が null のままの場合は "null" として保持
+    if [[ "${error_rate}" == "null" ]]; then
         error_rate="null"
     fi
 
@@ -2388,7 +2514,9 @@ log_resolved_params() {
         printf "POOL_SIZES=%s\n\n" "${POOL_SIZES:-24}"
         printf "## Error Configuration\n"
         printf "FAIL_RATE=%s\n" "${FAIL_RATE:-0}"
-        printf "RETRY=%s\n\n" "${RETRY:-false}"
+        printf "RETRY=%s\n" "${RETRY:-false}"
+        printf "RETRY_COUNT=%s\n" "${RETRY_COUNT:-0}"
+        printf "ID_POOL_SIZE=%s\n\n" "${ID_POOL_SIZE:-10}"
         printf "## Multi-Phase Load Profile Parameters\n"
         printf "MIN_RPS=%s\n" "${MIN_RPS:-10}"
         printf "STEP_COUNT=%s\n" "${STEP_COUNT:-4}"
@@ -2559,7 +2687,7 @@ run_single_phase() {
         ${rate_option} \
         --latency \
         --script="scripts/${script_name}.lua" \
-        "${API_URL}" 2>&1 | tee "${result_file}"
+        "${API_URL}" 2>&1 | tee "${phase_dir}/raw_wrk.txt" | tee "${result_file}"
 
     local actual_rps
     actual_rps=$(grep "Requests/sec:" "${result_file}" 2>/dev/null | awk '{print $2}' || echo "0")
@@ -2706,11 +2834,10 @@ merge_phase_results() {
     local avg_rps
     avg_rps=$(echo "scale=2; ${weighted_rps_sum} / ${total_duration}" | bc 2>/dev/null || echo "0")
 
-    # Calculate error rate using HTTP errors only (not socket errors)
-    # This is consistent with meta.json which uses HTTP 4xx/5xx for error_rate
-    # Use format_error_rate_json to normalize bc output (.123 -> 0.123) and clamp to [0, 1]
-    local error_rate
-    error_rate=$(format_error_rate_json "$(echo "scale=6; ${total_http_errors} / ${total_requests}" | bc 2>/dev/null || echo "0")" "${total_requests}")
+    # Error rate will be read from merged lua_metrics.json instead of wrk output
+    # This ensures consistency with http_status counts (REQ-PIPELINE-002)
+    # Fallback to wrk-based calculation only if lua_metrics is unavailable
+    local error_rate=""
 
     # Use the last phase's latency values for the merged output (representative of peak load)
     # Exception: p99 uses max_p99 (worst case across all phases) for conservative reporting
@@ -2781,7 +2908,42 @@ merge_phase_results() {
         fi
     done
 
+    # Merge lua_metrics.json from all phases BEFORE exporting metrics
+    local lua_metrics_files=()
+    for phase_dir in ${phase_dirs}; do
+        local lua_metrics="${phase_dir}/lua_metrics.json"
+        if [[ -f "${lua_metrics}" ]]; then
+            lua_metrics_files+=("${lua_metrics}")
+        fi
+    done
+
+    if [[ ${#lua_metrics_files[@]} -gt 0 ]]; then
+        echo -e "${CYAN}Merging ${#lua_metrics_files[@]} lua_metrics.json files...${NC}"
+        python3 "${SCRIPT_DIR}/scripts/merge_lua_metrics.py" \
+            --output "${results_base_dir}/lua_metrics.json" \
+            "${lua_metrics_files[@]}"
+
+        # Read error_rate from merged lua_metrics.json (REQ-PIPELINE-002)
+        if [[ -f "${results_base_dir}/lua_metrics.json" ]] && command -v jq &> /dev/null; then
+            local lua_error_rate
+            lua_error_rate=$(jq -r '.error_rate // empty' "${results_base_dir}/lua_metrics.json" 2>/dev/null)
+            if [[ -n "${lua_error_rate}" ]]; then
+                error_rate="${lua_error_rate}"
+                echo -e "${CYAN}Using error_rate from lua_metrics.json: ${error_rate}${NC}"
+            fi
+        fi
+    else
+        echo -e "${YELLOW}WARNING: No lua_metrics.json files found to merge${NC}"
+    fi
+
+    # Fallback to wrk-based calculation if lua_metrics error_rate is unavailable
+    if [[ -z "${error_rate}" ]]; then
+        error_rate=$(format_error_rate_json "$(echo "scale=6; ${total_http_errors} / ${total_requests}" | bc 2>/dev/null || echo "0")" "${total_requests}")
+        echo -e "${YELLOW}WARNING: Using wrk-based error_rate (lua_metrics unavailable): ${error_rate}${NC}"
+    fi
+
     # Export merged values as environment variables for meta.json generation
+    # IMPORTANT: error_rate must be read from lua_metrics.json BEFORE export
     export MERGED_RPS="${avg_rps}"
     export MERGED_REQUESTS="${total_requests}"
     export MERGED_DURATION="${total_duration}"
@@ -2795,6 +2957,20 @@ merge_phase_results() {
     export MERGED_P99="${max_p99}"
     export MERGED_ERROR_RATE="${error_rate}"
     export MERGED_PHASE_COUNT="${phase_count}"
+
+    # Concatenate raw_wrk.txt files
+    local raw_wrk_files=()
+    for phase_dir in ${phase_dirs}; do
+        local raw_wrk="${phase_dir}/raw_wrk.txt"
+        if [[ -f "${raw_wrk}" ]]; then
+            raw_wrk_files+=("${raw_wrk}")
+        fi
+    done
+
+    if [[ ${#raw_wrk_files[@]} -gt 0 ]]; then
+        cat "${raw_wrk_files[@]}" > "${results_base_dir}/raw_wrk_all.txt"
+        echo -e "${CYAN}Concatenated ${#raw_wrk_files[@]} raw_wrk.txt files${NC}"
+    fi
 
     echo -e "${GREEN}Merged ${phase_count} phase results${NC}"
 }
@@ -3050,6 +3226,17 @@ run_benchmark() {
         return 1
     fi
 
+    if [[ "${SCENARIO_NAME}" =~ ^tasks_update ]]; then
+        if [[ "${THREADS}" != "${CONNECTIONS}" || "${WRK_THREADS:-${THREADS}}" != "${THREADS}" ]]; then
+            echo -e "${RED}Error: tasks_update requires threads == connections == WRK_THREADS (current: threads=${THREADS}, connections=${CONNECTIONS}, WRK_THREADS=${WRK_THREADS:-${THREADS}})${NC}"
+            echo -e "${RED}Reason: Version state management and backoff exclusion require 1:1 mapping${NC}"
+            if [[ "${ALLOW_THREAD_CONNECTION_MISMATCH:-0}" != "1" ]]; then
+                exit 1
+            fi
+            echo -e "${YELLOW}WARNING: Proceeding with degraded accuracy (ALLOW_THREAD_CONNECTION_MISMATCH=1)${NC}"
+        fi
+    fi
+
     echo ""
     echo "----------------------------------------------"
     echo "Running: ${script_name}"
@@ -3109,6 +3296,35 @@ run_benchmark() {
         echo "  P75: ${p75:-N/A}" >> "${SUMMARY_FILE}"
         echo "  P90: ${p90:-N/A}" >> "${SUMMARY_FILE}"
         echo "  P99: ${p99:-N/A}" >> "${SUMMARY_FILE}"
+
+        # Add HTTP Status Distribution (REQ-PIPELINE-005)
+        local lua_metrics_summary="${script_results_dir}/lua_metrics.json"
+        if [[ -f "${lua_metrics_summary}" ]] && command -v jq &> /dev/null; then
+            echo "" >> "${SUMMARY_FILE}"
+            echo "--- HTTP Status Distribution ---" >> "${SUMMARY_FILE}"
+
+            # Check if http_status exists and is not empty
+            local has_http_status
+            has_http_status=$(jq -e '.http_status | type == "object" and length > 0' "${lua_metrics_summary}" 2>/dev/null && echo "yes" || echo "no")
+
+            if [[ "${has_http_status}" == "yes" ]]; then
+                jq -r '.http_status | to_entries[] | "  \(.key): \(.value)"' "${lua_metrics_summary}" 2>/dev/null >> "${SUMMARY_FILE}"
+
+                echo "" >> "${SUMMARY_FILE}"
+                echo "--- Error Analysis ---" >> "${SUMMARY_FILE}"
+
+                local error_rate_summary
+                error_rate_summary=$(jq -r '.error_rate // 0' "${lua_metrics_summary}" 2>/dev/null)
+                if [[ -n "${error_rate_summary}" && "${error_rate_summary}" != "null" ]]; then
+                    # Convert to percentage for display
+                    local error_rate_percent
+                    error_rate_percent=$(awk -v rate="${error_rate_summary}" 'BEGIN { printf "%.2f%%", rate * 100 }')
+                    echo "  Error Rate: ${error_rate_percent}" >> "${SUMMARY_FILE}"
+                fi
+            else
+                echo "  No HTTP status data available" >> "${SUMMARY_FILE}"
+            fi
+        fi
 
         # Add phase count if multi-phase execution
         if [[ -n "${MERGED_PHASE_COUNT:-}" && "${MERGED_PHASE_COUNT}" -gt 1 ]]; then

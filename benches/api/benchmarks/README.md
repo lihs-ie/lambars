@@ -109,6 +109,46 @@ benchmarks/
 ./run_benchmark.sh --scenario scenarios/tasks_eff.yaml
 ```
 
+### 環境変数
+
+ベンチマークの動作を制御する環境変数を以下に示します。
+これらの環境変数は、シナリオファイルの `metadata` セクションを優先し、
+トップレベルの設定値や `error_config` セクション、デフォルト値で補完されます。
+手動で上書きすることも可能です。
+
+#### tasks_update 関連の環境変数
+
+| 環境変数 | 説明 | デフォルト値 | シナリオファイルでの設定 |
+|---------|------|-------------|----------------------|
+| `ID_POOL_SIZE` | 更新ベンチマークで使用するタスク ID の数。小さい値ほど競合が増加する。 | 10 | `metadata.id_pool_size` または `id_pool_size` |
+| `RETRY_COUNT` | 409 Conflict 発生時の最大再試行回数 | 0 | `metadata.retry_count` または `error_config.max_retries` |
+| `WRK_THREADS` | wrk スレッド数（Lua スクリプトのスレッドローカル状態用）。通常は wrk の `-t` オプションと同じ値を設定する。 | `THREADS` と同じ | 自動設定 |
+| `RETRY_BACKOFF_MAX` | 擬似指数バックオフの上限（スキップするリクエスト数）。再試行時のバックオフ遅延を制御する。 | 16 | 手動設定のみ |
+
+#### 使用例
+
+```bash
+# シナリオファイルで設定（推奨）
+# scenarios/tasks_update.yaml
+metadata:
+  id_pool_size: 1000
+  retry_count: 3
+
+# 環境変数で上書き
+ID_POOL_SIZE=500 RETRY_COUNT=5 ./run_benchmark.sh --scenario scenarios/tasks_update.yaml
+
+# バックオフ上限を調整
+RETRY_BACKOFF_MAX=32 ./run_benchmark.sh --scenario scenarios/tasks_update.yaml
+```
+
+#### 重要な注意事項
+
+**tasks_update シナリオの制約:**
+- `threads == connections` が必須です（1 thread = 1 connection）
+- version 状態管理がスレッド単位で行われるため、threads != connections の場合は version 不整合により 409 Conflict が多発します
+- HTTP Status Distribution は単一スレッドからの推定値です（wrk2 の制約により全スレッド集計は不可）
+- 詳細は `scripts/tasks_update.lua` のコメントを参照してください
+
 ### Lua スクリプト互換性テスト
 
 全ての Lua スクリプトが wrk2 で正常に動作することを確認します:
@@ -247,6 +287,80 @@ PROFILE_MODE=true ./run_benchmark.sh --scenario scenarios/tasks_eff.yaml
   - インライン展開された関数（`debug = 1` では解決不可）
   - JIT コンパイルされたコード
 
+## HTTP ステータス集計
+
+ベンチマーク実行時に HTTP ステータスコードを集計し、エラー原因の分析を可能にします。
+
+### 出力ファイル
+
+| ファイル | 説明 |
+|---------|------|
+| `lua_metrics.json` | Lua スクリプトが生成する HTTP ステータス集計 |
+| `raw_wrk.txt` | wrk の生出力（done ハンドラ出力を含む） |
+| `meta.json` | 最終成果物（http_status を含む） |
+
+### lua_metrics.json のフォーマット
+
+```json
+{
+  "total_requests": 1000,
+  "error_rate": 0.05,
+  "http_status": {
+    "200": 800,
+    "201": 150,
+    "400": 30,
+    "409": 15,
+    "500": 5
+  },
+  "status_distribution": {
+    "200": 0.80,
+    "201": 0.15,
+    "400": 0.03,
+    "409": 0.015,
+    "500": 0.005
+  },
+  "latency": {
+    "min_ms": 1.5,
+    "max_ms": 150.0,
+    "mean_ms": 10.5,
+    "p50_ms": 8.2,
+    "p99_ms": 45.3
+  }
+}
+```
+
+### パイプラインテスト
+
+HTTP ステータス集計パイプラインの動作確認:
+
+```bash
+# 既存結果のテスト
+./scripts/test_http_status_pipeline.sh
+
+# ベンチマーク実行してからテスト (API サーバー必須)
+./scripts/test_http_status_pipeline.sh --run
+```
+
+### アーキテクチャ
+
+```
+wrk (Lua)
+  | track_thread_response()
+error_tracker.lua (スレッド状態管理)
+  | get_thread_aggregated_summary()
+common.lua (done ハンドラ)
+  | io.write()
+raw_wrk.txt (標準出力)
+
+result_collector.lua
+  | finalize() -> save_results()
+lua_metrics.json (各フェーズ)
+  | merge_lua_metrics.py
+lua_metrics.json (統合)
+  | generate_meta_json()
+meta.json (最終成果物)
+```
+
 ## トラブルシューティング
 
 ### wrk2 が見つからない
@@ -281,3 +395,31 @@ cd ../docker
 docker compose -f compose.ci.yaml ps
 docker compose -f compose.ci.yaml logs
 ```
+
+### http_status が空の場合
+
+1. lua_metrics.json が存在するか確認:
+   ```bash
+   find results/ -name "lua_metrics.json"
+   ```
+
+2. raw_wrk.txt に done 出力があるか確認:
+   ```bash
+   grep "HTTP Status Distribution" results/*/raw_wrk.txt
+   ```
+
+3. LUA_RESULTS_DIR が設定されているか確認:
+   ```bash
+   env | grep LUA_RESULTS_DIR
+   ```
+
+4. パイプラインテストを実行:
+   ```bash
+   ./scripts/test_http_status_pipeline.sh
+   ```
+
+### done ハンドラが実行されない場合
+
+- Lua スクリプトに `done()` 関数が定義されているか確認
+- `common.finalize_benchmark()` が呼ばれているか確認
+- wrk の `-d` オプションで十分な実行時間が指定されているか確認

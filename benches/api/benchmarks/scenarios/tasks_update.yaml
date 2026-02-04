@@ -2,11 +2,8 @@
 #
 # Tests PUT /tasks/{id} endpoint using Lens/Prism/Optional/Bifunctor
 #
-# Target API features:
-#   - Lens for focused updates
-#   - Prism for optional fields
-#   - Optional for nullable handling
-#   - Bifunctor for error transformation
+# IMPORTANT: Requires threads == connections (1:1 mapping)
+# Reason: Version state management and backoff exclusion are thread-local
 
 name: "tasks_update"
 description: "Benchmark PUT /tasks/{id} endpoint with Lens, Prism, Optional, and Bifunctor"
@@ -25,10 +22,10 @@ payload_variant: complex
 # rps_profile: constant=steady, ramp_up_down=ramp, burst=burst
 rps_profile: constant
 
-# Load generation (maps to DURATION, THREADS, CONNECTIONS)
+# Load generation (threads MUST equal connections)
 duration_seconds: 30
-connections: 50
-threads: 4
+connections: 8
+threads: 8
 target_rps: 800
 warmup_seconds: 5
 
@@ -72,15 +69,6 @@ thresholds:
   p99_latency_ms: 100
   min_rps_achieved: 500
 
-# Extended metadata for workflow integration
-# Keys here map to environment variables:
-#   cache_strategy -> CACHE_STRATEGY (read-through|write-through|write-behind)
-#   hit_rate -> HIT_RATE override (0|50|90)
-#   fail_injection -> FAIL_RATE override (0|0.1|0.5)
-#   retry -> RETRY override (true|false)
-#   profile -> PROFILE (true|false)
-#   id_pool_size -> ID_POOL_SIZE (number of task IDs to use)
-#   retry_count -> RETRY_COUNT (max retry attempts on conflict)
 metadata:
   test_type: "endpoint_benchmark"
   endpoint: "PUT /tasks/{id}"

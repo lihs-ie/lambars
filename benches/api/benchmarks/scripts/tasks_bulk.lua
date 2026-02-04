@@ -1,54 +1,51 @@
--- Endpoint-specific benchmark: POST /tasks/bulk
--- benches/api/benchmarks/scripts/tasks_bulk.lua
---
--- Target API features:
---   - for_! (list comprehension macro)
---   - Alternative (fallback and choice patterns)
---   - Partial failure handling (207 Multi-Status)
---
--- Demonstrates lambars' bulk operations with partial success handling,
--- Alternative-based fallback strategies for validation and save operations.
-
 package.path = package.path .. ";scripts/?.lua"
 local common = require("common")
 
 local counter = 0
-
--- Batch sizes for testing bulk optimization (must be >= bulk_threshold of 100)
-local batch_sizes = {100, 250, 500}
+local batch_sizes = {10, 50, 100}
+local benchmark_initialized = false
 
 function request()
     counter = counter + 1
     local batch_size = batch_sizes[(counter % #batch_sizes) + 1]
 
-    -- Create batch of tasks for bulk create
     local tasks = {}
     for i = 1, batch_size do
-        -- Occasionally inject an invalid task to test partial failure
-        if i == 1 and counter % 10 == 0 then
-            -- Invalid task (empty title) - should fail validation
-            table.insert(tasks, {
-                title = "",
-                description = "Invalid task for partial failure testing",
-                priority = "low",
-                tags = common.array({})
-            })
-        else
-            table.insert(tasks, {
-                title = common.random_title() .. " #" .. i,
-                description = "Bulk created task " .. i .. " of " .. batch_size,
-                priority = common.random_priority(),
-                tags = common.array({"bulk", "batch-" .. batch_size})
-            })
-        end
+        local task = (i == 1 and counter % 10 == 0) and {
+            title = "",
+            description = "Invalid task for partial failure testing",
+            priority = "low",
+            tags = common.array({})
+        } or {
+            title = common.random_title() .. " #" .. i,
+            description = "Bulk created task " .. i .. " of " .. batch_size,
+            priority = common.random_priority(),
+            tags = common.array({"bulk", "batch-" .. batch_size})
+        }
+        table.insert(tasks, task)
     end
 
-    local body = common.json_encode({
-        tasks = common.array(tasks)
-    })
-
+    local body = common.json_encode({tasks = common.array(tasks)})
     return wrk.format("POST", "/tasks/bulk", {["Content-Type"] = "application/json"}, body)
 end
 
-response = common.create_response_handler("tasks_bulk")
-done = common.create_done_handler("tasks_bulk")
+function init(args)
+    common.init_benchmark({scenario_name = "tasks_bulk", output_format = "json"})
+end
+
+local handlers = common.create_threaded_handlers("tasks_bulk")
+
+function setup(thread)
+    if not benchmark_initialized then
+        common.init_benchmark({scenario_name = "tasks_bulk", output_format = "json"})
+        benchmark_initialized = true
+    end
+    handlers.setup(thread)
+end
+
+response = handlers.response
+
+function done(summary, latency, requests)
+    handlers.done(summary, latency, requests)
+    common.finalize_benchmark(summary, latency, requests)
+end

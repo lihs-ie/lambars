@@ -1,6 +1,3 @@
--- Result Collector Module for wrk benchmarks
--- Collects and formats benchmark results including latency, errors, RPS, and payload info
-
 local M = {}
 
 M.NULL = {}
@@ -28,6 +25,7 @@ M.results = {
     error_rate = 0,
     http_error_rate = 0,
     network_error_rate = 0,
+    server_error_rate = 0,
     client_error_rate = 0,
     conflict_rate = 0,
     conflict_count = 0,
@@ -164,6 +162,25 @@ function M.set_payload(payload_metadata)
     if payload_metadata then M.results.payload = payload_metadata end
 end
 
+local function calculate_thread_requests()
+    local total = 0
+    for _, count in pairs(M.status_counts) do
+        if type(count) == "number" then total = total + count end
+    end
+    return total
+end
+
+local function calculate_failed_requests()
+    local failed = 0
+    for code, count in pairs(M.status_counts) do
+        local code_num = tonumber(code)
+        if code_num and code_num >= 400 and type(count) == "number" then
+            failed = failed + count
+        end
+    end
+    return failed
+end
+
 function M.finalize(summary, latency, requests)
     if not summary then
         M.results.total_requests = M.response_count
@@ -177,31 +194,49 @@ function M.finalize(summary, latency, requests)
     local duration_seconds = summary.duration / 1000000
     M.results.duration_seconds = duration_seconds
     M.results.execution.duration_seconds = duration_seconds
-    M.results.total_requests = summary.requests
-    M.results.successful_requests = summary.requests - (summary.errors.connect + summary.errors.read +
-                                                         summary.errors.write + summary.errors.timeout +
-                                                         summary.errors.status)
-    M.results.failed_requests = summary.requests - M.results.successful_requests
+
+    local thread_total_requests = calculate_thread_requests()
+    local use_thread_local = thread_total_requests > 0
+    M.results.total_requests = use_thread_local and thread_total_requests or summary.requests
+
+    if use_thread_local then
+        local thread_failed_requests = calculate_failed_requests()
+        M.results.failed_requests = thread_failed_requests
+        M.results.successful_requests = thread_total_requests - thread_failed_requests
+    else
+        M.results.successful_requests = summary.requests - (summary.errors.connect + summary.errors.read +
+                                                             summary.errors.write + summary.errors.timeout +
+                                                             summary.errors.status)
+        M.results.failed_requests = summary.requests - M.results.successful_requests
+    end
 
     if duration_seconds > 0 then
         M.results.rps.actual = M.results.total_requests / duration_seconds
     end
 
-    M.results.throughput.requests_total = summary.requests
+    M.results.throughput.requests_total = M.results.total_requests
     M.results.throughput.requests_per_second = M.results.rps.actual
-    M.results.throughput.bytes_total = summary.bytes or 0
-    if duration_seconds > 0 then
-        M.results.throughput.bytes_per_second = (summary.bytes or 0) / duration_seconds
-    end
 
-    M.results.errors = {
-        connect = summary.errors.connect,
-        read = summary.errors.read,
-        write = summary.errors.write,
-        timeout = summary.errors.timeout,
-        status = { ["4xx"] = 0, ["5xx"] = 0 }
-    }
-    M.results.errors.status_total = summary.errors.status
+    if use_thread_local then
+        M.results.throughput.bytes_total = M.NULL
+        M.results.throughput.bytes_per_second = M.NULL
+        M.results.errors = {
+            connect = M.NULL, read = M.NULL, write = M.NULL, timeout = M.NULL,
+            status = { ["4xx"] = 0, ["5xx"] = 0 }
+        }
+        M.results.errors.status_total = M.NULL
+    else
+        M.results.throughput.bytes_total = summary.bytes or 0
+        if duration_seconds > 0 then
+            M.results.throughput.bytes_per_second = (summary.bytes or 0) / duration_seconds
+        end
+        M.results.errors = {
+            connect = summary.errors.connect, read = summary.errors.read,
+            write = summary.errors.write, timeout = summary.errors.timeout,
+            status = { ["4xx"] = 0, ["5xx"] = 0 }
+        }
+        M.results.errors.status_total = summary.errors.status
+    end
 
     if next(M.status_counts) then
         M.results.status_codes = M.status_counts
@@ -276,157 +311,136 @@ function M.finalize(summary, latency, requests)
 
     if cache_metrics then M.results.cache = cache_metrics.get_summary() end
 
-    if error_tracker then
-        error_tracker.aggregate_from_summary(summary)
+local function aggregate_error_counts()
+    local counts = {
+        total = 0, count_400 = 0, count_404 = 0, count_409 = 0, count_422 = 0, count_500 = 0,
+        count_4xx_total = 0, count_4xx_excluding_409 = 0, count_5xx_total = 0
+    }
 
-        local http_error_counts = {
-            total = 0, count_400 = 0, count_404 = 0, count_409 = 0, count_422 = 0, count_500 = 0,
-            count_4xx_total = 0, count_4xx_excluding_409 = 0, count_5xx_total = 0
-        }
+    if not M.results.status_distribution or type(M.results.status_distribution) ~= "table" or not next(M.results.status_distribution) then
+        return counts
+    end
 
-        if M.results.status_distribution and type(M.results.status_distribution) == "table" and next(M.results.status_distribution) then
-            for status, count in pairs(M.results.status_distribution) do
-                local status_num = tonumber(status)
-                if status_num and type(count) == "number" then
-                    if status_num >= 400 and status_num < 500 then
-                        http_error_counts.count_4xx_total = http_error_counts.count_4xx_total + count
-                        http_error_counts.total = http_error_counts.total + count
-                        if status_num ~= 409 then
-                            http_error_counts.count_4xx_excluding_409 = http_error_counts.count_4xx_excluding_409 + count
-                        end
-                    elseif status_num >= 500 and status_num < 600 then
-                        http_error_counts.count_5xx_total = http_error_counts.count_5xx_total + count
-                        http_error_counts.total = http_error_counts.total + count
-                    end
+    local status_map = {[400] = "count_400", [404] = "count_404", [409] = "count_409", [422] = "count_422", [500] = "count_500"}
 
-                    if status_num == 400 then http_error_counts.count_400 = count
-                    elseif status_num == 404 then http_error_counts.count_404 = count
-                    elseif status_num == 409 then http_error_counts.count_409 = count
-                    elseif status_num == 422 then http_error_counts.count_422 = count
-                    elseif status_num == 500 then http_error_counts.count_500 = count
-                    end
+    for status, count in pairs(M.results.status_distribution) do
+        local status_num = tonumber(status)
+        if status_num and type(count) == "number" then
+            if status_num >= 400 and status_num < 500 then
+                counts.count_4xx_total = counts.count_4xx_total + count
+                counts.total = counts.total + count
+                if status_num ~= 409 then
+                    counts.count_4xx_excluding_409 = counts.count_4xx_excluding_409 + count
                 end
+            elseif status_num >= 500 and status_num < 600 then
+                counts.count_5xx_total = counts.count_5xx_total + count
+                counts.total = counts.total + count
             end
-        elseif summary and summary.errors and summary.errors.status then
-            http_error_counts.total = summary.errors.status
-        end
 
-        error_tracker.set_http_error_counts(http_error_counts)
-        M.results.errors_detail = error_tracker.get_summary()
-
-        if M.results.total_requests > 0 then
-            if M.results.status_distribution and type(M.results.status_distribution) == "table" and next(M.results.status_distribution) then
-                M.results.error_rate = http_error_counts.count_5xx_total / M.results.total_requests
-                M.results.client_error_rate = http_error_counts.count_4xx_excluding_409 / M.results.total_requests
-                M.results.conflict_count = http_error_counts.count_409
-                M.results.conflict_rate = http_error_counts.count_409 / M.results.total_requests
-                M.results.http_error_rate = (http_error_counts.count_4xx_total + http_error_counts.count_5xx_total) / M.results.total_requests
-                M.results.status_code_counts = {
-                    count_400 = http_error_counts.count_400,
-                    count_404 = http_error_counts.count_404,
-                    count_409 = http_error_counts.count_409,
-                    count_422 = http_error_counts.count_422,
-                    count_500 = http_error_counts.count_500,
-                }
-            else
-                M.results.error_rate = M.NULL
-                M.results.client_error_rate = M.NULL
-                M.results.conflict_rate = M.NULL
-                M.results.conflict_count = M.NULL
-                local http_errors = (summary and summary.errors and summary.errors.status) or 0
-                M.results.http_error_rate = http_errors / M.results.total_requests
-                M.results.status_code_counts = {
-                    count_400 = M.NULL,
-                    count_404 = M.NULL,
-                    count_409 = M.NULL,
-                    count_422 = M.NULL,
-                    count_500 = M.NULL,
-                }
-            end
-            local network_errors = (summary and summary.errors) and
-                ((summary.errors.connect or 0) + (summary.errors.read or 0) +
-                 (summary.errors.write or 0) + (summary.errors.timeout or 0)) or 0
-            M.results.network_error_rate = network_errors / M.results.total_requests
-        else
-            M.results.error_rate = 0
-            M.results.client_error_rate = 0
-            M.results.http_error_rate = 0
-            M.results.network_error_rate = 0
-            M.results.conflict_rate = 0
-            M.results.conflict_count = 0
+            local key = status_map[status_num]
+            if key then counts[key] = count end
+        elseif status == "other" and type(count) == "number" then
+            counts.count_5xx_total = counts.count_5xx_total + count
+            counts.total = counts.total + count
         end
-    else
-        if M.results.total_requests > 0 then
-            if M.results.status_distribution and type(M.results.status_distribution) == "table" and next(M.results.status_distribution) then
-                local count_400, count_404, count_409, count_422, count_500 = 0, 0, 0, 0, 0
-                local count_4xx, count_5xx, count_4xx_excluding_409 = 0, 0, 0
-                for status, count in pairs(M.results.status_distribution) do
-                    local status_num = tonumber(status)
-                    if status_num and type(count) == "number" then
-                        if status_num >= 400 and status_num < 500 then
-                            count_4xx = count_4xx + count
-                            if status_num == 409 then count_409 = count
-                            else count_4xx_excluding_409 = count_4xx_excluding_409 + count end
-                        elseif status_num >= 500 and status_num < 600 then
-                            count_5xx = count_5xx + count
-                        end
+    end
+    return counts
+end
 
-                        if status_num == 400 then count_400 = count
-                        elseif status_num == 404 then count_404 = count
-                        elseif status_num == 409 then count_409 = count
-                        elseif status_num == 422 then count_422 = count
-                        elseif status_num == 500 then count_500 = count
-                        end
-                    end
-                end
-                M.results.error_rate = count_5xx / M.results.total_requests
-                M.results.client_error_rate = count_4xx_excluding_409 / M.results.total_requests
-                M.results.conflict_count = count_409
-                M.results.conflict_rate = count_409 / M.results.total_requests
-                M.results.http_error_rate = (count_4xx + count_5xx) / M.results.total_requests
-                M.results.status_code_counts = {
-                    count_400 = count_400,
-                    count_404 = count_404,
-                    count_409 = count_409,
-                    count_422 = count_422,
-                    count_500 = count_500,
-                }
-            else
-                M.results.error_rate = M.NULL
-                M.results.client_error_rate = M.NULL
-                M.results.conflict_rate = M.NULL
-                M.results.conflict_count = M.NULL
-                local http_errors = (summary and summary.errors and summary.errors.status) or 0
-                M.results.http_error_rate = http_errors / M.results.total_requests
-                M.results.status_code_counts = {
-                    count_400 = M.NULL,
-                    count_404 = M.NULL,
-                    count_409 = M.NULL,
-                    count_422 = M.NULL,
-                    count_500 = M.NULL,
-                }
-            end
-            local network_errors = (summary and summary.errors) and
-                ((summary.errors.connect or 0) + (summary.errors.read or 0) +
-                 (summary.errors.write or 0) + (summary.errors.timeout or 0)) or 0
-            M.results.network_error_rate = network_errors / M.results.total_requests
-        else
-            M.results.error_rate = 0
-            M.results.client_error_rate = 0
-            M.results.http_error_rate = 0
-            M.results.network_error_rate = 0
-            M.results.conflict_rate = 0
-            M.results.conflict_count = 0
-        end
+local function set_error_metrics(http_error_counts, summary)
+    if M.results.total_requests <= 0 then
+        M.results.error_rate = 0
+        M.results.client_error_rate = 0
+        M.results.http_error_rate = 0
+        M.results.network_error_rate = 0
+        M.results.conflict_rate = 0
+        M.results.conflict_count = 0
+        return
     end
 
     if M.results.status_distribution and type(M.results.status_distribution) == "table" and next(M.results.status_distribution) then
-        for status, count in pairs(M.results.status_distribution) do
-            local status_num = tonumber(status)
-            if status_num and type(count) == "number" then
-                M.results.http_status[status] = count
+        local total_http_errors = http_error_counts.count_4xx_total + http_error_counts.count_5xx_total
+        M.results.error_rate = total_http_errors / M.results.total_requests
+        M.results.client_error_rate = http_error_counts.count_4xx_excluding_409 / M.results.total_requests
+        M.results.conflict_count = http_error_counts.count_409
+        M.results.conflict_rate = http_error_counts.count_409 / M.results.total_requests
+        M.results.http_error_rate = total_http_errors / M.results.total_requests
+        M.results.server_error_rate = http_error_counts.count_5xx_total / M.results.total_requests
+        M.results.status_code_counts = {
+            count_400 = http_error_counts.count_400,
+            count_404 = http_error_counts.count_404,
+            count_409 = http_error_counts.count_409,
+            count_422 = http_error_counts.count_422,
+            count_500 = http_error_counts.count_500,
+        }
+    else
+        M.results.error_rate = M.NULL
+        M.results.client_error_rate = M.NULL
+        M.results.conflict_rate = M.NULL
+        M.results.conflict_count = M.NULL
+        local http_errors = (summary and summary.errors and summary.errors.status) or 0
+        M.results.http_error_rate = http_errors / M.results.total_requests
+        M.results.status_code_counts = {
+            count_400 = M.NULL, count_404 = M.NULL, count_409 = M.NULL,
+            count_422 = M.NULL, count_500 = M.NULL,
+        }
+    end
+
+    if M.results.errors.connect == M.NULL then
+        M.results.network_error_rate = M.NULL
+    else
+        local network_errors = (summary and summary.errors) and
+            ((summary.errors.connect or 0) + (summary.errors.read or 0) +
+             (summary.errors.write or 0) + (summary.errors.timeout or 0)) or 0
+        M.results.network_error_rate = network_errors / M.results.total_requests
+    end
+end
+
+    if error_tracker and type(error_tracker.get_all_threads_aggregated_summary) == "function" then
+        local aggregated = error_tracker.get_all_threads_aggregated_summary()
+        M.results.http_status = {}
+        local http_status_total = 0
+
+        for key, count in pairs(aggregated) do
+            local status_code = key:match("^status_(.+)$")
+            if status_code and count > 0 then
+                M.results.http_status[status_code] = count
+                http_status_total = http_status_total + count
             end
         end
+
+        if http_status_total > 0 then
+            M.results.total_requests = http_status_total
+            M.results.status_distribution = {}
+            for status, count in pairs(M.results.http_status) do
+                if (tonumber(status) or status == "other") and type(count) == "number" then
+                    M.results.status_distribution[status] = count
+                end
+            end
+        end
+    elseif not M.results.http_status or not next(M.results.http_status) then
+        if M.results.status_distribution and type(M.results.status_distribution) == "table" and next(M.results.status_distribution) then
+            M.results.http_status = {}
+            for status, count in pairs(M.results.status_distribution) do
+                if tonumber(status) and type(count) == "number" then
+                    M.results.http_status[status] = count
+                end
+            end
+        end
+    end
+
+    if error_tracker then
+        error_tracker.aggregate_from_summary(summary)
+        local http_error_counts = aggregate_error_counts()
+        if http_error_counts.total == 0 and summary and summary.errors and summary.errors.status then
+            http_error_counts.total = summary.errors.status
+        end
+        error_tracker.set_http_error_counts(http_error_counts)
+        M.results.errors_detail = error_tracker.get_summary()
+        set_error_metrics(http_error_counts, summary)
+    else
+        local http_error_counts = aggregate_error_counts()
+        set_error_metrics(http_error_counts, summary)
     end
 
     if error_tracker then
@@ -444,11 +458,12 @@ end
 function M.encode_table_json(tbl)
     if tbl == M.NULL then return "null" end
 
-    if type(tbl) ~= "table" then
-        if type(tbl) == "string" then
+    local tbl_type = type(tbl)
+    if tbl_type ~= "table" then
+        if tbl_type == "string" then
             return '"' .. tbl:gsub('\\', '\\\\'):gsub('"', '\\"'):gsub('\n', '\\n') .. '"'
-        elseif type(tbl) == "boolean" then return tbl and "true" or "false"
-        elseif type(tbl) == "nil" then return "null"
+        elseif tbl_type == "boolean" then return tbl and "true" or "false"
+        elseif tbl_type == "nil" then return "null"
         else return tostring(tbl) end
     end
 
@@ -469,13 +484,15 @@ function M.format_yaml()
 
     local function add_line(indent, key, value)
         local prefix = string.rep("  ", indent)
+        local value_type = type(value)
+
         if value == M.NULL then table.insert(lines, string.format("%s%s: null", prefix, key))
         elseif value == nil then table.insert(lines, string.format("%s%s:", prefix, key))
-        elseif type(value) == "table" then
+        elseif value_type == "table" then
             table.insert(lines, string.format("%s%s:", prefix, key))
             for k, v in pairs(value) do add_line(indent + 1, k, v) end
-        elseif type(value) == "string" then table.insert(lines, string.format('%s%s: "%s"', prefix, key, value))
-        elseif type(value) == "boolean" then table.insert(lines, string.format("%s%s: %s", prefix, key, value and "true" or "false"))
+        elseif value_type == "string" then table.insert(lines, string.format('%s%s: "%s"', prefix, key, value))
+        elseif value_type == "boolean" then table.insert(lines, string.format("%s%s: %s", prefix, key, value and "true" or "false"))
         else table.insert(lines, string.format("%s%s: %s", prefix, key, tostring(value))) end
     end
 
@@ -491,8 +508,16 @@ function M.format_yaml()
     add_line(0, "successful_requests", M.results.successful_requests)
     add_line(0, "failed_requests", M.results.failed_requests)
     add_rate("error_rate", M.results.error_rate)
-    add_line(0, "http_error_rate", string.format("%.4f", M.results.http_error_rate or 0))
-    add_line(0, "network_error_rate", string.format("%.4f", M.results.network_error_rate or 0))
+    if M.results.http_error_rate == M.NULL then
+        add_line(0, "http_error_rate", M.NULL)
+    else
+        add_line(0, "http_error_rate", string.format("%.4f", M.results.http_error_rate or 0))
+    end
+    if M.results.network_error_rate == M.NULL then
+        add_line(0, "network_error_rate", M.NULL)
+    else
+        add_line(0, "network_error_rate", string.format("%.4f", M.results.network_error_rate or 0))
+    end
     add_rate("client_error_rate", M.results.client_error_rate)
     add_line(0, "conflict_count", M.results.conflict_count or 0)
     add_rate("conflict_rate", M.results.conflict_rate)
@@ -509,16 +534,14 @@ function M.format_yaml()
     add_line(1, "actual", string.format("%.1f", M.results.rps.actual))
 
     add_line(0, "latency")
-    add_line(1, "min_ms", string.format("%.2f", M.results.latency.min_ms))
-    add_line(1, "max_ms", string.format("%.2f", M.results.latency.max_ms))
-    add_line(1, "mean_ms", string.format("%.2f", M.results.latency.mean_ms))
-    add_line(1, "stddev_ms", string.format("%.2f", M.results.latency.stddev_ms))
-    add_line(1, "p50_ms", M.results.latency.p50_ms)
-    add_line(1, "p75_ms", M.results.latency.p75_ms)
-    add_line(1, "p90_ms", M.results.latency.p90_ms)
-    add_line(1, "p95_ms", M.results.latency.p95_ms)
-    add_line(1, "p99_ms", M.results.latency.p99_ms)
-    add_line(1, "p999_ms", M.results.latency.p999_ms)
+    local latency_fields = {"min_ms", "max_ms", "mean_ms", "stddev_ms"}
+    for _, field in ipairs(latency_fields) do
+        add_line(1, field, string.format("%.2f", M.results.latency[field]))
+    end
+    local percentile_fields = {"p50_ms", "p75_ms", "p90_ms", "p95_ms", "p99_ms", "p999_ms"}
+    for _, field in ipairs(percentile_fields) do
+        add_line(1, field, M.results.latency[field])
+    end
 
     add_line(0, "payload")
     add_line(1, "variant", M.results.payload.variant or "unknown")
@@ -529,6 +552,7 @@ function M.format_yaml()
     add_line(1, "target_rps", M.results.load_profile.target_rps or 0)
 
     add_line(0, "errors")
+    -- Handle M.NULL for thread-local mode
     add_line(1, "connect", M.results.errors.connect)
     add_line(1, "read", M.results.errors.read)
     add_line(1, "write", M.results.errors.write)
@@ -541,7 +565,11 @@ function M.format_yaml()
     elseif type(M.results.errors.status) == "number" then add_line(1, "status", M.results.errors.status)
     else add_line(1, "status", 0) end
 
-    if M.results.errors.status_total then add_line(1, "status_total", M.results.errors.status_total) end
+    if M.results.errors.status_total and M.results.errors.status_total ~= M.NULL then
+        add_line(1, "status_total", M.results.errors.status_total)
+    elseif M.results.errors.status_total == M.NULL then
+        add_line(1, "status_total", M.NULL)
+    end
 
     return table.concat(lines, "\n")
 end
@@ -582,8 +610,16 @@ function M.format_text()
     table.insert(lines, string.format("Total requests:      %d", M.results.total_requests))
     table.insert(lines, string.format("Successful requests: %d", M.results.successful_requests))
     table.insert(lines, string.format("Failed requests:     %d", M.results.failed_requests))
-    table.insert(lines, string.format("HTTP error rate:     %.2f%% (4xx/5xx only)", (M.results.http_error_rate or 0) * 100))
-    table.insert(lines, string.format("Network error rate:  %.2f%% (socket errors)", (M.results.network_error_rate or 0) * 100))
+    if M.results.http_error_rate == M.NULL then
+        table.insert(lines, "HTTP error rate:     N/A (4xx/5xx only)")
+    else
+        table.insert(lines, string.format("HTTP error rate:     %.2f%% (4xx/5xx only)", (M.results.http_error_rate or 0) * 100))
+    end
+    if M.results.network_error_rate == M.NULL then
+        table.insert(lines, "Network error rate:  N/A (socket errors)")
+    else
+        table.insert(lines, string.format("Network error rate:  %.2f%% (socket errors)", (M.results.network_error_rate or 0) * 100))
+    end
     table.insert(lines, format_rate("5xx error rate:     ", M.results.error_rate))
     table.insert(lines, format_rate("Client error rate:  ", M.results.client_error_rate))
     table.insert(lines, format_count("Conflict count:     ", M.results.conflict_count))
@@ -591,11 +627,16 @@ function M.format_text()
     table.insert(lines, "")
     table.insert(lines, "--- Status Code Counts ---")
     local scc = M.results.status_code_counts or {}
-    table.insert(lines, format_count("400 Bad Request:    ", scc.count_400))
-    table.insert(lines, format_count("404 Not Found:      ", scc.count_404))
-    table.insert(lines, format_count("409 Conflict:       ", scc.count_409))
-    table.insert(lines, format_count("422 Unprocessable:  ", scc.count_422))
-    table.insert(lines, format_count("500 Server Error:   ", scc.count_500))
+    local status_labels = {
+        {"400 Bad Request", "count_400"},
+        {"404 Not Found", "count_404"},
+        {"409 Conflict", "count_409"},
+        {"422 Unprocessable", "count_422"},
+        {"500 Server Error", "count_500"}
+    }
+    for _, item in ipairs(status_labels) do
+        table.insert(lines, format_count(string.format("%-20s", item[1] .. ":"), scc[item[2]]))
+    end
     table.insert(lines, "")
 
     table.insert(lines, "--- Throughput ---")
@@ -608,18 +649,28 @@ function M.format_text()
     end
 
     table.insert(lines, "--- Latency (ms) ---")
-    table.insert(lines, string.format("Min:    %.2f", M.results.latency.min_ms))
-    table.insert(lines, string.format("Max:    %.2f", M.results.latency.max_ms))
-    table.insert(lines, string.format("Mean:   %.2f", M.results.latency.mean_ms))
-    table.insert(lines, string.format("StdDev: %.2f", M.results.latency.stddev_ms))
+    local latency_stats = {
+        {"Min", M.results.latency.min_ms},
+        {"Max", M.results.latency.max_ms},
+        {"Mean", M.results.latency.mean_ms},
+        {"StdDev", M.results.latency.stddev_ms}
+    }
+    for _, stat in ipairs(latency_stats) do
+        table.insert(lines, string.format("%-7s %.2f", stat[1] .. ":", stat[2]))
+    end
     table.insert(lines, "")
     table.insert(lines, "Percentiles:")
-    table.insert(lines, string.format("  p50:   %s", format_percentile(M.results.latency.p50_ms)))
-    table.insert(lines, string.format("  p75:   %s", format_percentile(M.results.latency.p75_ms)))
-    table.insert(lines, string.format("  p90:   %s", format_percentile(M.results.latency.p90_ms)))
-    table.insert(lines, string.format("  p95:   %s", format_percentile(M.results.latency.p95_ms)))
-    table.insert(lines, string.format("  p99:   %s", format_percentile(M.results.latency.p99_ms)))
-    table.insert(lines, string.format("  p99.9: %s", format_percentile(M.results.latency.p999_ms)))
+    local percentiles = {
+        {"p50", M.results.latency.p50_ms},
+        {"p75", M.results.latency.p75_ms},
+        {"p90", M.results.latency.p90_ms},
+        {"p95", M.results.latency.p95_ms},
+        {"p99", M.results.latency.p99_ms},
+        {"p99.9", M.results.latency.p999_ms}
+    }
+    for _, p in ipairs(percentiles) do
+        table.insert(lines, string.format("  %-6s %s", p[1] .. ":", format_percentile(p[2])))
+    end
     table.insert(lines, "")
 
     table.insert(lines, "--- Payload ---")
@@ -633,10 +684,17 @@ function M.format_text()
     table.insert(lines, "")
 
     table.insert(lines, "--- Errors Breakdown ---")
-    table.insert(lines, string.format("Connect: %d", M.results.errors.connect))
-    table.insert(lines, string.format("Read:    %d", M.results.errors.read))
-    table.insert(lines, string.format("Write:   %d", M.results.errors.write))
-    table.insert(lines, string.format("Timeout: %d", M.results.errors.timeout))
+    local error_types = {"Connect", "Read", "Write", "Timeout"}
+    if M.results.errors.connect == M.NULL then
+        for _, err_type in ipairs(error_types) do
+            table.insert(lines, string.format("%-8s N/A", err_type .. ":"))
+        end
+    else
+        for _, err_type in ipairs(error_types) do
+            local key = string.lower(err_type)
+            table.insert(lines, string.format("%-8s %d", err_type .. ":", M.results.errors[key]))
+        end
+    end
 
     if type(M.results.errors.status) == "table" then
         local status_errors_total = 0
@@ -652,8 +710,10 @@ function M.format_text()
         table.insert(lines, string.format("Status: %s", tostring(M.results.errors.status or 0)))
     end
 
-    if M.results.errors.status_total and M.results.errors.status_total > 0 then
+    if M.results.errors.status_total and M.results.errors.status_total ~= M.NULL and M.results.errors.status_total > 0 then
         table.insert(lines, string.format("Status (from wrk): %d", M.results.errors.status_total))
+    elseif M.results.errors.status_total == M.NULL then
+        table.insert(lines, "Status (from wrk): N/A")
     end
 
     table.insert(lines, "====================================")

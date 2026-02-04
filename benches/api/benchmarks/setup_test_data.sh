@@ -569,6 +569,34 @@ function M.reset_versions()
     end
 end
 
+-- Get total task count
+function M.get_task_count()
+    return #M.task_ids
+end
+
+-- Get total project count
+function M.get_project_count()
+    return #M.project_ids
+end
+
+-- Get all task IDs (copy)
+function M.get_all_task_ids()
+    local copy = {}
+    for i, id in ipairs(M.task_ids) do
+        copy[i] = id
+    end
+    return copy
+end
+
+-- Get all project IDs (copy)
+function M.get_all_project_ids()
+    local copy = {}
+    for i, id in ipairs(M.project_ids) do
+        copy[i] = id
+    end
+    return copy
+end
+
 return M
 EOF
 

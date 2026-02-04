@@ -1,0 +1,832 @@
+# HTTP ステータス集計パイプライン修正 要件定義
+#
+# 概要:
+#   wrk ベンチマークの HTTP ステータスコード集計が最終成果物（meta.json）に反映されない問題を修正し、
+#   エラー原因の定量分析を可能にする。
+#
+# 設計方針:
+#   1. Lua メトリクス（lua_metrics.json）を各フェーズで生成し、最終成果物に統合する
+#   2. done ハンドラの標準出力を保持し、デバッグ可能な形で保存する
+#   3. フェーズ合成時に HTTP ステータスコードを集約し、meta.json に反映する
+#   4. スレッド分離された wrk のスレッド状態を正しく集約する
+#
+# 参照:
+#   - docs/internal/analysis/20260202_tasks_bulk_post_integration_analysis.yaml
+#   - benches/api/benchmarks/scripts/common.lua
+#   - benches/api/benchmarks/scripts/error_tracker.lua
+#   - benches/api/benchmarks/scripts/result_collector.lua
+
+version: "1.0.0"
+name: "http_status_collection_pipeline_fix"
+description: |
+  PR #265 で実装した HTTP ステータス別集計（REQ-ERROR-002）が、
+  wrk ベンチマークの出力から最終成果物（meta.json）に到達していない問題を修正する。
+
+  プロファイリング結果の評価で、tasks_bulk のエラー率が 68.40%、tasks_update が 41.52% と
+  目標の 10% 以下を大幅に超過しているが、http_status フィールドが空（{}）のため、
+  エラーの内訳（400/404/409/500）を特定できず、根本原因の分析とボトルネック改善が不可能な状態。
+
+  根本原因は、フェーズ合成のワークフロー（run_benchmark.sh）が wrk の生出力と
+  Lua の集計結果を破棄または見落としており、HTTP ステータス集計が最終成果物に出ないこと。
+
+# 背景・動機
+background:
+  problem: |
+    ## 現状の問題
+
+    1. **HTTP ステータスコード集計が利用不可**
+       - tasks_bulk.json, tasks_update.json の http_status フィールドが空（{}）
+       - lua_metrics フィールドも null
+       - エラー率は計算されているが、内訳が不明
+
+    2. **wrk 出力に done ハンドラの出力がない**
+       - tasks_bulk/benchmark/wrk/tasks_bulk.txt: HTTP Status Distribution なし
+       - summary.txt: HTTP ステータス情報なし
+       - done() 内の io.write() 出力が失われている
+
+    3. **エラー原因の特定が不可能**
+       - tasks_bulk: error_rate 68.40% の原因が不明（400/409/500 のどれか不明）
+       - tasks_update: error_rate 41.52% の原因が不明
+       - パフォーマンス最適化の方向性が決められない
+
+    ## 期待されていた動作
+
+    PR #265 で実装した機能:
+    - REQ-ERROR-002: HTTP ステータス別集計の実装
+      - error_tracker.lua: track_thread_response(), get_thread_aggregated_summary()
+      - common.lua: create_threaded_handlers() が done で集計結果を出力
+      - result_collector.lua: http_status を JSON に出力
+
+    これらは実装済みだが、ワークフローの統合が不完全で最終成果物に反映されていない。
+
+  motivation: |
+    1. **エラー原因の定量分析を可能にする**
+       - 400 Bad Request: リクエストフォーマットの問題
+       - 404 Not Found: 存在しない ID への操作
+       - 409 Conflict: 楽観的ロックの競合
+       - 500 Internal Server Error: サーバ側の実装バグ
+       各エラーの比率を特定し、適切な改善策を選択する。
+
+    2. **パフォーマンス最適化の根拠を提供する**
+       - 409 が多い → ID プール拡大、リトライ戦略の改善
+       - 500 が多い → サーバ側の実装バグ修正
+       - 404 が多い → ID 選択ロジックの改善
+
+    3. **継続的な性能評価を可能にする**
+       - 各 PR で HTTP ステータスの変化を追跡
+       - リグレッションの早期検出
+       - SLO（エラー率 10% 以下）の達成度を定量的に評価
+
+  prior_art:
+    - name: "wrk2 の --latency オプション"
+      description: "レイテンシ分布を出力する標準機能。HTTP ステータスコードは別途 Lua で集計する必要がある。"
+
+    - name: "Apache Bench の -g オプション"
+      description: "gnuplot フォーマットでレスポンスコードを出力。wrk は Lua スクリプトで柔軟に集計可能。"
+
+    - name: "GitHub Actions の Artifact アップロード"
+      description: "複数のファイルを成果物として保存し、後続のジョブで統合する標準パターン。"
+
+# 要件一覧
+requirements:
+  # ======================================================================
+  # 1. Lua メトリクス出力の統合
+  # ======================================================================
+  - id: REQ-PIPELINE-001
+    name: "lua_metrics.json の生成と保存"
+    description: |
+      各ベンチマークシナリオ実行時に、Lua スクリプトが HTTP ステータスコード集計を含む
+      lua_metrics.json を生成し、result_collector によって保存されるようにする。
+
+      ## 現状の問題
+
+      - result_collector.lua は finalize() で lua_metrics.json を保存する実装がある
+      - しかし、tasks_bulk.lua, tasks_update.lua が common.init_benchmark() /
+        common.finalize_benchmark() を呼び出していない
+      - そのため result_collector.init() / finalize() が実行されず、lua_metrics.json が生成されない
+
+      ## 実装要件
+
+      1. tasks_bulk.lua の修正:
+         ```lua
+         local handlers = common.create_threaded_handlers("tasks_bulk")
+
+         function setup(thread)
+             handlers.setup(thread)
+         end
+
+         function init(args)
+             common.init_benchmark({
+                 scenario_name = "tasks_bulk",
+                 output_format = "json"
+             })
+         end
+
+         function request()
+             -- 既存のリクエスト生成ロジック
+         end
+
+         function response(status, headers, body)
+             handlers.response(status, headers, body)
+         end
+
+         function done(summary, latency, requests)
+             handlers.done(summary, latency, requests)
+             common.finalize_benchmark(summary, latency, requests)
+         end
+         ```
+
+      2. tasks_update.lua の修正:
+         - tasks_bulk.lua と同様の修正を適用
+
+      3. LUA_RESULTS_DIR 環境変数の設定:
+         - run_benchmark.sh が LUA_RESULTS_DIR を設定し、lua_metrics.json の出力先を指定
+         - フェーズごとに <phase_dir>/lua_metrics.json に保存
+
+      ## 検証方法
+
+      - ベンチマーク実行後、各フェーズのディレクトリに lua_metrics.json が存在する
+      - lua_metrics.json に http_status, error_rate, status_distribution が含まれる
+      - jq で JSON の妥当性を検証: `jq . lua_metrics.json`
+
+  - id: REQ-PIPELINE-002
+    name: "フェーズ間の lua_metrics 統合"
+    description: |
+      複数フェーズを持つベンチマーク（ramp_up, main, ramp_down など）で、
+      各フェーズの lua_metrics.json を統合し、全体の集計結果を生成する。
+
+      ## 実装要件
+
+      1. merge_lua_metrics 関数の実装:
+         ```bash
+         merge_lua_metrics() {
+             local output_file="$1"
+             shift
+             local input_files=("$@")
+
+             # Python スクリプトで JSON をマージ
+             python3 "${SCRIPT_DIR}/scripts/merge_lua_metrics.py" \
+                 --output "${output_file}" \
+                 "${input_files[@]}"
+         }
+         ```
+
+      2. scripts/merge_lua_metrics.py の実装:
+         - 各フェーズの lua_metrics.json を読み込み
+         - http_status のカウントを合算
+         - total_requests, error_rate を再計算
+         - 統合された lua_metrics.json を出力
+
+      3. merge_phase_results での呼び出し:
+         ```bash
+         merge_phase_results() {
+             # ... 既存のマージ処理 ...
+
+             # lua_metrics のマージ
+             local lua_metrics_files=()
+             for phase in "${phases[@]}"; do
+                 local lua_metrics="${phase_dir}/${phase}/lua_metrics.json"
+                 if [[ -f "${lua_metrics}" ]]; then
+                     lua_metrics_files+=("${lua_metrics}")
+                 fi
+             done
+
+             if [[ ${#lua_metrics_files[@]} -gt 0 ]]; then
+                 merge_lua_metrics "${RESULTS_DIR}/lua_metrics.json" "${lua_metrics_files[@]}"
+             fi
+         }
+         ```
+
+      ## 統合ロジック
+
+      - http_status: 各ステータスコードのカウントを合算
+      - total_requests: 合算
+      - error_rate: total_errors / total_requests で再計算
+      - latency: 各フェーズの weighted average（requests で重み付け）
+
+      ## 検証方法
+
+      - 複数フェーズのベンチマーク実行後、RESULTS_DIR/lua_metrics.json が存在
+      - 各フェーズの http_status が正しく合算されている
+      - total_requests が各フェーズの合計と一致
+
+  - id: REQ-PIPELINE-003
+    name: "meta.json への http_status 反映"
+    description: |
+      generate_meta_json 関数が lua_metrics.json から http_status を読み込み、
+      meta.json の http_status フィールドに反映する。
+
+      ## 実装要件
+
+      1. generate_meta_json の修正:
+         ```bash
+         generate_meta_json() {
+             local meta_file="$1"
+             local wrk_output="$2"
+             local lua_metrics="$3"  # 新しい引数
+
+             # ... 既存の解析処理 ...
+
+             # lua_metrics から http_status を抽出
+             local http_status="{}"
+             if [[ -f "${lua_metrics}" ]]; then
+                 http_status=$(jq -c '.http_status // {}' "${lua_metrics}")
+             fi
+
+             # meta.json に http_status を追加
+             jq -n \
+                 --argjson scenario "${scenario_json}" \
+                 --argjson execution "${execution_json}" \
+                 --argjson results "${results_json}" \
+                 --argjson errors "${errors_json}" \
+                 --argjson http_status "${http_status}" \
+                 '{
+                     version: "3.0",
+                     scenario: $scenario,
+                     execution: $execution,
+                     results: ($results + {http_status: $http_status}),
+                     errors: $errors,
+                     ...
+                 }' > "${meta_file}"
+         }
+         ```
+
+      2. 呼び出し側の修正:
+         ```bash
+         # 単一フェーズの場合
+         generate_meta_json "${meta_file}" "${wrk_output}" "${RESULTS_DIR}/lua_metrics.json"
+
+         # 複数フェーズの場合
+         merge_phase_results
+         generate_meta_json "${meta_file}" "${RESULTS_DIR}/wrk.txt" "${RESULTS_DIR}/lua_metrics.json"
+         ```
+
+      ## 検証方法
+
+      - meta.json の results.http_status が lua_metrics.json の http_status と一致
+      - http_status が空（{}）でない
+      - 各ステータスコード（200, 201, 207, 400, 404, 409, 500）のカウントが含まれる
+
+  # ======================================================================
+  # 2. done ハンドラ出力の保持
+  # ======================================================================
+  - id: REQ-PIPELINE-004
+    name: "wrk 生出力の保存"
+    description: |
+      wrk の標準出力（done ハンドラの io.write() を含む）を raw_wrk.txt として保存し、
+      デバッグと検証を可能にする。
+
+      ## 実装要件
+
+      1. run_single_phase の修正:
+         ```bash
+         run_single_phase() {
+             local phase_name="$1"
+             local phase_dir="$2"
+
+             # wrk の実行と生出力の保存
+             wrk ... "${lua_script}" 2>&1 | tee "${phase_dir}/raw_wrk.txt"
+
+             # 既存の処理（wrk.txt, meta.json の生成）
+             ...
+         }
+         ```
+
+      2. merge_phase_results の修正:
+         ```bash
+         merge_phase_results() {
+             # raw_wrk.txt を連結して保存
+             cat "${phase_dirs[@]/%//raw_wrk.txt}" > "${RESULTS_DIR}/raw_wrk_all.txt"
+
+             # 既存のマージ処理
+             ...
+         }
+         ```
+
+      ## 保存内容
+
+      raw_wrk.txt には以下が含まれる:
+      - wrk の標準的な統計情報（Latency Distribution, Requests/sec など）
+      - Lua の init() / done() からの io.write() 出力
+      - error_tracker の HTTP Status Distribution
+      - common.lua の Status Summary
+
+      ## 検証方法
+
+      - raw_wrk.txt に "HTTP Status Distribution" セクションが含まれる
+      - grep "Status Summary" raw_wrk.txt で検索可能
+      - 各ステータスコードのカウントと比率が出力されている
+
+  - id: REQ-PIPELINE-005
+    name: "summary.txt への HTTP ステータス追加"
+    description: |
+      ベンチマーク実行後に生成される summary.txt に、HTTP ステータスコード集計を追加し、
+      視認性を向上させる。
+
+      ## 実装要件
+
+      1. generate_summary 関数の修正:
+         ```bash
+         generate_summary() {
+             local summary_file="$1"
+             local lua_metrics="$2"
+
+             # 既存のサマリー生成
+             echo "Benchmark Results - $(date)" > "${summary_file}"
+             echo "================================" >> "${summary_file}"
+
+             # ... RPS, Latency などの既存出力 ...
+
+             # HTTP ステータス分布の追加
+             if [[ -f "${lua_metrics}" ]]; then
+                 echo "" >> "${summary_file}"
+                 echo "--- HTTP Status Distribution ---" >> "${summary_file}"
+                 jq -r '.http_status | to_entries[] | "\(.key): \(.value)"' "${lua_metrics}" \
+                     >> "${summary_file}"
+
+                 echo "" >> "${summary_file}"
+                 echo "--- Error Analysis ---" >> "${summary_file}"
+                 local error_rate
+                 error_rate=$(jq -r '.error_rate // 0' "${lua_metrics}")
+                 echo "Error Rate: ${error_rate}" >> "${summary_file}"
+             fi
+         }
+         ```
+
+      ## 出力例
+
+      ```
+      Benchmark Results - Mon Feb  3 12:30:00 UTC 2026
+      ================================
+
+      tasks_bulk:
+        Requests/sec: 32.65
+        Avg Latency:  17.71s
+        P50: 17.32s
+        P99: 27.57s
+
+      --- HTTP Status Distribution ---
+      200: 310
+      207: 0
+      400: 450
+      409: 210
+      500: 11
+
+      --- Error Analysis ---
+      Error Rate: 0.6840
+      ```
+
+      ## 検証方法
+
+      - summary.txt に "HTTP Status Distribution" セクションが含まれる
+      - 各ステータスコードのカウントが表示される
+      - エラー率が表示される
+
+  # ======================================================================
+  # 3. スレッド集約の修正
+  # ======================================================================
+  - id: REQ-PIPELINE-006
+    name: "error_tracker のスレッド集約実装"
+    description: |
+      error_tracker.get_thread_aggregated_summary() が wrk のスレッド分離モデルに対応し、
+      全スレッドの HTTP ステータスカウントを正しく集約する。
+
+      ## 現状の問題
+
+      - error_tracker.setup_thread() で M.threads にスレッドを追加
+      - しかし wrk のスレッドは完全に分離されており、done ハンドラは各スレッドで独立実行
+      - M.threads は各スレッドのローカル変数で、他のスレッドの状態にアクセスできない
+      - そのため get_thread_aggregated_summary() は自スレッドの状態のみ返す
+
+      ## 実装要件
+
+      1. error_tracker.lua の修正:
+         ```lua
+         function M.setup_thread(thread)
+             -- M.threads への追加を削除（wrk のスレッド分離により無効）
+             -- 代わりに thread:set() で初期化
+             local status_codes = {"200", "201", "207", "400", "404", "409", "422", "500", "502", "other"}
+             for _, code in ipairs(status_codes) do
+                 thread:set("status_" .. code, 0)
+             end
+         end
+
+         function M.get_thread_aggregated_summary()
+             -- wrk.thread が現在のスレッドオブジェクト
+             local thread = wrk.thread
+             if not thread then
+                 return {
+                     status_200 = 0, status_201 = 0, status_207 = 0,
+                     status_400 = 0, status_404 = 0, status_409 = 0,
+                     status_422 = 0, status_500 = 0, status_502 = 0,
+                     status_other = 0,
+                 }
+             end
+
+             local aggregated = {}
+             local status_codes = {"200", "201", "207", "400", "404", "409", "422", "500", "502", "other"}
+             for _, code in ipairs(status_codes) do
+                 local key = "status_" .. code
+                 aggregated[key] = tonumber(thread:get(key)) or 0
+             end
+             return aggregated
+         end
+         ```
+
+      2. common.lua の done ハンドラ修正:
+         ```lua
+         done = function(summary, latency, requests)
+             M.print_summary(script_name, summary)
+
+             -- 注意: done は各スレッドで独立に実行される
+             -- 全スレッドの集約は wrk 側で行う必要がある
+             local thread_summary = error_tracker.get_thread_aggregated_summary()
+             local total = summary.requests or 0
+
+             -- このスレッドの集計結果を出力
+             io.write(string.format("\n--- %s HTTP Status (Thread %d) ---\n",
+                 script_name, wrk.thread.id or 0))
+             -- ... ステータスコード出力 ...
+         end
+         ```
+
+      ## 注意事項
+
+      wrk のアーキテクチャ上、done ハンドラは各スレッドで独立に実行され、
+      他のスレッドの状態にアクセスできない。
+
+      全スレッドの集約は以下の方法で実現:
+      1. 各スレッドが done で自スレッドの結果を出力
+      2. result_collector.finalize() が summary を使って全体を集約
+      3. lua_metrics.json に全スレッドの合計を保存
+
+      ## 検証方法
+
+      - THREADS=4 で実行時、各スレッドの HTTP Status 出力が表示される
+      - lua_metrics.json の http_status が全スレッドの合計になっている
+      - 各スレッドの合計と lua_metrics.json の合計が一致
+
+  # ======================================================================
+  # 4. 統合テストとドキュメント
+  # ======================================================================
+  - id: REQ-PIPELINE-007
+    name: "統合テストの実装"
+    description: |
+      HTTP ステータス集計パイプラインの統合テストを実装し、
+      各要件が正しく動作することを検証する。
+
+      ## テストシナリオ
+
+      1. **単一フェーズのテスト**:
+         ```bash
+         # tasks_bulk を 5 秒実行
+         ./run_benchmark.sh --scenario tasks_bulk --quick
+
+         # 検証項目
+         - lua_metrics.json が存在する
+         - http_status が空でない
+         - meta.json の http_status が lua_metrics と一致
+         - raw_wrk.txt に "HTTP Status Distribution" が含まれる
+         - summary.txt に HTTP ステータスが表示される
+         ```
+
+      2. **複数フェーズのテスト**:
+         ```bash
+         # ramp_up_down プロファイルで実行
+         ./run_benchmark.sh --scenario tasks_update
+
+         # 検証項目
+         - 各フェーズの lua_metrics.json が存在する
+         - マージされた lua_metrics.json が存在する
+         - meta.json の http_status が全フェーズの合計になっている
+         ```
+
+      3. **エラー率の検証**:
+         ```bash
+         # 高エラー率のシナリオ
+         FAIL_RATE=0.3 ./run_benchmark.sh --scenario tasks_bulk --quick
+
+         # 検証項目
+         - http_status に 400/500 が含まれる
+         - error_rate が 0.3 付近である
+         - meta.json の error_rate と lua_metrics が一致
+         ```
+
+      ## 自動テストスクリプト
+
+      scripts/test_http_status_pipeline.sh の実装:
+      ```bash
+      #!/bin/bash
+      set -euo pipefail
+
+      test_single_phase() {
+          echo "Testing single phase..."
+          ./run_benchmark.sh --scenario tasks_bulk --quick
+
+          local results_dir="$(find benches/api/benchmarks/results -type d -name '20*' | sort -r | head -1)"
+
+          # lua_metrics.json の検証
+          if [[ ! -f "${results_dir}/lua_metrics.json" ]]; then
+              echo "FAIL: lua_metrics.json not found"
+              return 1
+          fi
+
+          # http_status の検証
+          local http_status=$(jq -c '.http_status' "${results_dir}/lua_metrics.json")
+          if [[ "${http_status}" == "{}" || "${http_status}" == "null" ]]; then
+              echo "FAIL: http_status is empty"
+              return 1
+          fi
+
+          echo "PASS: single phase test"
+      }
+
+      test_meta_integration() {
+          echo "Testing meta.json integration..."
+          ./run_benchmark.sh --scenario tasks_update --quick
+
+          local results_dir="$(find benches/api/benchmarks/results -type d -name '20*' | sort -r | head -1)"
+
+          # meta.json の http_status 検証
+          local meta_http_status=$(jq -c '.results.http_status' "${results_dir}/meta/tasks_update.json")
+          local lua_http_status=$(jq -c '.http_status' "${results_dir}/lua_metrics.json")
+
+          if [[ "${meta_http_status}" != "${lua_http_status}" ]]; then
+              echo "FAIL: meta.json http_status does not match lua_metrics"
+              return 1
+          fi
+
+          echo "PASS: meta integration test"
+      }
+
+      # 全テスト実行
+      test_single_phase
+      test_meta_integration
+
+      echo "All tests passed"
+      ```
+
+      ## 検証方法
+
+      - scripts/test_http_status_pipeline.sh を実行
+      - 全てのテストが PASS になる
+      - CI/CD パイプラインに統合
+
+  - id: REQ-PIPELINE-008
+    name: "ドキュメントの更新"
+    description: |
+      HTTP ステータス集計パイプラインの動作を説明するドキュメントを作成・更新する。
+
+      ## 更新対象
+
+      1. **benches/api/benchmarks/README.md**:
+         - HTTP ステータス集計の仕組みを説明
+         - lua_metrics.json のフォーマットを記載
+         - トラブルシューティングガイドを追加
+
+      2. **docs/internal/analysis/http_status_collection_design.md**:
+         ```markdown
+         # HTTP ステータス集計パイプライン設計
+
+         ## 概要
+
+         wrk ベンチマークで HTTP ステータスコードを集計し、
+         エラー原因の定量分析を可能にする仕組み。
+
+         ## アーキテクチャ
+
+         ```
+         wrk (Lua)
+           ↓ track_thread_response()
+         error_tracker.lua (スレッド状態管理)
+           ↓ get_thread_aggregated_summary()
+         common.lua (done ハンドラ)
+           ↓ io.write()
+         raw_wrk.txt (標準出力)
+
+         result_collector.lua
+           ↓ finalize() → save_results()
+         lua_metrics.json (各フェーズ)
+           ↓ merge_lua_metrics.py
+         lua_metrics.json (統合)
+           ↓ generate_meta_json()
+         meta.json (最終成果物)
+         ```
+
+         ## データフロー
+
+         1. **リクエスト実行時**:
+            - wrk が response() を呼び出し
+            - error_tracker.track_thread_response() でステータスを記録
+            - thread:set() でスレッドローカル変数に保存
+
+         2. **done ハンドラ実行時**:
+            - 各スレッドで done() が独立に実行
+            - error_tracker.get_thread_aggregated_summary() で自スレッドの集計
+            - result_collector.finalize() で全スレッドの summary を統合
+            - lua_metrics.json に保存
+
+         3. **フェーズマージ時**:
+            - merge_lua_metrics.py が各フェーズの lua_metrics.json を統合
+            - http_status のカウントを合算
+            - error_rate を再計算
+
+         4. **meta.json 生成時**:
+            - generate_meta_json() が lua_metrics.json を読み込み
+            - meta.json の results.http_status に反映
+
+         ## トラブルシューティング
+
+         ### http_status が空の場合
+
+         1. lua_metrics.json が存在するか確認:
+            ```bash
+            find results/ -name "lua_metrics.json"
+            ```
+
+         2. raw_wrk.txt に done 出力があるか確認:
+            ```bash
+            grep "HTTP Status Distribution" results/*/raw_wrk.txt
+            ```
+
+         3. LUA_RESULTS_DIR が設定されているか確認:
+            ```bash
+            env | grep LUA_RESULTS_DIR
+            ```
+
+         ### done ハンドラが実行されない場合
+
+         - Lua スクリプトに done() 関数が定義されているか確認
+         - common.finalize_benchmark() が呼ばれているか確認
+         ```
+
+      3. **CHANGELOG.md**:
+         ```markdown
+         ## [Unreleased]
+
+         ### Fixed
+         - HTTP ステータス集計が meta.json に反映されない問題を修正
+         - lua_metrics.json の生成と統合パイプラインを実装
+         - wrk の done ハンドラ出力を raw_wrk.txt として保存
+         ```
+
+      ## 検証方法
+
+      - README.md に HTTP ステータス集計のセクションが追加されている
+      - トラブルシューティングガイドが実際の問題解決に役立つ
+      - 設計ドキュメントがアーキテクチャを正確に説明している
+
+# 非機能要件
+non_functional_requirements:
+  performance:
+    - "lua_metrics.json の生成は wrk のベンチマーク実行時間に対して 1% 以下のオーバーヘッド"
+    - "merge_lua_metrics.py の実行時間は 1 秒以内（フェーズ数 10 以下の場合）"
+    - "meta.json のサイズ増加は 10KB 以内"
+
+  compatibility:
+    - "既存の meta.json フォーマット（version 3.0）との後方互換性を維持"
+    - "http_status フィールドが空の場合でも meta.json の解析が失敗しない"
+    - "wrk と wrk2 の両方で動作する"
+
+  testing:
+    - "全ての要件に対して統合テストを実装"
+    - "CI/CD パイプラインで自動テストを実行"
+    - "テストカバレッジ 100%（新規実装コードに対して）"
+
+  maintainability:
+    - "Lua スクリプトと Shell スクリプトの責任分離を明確にする"
+    - "エラーメッセージは問題の特定と解決方法を含む"
+    - "ログ出力は構造化され、grep/jq で解析可能"
+
+# 実装計画
+implementation_plan:
+  phase_1:
+    name: "Lua メトリクス出力の実装"
+    estimated_effort: "1 日"
+    tasks:
+      - "tasks_bulk.lua に init() / done() を追加"
+      - "tasks_update.lua に init() / done() を追加"
+      - "run_benchmark.sh に LUA_RESULTS_DIR の設定を追加"
+      - "lua_metrics.json の生成を確認"
+
+  phase_2:
+    name: "フェーズ統合とメタ反映"
+    estimated_effort: "1 日"
+    tasks:
+      - "scripts/merge_lua_metrics.py の実装"
+      - "merge_phase_results に lua_metrics マージを追加"
+      - "generate_meta_json に http_status 反映を追加"
+      - "meta.json の http_status を確認"
+
+  phase_3:
+    name: "done 出力の保存とスレッド集約"
+    estimated_effort: "0.5 日"
+    tasks:
+      - "run_single_phase に raw_wrk.txt の保存を追加"
+      - "error_tracker.lua のスレッド集約を修正"
+      - "raw_wrk.txt に done 出力が含まれることを確認"
+
+  phase_4:
+    name: "統合テストとドキュメント"
+    estimated_effort: "0.5 日"
+    tasks:
+      - "scripts/test_http_status_pipeline.sh の実装"
+      - "README.md の更新"
+      - "設計ドキュメントの作成"
+      - "CI/CD パイプラインへの統合"
+
+# 受け入れ基準
+acceptance_criteria:
+  functionality:
+    - "tasks_bulk, tasks_update のベンチマーク実行後、meta.json の http_status が空でない"
+    - "http_status に 200, 201, 207, 400, 404, 409, 500 などの実際のカウントが含まれる"
+    - "lua_metrics.json が各フェーズで生成される"
+    - "raw_wrk.txt に done ハンドラの出力が含まれる"
+    - "summary.txt に HTTP Status Distribution セクションが表示される"
+
+  accuracy:
+    - "meta.json の http_status が lua_metrics.json と一致する"
+    - "error_rate が HTTP 4xx/5xx の比率と一致する"
+    - "各ステータスコードのカウント合計が total_requests と一致する"
+
+  robustness:
+    - "lua_metrics.json が存在しない場合でも meta.json 生成が失敗しない"
+    - "done ハンドラでエラーが発生してもベンチマークが中断されない"
+    - "フェーズが 1 つの場合もマージロジックが正しく動作する"
+
+  testing:
+    - "scripts/test_http_status_pipeline.sh の全テストが PASS"
+    - "CI/CD パイプラインで自動テストが実行される"
+    - "既存のベンチマークシナリオが全て正常実行される"
+
+# 将来の拡張
+future_extensions:
+  - id: "EXT-001"
+    name: "リアルタイム HTTP ステータス可視化"
+    description: |
+      ベンチマーク実行中に HTTP ステータスコードの分布をリアルタイムで表示する。
+      Grafana や Prometheus との統合を検討。
+    rationale: |
+      現時点では静的な集計結果の保存に集中し、リアルタイム可視化は将来の拡張とする。
+
+  - id: "EXT-002"
+    name: "カスタム HTTP ステータスコードの追加"
+    description: |
+      207 Multi-Status など、アプリケーション固有のステータスコードを柔軟に追加できる仕組み。
+    rationale: |
+      現時点では一般的なステータスコード（200, 201, 400, 404, 409, 500）に対応し、
+      カスタムコードの追加は必要に応じて実装する。
+
+  - id: "EXT-003"
+    name: "エラー原因の自動分類"
+    description: |
+      HTTP ステータスコードとレスポンスボディから、エラーの根本原因を自動分類する。
+      例: 409 Conflict → バージョン競合 or ID 重複
+    rationale: |
+      まずは HTTP ステータスコードの集計を確立し、詳細な原因分析は次のステップとする。
+
+# 関連ドキュメント
+related_documents:
+  requirements:
+    - path: "docs/internal/requirements/20260201_1300_benchmark_coverage_improvement.yaml"
+      description: "ベンチマークカバレッジ改善の要件定義（REQ-ERROR-002 を含む）"
+
+  analysis:
+    - path: "docs/internal/analysis/20260202_tasks_bulk_post_integration_analysis.yaml"
+      description: "tasks_bulk の統合後分析（エラー率 68.40% の問題を特定）"
+
+  implementation:
+    - path: "benches/api/benchmarks/scripts/common.lua"
+      description: "共通ユーティリティと create_threaded_handlers() の実装"
+
+    - path: "benches/api/benchmarks/scripts/error_tracker.lua"
+      description: "HTTP ステータスコード集計の実装"
+
+    - path: "benches/api/benchmarks/scripts/result_collector.lua"
+      description: "結果の JSON 出力とフォーマット"
+
+    - path: "benches/api/benchmarks/run_benchmark.sh"
+      description: "ベンチマーク実行とフェーズ統合のワークフロー"
+
+# メタ情報
+metadata:
+  author: "Claude Code + Codex MCP"
+  created_at: "2026-02-03T12:27:00Z"
+  status: "draft"
+  priority: "P0"
+  estimated_completion: "2026-02-04"
+  related_issues:
+    - "PR #265: benchmark coverage improvement (REQ-ERROR-001, REQ-ERROR-002, REQ-ERROR-003)"
+
+  success_metrics:
+    - metric: "http_status 集計の成功率"
+      target: "100%"
+      current: "0%"
+
+    - metric: "エラー原因の特定可能率"
+      target: "100%"
+      current: "0%"
+
+    - metric: "ベンチマーク実行時のオーバーヘッド"
+      target: "< 1%"
+      current: "未計測"

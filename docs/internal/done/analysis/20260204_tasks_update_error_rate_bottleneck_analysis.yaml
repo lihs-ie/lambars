@@ -1,0 +1,219 @@
+id: ANALYSIS-20260204-0841
+title: "tasks_update エラー率74.99%のボトルネック分析"
+created: "2026-02-04"
+status: completed
+category: performance
+related_requirements:
+  - "docs/internal/requirements/20260204_0841_tasks_update_error_rate_remediation.yaml"
+related_issues:
+  - "docs/internal/issues/20260125_1814_tasks_update_conflict.yaml"
+tags:
+  - profiling
+  - error-rate
+  - tasks-update
+  - bottleneck
+
+ci_run_info:
+  workflow: "Profiling Analysis"
+  branch: "feature/tasks-bulk-update-error-rate-remediation"
+  run_id: 21651551205
+  commit: "fc35c16"
+  status: "success"
+  timestamp: "2026-02-03T23:15:06Z"
+
+benchmark_results:
+  tasks_bulk:
+    error_rate: 0.00%
+    status: "✓ 改善済み"
+    rps: 13.65
+    latency_avg_ms: 18380
+    requests: 410
+
+  tasks_update:
+    error_rate: 74.99%
+    status: "✗ 深刻な問題"
+    target: "≤10%"
+    rps: 800.15
+    latency_avg_ms: 0.92
+    requests: 24000
+    scenario:
+      threads: 4
+      connections: 50
+      id_pool_size: 1000
+      retry_count: 1
+
+  tasks_update_conflict:
+    error_rate: 74.99%
+    status: "✗ 深刻な問題"
+    target: "≤10%"
+    rps: 500.12
+    latency_avg_ms: 0.81
+    requests: 15003
+    scenario:
+      threads: 4
+      connections: 4
+      id_pool_size: 1000
+      retry_count: 1
+
+  tasks_update_steady:
+    error_rate: 0.00%
+    status: "✓ 成功"
+    rps: ~100
+    scenario:
+      threads: 1
+      connections: 1
+      note: "低コンテンション環境では成功"
+
+root_causes:
+  primary:
+    - issue: "ID_POOL_SIZE 未設定"
+      severity: "高"
+      description: |
+        metadata.id_pool_size=1000 が環境変数に反映されず、
+        デフォルト10件で動作。高衝突が発生。
+      affected_files:
+        - "benches/api/benchmarks/run_benchmark.sh"
+      note: |
+        分析時点（2026-02-04）では scenario_env.sh のみ対応済みで、
+        run_benchmark.sh の load_scenario_env_vars 関数が欠落していた。
+        現在は run_benchmark.sh も load_numeric_param で ID_POOL_SIZE/RETRY_COUNT を export 済み。
+      evidence: |
+        分析時点での状態:
+        - run_benchmark.sh の load_scenario_env_vars で ID_POOL_SIZE と RETRY_COUNT の export が欠落
+        - scenario_env.sh は load_scenario_env / export_scenario_env で対応済み
+        現在は両方とも対応完了。
+
+    - issue: "threads vs connections 不整合"
+      severity: "高"
+      description: |
+        tasks_update.lua は「1 thread = 1 connection」前提だが、
+        実際は threads=4, connections=50 で前提違反。
+        version 状態が共有されず同一IDに古いversionでPUT → 409多発。
+      affected_files:
+        - "benches/api/benchmarks/scripts/tasks_update.lua"
+        - "benches/api/benchmarks/scenarios/tasks_update.yaml"
+      evidence: |
+        tasks_update.lua の counter / last_request_index が
+        接続単位ではなくスレッド単位で管理されている
+
+  secondary:
+    - issue: "RETRY_COUNT 未設定"
+      severity: "中"
+      description: |
+        metadata.retry_count=1 や error_config.max_retries=2 が未反映。
+        再試行回数が制御できていない。
+      affected_files:
+        - "benches/api/benchmarks/run_benchmark.sh"
+      note: |
+        scenario_env.sh は対応済み。run_benchmark.sh のみ欠落。
+
+    - issue: "http_status 内訳欠落"
+      severity: "低"
+      description: |
+        result_collector 未初期化のため、エラー原因分類が困難。
+        409/404などの詳細が不明。
+      affected_files:
+        - "benches/api/benchmarks/scripts/tasks_update.lua"
+      evidence: |
+        common.track_response のみで result_collector 未初期化。
+        http_status 内訳は出力されない。
+
+key_findings:
+  - finding: "レイテンシが低いのにエラー率が高い理由"
+    explanation: |
+      409などの即時エラーは処理が軽く、DB更新を行わずに返るため
+      レイテンシは低く保たれる。「速く失敗する」構図。
+
+  - finding: "tasks_bulk成功 vs tasks_update失敗の理由"
+    explanation: |
+      tasks_bulk は低RPS（13.65）かつ version依存の更新が不要。
+      tasks_update は高RPSでversion整合に依存し、
+      ベンチマーク側の状態管理に依存するため失敗。
+
+  - finding: "tasks_update_steady が成功する理由"
+    explanation: |
+      threads=connections=1 で「1 thread = 1 connection」前提を満たし、
+      スレッド間のversion不整合が起きにくい。
+
+recommended_fixes:
+  high_priority:
+    - fix: "ID_POOL_SIZE の環境変数マッピング追加"
+      target_files:
+        - "benches/api/benchmarks/run_benchmark.sh"
+      note: "scenario_env.sh は既に対応済み"
+      action: |
+        run_benchmark.sh の load_scenario_env_vars 関数に
+        metadata.id_pool_size を ID_POOL_SIZE として export するロジックを追加
+      expected_impact: "想定どおりのIDプールで衝突率を制御"
+
+    - fix: "threads=connections 統一"
+      target_files:
+        - "benches/api/benchmarks/scenarios/tasks_update.yaml"
+      action: |
+        threads=connections=1 に固定、または
+        スレッドごとにID範囲を分割する仕組みを追加
+      expected_impact: "競合率の大幅低下、エラー率改善"
+
+  medium_priority:
+    - fix: "RETRY_COUNT の環境変数マッピング追加"
+      target_files:
+        - "benches/api/benchmarks/run_benchmark.sh"
+      action: |
+        metadata.retry_count を RETRY_COUNT として export
+      expected_impact: "再試行回数が設定通りになり成功率が安定"
+
+    - fix: "connections=threads に統一"
+      target_files:
+        - "benches/api/benchmarks/scripts/tasks_update.lua"
+      action: |
+        connections=threads を強制、もしくは
+        接続単位の状態管理を導入
+      expected_impact: "レスポンス対応の整合性向上"
+
+  low_priority:
+    - fix: "result_collector 有効化"
+      target_files:
+        - "benches/api/benchmarks/scripts/tasks_update.lua"
+      action: |
+        common.init_benchmark / common.finalize_benchmark で
+        result_collector を有効化
+      expected_impact: "エラー原因の詳細把握が可能"
+
+performance_impact:
+  current:
+    tasks_update_error_rate: 74.99%
+    tasks_update_conflict_error_rate: 74.99%
+    estimated_409_rate: "~75%"
+
+  expected_after_fix:
+    tasks_update_error_rate: "≤10%"
+    tasks_update_conflict_error_rate: "≤10%"
+    improvement: "エラー率を85%削減"
+
+methodology:
+  tools_used:
+    - "GitHub CLI (gh)"
+    - "Codex MCP"
+    - "CI Artifacts Analysis"
+
+  analysis_steps:
+    - "最新CI実行結果の取得（run: 21651551205）"
+    - "アーティファクトのダウンロードと解析"
+    - "メタデータJSON（tasks_bulk/update/update_conflict）の比較"
+    - "シナリオYAMLとLuaスクリプトのコード分析"
+    - "環境変数マッピング箇所の特定"
+    - "成功パターン（tasks_update_steady）との差分分析"
+    - "Codex MCPによる根本原因の特定"
+
+next_actions:
+  - action: "要件定義に基づいた実装計画の作成"
+    file: "docs/internal/requirements/20260204_0841_tasks_update_error_rate_remediation.yaml"
+
+  - action: "環境変数マッピングの修正（Phase 1）"
+    priority: "即時"
+
+  - action: "threads/connections整合性確保（Phase 2）"
+    priority: "即時"
+
+  - action: "result_collector有効化（Phase 3）"
+    priority: "中期"
