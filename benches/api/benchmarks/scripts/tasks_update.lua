@@ -14,9 +14,6 @@ local thread_retry_count, thread_retry_exhausted_count = 0, 0
 local update_types = {"priority", "status", "description", "title", "full"}
 
 local backoff_skip_counter, backoff_skip_target = 0, 0
-local backoff_request_count = 0
-local fallback_request_count = 0
-local suppressed_request_count = 0
 local is_backoff_request, is_suppressed_request, is_fallback_request = false, false, false
 
 -- REQ-MEASURE-401: リクエストカテゴリの追加
@@ -131,7 +128,6 @@ local function fallback_request()
     state = "fallback"
     last_request_is_update = false
     is_fallback_request = true
-    fallback_request_count = fallback_request_count + 1
     request_categories.fallback = request_categories.fallback + 1
     return wrk and wrk.format and wrk.format("GET", "/health") or ""
 end
@@ -141,7 +137,6 @@ function request()
         local suppressed = wrk.thread:get("suppressed")
         if suppressed == true or suppressed == "true" then
             is_suppressed_request = true
-            suppressed_request_count = suppressed_request_count + 1
             request_categories.suppressed = request_categories.suppressed + 1
             return wrk and wrk.format and wrk.format("GET", "/health") or ""
         end
@@ -151,7 +146,6 @@ function request()
     if backoff_skip_counter < backoff_skip_target then
         backoff_skip_counter = backoff_skip_counter + 1
         is_backoff_request = true
-        backoff_request_count = backoff_request_count + 1
         request_categories.backoff = request_categories.backoff + 1
         return wrk and wrk.format and wrk.format("GET", "/health") or ""
     end
@@ -298,9 +292,9 @@ local STATUS_LABELS = {
 
 local function print_excluded_requests()
     local excluded = {
-        {backoff_request_count, "Backoff"},
-        {suppressed_request_count, "Suppressed thread"},
-        {fallback_request_count, "Fallback"}
+        {request_categories.backoff, "Backoff"},
+        {request_categories.suppressed, "Suppressed thread"},
+        {request_categories.fallback, "Fallback"}
     }
     for _, item in ipairs(excluded) do
         if item[1] > 0 then
@@ -339,7 +333,7 @@ local function print_status_distribution(aggregated, lua_total, summary)
     io.write(string.format("\nActual Error Rate: %.2f%% (%d errors / %d requests)\n",
         actual_error_rate, error_count, total))
     io.write(string.format("Note: %d backoff + %d suppressed + %d fallback requests are excluded from metrics\n",
-        backoff_request_count, suppressed_request_count, fallback_request_count))
+        request_categories.backoff, request_categories.suppressed, request_categories.fallback))
 end
 
 function done(summary, latency, requests)
