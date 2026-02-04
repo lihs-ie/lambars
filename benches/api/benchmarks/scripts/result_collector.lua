@@ -32,6 +32,11 @@ M.results = {
     status_code_counts = { count_400 = 0, count_404 = 0, count_409 = 0, count_422 = 0, count_500 = 0 },
     http_status = {},
     retries = 0,
+    meta = {
+        tracked_requests = 0,
+        excluded_requests = 0,
+        success_rate = 0
+    },
     rps = { target = 0, actual = 0 },
     latency = {
         min_us = 0, max_us = 0, mean_us = 0, stdev_us = 0,
@@ -347,25 +352,54 @@ local function aggregate_error_counts()
     return counts
 end
 
+-- REQ-MEASURE-401: tracked_requests の計算（純粋関数）
+local function calculate_tracked_requests(status_distribution)
+    local tracked = 0
+    if status_distribution and type(status_distribution) == "table" then
+        for status, count in pairs(status_distribution) do
+            if tonumber(status) and type(count) == "number" then
+                tracked = tracked + count
+            end
+        end
+    end
+    return tracked
+end
+
 local function set_error_metrics(http_error_counts, summary)
-    if M.results.total_requests <= 0 then
+    -- REQ-MEASURE-401: tracked_requests の計算
+    local tracked_requests = calculate_tracked_requests(M.results.status_distribution)
+    M.results.meta.tracked_requests = tracked_requests
+
+    if tracked_requests <= 0 then
         M.results.error_rate = 0
         M.results.client_error_rate = 0
         M.results.http_error_rate = 0
         M.results.network_error_rate = 0
         M.results.conflict_rate = 0
         M.results.conflict_count = 0
+        M.results.meta.success_rate = 0
         return
     end
 
     if M.results.status_distribution and type(M.results.status_distribution) == "table" and next(M.results.status_distribution) then
+        -- REQ-MEASURE-401: メトリクスの分離（分母を tracked_requests に変更）
+        local success_count = 0
+        for status, count in pairs(M.results.status_distribution) do
+            local status_num = tonumber(status)
+            if status_num and status_num >= 200 and status_num < 300 and type(count) == "number" then
+                success_count = success_count + count
+            end
+        end
+
+        M.results.meta.success_rate = success_count / tracked_requests
+
         local total_http_errors = http_error_counts.count_4xx_total + http_error_counts.count_5xx_total
-        M.results.error_rate = total_http_errors / M.results.total_requests
-        M.results.client_error_rate = http_error_counts.count_4xx_excluding_409 / M.results.total_requests
+        M.results.error_rate = total_http_errors / tracked_requests
+        M.results.client_error_rate = http_error_counts.count_4xx_excluding_409 / tracked_requests
         M.results.conflict_count = http_error_counts.count_409
-        M.results.conflict_rate = http_error_counts.count_409 / M.results.total_requests
-        M.results.http_error_rate = total_http_errors / M.results.total_requests
-        M.results.server_error_rate = http_error_counts.count_5xx_total / M.results.total_requests
+        M.results.conflict_rate = http_error_counts.count_409 / tracked_requests
+        M.results.http_error_rate = total_http_errors / tracked_requests
+        M.results.server_error_rate = http_error_counts.count_5xx_total / tracked_requests
         M.results.status_code_counts = {
             count_400 = http_error_counts.count_400,
             count_404 = http_error_counts.count_404,
@@ -378,8 +412,9 @@ local function set_error_metrics(http_error_counts, summary)
         M.results.client_error_rate = M.NULL
         M.results.conflict_rate = M.NULL
         M.results.conflict_count = M.NULL
+        M.results.meta.success_rate = M.NULL
         local http_errors = (summary and summary.errors and summary.errors.status) or 0
-        M.results.http_error_rate = http_errors / M.results.total_requests
+        M.results.http_error_rate = http_errors / tracked_requests
         M.results.status_code_counts = {
             count_400 = M.NULL, count_404 = M.NULL, count_409 = M.NULL,
             count_422 = M.NULL, count_500 = M.NULL,
