@@ -1200,6 +1200,86 @@ pub type PrefixIndex = PersistentTreeMap<NgramKey, TaskIdCollection>;
 // Phase 3: merge_ngram_delta Result Types
 // =============================================================================
 
+/// Reusable buffer for merge operations (TB-003).
+///
+/// This structure reduces allocation overhead during merge operations by:
+/// 1. Pre-allocating capacity based on input sizes via `prepare()`
+/// 2. Reusing the internal buffer's capacity across iterations when possible
+///
+/// # Buffer Lifecycle
+///
+/// Each merge iteration:
+/// 1. `prepare(capacity_hint)` - clears buffer, reserves if needed
+/// 2. `merge_posting_lists_iter_sorted_core_into()` - writes to buffer
+/// 3. `take_clone()` - returns a clone of the buffer contents for storage
+///
+/// The buffer retains its capacity between iterations, reducing the number
+/// of allocations from O(n) to O(1) amortized for the merge operation itself.
+///
+/// Note: The final `TaskIdCollection::from_sorted_vec()` still requires a
+/// separate allocation to store the persistent result, but the merge
+/// computation itself benefits from buffer reuse.
+///
+/// # Usage
+///
+/// ```ignore
+/// let mut buffer = MergeBuffer::new();
+/// for key in keys {
+///     let merged = merge_with_buffer(&existing, &add, &remove, &mut buffer);
+///     // merged is a fresh Vec, buffer retains capacity for next iteration
+/// }
+/// ```
+#[derive(Debug, Default)]
+pub struct MergeBuffer {
+    /// Internal buffer for storing merge results.
+    result: Vec<TaskId>,
+}
+
+impl MergeBuffer {
+    /// Creates a new empty `MergeBuffer`.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self { result: Vec::new() }
+    }
+
+    /// Creates a new `MergeBuffer` with the specified capacity.
+    #[must_use]
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            result: Vec::with_capacity(capacity),
+        }
+    }
+
+    /// Clears and prepares the buffer for reuse with the given capacity hint.
+    ///
+    /// This method:
+    /// 1. Clears existing contents (O(1) for POD types like `TaskId`)
+    /// 2. Reserves additional capacity if needed
+    ///
+    /// The buffer's existing capacity is preserved, enabling reuse.
+    fn prepare(&mut self, capacity_hint: usize) {
+        self.result.clear();
+        if self.result.capacity() < capacity_hint {
+            self.result.reserve(capacity_hint - self.result.capacity());
+        }
+    }
+
+    /// Returns a clone of the buffer contents and clears the buffer.
+    ///
+    /// This method preserves the buffer's capacity for reuse while providing
+    /// a fresh `Vec` for storage in `TaskIdCollection::from_sorted_vec()`.
+    ///
+    /// # Performance
+    ///
+    /// - Clone cost: O(n) where n is the number of elements
+    /// - Buffer capacity is preserved for next iteration
+    fn take_clone(&mut self) -> Vec<TaskId> {
+        let result = self.result.clone();
+        self.result.clear();
+        result
+    }
+}
+
 /// Result of the `merge_ngram_delta` operation.
 ///
 /// This type enables the Phase 3 optimization to use `insert_bulk_owned` for
@@ -1957,43 +2037,12 @@ impl SearchIndexBulkBuilder {
 }
 
 /// Merges two sorted posting lists into a single sorted, deduplicated list.
-///
-/// This function performs a merge-sort style operation on two `TaskIdCollection`s,
-/// combining them efficiently without redundant intermediate allocations.
-///
-/// # Preconditions
-///
-/// - Both `existing` and `new_entries` must be sorted in ascending order.
-/// - No duplicate elements within each collection (deduplication is still performed
-///   for elements appearing in both collections).
-///
-/// # Algorithm
-///
-/// Uses a two-pointer merge algorithm (O(N+M) time complexity) to combine the lists:
-/// 1. Initialize iterators for both collections
-/// 2. Compare current elements from each iterator
-/// 3. Emit the smaller element (or skip duplicates if equal)
-/// 4. Construct the result using `from_sorted_vec` (O(n) construction)
-///
-/// # Complexity
-///
-/// - Time: O(N + M) where N and M are the sizes of the input collections
-/// - Space: O(N + M) for the result vector
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// let existing = TaskIdCollection::from_sorted_vec(vec![task_id_1, task_id_3, task_id_5]);
-/// let new_entries = TaskIdCollection::from_sorted_vec(vec![task_id_2, task_id_4, task_id_6]);
-/// let merged = merge_sorted_posting_lists(&existing, &new_entries);
-/// // merged contains: [task_id_1, task_id_2, task_id_3, task_id_4, task_id_5, task_id_6]
-/// ```
+/// Both inputs must be sorted. Uses two-pointer merge in O(N+M) time.
 #[must_use]
 fn merge_sorted_posting_lists(
     existing: &TaskIdCollection,
     new_entries: &TaskIdCollection,
 ) -> TaskIdCollection {
-    // Fast paths for empty collections
     if existing.is_empty() {
         return new_entries.clone();
     }
@@ -2001,14 +2050,10 @@ fn merge_sorted_posting_lists(
         return existing.clone();
     }
 
-    // TB-002: Use iter_sorted() instead of to_sorted_vec() to avoid intermediate Vec allocation
     let mut existing_iter = existing.iter_sorted().peekable();
     let mut new_iter = new_entries.iter_sorted().peekable();
-
-    // Pre-allocate result with estimated capacity
     let mut result = Vec::with_capacity(existing.len() + new_entries.len());
 
-    // Two-pointer merge using iterators
     loop {
         match (existing_iter.peek(), new_iter.peek()) {
             (Some(&existing_id), Some(&new_id)) => match existing_id.cmp(new_id) {
@@ -2019,7 +2064,6 @@ fn merge_sorted_posting_lists(
                     result.push(new_iter.next().unwrap().clone());
                 }
                 std::cmp::Ordering::Equal => {
-                    // Skip duplicate - take from existing, advance both
                     result.push(existing_iter.next().unwrap().clone());
                     new_iter.next();
                 }
@@ -5641,13 +5685,13 @@ impl SearchIndex {
 
     /// Computes `(existing ∪ add) - remove` for a `PrefixIndex`.
     ///
-    /// # TB-001 Optimization
+    /// # TB-001/TB-002/TB-003 Optimization
     ///
-    /// Uses transient structure for batch updates, converting to persistent only
-    /// at the end. This avoids repeated COW operations during individual inserts.
-    ///
-    /// Uses `TaskIdCollection::from_sorted_vec` for O(n) bulk construction,
-    /// avoiding per-element COW overhead.
+    /// - Uses transient structure for batch updates, converting to persistent only
+    ///   at the end. This avoids repeated COW operations during individual inserts.
+    /// - Uses `iter_sorted()` instead of `to_sorted_vec()` to avoid intermediate
+    ///   vector allocation (TB-002).
+    /// - Reuses a single `MergeBuffer` across all key iterations (TB-003).
     fn merge_index_delta(
         index: &PrefixIndex,
         add: &MutableIndex,
@@ -5661,24 +5705,25 @@ impl SearchIndex {
 
         // TB-001: Use transient for bulk updates to reduce COW overhead
         let mut transient = index.clone().transient();
+        // TB-003: Reuse buffer across iterations
+        let mut buffer = MergeBuffer::new();
 
         for key in all_keys {
             let key_str = key.as_str();
-            let existing: Vec<TaskId> = transient
-                .get(key_str)
-                .map(TaskIdCollection::to_sorted_vec)
-                .unwrap_or_default();
-            let merged = Self::compute_merged_posting_list_sorted(
-                &existing,
-                add.get(key).map_or(&[], Vec::as_slice),
-                remove.get(key).map_or(&[], Vec::as_slice),
+            let add_slice = add.get(key).map_or(&[] as &[TaskId], Vec::as_slice);
+            let remove_slice = remove.get(key).map_or(&[] as &[TaskId], Vec::as_slice);
+            // TB-002: Use iter_sorted() instead of to_sorted_vec()
+            let merged = Self::merge_single_posting_list_with_buffer(
+                transient.get(key_str),
+                add_slice,
+                remove_slice,
+                &mut buffer,
             );
 
             if merged.is_empty() {
                 transient.remove(key_str);
             } else {
-                let collection = TaskIdCollection::from_sorted_vec(merged);
-                transient.insert(key.clone(), collection);
+                transient.insert(key.clone(), TaskIdCollection::from_sorted_vec(merged));
             }
         }
 
@@ -5686,32 +5731,7 @@ impl SearchIndex {
     }
 
     /// Computes `(existing ∪ add) - remove` for a `NgramIndex`.
-    ///
-    /// # Phase 3 Optimization
-    ///
-    /// When `config.use_merge_ngram_delta_bulk_insert` is `true`, this method
-    /// collects all merged entries first, then uses `insert_bulk_owned` to
-    /// reduce COW overhead during bulk updates.
-    ///
-    /// # Fallback Behavior
-    ///
-    /// If the number of entries exceeds `MAX_BULK_INSERT` (100,000):
-    /// - Falls back to individual inserts (slower but guarantees completion)
-    /// - Returns `MergeNgramDeltaResult::Fallback` with `TooManyEntries` reason
-    ///
-    /// The operation always completes successfully (no errors returned), but
-    /// the result variant indicates whether a fallback was triggered.
-    ///
-    /// # Arguments
-    ///
-    /// * `index` - The existing n-gram index
-    /// * `add` - Entries to add
-    /// * `remove` - Entries to remove
-    /// * `config` - Configuration with optimization flags
-    ///
-    /// # Returns
-    ///
-    /// `MergeNgramDeltaResult` with the updated index and optional fallback info.
+    /// Uses bulk insert when `config.use_merge_ngram_delta_bulk_insert` is enabled.
     fn merge_ngram_delta(
         index: &NgramIndex,
         add: &MutableIndex,
@@ -5720,18 +5740,54 @@ impl SearchIndex {
     ) -> MergeNgramDeltaResult {
         let all_keys: std::collections::HashSet<_> = add.keys().chain(remove.keys()).collect();
 
-        // Phase 3 optimization: use bulk insert when flag is enabled
         if config.use_merge_ngram_delta_bulk_insert {
             Self::merge_ngram_delta_bulk(index, add, remove, &all_keys)
         } else {
-            // Original implementation: individual inserts
             Self::merge_ngram_delta_individual(index, add, remove, &all_keys)
         }
     }
 
-    /// Original merge implementation using individual inserts.
+    /// Merges a single posting list for the given key using a reusable buffer (TB-003).
     ///
-    /// TB-002: Uses iter_sorted() instead of to_sorted_vec() to reduce allocations.
+    /// # Arguments
+    ///
+    /// * `existing` - Optional existing posting list
+    /// * `add_slice` - Elements to add (must be sorted)
+    /// * `remove_slice` - Elements to remove (must be sorted)
+    /// * `buffer` - Reusable buffer to reduce allocations
+    ///
+    /// # Returns
+    ///
+    /// The merged result is stored in `buffer.result` and returned via `buffer.take_clone()`.
+    /// The buffer retains its capacity for reuse in subsequent iterations.
+    fn merge_single_posting_list_with_buffer<'a>(
+        existing: Option<&'a TaskIdCollection>,
+        add_slice: &'a [TaskId],
+        remove_slice: &'a [TaskId],
+        buffer: &mut MergeBuffer,
+    ) -> Vec<TaskId> {
+        let existing_len = existing.map_or(0, TaskIdCollection::len);
+        buffer.prepare(existing_len + add_slice.len());
+
+        match existing {
+            Some(collection) => Self::merge_posting_lists_iter_sorted_core_into(
+                collection.iter_sorted(),
+                add_slice.iter(),
+                remove_slice,
+                &mut buffer.result,
+            ),
+            None => Self::merge_posting_lists_iter_sorted_core_into(
+                std::iter::empty(),
+                add_slice.iter(),
+                remove_slice,
+                &mut buffer.result,
+            ),
+        }
+
+        buffer.take_clone()
+    }
+
+    /// Original merge implementation using individual inserts with buffer reuse (TB-003).
     fn merge_ngram_delta_individual(
         index: &NgramIndex,
         add: &MutableIndex,
@@ -5739,90 +5795,59 @@ impl SearchIndex {
         all_keys: &std::collections::HashSet<&NgramKey>,
     ) -> MergeNgramDeltaResult {
         let mut result = index.clone().transient();
+        let mut buffer = MergeBuffer::new();
 
         for key in all_keys {
             let key_str = key.as_str();
-            let existing_collection = result.get(key_str);
             let add_slice = add.get(*key).map_or(&[] as &[TaskId], Vec::as_slice);
             let remove_slice = remove.get(*key).map_or(&[] as &[TaskId], Vec::as_slice);
-
-            // TB-002: Use iter_sorted() instead of to_sorted_vec()
-            let merged = if let Some(collection) = existing_collection {
-                Self::merge_posting_lists_iter_sorted_core(
-                    collection.iter_sorted(),
-                    add_slice.iter(),
-                    remove_slice,
-                )
-            } else {
-                Self::merge_posting_lists_iter_sorted_core(
-                    std::iter::empty(),
-                    add_slice.iter(),
-                    remove_slice,
-                )
-            };
+            let merged = Self::merge_single_posting_list_with_buffer(
+                result.get(key_str),
+                add_slice,
+                remove_slice,
+                &mut buffer,
+            );
 
             if merged.is_empty() {
                 result.remove(key_str);
             } else {
-                let collection = TaskIdCollection::from_sorted_vec(merged);
-                result.insert((*key).clone(), collection);
+                result.insert((*key).clone(), TaskIdCollection::from_sorted_vec(merged));
             }
         }
 
         MergeNgramDeltaResult::Ok(result.persistent())
     }
 
-    /// Optimized merge implementation using bulk insert.
-    ///
-    /// Collects all merged entries first, then uses `insert_bulk_owned` with chunking.
-    ///
-    /// # Fallback Behavior
-    ///
-    /// If bulk insert fails (which should not happen due to chunk size constraints),
-    /// falls back to `merge_ngram_delta_individual` to ensure the operation completes
-    /// successfully with correct `(existing ∪ add) - remove` semantics.
-    ///
-    /// TB-002: Uses iter_sorted() instead of to_sorted_vec() to reduce allocations.
+    /// Optimized merge implementation using bulk insert with chunking and buffer reuse (TB-003).
+    /// Falls back to individual inserts if bulk insert fails.
     fn merge_ngram_delta_bulk(
         index: &NgramIndex,
         add: &MutableIndex,
         remove: &MutableIndex,
         all_keys: &std::collections::HashSet<&NgramKey>,
     ) -> MergeNgramDeltaResult {
-        // Chunk size limited to MAX_BULK_INSERT - 1 to avoid errors.
-        // The const assert in hashmap.rs guarantees MAX_BULK_INSERT >= 2.
         const CHUNK_SIZE: usize = MAX_BULK_INSERT - 1;
 
         let mut result = index.clone().transient();
         let mut entries_to_insert: Vec<(NgramKey, TaskIdCollection)> = Vec::new();
         let mut keys_to_remove: Vec<&str> = Vec::new();
+        let mut buffer = MergeBuffer::new();
 
         for key in all_keys {
             let key_str = key.as_str();
-            let existing_collection = result.get(key_str);
             let add_slice = add.get(*key).map_or(&[] as &[TaskId], Vec::as_slice);
             let remove_slice = remove.get(*key).map_or(&[] as &[TaskId], Vec::as_slice);
-
-            // TB-002: Use iter_sorted() instead of to_sorted_vec()
-            let merged = if let Some(collection) = existing_collection {
-                Self::merge_posting_lists_iter_sorted_core(
-                    collection.iter_sorted(),
-                    add_slice.iter(),
-                    remove_slice,
-                )
-            } else {
-                Self::merge_posting_lists_iter_sorted_core(
-                    std::iter::empty(),
-                    add_slice.iter(),
-                    remove_slice,
-                )
-            };
+            let merged = Self::merge_single_posting_list_with_buffer(
+                result.get(key_str),
+                add_slice,
+                remove_slice,
+                &mut buffer,
+            );
 
             if merged.is_empty() {
                 keys_to_remove.push(key_str);
             } else {
-                let collection = TaskIdCollection::from_sorted_vec(merged);
-                entries_to_insert.push(((*key).clone(), collection));
+                entries_to_insert.push(((*key).clone(), TaskIdCollection::from_sorted_vec(merged)));
             }
         }
 
@@ -5830,28 +5855,23 @@ impl SearchIndex {
             result.remove(*key_str);
         }
 
-        if !entries_to_insert.is_empty() {
-            while !entries_to_insert.is_empty() {
-                let chunk_size = entries_to_insert.len().min(CHUNK_SIZE);
-                let chunk_vec: Vec<_> = entries_to_insert.drain(..chunk_size).collect();
-                let insert_count = chunk_vec.len();
-                match result.insert_bulk_owned(chunk_vec) {
-                    Ok(updated) => {
-                        result = updated;
-                    }
-                    Err(_) => {
-                        // TB-003: Fallback to individual merge to ensure correct semantics.
-                        // This guarantees `(existing ∪ add) - remove` is preserved.
-                        let fallback = Self::merge_ngram_delta_individual(index, add, remove, all_keys)
+        while !entries_to_insert.is_empty() {
+            let chunk_size = entries_to_insert.len().min(CHUNK_SIZE);
+            let chunk_vec: Vec<_> = entries_to_insert.drain(..chunk_size).collect();
+            let insert_count = chunk_vec.len();
+            match result.insert_bulk_owned(chunk_vec) {
+                Ok(updated) => result = updated,
+                Err(_) => {
+                    let fallback =
+                        Self::merge_ngram_delta_individual(index, add, remove, all_keys)
                             .into_index();
-                        return MergeNgramDeltaResult::Fallback {
-                            index: fallback,
-                            reason: MergeNgramDeltaFallbackReason::TooManyEntries {
-                                count: insert_count,
-                                limit: CHUNK_SIZE,
-                            },
-                        };
-                    }
+                    return MergeNgramDeltaResult::Fallback {
+                        index: fallback,
+                        reason: MergeNgramDeltaFallbackReason::TooManyEntries {
+                            count: insert_count,
+                            limit: CHUNK_SIZE,
+                        },
+                    };
                 }
             }
         }
@@ -5881,25 +5901,34 @@ impl SearchIndex {
         merged
     }
 
+    /// Checks if candidate should be removed using two-pointer algorithm.
+    /// Advances the remove iterator past elements less than candidate.
+    fn should_remove_from_sorted(
+        candidate: &TaskId,
+        remove_iter: &mut std::iter::Peekable<std::slice::Iter<'_, TaskId>>,
+    ) -> bool {
+        while let Some(remove_element) = remove_iter.peek() {
+            match (*remove_element).cmp(candidate) {
+                std::cmp::Ordering::Less => {
+                    remove_iter.next();
+                }
+                std::cmp::Ordering::Equal => {
+                    remove_iter.next();
+                    return true;
+                }
+                std::cmp::Ordering::Greater => {
+                    return false;
+                }
+            }
+        }
+        false
+    }
+
     /// Merges posting lists using iterators with two-pointer algorithm.
+    /// Computes `(existing ∪ add) - remove` in O(n+m+r) time.
     ///
-    /// Computes `(existing ∪ add) - remove` where all inputs are sorted iterators.
-    /// Uses linear two-pointer algorithm for remove (O(n+m+r) complexity).
-    ///
-    /// # Preconditions
-    ///
-    /// All inputs must be sorted in ascending order and deduplicated.
-    /// Debug builds validate with debug_assert!.
-    ///
-    /// # Arguments
-    ///
-    /// * `existing` - Sorted iterator of existing TaskIds
-    /// * `add` - Sorted iterator of TaskIds to add
-    /// * `remove` - Sorted slice of TaskIds to remove
-    ///
-    /// # Returns
-    ///
-    /// Sorted, deduplicated Vec of TaskIds representing the merged result.
+    /// All inputs must be sorted and deduplicated.
+    #[allow(dead_code)]
     fn merge_posting_lists_iter_sorted_core<'a, E, A>(
         existing: E,
         add: A,
@@ -5909,40 +5938,15 @@ impl SearchIndex {
         E: Iterator<Item = &'a TaskId>,
         A: Iterator<Item = &'a TaskId>,
     {
-        // Helper function for remove check using two-pointer algorithm
-        fn should_remove(
-            candidate: &TaskId,
-            remove_iter: &mut std::iter::Peekable<std::slice::Iter<'_, TaskId>>,
-        ) -> bool {
-            while let Some(remove_element) = remove_iter.peek() {
-                match (*remove_element).cmp(candidate) {
-                    std::cmp::Ordering::Less => {
-                        remove_iter.next();
-                    }
-                    std::cmp::Ordering::Equal => {
-                        remove_iter.next();
-                        return true;
-                    }
-                    std::cmp::Ordering::Greater => {
-                        return false;
-                    }
-                }
-            }
-            false
-        }
-
         #[cfg(debug_assertions)]
-        {
-            debug_assert!(
-                remove.is_empty() || remove.windows(2).all(|w| w[0] < w[1]),
-                "remove slice must be sorted and deduplicated"
-            );
-        }
+        debug_assert!(
+            remove.is_empty() || remove.windows(2).all(|w| w[0] < w[1]),
+            "remove slice must be sorted and deduplicated"
+        );
 
         let mut existing = existing.peekable();
         let mut add = add.peekable();
         let mut remove_iter = remove.iter().peekable();
-
         let mut result = Vec::with_capacity(existing.size_hint().0 + add.size_hint().0);
 
         loop {
@@ -5950,13 +5954,13 @@ impl SearchIndex {
                 (None, None) => break,
                 (Some(&existing_element), None) => {
                     existing.next();
-                    if !should_remove(existing_element, &mut remove_iter) {
+                    if !Self::should_remove_from_sorted(existing_element, &mut remove_iter) {
                         result.push(existing_element.clone());
                     }
                 }
                 (None, Some(&add_element)) => {
                     add.next();
-                    if !should_remove(add_element, &mut remove_iter) {
+                    if !Self::should_remove_from_sorted(add_element, &mut remove_iter) {
                         result.push(add_element.clone());
                     }
                 }
@@ -5964,21 +5968,22 @@ impl SearchIndex {
                     match existing_element.cmp(add_element) {
                         std::cmp::Ordering::Less => {
                             existing.next();
-                            if !should_remove(existing_element, &mut remove_iter) {
+                            if !Self::should_remove_from_sorted(existing_element, &mut remove_iter)
+                            {
                                 result.push(existing_element.clone());
                             }
                         }
                         std::cmp::Ordering::Greater => {
                             add.next();
-                            if !should_remove(add_element, &mut remove_iter) {
+                            if !Self::should_remove_from_sorted(add_element, &mut remove_iter) {
                                 result.push(add_element.clone());
                             }
                         }
                         std::cmp::Ordering::Equal => {
-                            // Deduplicate: take from existing, skip add
                             existing.next();
                             add.next();
-                            if !should_remove(existing_element, &mut remove_iter) {
+                            if !Self::should_remove_from_sorted(existing_element, &mut remove_iter)
+                            {
                                 result.push(existing_element.clone());
                             }
                         }
@@ -5990,54 +5995,90 @@ impl SearchIndex {
         result
     }
 
+    /// Merges posting lists into a provided buffer (TB-003 buffer reuse).
+    /// Computes `(existing ∪ add) - remove` in O(n+m+r) time.
+    ///
+    /// All inputs must be sorted and deduplicated.
+    /// The buffer is assumed to be cleared before calling.
+    fn merge_posting_lists_iter_sorted_core_into<'a, E, A>(
+        existing: E,
+        add: A,
+        remove: &'a [TaskId],
+        result: &mut Vec<TaskId>,
+    ) where
+        E: Iterator<Item = &'a TaskId>,
+        A: Iterator<Item = &'a TaskId>,
+    {
+        #[cfg(debug_assertions)]
+        debug_assert!(
+            remove.is_empty() || remove.windows(2).all(|w| w[0] < w[1]),
+            "remove slice must be sorted and deduplicated"
+        );
+
+        let mut existing = existing.peekable();
+        let mut add = add.peekable();
+        let mut remove_iter = remove.iter().peekable();
+
+        loop {
+            match (existing.peek(), add.peek()) {
+                (None, None) => break,
+                (Some(&existing_element), None) => {
+                    existing.next();
+                    if !Self::should_remove_from_sorted(existing_element, &mut remove_iter) {
+                        result.push(existing_element.clone());
+                    }
+                }
+                (None, Some(&add_element)) => {
+                    add.next();
+                    if !Self::should_remove_from_sorted(add_element, &mut remove_iter) {
+                        result.push(add_element.clone());
+                    }
+                }
+                (Some(&existing_element), Some(&add_element)) => {
+                    match existing_element.cmp(add_element) {
+                        std::cmp::Ordering::Less => {
+                            existing.next();
+                            if !Self::should_remove_from_sorted(existing_element, &mut remove_iter)
+                            {
+                                result.push(existing_element.clone());
+                            }
+                        }
+                        std::cmp::Ordering::Greater => {
+                            add.next();
+                            if !Self::should_remove_from_sorted(add_element, &mut remove_iter) {
+                                result.push(add_element.clone());
+                            }
+                        }
+                        std::cmp::Ordering::Equal => {
+                            existing.next();
+                            add.next();
+                            if !Self::should_remove_from_sorted(existing_element, &mut remove_iter)
+                            {
+                                result.push(existing_element.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Computes `(existing ∪ add) - remove` in a single pass.
+    /// All inputs must be sorted and deduplicated.
     ///
-    /// # Early Return Optimizations
-    ///
-    /// When `remove` is empty, applies early return to avoid unnecessary merging:
-    /// - If `existing` is empty: returns `add.to_vec()` directly
-    /// - If `add` is empty: returns `existing.to_vec()` directly
-    ///
-    /// # Preconditions
-    ///
-    /// All input slices must be sorted in ascending order and deduplicated.
-    /// Debug builds validate with `debug_assert!`; release builds produce
-    /// incorrect results for invalid input.
+    /// This function delegates to `merge_posting_lists_iter_sorted_core` after
+    /// applying fast-path optimizations for common cases.
+    #[allow(dead_code)]
     fn compute_merged_posting_list_sorted(
         existing: &[TaskId],
         add: &[TaskId],
         remove: &[TaskId],
     ) -> Vec<TaskId> {
-        // Helper function for debug assertions (only in debug builds)
-        #[cfg(debug_assertions)]
-        fn is_strictly_sorted(slice: &[TaskId]) -> bool {
-            slice.windows(2).all(|window| window[0] < window[1])
-        }
-
-        // Helper function for remove check (defined before statements)
-        fn should_remove(
-            candidate: &TaskId,
-            remove_iterator: &mut std::iter::Peekable<std::slice::Iter<'_, TaskId>>,
-        ) -> bool {
-            while let Some(remove_element) = remove_iterator.peek() {
-                match (*remove_element).cmp(candidate) {
-                    std::cmp::Ordering::Less => {
-                        remove_iterator.next();
-                    }
-                    std::cmp::Ordering::Equal => {
-                        remove_iterator.next();
-                        return true;
-                    }
-                    std::cmp::Ordering::Greater => {
-                        return false;
-                    }
-                }
-            }
-            false
-        }
-
         #[cfg(debug_assertions)]
         {
+            fn is_strictly_sorted(slice: &[TaskId]) -> bool {
+                slice.windows(2).all(|window| window[0] < window[1])
+            }
             debug_assert!(
                 existing.is_empty() || is_strictly_sorted(existing),
                 "existing slice must be sorted and deduplicated"
@@ -6052,71 +6093,18 @@ impl SearchIndex {
             );
         }
 
-        // =====================================================================
-        // Phase 2: Early return optimizations
-        // =====================================================================
-        // When remove is empty, we can avoid the full merge loop in common cases.
-        // These optimizations preserve referential transparency (same input → same output).
-
+        // Fast paths when remove is empty
         if remove.is_empty() {
-            // Fast path 1: No remove, no existing → just clone add
             if existing.is_empty() {
                 return add.to_vec();
             }
-            // Fast path 2: No remove, no add → just clone existing
             if add.is_empty() {
                 return existing.to_vec();
             }
         }
 
-        let mut result = Vec::with_capacity(existing.len() + add.len());
-
-        let mut existing_iterator = existing.iter().peekable();
-        let mut add_iterator = add.iter().peekable();
-        let mut remove_iterator = remove.iter().peekable();
-
-        loop {
-            match (existing_iterator.peek(), add_iterator.peek()) {
-                (None, None) => break,
-                (Some(&existing_element), None) => {
-                    existing_iterator.next();
-                    if !should_remove(existing_element, &mut remove_iterator) {
-                        result.push(existing_element.clone());
-                    }
-                }
-                (None, Some(&add_element)) => {
-                    add_iterator.next();
-                    if !should_remove(add_element, &mut remove_iterator) {
-                        result.push(add_element.clone());
-                    }
-                }
-                (Some(&existing_element), Some(&add_element)) => {
-                    match existing_element.cmp(add_element) {
-                        std::cmp::Ordering::Less => {
-                            existing_iterator.next();
-                            if !should_remove(existing_element, &mut remove_iterator) {
-                                result.push(existing_element.clone());
-                            }
-                        }
-                        std::cmp::Ordering::Greater => {
-                            add_iterator.next();
-                            if !should_remove(add_element, &mut remove_iterator) {
-                                result.push(add_element.clone());
-                            }
-                        }
-                        std::cmp::Ordering::Equal => {
-                            existing_iterator.next();
-                            add_iterator.next();
-                            if !should_remove(existing_element, &mut remove_iterator) {
-                                result.push(existing_element.clone());
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        result
+        // Delegate to core implementation for unified logic
+        Self::merge_posting_lists_iter_sorted_core(existing.iter(), add.iter(), remove)
     }
 
     /// Computes `(existing ∪ add) - remove` with sorted, deduplicated output.
