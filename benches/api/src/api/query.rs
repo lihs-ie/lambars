@@ -2001,38 +2001,35 @@ fn merge_sorted_posting_lists(
         return existing.clone();
     }
 
-    // Get sorted vectors for merge
-    let existing_sorted = existing.to_sorted_vec();
-    let new_sorted = new_entries.to_sorted_vec();
+    // TB-002: Use iter_sorted() instead of to_sorted_vec() to avoid intermediate Vec allocation
+    let mut existing_iter = existing.iter_sorted().peekable();
+    let mut new_iter = new_entries.iter_sorted().peekable();
 
-    // Pre-allocate result with exact capacity
-    let mut result = Vec::with_capacity(existing_sorted.len() + new_sorted.len());
+    // Pre-allocate result with estimated capacity
+    let mut result = Vec::with_capacity(existing.len() + new_entries.len());
 
-    // Two-pointer merge
-    let mut existing_iterator = existing_sorted.into_iter().peekable();
-    let mut new_iterator = new_sorted.into_iter().peekable();
-
+    // Two-pointer merge using iterators
     loop {
-        match (existing_iterator.peek(), new_iterator.peek()) {
-            (Some(existing_id), Some(new_id)) => match existing_id.cmp(new_id) {
+        match (existing_iter.peek(), new_iter.peek()) {
+            (Some(&existing_id), Some(&new_id)) => match existing_id.cmp(new_id) {
                 std::cmp::Ordering::Less => {
-                    result.push(existing_iterator.next().unwrap());
+                    result.push(existing_iter.next().unwrap().clone());
                 }
                 std::cmp::Ordering::Greater => {
-                    result.push(new_iterator.next().unwrap());
+                    result.push(new_iter.next().unwrap().clone());
                 }
                 std::cmp::Ordering::Equal => {
                     // Skip duplicate - take from existing, advance both
-                    result.push(existing_iterator.next().unwrap());
-                    new_iterator.next();
+                    result.push(existing_iter.next().unwrap().clone());
+                    new_iter.next();
                 }
             },
             (Some(_), None) => {
-                result.extend(existing_iterator);
+                result.extend(existing_iter.cloned());
                 break;
             }
             (None, Some(_)) => {
-                result.extend(new_iterator);
+                result.extend(new_iter.cloned());
                 break;
             }
             (None, None) => break,
