@@ -52,7 +52,7 @@ jobs:
           # Remove problematic Azure CLI repository that may return 403
           sudo rm -f /etc/apt/sources.list.d/azure-cli.list || true
           sudo apt-get update || true
-          sudo apt-get install -y build-essential libssl-dev git linux-tools-common linux-tools-generic
+          sudo apt-get install -y build-essential libssl-dev git linux-tools-common linux-tools-generic linux-tools-$(uname -r) || true
           # Install yq (Mike Farah's YAML processor)
           sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
           sudo chmod +x /usr/local/bin/yq
@@ -142,7 +142,7 @@ jobs:
           # Remove problematic Azure CLI repository that may return 403
           sudo rm -f /etc/apt/sources.list.d/azure-cli.list || true
           sudo apt-get update || true
-          sudo apt-get install -y build-essential libssl-dev git linux-tools-common linux-tools-generic
+          sudo apt-get install -y build-essential libssl-dev git linux-tools-common linux-tools-generic linux-tools-$(uname -r) || true
           # Install yq (Mike Farah's YAML processor)
           sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
           sudo chmod +x /usr/local/bin/yq

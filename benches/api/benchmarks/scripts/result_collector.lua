@@ -32,6 +32,11 @@ M.results = {
     status_code_counts = { count_400 = 0, count_404 = 0, count_409 = 0, count_422 = 0, count_500 = 0 },
     http_status = {},
     retries = 0,
+    meta = {
+        tracked_requests = 0,
+        excluded_requests = 0,
+        success_rate = 0
+    },
     rps = { target = 0, actual = 0 },
     latency = {
         min_us = 0, max_us = 0, mean_us = 0, stdev_us = 0,
@@ -96,6 +101,12 @@ function M.set_scenario_metadata(metadata)
     M.results.scenario.cache_mode = metadata.cache_mode
     M.results.scenario.load_pattern = metadata.load_pattern
     M.results.scenario.contention_level = metadata.contention_level
+end
+
+function M.set_request_categories(categories)
+    if not categories then return end
+    local excluded = (categories.backoff or 0) + (categories.suppressed or 0) + (categories.fallback or 0)
+    M.results.meta.excluded_requests = excluded
 end
 
 function M.load_scenario_from_env()
@@ -325,7 +336,9 @@ local function aggregate_error_counts()
 
     for status, count in pairs(M.results.status_distribution) do
         local status_num = tonumber(status)
-        if status_num and type(count) == "number" then
+        local is_number = status_num and type(count) == "number"
+
+        if is_number then
             if status_num >= 400 and status_num < 500 then
                 counts.count_4xx_total = counts.count_4xx_total + count
                 counts.total = counts.total + count
@@ -347,25 +360,59 @@ local function aggregate_error_counts()
     return counts
 end
 
+local function calculate_tracked_requests(status_distribution)
+    local tracked = 0
+    if status_distribution and type(status_distribution) == "table" then
+        for status, count in pairs(status_distribution) do
+            if (tonumber(status) or status == "other") and type(count) == "number" then
+                tracked = tracked + count
+            end
+        end
+    end
+    return tracked
+end
+
 local function set_error_metrics(http_error_counts, summary)
-    if M.results.total_requests <= 0 then
+    local tracked_requests = calculate_tracked_requests(M.results.status_distribution)
+    if tracked_requests <= 0 and summary and summary.requests then
+        local network_errors = (summary.errors and summary.errors.connect or 0) +
+                               (summary.errors and summary.errors.read or 0) +
+                               (summary.errors and summary.errors.write or 0) +
+                               (summary.errors and summary.errors.timeout or 0)
+        tracked_requests = math.max(0, summary.requests - network_errors)
+    end
+    M.results.meta.tracked_requests = tracked_requests
+
+    if tracked_requests <= 0 then
         M.results.error_rate = 0
         M.results.client_error_rate = 0
         M.results.http_error_rate = 0
         M.results.network_error_rate = 0
         M.results.conflict_rate = 0
         M.results.conflict_count = 0
+        M.results.meta.success_rate = 0
         return
     end
 
     if M.results.status_distribution and type(M.results.status_distribution) == "table" and next(M.results.status_distribution) then
+        local success_count = 0
+        for status, count in pairs(M.results.status_distribution) do
+            local status_num = tonumber(status)
+            if status_num and status_num >= 200 and status_num < 300 and type(count) == "number" then
+                success_count = success_count + count
+            end
+        end
+
+        M.results.meta.success_rate = success_count / tracked_requests
+
         local total_http_errors = http_error_counts.count_4xx_total + http_error_counts.count_5xx_total
-        M.results.error_rate = total_http_errors / M.results.total_requests
-        M.results.client_error_rate = http_error_counts.count_4xx_excluding_409 / M.results.total_requests
+        local non_conflict_errors = http_error_counts.count_4xx_excluding_409 + http_error_counts.count_5xx_total
+        M.results.error_rate = non_conflict_errors / tracked_requests
+        M.results.client_error_rate = http_error_counts.count_4xx_excluding_409 / tracked_requests
         M.results.conflict_count = http_error_counts.count_409
-        M.results.conflict_rate = http_error_counts.count_409 / M.results.total_requests
-        M.results.http_error_rate = total_http_errors / M.results.total_requests
-        M.results.server_error_rate = http_error_counts.count_5xx_total / M.results.total_requests
+        M.results.conflict_rate = http_error_counts.count_409 / tracked_requests
+        M.results.http_error_rate = total_http_errors / tracked_requests
+        M.results.server_error_rate = http_error_counts.count_5xx_total / tracked_requests
         M.results.status_code_counts = {
             count_400 = http_error_counts.count_400,
             count_404 = http_error_counts.count_404,
@@ -378,8 +425,9 @@ local function set_error_metrics(http_error_counts, summary)
         M.results.client_error_rate = M.NULL
         M.results.conflict_rate = M.NULL
         M.results.conflict_count = M.NULL
+        M.results.meta.success_rate = M.NULL
         local http_errors = (summary and summary.errors and summary.errors.status) or 0
-        M.results.http_error_rate = http_errors / M.results.total_requests
+        M.results.http_error_rate = http_errors / tracked_requests
         M.results.status_code_counts = {
             count_400 = M.NULL, count_404 = M.NULL, count_409 = M.NULL,
             count_422 = M.NULL, count_500 = M.NULL,
@@ -410,7 +458,7 @@ end
         end
 
         if http_status_total > 0 then
-            M.results.total_requests = http_status_total
+            M.results.meta.tracked_requests = http_status_total
             M.results.status_distribution = {}
             for status, count in pairs(M.results.http_status) do
                 if (tonumber(status) or status == "other") and type(count) == "number" then
@@ -620,7 +668,7 @@ function M.format_text()
     else
         table.insert(lines, string.format("Network error rate:  %.2f%% (socket errors)", (M.results.network_error_rate or 0) * 100))
     end
-    table.insert(lines, format_rate("5xx error rate:     ", M.results.error_rate))
+    table.insert(lines, format_rate("Error rate (excl.409):", M.results.error_rate))
     table.insert(lines, format_rate("Client error rate:  ", M.results.client_error_rate))
     table.insert(lines, format_count("Conflict count:     ", M.results.conflict_count))
     table.insert(lines, format_rate("Conflict rate:      ", M.results.conflict_rate))

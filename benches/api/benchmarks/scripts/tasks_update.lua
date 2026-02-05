@@ -14,10 +14,14 @@ local thread_retry_count, thread_retry_exhausted_count = 0, 0
 local update_types = {"priority", "status", "description", "title", "full"}
 
 local backoff_skip_counter, backoff_skip_target = 0, 0
-local backoff_request_count = 0
-local fallback_request_count = 0
-local suppressed_request_count = 0
 local is_backoff_request, is_suppressed_request, is_fallback_request = false, false, false
+
+local request_categories = {
+    executed = 0,
+    backoff = 0,
+    suppressed = 0,
+    fallback = 0
+}
 
 local error_tracker = pcall(require, "error_tracker") and require("error_tracker") or nil
 local benchmark_initialized = false
@@ -113,8 +117,7 @@ local function apply_backoff()
     backoff_skip_counter = 0
 end
 
-local function create_health_request(request_type, counter_field)
-    _G[counter_field] = _G[counter_field] + 1
+local function health_request()
     return wrk and wrk.format and wrk.format("GET", "/health") or ""
 end
 
@@ -123,8 +126,8 @@ local function fallback_request()
     state = "fallback"
     last_request_is_update = false
     is_fallback_request = true
-    fallback_request_count = fallback_request_count + 1
-    return wrk and wrk.format and wrk.format("GET", "/health") or ""
+    request_categories.fallback = request_categories.fallback + 1
+    return health_request()
 end
 
 function request()
@@ -132,8 +135,8 @@ function request()
         local suppressed = wrk.thread:get("suppressed")
         if suppressed == true or suppressed == "true" then
             is_suppressed_request = true
-            suppressed_request_count = suppressed_request_count + 1
-            return wrk and wrk.format and wrk.format("GET", "/health") or ""
+            request_categories.suppressed = request_categories.suppressed + 1
+            return health_request()
         end
     end
     is_suppressed_request = false
@@ -141,8 +144,8 @@ function request()
     if backoff_skip_counter < backoff_skip_target then
         backoff_skip_counter = backoff_skip_counter + 1
         is_backoff_request = true
-        backoff_request_count = backoff_request_count + 1
-        return wrk and wrk.format and wrk.format("GET", "/health") or ""
+        request_categories.backoff = request_categories.backoff + 1
+        return health_request()
     end
     backoff_skip_counter = 0
     is_backoff_request = false
@@ -208,6 +211,7 @@ function response(status, headers, body)
     end
 
     common.track_response(status, headers)
+    request_categories.executed = request_categories.executed + 1
     if error_tracker then error_tracker.track_thread_response(status) end
     if not last_request_is_update then return end
 
@@ -286,9 +290,9 @@ local STATUS_LABELS = {
 
 local function print_excluded_requests()
     local excluded = {
-        {backoff_request_count, "Backoff"},
-        {suppressed_request_count, "Suppressed thread"},
-        {fallback_request_count, "Fallback"}
+        {request_categories.backoff, "Backoff"},
+        {request_categories.suppressed, "Suppressed thread"},
+        {request_categories.fallback, "Fallback"}
     }
     for _, item in ipairs(excluded) do
         if item[1] > 0 then
@@ -327,10 +331,44 @@ local function print_status_distribution(aggregated, lua_total, summary)
     io.write(string.format("\nActual Error Rate: %.2f%% (%d errors / %d requests)\n",
         actual_error_rate, error_count, total))
     io.write(string.format("Note: %d backoff + %d suppressed + %d fallback requests are excluded from metrics\n",
-        backoff_request_count, suppressed_request_count, fallback_request_count))
+        request_categories.backoff, request_categories.suppressed, request_categories.fallback))
+end
+
+local function aggregate_categories(categories)
+    return {
+        executed = categories.executed,
+        backoff = categories.backoff,
+        suppressed = categories.suppressed,
+        fallback = categories.fallback
+    }
+end
+
+local function verify_consistency(categories, total_requests)
+    local sum = categories.executed + categories.backoff +
+                categories.suppressed + categories.fallback
+    return sum == total_requests, sum
 end
 
 function done(summary, latency, requests)
+    local categories = aggregate_categories(request_categories)
+    local is_consistent, sum = verify_consistency(categories, summary.requests)
+
+    if not is_consistent then
+        io.stderr:write(string.format(
+            "[tasks_update] WARN: Inconsistency detected: total=%d, sum(categories)=%d\n",
+            summary.requests, sum))
+    end
+
+    io.write("\n--- Request Categories ---\n")
+    io.write(string.format("  Executed:   %d\n", categories.executed))
+    io.write(string.format("  Backoff:    %d\n", categories.backoff))
+    io.write(string.format("  Suppressed: %d\n", categories.suppressed))
+    io.write(string.format("  Fallback:   %d\n", categories.fallback))
+    io.write(string.format("  Total:      %d\n", sum))
+    io.write(string.format("  Excluded:   %d (backoff + suppressed + fallback)\n",
+        categories.backoff + categories.suppressed + categories.fallback))
+    io.write("\n")
+
     print_excluded_requests()
     common.print_summary("tasks_update", summary)
 
@@ -348,6 +386,11 @@ function done(summary, latency, requests)
         if stat[1] > 0 then
             io.stderr:write(string.format("[tasks_update] %s: %d\n", stat[2], stat[1]))
         end
+    end
+
+    local rc = pcall(require, "result_collector") and require("result_collector") or nil
+    if rc and rc.set_request_categories then
+        rc.set_request_categories(categories)
     end
 
     common.finalize_benchmark(summary, latency, requests)

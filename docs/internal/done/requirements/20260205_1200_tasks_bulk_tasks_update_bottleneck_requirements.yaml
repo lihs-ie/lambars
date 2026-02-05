@@ -1,0 +1,362 @@
+version: "1.0.0"
+name: "tasks_bulk_tasks_update_bottleneck_requirements"
+description: |
+  tasks_bulk の性能低下と tasks_update の計測精度問題を、
+  プロファイリング結果と bottleneck-finder のチェックリストに基づいて是正する。
+
+analysis:
+  profiling_baseline:
+    commit: "c682386fbcc93b65a360c40c1d0f547bd724a061"
+    pr: "267"
+    date: "2026-02-05"
+    location: "profiling-results/pr-267/api-profiling-all-c682386fbcc93b65a360c40c1d0f547bd724a061/"
+
+  current_metrics:
+    tasks_bulk:
+      rps: 14.38
+      p50: "17.79s"
+      p99: "28.79s"
+      error_rate: "0.00%"
+    tasks_update:
+      rps: 800.33
+      p50: "0.733ms"
+      p99: "1.55ms"
+      error_rate: "53.76%"
+      note: "Backoff/Suppressed/Fallback により約40%未記録（evaluation-summary-revised.md）"
+
+  flamegraph_analysis:
+    tasks_bulk_cpu_hotspots:
+      - name: "libc（システムコール等）"
+        percentage: 21.61
+        category: "メモリ管理/I/O"
+        root_cause: "malloc/free が支配的。COW と中間 Vec の生成が主因"
+      - name: "PersistentHashMapIterator::advance"
+        percentage: 14.32
+        category: "アルゴリズム/データ構造"
+        root_cause: "Large 経路で PersistentHashSet を反復→Vec 化→再ソートが繰り返される"
+      - name: "TransientHashMap::insert_into_bitmap_node_cow"
+        percentage: 9.80
+        category: "メモリ/データ構造"
+        root_cause: "共有ノードに対する COW が頻発。insert_without_cow が未適用の経路が残存"
+      - name: "core::slice::sort::stable::quicksort"
+        percentage: 7.38
+        category: "アルゴリズム"
+        root_cause: "事前ソート入力を活かせず、毎回 sort + dedup"
+      - name: "core::slice::sort::shared::smallsort"
+        percentage: 6.47
+        category: "アルゴリズム"
+        root_cause: "事前ソート入力を活かせず、毎回 sort + dedup"
+      - name: "Arc::make_mut"
+        percentage: 4.57
+        category: "メモリ/並行処理"
+        root_cause: "Arc の共有解除が多発。短命な Vec/ノード生成が多い"
+      - name: "drop_in_place<Vec<ChildSlot>>"
+        percentage: 4.36
+        category: "メモリ"
+        root_cause: "短命 Vec/Node の生成が多く Drop が支配的"
+      - name: "Arc::drop_slow"
+        percentage: 4.15
+        category: "メモリ/並行処理"
+        root_cause: "Arc の Drop が多発。短命な Vec/ノード生成が多い"
+
+    aggregated_categories:
+      sort_operations: 13.85  # quicksort(7.38) + smallsort(6.47)
+      arc_cow_operations: 13.08  # make_mut(4.57) + drop_slow(4.15) + drop_in_place(4.36)
+      transient_hashmap_cow: 9.80
+      hashmap_iteration: 14.32
+      libc_overhead: 21.61
+      total_analyzed: 72.66
+
+  tb_001_003_no_improvement:
+    - title: "Transient一括更新の効果がホットパス外/限定的"
+      detail: |
+        insert_bulk_owned/BulkBuilder は一部経路でのみ有効。
+        TaskIdCollection::from_sorted_vec と PersistentHashMap 反復・ソートが支配的で、
+        COW削減の効果が全体に波及しなかった。
+      impact: "COW削減の効果が Arc と Drop のオーバーヘッドに埋没（Arc関連が13.08%を占有）"
+
+    - title: "reserve の実効性不足"
+      detail: |
+        HAMT の reserve は capacity_hint 更新のみで実メモリ確保ではない。
+        libc が 21.61% を占有する現状では効果が出にくい。
+      impact: "メモリアロケーション削減効果が限定的"
+
+    - title: "ソート削減の限定適用"
+      detail: |
+        from_sorted_iter 未適用/入力未ソートにより、
+        core::slice::sort が 13.85% で残存。
+      impact: "ソート回数削減が達成できず、O(n log n) がホットパスで反復"
+
+    - title: "Arc/COW/Drop コストの主要化"
+      detail: |
+        Arc::make_mut / Arc::drop_slow / drop_in_place が合計 13.08% を占有。
+        COW削減の効果が Arc と Drop のオーバーヘッドに埋没した。
+      impact: "参照カウント更新と Drop の負荷が増大し、性能向上を阻害"
+
+bottleneck_analysis:
+  - name: "PersistentHashMapIterator::advance (14.32%)"
+    category: ["アルゴリズム", "データ構造"]
+    root_cause: "Large 経路で PersistentHashSet を反復→Vec 化→再ソートが繰り返される"
+    impact: "反復コストとキャッシュミスが支配的"
+    bottleneck_finder_checklist:
+      algorithm_data_structure:
+        - "O(n)以上のアルゴリズムがホットパスに存在: ✓ (O(n)反復が多発)"
+        - "適切なデータ構造を使用: ✗ (PersistentHashSet → SortedVec への移行が必要)"
+      memory:
+        - "大きな構造体のコピー: ✓ (Vec<TaskId>の生成が頻発)"
+
+  - name: "TransientHashMap::insert_into_bitmap_node_cow (9.80%)"
+    category: ["メモリ", "データ構造"]
+    root_cause: "共有ノードに対する COW が頻発。insert_without_cow が未適用の経路が残存"
+    impact: "malloc/free と Arc ドロップが増加"
+    bottleneck_finder_checklist:
+      memory:
+        - "不要なクローン: ✓ (COW により過剰なクローンが発生)"
+        - "Boxやアロケーション過剰: ✓ (libcが21.61%を占有)"
+
+  - name: "core::slice::sort (13.85%)"
+    category: ["アルゴリズム"]
+    root_cause: "事前ソート入力を活かせず、毎回 sort + dedup"
+    impact: "O(n log n) がホットパスで反復"
+    bottleneck_finder_checklist:
+      algorithm_data_structure:
+        - "O(n²)以上のアルゴリズム: ✗ (O(n log n)だが頻度が高い)"
+        - "イテレータチェーン効率: ✗ (Vec経由で非効率)"
+
+  - name: "Arc::make_mut / Arc::drop_slow / drop_in_place<Vec<ChildSlot<...>>>"
+    category: ["メモリ", "並行処理"]
+    root_cause: "Arc の共有解除と Drop が多発。短命な Vec/ノード生成が多い"
+    impact: "参照カウント更新と Drop の負荷が増大"
+    bottleneck_finder_checklist:
+      memory:
+        - "不要なクローン: ✓ (Arc::make_mutによる過剰な共有解除)"
+        - "Boxやアロケーション過剰: ✓ (短命なVec/Nodeの生成が多い)"
+      concurrency:
+        - "不要なArc/Mutex: ✓ (Arc使用の最適化が必要)"
+
+  - name: "libc (21.61%)"
+    category: ["メモリ", "I/O"]
+    root_cause: "malloc/free が支配的。COW と中間 Vec の生成が主因"
+    impact: "システムコールとロック競合を誘発"
+    bottleneck_finder_checklist:
+      memory:
+        - "Boxやアロケーション過剰: ✓ (メモリ割り当てが支配的)"
+        - "Vecの容量事前確保: ✗ (未実装)"
+      compiler_optimization:
+        - "代替アロケータの検討: 未実施 (jemalloc/mimallocの評価が必要)"
+
+requirements:
+  - id: "REQ-BULK-301"
+    name: "TaskIdCollection Large 表現の SortedVec 化"
+    component:
+      - "src/search/task_id_collection.rs"
+      - "src/persistent/ordered_unique_set.rs"
+      - "benches/api/src/api/query.rs"
+    bottleneck:
+      name: "PersistentHashMapIterator::advance / core::slice::sort"
+      why: "Large 経路が PersistentHashSet を経由し、反復＋ソートが支配的"
+      current_cpu_percentage: 28.17  # iterator(14.32) + sort(13.85)
+    improvement:
+      summary: "Large 経路を SortedVec 表現に置換し、反復/ソートを線形マージに置換"
+      details:
+        - "Large は `Vec<TaskId>`（昇順・重複なし）で保持"
+        - "contains は二分探索、merge は two-pointer で実装"
+        - "HashSet への変換は必要箇所のみ（API 互換性維持）"
+      functional_programming_principles:
+        - "参照透過性: ソート済み配列の操作は決定的"
+        - "純粋関数: 副作用なし、入力を変更しない"
+        - "不変性: 新しいVecを返す設計"
+    algorithm:
+      - "sorted merge (two-pointer) + dedup"
+      - "difference/intersection in linear time"
+      - "binary search for contains"
+    current_performance_issue: "sort 13.85% / iterator 14.32%"
+    expected_effect:
+      - "PersistentHashMapIterator::advance を 50% 以上削減"
+      - "core::slice::sort を 60% 以上削減"
+      - "tasks_bulk RPS 14.38 → 20-24（単体効果）"
+    priority: "P0"
+    implementation_notes:
+      - "enum TaskIdCollection { Small(PersistentHashSet), Large(Vec<TaskId>) }"
+      - "閾値は LARGE_THRESHOLD で設定"
+      - "Large → Small への変換は遅延評価"
+
+  - id: "REQ-BULK-302"
+    name: "COW削減の適用範囲拡大（bulk insert の徹底）"
+    component:
+      - "src/persistent/hashmap.rs"
+      - "src/persistent/hashset.rs"
+      - "src/persistent/ordered_unique_set.rs"
+    bottleneck:
+      name: "TransientHashMap::insert_into_bitmap_node_cow / Arc::make_mut"
+      why: "insert_without_cow が未適用の経路が残り、共有解除が頻発"
+      current_cpu_percentage: 14.37  # insert_cow(9.80) + make_mut(4.57)
+    improvement:
+      summary: "bulk 構築経路を一元化し、insert_without_cow を必ず通す"
+      details:
+        - "TaskIdCollection::from_sorted_vec の Large 経路は insert_bulk_owned を必須化"
+        - "chunking により MAX_BULK_INSERT 超過時も COW 低減を維持"
+        - "Transient の世代トークン一致を保証する Builder 経路を追加"
+      functional_programming_principles:
+        - "参照透過性: 同じ入力に対して同じ出力"
+        - "純粋関数: 世代トークンによる制御だが、外部から見て純粋"
+        - "不変性: 永続データ構造は変更しない"
+    algorithm:
+      - "generation token based in-place updates"
+      - "bulk insert with chunking"
+      - "owned node optimization"
+    current_performance_issue: "COW 9.80% + Arc::make_mut 4.57%"
+    expected_effect:
+      - "insert_into_bitmap_node_cow を 60% 以上削減"
+      - "Arc::make_mut を 50% 以上削減"
+      - "tasks_bulk RPS 14.38 → 22-28（単体効果）"
+    priority: "P0"
+    implementation_notes:
+      - "struct GenerationToken(NonZeroU64)"
+      - "struct TransientHashMap { generation: GenerationToken, ... }"
+      - "SHARED_GENERATION = GenerationToken(1)"
+
+  - id: "REQ-BULK-303"
+    name: "ソート/マージ経路の線形化（from_sorted_iter）"
+    component:
+      - "benches/api/src/api/query.rs"
+      - "src/search/task_id_collection.rs"
+    bottleneck:
+      name: "core::slice::sort"
+      why: "compute_merged_posting_list_sorted が毎回 sort を実施"
+      current_cpu_percentage: 13.85
+    improvement:
+      summary: "from_sorted_iter を導入し、Vec 生成と多重ソートを排除"
+      details:
+        - "compute_merged_posting_list_sorted を iterator 返却に変更"
+        - "from_sorted_iter で直接構築"
+      functional_programming_principles:
+        - "高階関数: Iteratorパイプラインによる処理"
+        - "遅延評価: Iteratorによる遅延計算"
+        - "参照透過性: 同じ入力に対して同じ出力"
+    algorithm:
+      - "sorted merge / iterator pipeline"
+      - "lazy evaluation with Iterator"
+    current_performance_issue: "sort 13.85% が残存"
+    expected_effect:
+      - "sort コストを 60% 以上削減"
+      - "libc 呼び出しの一部削減"
+      - "tasks_bulk RPS 14.38 → 24-32（REQ-BULK-301/302と合算で 40+ を目標）"
+    priority: "P1"
+    implementation_notes:
+      - "fn from_sorted_iter<I: Iterator<Item=T>>(iter: I) -> Self"
+      - "fn compute_merged_posting_list_sorted(...) -> impl Iterator<Item=TaskId>"
+
+  - id: "REQ-BULK-304"
+    name: "アロケーション削減と Drop コスト低減"
+    component:
+      - "src/persistent/hashmap_node.rs"
+      - "src/persistent/hashmap.rs"
+    bottleneck:
+      name: "libc / drop_in_place<Vec<ChildSlot<...>>> / Arc::drop_slow"
+      why: "短命 Vec/Node の生成が多く Drop が支配的"
+      current_cpu_percentage: 30.12  # libc(21.61) + drop_in_place(4.36) + drop_slow(4.15)
+    improvement:
+      summary: "ChildSlot の SmallVec 化と中間 Vec の再利用でアロケーション削減"
+      details:
+        - "ChildSlot の小サイズは inline で保持"
+        - "中間 Vec は with_capacity + clear で再利用"
+        - "副作用は呼び出し側に限定し、データ構造層は純粋関数を維持"
+      functional_programming_principles:
+        - "不変性: データ構造層は純粋関数"
+        - "副作用の分離: バッファ再利用は呼び出し側"
+        - "参照透過性: 最適化は実装の詳細"
+    algorithm:
+      - "small-buffer optimization"
+      - "scratch buffer reuse"
+    current_performance_issue: "libc 21.61% / drop 系 8.51%"
+    expected_effect:
+      - "libc 占有率を 30% 以上削減"
+      - "drop_in_place / Arc::drop_slow を 30% 以上削減"
+    priority: "P1"
+    implementation_notes:
+      - "type ChildSlot = SmallVec<[Arc<Node>; 4]>"
+      - "struct ScratchBuffer { vec: Vec<T> }"
+      - "impl ScratchBuffer { fn reuse(&mut self) { self.vec.clear() } }"
+
+  - id: "REQ-MEASURE-401"
+    name: "tasks_update 計測精度の修正と指標分離"
+    component:
+      - "benches/api/benchmarks/scripts/tasks_update.lua"
+      - "benches/api/benchmarks/scripts/result_collector.lua"
+    bottleneck:
+      name: "計測漏れ（約40%未記録）"
+      why: "backoff/suppressed/fallback が early return で track_response を通過しない"
+    improvement:
+      summary: "excluded_requests と tracked_requests を明示化し、error_rate を分離"
+      details:
+        - "excluded_requests を meta に記録"
+        - "tracked_requests = sum(http_status)"
+        - "error_rate / conflict_rate / server_error_rate を分離"
+      functional_programming_principles:
+        - "純粋関数: 集計ロジックは副作用なし"
+        - "不変性: 計測データは不変"
+        - "型安全: メトリクス計算は型で保証"
+    algorithm:
+      - "pure function での集計（副作用は呼び出し側）"
+    current_performance_issue: "error_rate が部分母数で 53.76% に誤認"
+    expected_effect:
+      - "未記録 0 を保証"
+      - "409 を conflict_rate として分離"
+    priority: "P0"
+    implementation_notes:
+      - "request_categories = { executed, backoff, suppressed, fallback }"
+      - "metrics = { success_rate, conflict_rate, error_rate }"
+      - "整合性検証: total_requests == sum(categories)"
+
+non_functional_requirements:
+  performance:
+    - "Phase1（REQ-BULK-301/302）: tasks_bulk RPS >= 30, P99 < 15s"
+    - "Phase2（301/302/303/304）: tasks_bulk RPS >= 60, P99 < 10s"
+    - "最終目標: RPS 200+, P99 < 5s（累積最適化で到達）"
+  reliability:
+    - "tasks_update tracked_requests == sum(http_status)"
+    - "error_rate は明確な分母で算出"
+  compatibility:
+    - "既存 API の参照透過性と純粋性を維持"
+    - "副作用（ログ/計測）は呼び出し側に限定"
+  functional_programming:
+    - "参照透過性: 同じ入力に対して常に同じ出力"
+    - "純粋関数: 副作用なし、入力を変更しない"
+    - "不変性: 永続データ構造は変更しない"
+    - "例外を制御フローに使わない: Result型で表現"
+    - "高階関数: Iteratorパイプラインを活用"
+
+acceptance_criteria:
+  - "PersistentHashMapIterator::advance の占有率が 50% 以上削減"
+  - "core::slice::sort の占有率が 60% 以上削減"
+  - "insert_into_bitmap_node_cow の占有率が 60% 以上削減"
+  - "libc の占有率が 30% 以上削減"
+  - "tasks_update の未記録が 0"
+  - "conflict_rate が meta に出力される"
+  - "参照透過性と純粋性を維持"
+
+metadata:
+  created_at: "2026-02-05T12:00:00+09:00"
+  status: "completed"
+  priority: "P0"
+  tags:
+    - "tasks_bulk"
+    - "tasks_update"
+    - "profiling"
+    - "performance"
+    - "measurement"
+    - "bottleneck-finder"
+    - "functional-programming"
+  related_requirements:
+    - "20260201_1530_tasks_bulk_apply_changes_optimization.yaml"
+    - "20260202_0930_tasks_bulk_hashset_bulk_optimization.yaml"
+    - "20260204_1700_tasks_update_measurement_and_tasks_bulk_optimization.yaml"
+    - "20260205_0900_profiling_bottleneck_remediation.yaml"
+  codex_review_status: "completed"
+  functional_programming_review_status: "completed"
+  implementation_notes:
+    - "OrderedUniqueSet が既に src/persistent/ordered_unique_set.rs に実装済み"
+    - "SmallVec を使用した Small (n <= 8) と PersistentHashSet を使用した Large (n > 8) の自動切り替え"
+    - "REQ-BULK-301-304 の要件を実装"
+    - "REQ-MEASURE-401 の tasks_update 計測精度の修正実装"
