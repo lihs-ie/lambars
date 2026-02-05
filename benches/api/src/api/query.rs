@@ -5730,6 +5730,8 @@ impl SearchIndex {
     }
 
     /// Original merge implementation using individual inserts.
+    ///
+    /// TB-002: Uses iter_sorted() instead of to_sorted_vec() to reduce allocations.
     fn merge_ngram_delta_individual(
         index: &NgramIndex,
         add: &MutableIndex,
@@ -5740,15 +5742,24 @@ impl SearchIndex {
 
         for key in all_keys {
             let key_str = key.as_str();
-            let existing: Vec<TaskId> = result
-                .get(key_str)
-                .map(TaskIdCollection::to_sorted_vec)
-                .unwrap_or_default();
-            let merged = Self::compute_merged_posting_list_sorted(
-                &existing,
-                add.get(*key).map_or(&[], Vec::as_slice),
-                remove.get(*key).map_or(&[], Vec::as_slice),
-            );
+            let existing_collection = result.get(key_str);
+            let add_slice = add.get(*key).map_or(&[] as &[TaskId], Vec::as_slice);
+            let remove_slice = remove.get(*key).map_or(&[] as &[TaskId], Vec::as_slice);
+
+            // TB-002: Use iter_sorted() instead of to_sorted_vec()
+            let merged = if let Some(collection) = existing_collection {
+                Self::merge_posting_lists_iter_sorted_core(
+                    collection.iter_sorted(),
+                    add_slice.iter(),
+                    remove_slice,
+                )
+            } else {
+                Self::merge_posting_lists_iter_sorted_core(
+                    std::iter::empty(),
+                    add_slice.iter(),
+                    remove_slice,
+                )
+            };
 
             if merged.is_empty() {
                 result.remove(key_str);
