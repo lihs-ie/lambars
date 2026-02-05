@@ -19619,12 +19619,12 @@ mod merge_posting_lists_iter_sorted_tests {
     use rstest::rstest;
     use uuid::Uuid;
 
-    /// Helper: Creates TaskIds from u128 values for deterministic testing.
+    /// Helper: Creates `TaskId` from u128 values for deterministic testing.
     fn task_id(n: u128) -> TaskId {
         TaskId::from_uuid(Uuid::from_u128(n))
     }
 
-    /// Helper: Creates a Vec<TaskId> from u128 values.
+    /// Helper: Creates a `Vec<TaskId>` from u128 values.
     fn task_ids(values: &[u128]) -> Vec<TaskId> {
         values.iter().map(|&v| task_id(v)).collect()
     }
