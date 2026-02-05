@@ -1,0 +1,81 @@
+# Issue: パイプライン演算子のカスタム構文
+# |> 演算子風の構文を提供
+
+deferred_features:
+  - id: pipeline_operator
+    name: "パイプライン演算子のカスタム構文"
+    discovered_date: "2026-01-16"
+    priority: low
+    category: enhancement
+    labels:
+      - "compose"
+      - "enhancement"
+      - "priority: low"
+
+    problem:
+      summary: "Elixir/F# のような |> パイプライン演算子がない"
+      details: |
+        Rust では演算子のオーバーロードが制限されており、
+        |> のようなカスタム演算子を定義できない。
+        proc-macro でエミュレートする可能性を検討。
+
+        - 何が問題なのか: パイプライン演算子による読みやすい構文がない
+        - なぜ発生するのか: Rust の演算子制約
+        - どのような影響があるか: 関数チェーンの可読性が低下
+
+        ただし現在のマクロ（pipe!, compose!）で十分な用途をカバー。
+
+      rust_limitation: |
+        ```rust
+        // Rust では |> 演算子を定義できない
+        // 以下は構文エラー
+        // let result = x |> f |> g |> h;
+
+        // 現在の代替: pipe! マクロ
+        let result = pipe!(x => f => g => h);
+
+        // または compose! + 適用
+        let pipeline = compose!(f, g, h);
+        let result = pipeline(x);
+        ```
+
+    solution:
+      approach: "proc-macro で演算子風構文をエミュレート"
+      options:
+        - name: "pipe! マクロの拡張"
+          description: |
+            既存の pipe! マクロをより |> に近い構文に改善。
+          pros:
+            - "既存実装の活用"
+            - "破壊的変更なし"
+          cons:
+            - "本物の演算子ではない"
+            - "IDE サポートが限定的"
+
+        - name: "proc-macro で |> をエミュレート"
+          description: |
+            proc-macro で `|>` トークンを認識し変換。
+          pros:
+            - "見た目が本物に近い"
+          cons:
+            - "Rust の構文規則に反する"
+            - "メンテナンスコストが高い"
+            - "エラーメッセージが分かりにくい"
+
+      recommended: "pipe! マクロの拡張"
+      estimated_complexity: low
+
+    references:
+      - "Elixir |> operator"
+      - "F# |> operator"
+      - "src/compose/pipe.rs"
+      - "docs/internal/requirements/20250101_0100_compose.yaml"
+
+    related:
+      requirement_id: "compose"
+      plan_id: null
+
+    github_issue:
+      number: 178
+      url: "https://github.com/lihs-ie/lambars/issues/178"
+      created: true

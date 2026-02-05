@@ -1,0 +1,78 @@
+# Issue: async 関数の合成（async_compose!）
+# 非同期関数を合成するマクロ
+
+deferred_features:
+  - id: async_compose
+    name: "async 関数の合成（async_compose!）"
+    discovered_date: "2026-01-16"
+    priority: low
+    category: enhancement
+    labels:
+      - "compose"
+      - "async"
+      - "enhancement"
+      - "priority: low"
+
+    problem:
+      summary: "async 関数を compose! マクロで合成できない"
+      details: |
+        現在の compose! マクロは同期関数のみ対応。
+        async 関数を合成するには手動で .await を挟む必要がある。
+
+        - 何が問題なのか: async 関数の合成が煩雑
+        - なぜ発生するのか: compose! が async 非対応
+        - どのような影響があるか: 非同期パイプラインの構築が面倒
+
+        ただし for_async! マクロで部分的に対応済み。
+
+      rust_limitation: |
+        ```rust
+        // 現状: 手動で await を挟む
+        async fn pipeline(x: i32) -> String {
+            let a = fetch_data(x).await;
+            let b = process(a).await;
+            format_result(b).await
+        }
+
+        // 理想: async_compose! で合成
+        let pipeline = async_compose!(fetch_data, process, format_result);
+        ```
+
+    solution:
+      approach: "async_compose! マクロを追加"
+      options:
+        - name: "async_compose! マクロ"
+          description: |
+            async 関数を合成する専用マクロ。
+            内部で .await を自動挿入。
+          pros:
+            - "for_async! との一貫性"
+            - "非同期パイプラインの簡潔化"
+          cons:
+            - "エラー処理との組み合わせが複雑"
+            - "for_async! で代替可能な場合が多い"
+
+        - name: "for_async! の拡張"
+          description: |
+            既存の for_async! を拡張して関数合成をサポート。
+          pros:
+            - "既存マクロの活用"
+            - "学習コスト削減"
+          cons:
+            - "マクロの複雑化"
+
+      recommended: "async_compose! マクロ"
+      estimated_complexity: medium
+
+    references:
+      - "src/compose/for_async.rs"
+      - "docs/internal/requirements/20250101_0100_compose.yaml"
+
+    related:
+      requirement_id: "compose"
+      plan_id: null
+
+    github_issue:
+      number: 177
+      url: "https://github.com/lihs-ie/lambars/issues/177"
+      created: true

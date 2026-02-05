@@ -79,7 +79,7 @@ priorities:
         rationale: |
           Either/Result など二つの型パラメータを持つ型で必須。
           Haskell, cats-core で基本型クラスとして提供されている。
-        github_issue: null
+        github_issue: 170
         references:
           - docs/internal/requirements/20250101_0000_typeclass.yaml
 
@@ -91,7 +91,7 @@ priorities:
           パーサーコンビネータ等で即効性が高い。
           nom や combine との連携で価値がある。
           empty と orElse (|) を持つ Applicative の拡張。
-        github_issue: null
+        github_issue: 171
         references:
           - docs/internal/requirements/20250101_0000_typeclass.yaml
 
@@ -104,7 +104,7 @@ priorities:
           Functor の代わりに型レベルのリストを使用。
           Rust では HKT 制約を回避できるため、Free より実装しやすい。
           DSL 構築の基盤として重要。
-        github_issue: null
+        github_issue: 172
         references:
           - docs/internal/requirements/20250101_0200_control.yaml
 
@@ -134,7 +134,7 @@ priorities:
           Phase 3 の Continuation との統合。
           高度な制御フローに必要。
           TrampolineT, ContinuationT もこの実装に統合。
-        github_issue: null
+        github_issue: 173
         references:
           - docs/internal/requirements/20250101_0500_effect.yaml
           - docs/internal/requirements/20250101_0200_control.yaml
@@ -147,7 +147,7 @@ priorities:
           非決定的選択を扱う Transformer。
           バックトラッキングの実装に有用。
           AI/探索アルゴリズム向け。
-        github_issue: null
+        github_issue: 174
         dependencies: [FW-005]
         note: ContT/MonadTrans 基盤に依存
         references:
@@ -161,7 +161,7 @@ priorities:
           既存の optics と persistent の連携強化。
           persistent_optics.rs が存在するため拡張が容易。
           深いネストへの効率的なアクセスと不変更新の簡略化。
-        github_issue: null
+        github_issue: 175
         references:
           - docs/internal/requirements/20250101_0300_persistent.yaml
 
@@ -176,7 +176,7 @@ priorities:
           反変ファンクター。入力の型に対して contramap を持つ。
           Predicate<A>: contramap(f: B -> A) -> Predicate<B>
           使用頻度は低めだが、型理論的には重要。
-        github_issue: null
+        github_issue: 176
         references:
           - docs/internal/requirements/20250101_0000_typeclass.yaml
 
@@ -188,7 +188,7 @@ priorities:
           async 関数を compose するためのマクロ。
           for_async! で部分的に対応済み。
           追加の async_compose! の需要は限定的。
-        github_issue: null
+        github_issue: 177
         references:
           - docs/internal/requirements/20250101_0100_compose.yaml
 
@@ -200,7 +200,7 @@ priorities:
           proc-macro で |> 演算子風の構文を提供する可能性の検討。
           Rust の構文制約により限定的。
           現在のマクロで十分な用途をカバー。
-        github_issue: null
+        github_issue: 178
         references:
           - docs/internal/requirements/20250101_0100_compose.yaml
 
@@ -212,7 +212,7 @@ priorities:
           PersistentTreeMap<T, ()> のラッパー。
           順序付きセット、範囲クエリのサポート。
           HashSet で代替可能な場合が多い。
-        github_issue: null
+        github_issue: 179
         references:
           - docs/internal/requirements/20250101_0300_persistent.yaml
 
@@ -224,7 +224,7 @@ priorities:
           Vec ではなくイテレータを返すバージョン。
           大量のデータを処理する場合に有用。
           現在の Vec 版で多くの用途をカバー。
-        github_issue: null
+        github_issue: 180
         references:
           - docs/internal/requirements/phase_10_1_for_macro.yaml
 
@@ -263,7 +263,7 @@ priorities:
           非同期コンテキストでの Optics 操作。
           async/await との統合。
           需要が限定的で、AsyncIO との統合で代替可能。
-        github_issue: null
+        github_issue: 181
         references:
           - docs/internal/requirements/20250101_0400_optics.yaml
 

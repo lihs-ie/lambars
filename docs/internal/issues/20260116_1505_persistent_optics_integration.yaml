@@ -1,0 +1,78 @@
+# Issue: Lens/Prism と永続データ構造の統合強化
+# optics と persistent モジュールの連携強化
+
+deferred_features:
+  - id: persistent_optics_integration
+    name: "Lens/Prism と永続データ構造の統合強化"
+    discovered_date: "2026-01-16"
+    priority: medium
+    category: enhancement
+    labels:
+      - "optics"
+      - "persistent"
+      - "enhancement"
+      - "priority: medium"
+
+    problem:
+      summary: "永続データ構造への深いアクセスと不変更新が煩雑"
+      details: |
+        現在 optics と persistent モジュールは独立して存在するが、
+        より深い統合により、永続データ構造への効率的なアクセスと
+        更新が可能になる。
+
+        - 何が問題なのか: 深くネストした永続構造の更新が冗長
+        - なぜ発生するのか: optics と persistent の連携が限定的
+        - どのような影響があるか: 複雑なデータ構造の操作が面倒
+
+      rust_limitation: |
+        ```rust
+        // 現状: 手動でネストを辿る
+        let new_map = map.update(&key1, |inner| {
+            inner.update(&key2, |value| value + 1)
+        });
+
+        // 理想: Lens を使って一行で
+        let new_map = map.over(at(key1).then(at(key2)), |v| v + 1);
+        ```
+
+    solution:
+      approach: "persistent_optics.rs を拡張し、より多くの連携機能を追加"
+      options:
+        - name: "At/Index トレイトの拡張"
+          description: |
+            At, Ixed トレイトの永続データ構造向け最適化実装を追加。
+            効率的な部分更新をサポート。
+          pros:
+            - "既存の optics トレイトを活用"
+            - "一貫した API"
+          cons:
+            - "パフォーマンスチューニングが必要"
+
+        - name: "専用の PersistentLens"
+          description: |
+            永続データ構造専用の Lens バリアントを作成。
+            構造共有を最大化。
+          pros:
+            - "最適化の余地が大きい"
+            - "構造共有を意識した設計"
+          cons:
+            - "API の複雑化"
+            - "学習コストの増加"
+
+      recommended: "At/Index トレイトの拡張"
+      estimated_complexity: medium
+
+    references:
+      - "src/optics/persistent_optics.rs"
+      - "src/optics/at.rs"
+      - "src/optics/ixed.rs"
+      - "docs/internal/requirements/20250101_0300_persistent.yaml"
+
+    related:
+      requirement_id: "persistent"
+      plan_id: null
+
+    github_issue:
+      number: 175
+      url: "https://github.com/lihs-ie/lambars/issues/175"
+      created: true
