@@ -1,0 +1,172 @@
+# Lazy/ConcurrentLazy パフォーマンス改善 要件定義
+#
+# 概要:
+#   Lazy/ConcurrentLazy の評価パスを改善し、ホットパスの待機とアトミック負荷を削減する。
+#
+# 設計方針:
+#   1. 参照透過性と単回評価保証を維持する。
+#   2. 待機はスピンではなくブロッキング待機に寄せ、CPU を浪費しない。
+#   3. 単一スレッド向け Lazy はアトミックを最小化し、評価済みの取得コストを削減する。
+#
+# 参照:
+#   - profiling-results/latest/criterion-profiling-all-6cd291f4b678bb35db16d0ff678c6741b33d533f/criterion-profiling-6cd291f4b678bb35db16d0ff678c6741b33d533f-control_bench/stacks.folded
+#   - src/control/lazy.rs
+#   - src/control/concurrent_lazy.rs
+
+version: "1.0.0"
+name: "lazy_concurrentlazy_performance"
+description: |
+  control_bench において Lazy/ConcurrentLazy がホットパスとして観測され、
+  評価待機のスピンとアトミック操作が CPU サンプル比率を押し上げている。
+  問題の原因を明確化し、待機戦略と状態管理を改善することで
+  評価済み取得の低コスト化と高負荷時の CPU 競合を抑制する。
+
+# 背景・動機
+background:
+  problem: |
+    control_bench で ConcurrentLazy::force / Lazy::force が上位に出現している。
+    - ConcurrentLazy は計算中にスピン待機を行い、競合時に CPU を消費する。
+    - Lazy は単一スレッド用途にも関わらずアトミック状態機械を使い、
+      評価済みの取得でもメモリフェンスが発生する。
+    これらが繰り返し評価される場面で累積コストとなる。
+  motivation: |
+    高頻度の遅延評価で CPU コストを抑え、
+    参照透過性と単回評価保証を損なわない性能改善を実現する。
+  prior_art:
+    - name: "control_bench stacks.folded"
+      description: "ConcurrentLazy::force / Lazy::force がホットパスとして観測"
+
+# 要件一覧
+requirements:
+  # ======================================================================
+  # 1. ConcurrentLazy の待機戦略改善
+  # ======================================================================
+  - id: LZ-001
+    name: "スピン待機の排除とブロッキング待機"
+    description: |
+      問題: ConcurrentLazy は STATE_COMPUTING 中の待機がスピンであり、
+      競合時に CPU を浪費している。
+      原因: 状態遷移がアトミックのみで、待機をブロッキングに切り替える仕組みがない。
+      解決策: 待機側は Condvar/parking を用いたブロッキング待機へ変更し、
+      READY への遷移通知で起床する。
+      アルゴリズムは「状態マシン + 待機キュー」にし、
+      READY の fast path はロック不要のまま維持する。
+      計算量は O(1) のまま、競合時の実測 CPU コストを削減する。
+
+    laws:
+      - name: "SingleEvaluation"
+        description: |
+          同一 Lazy は 1 回だけ評価され、以降は同じ値を返す。
+        equation: "force(x) == force(x)"
+        property_test: |
+          #[test]
+          fn concurrent_lazy_single_evaluation() {
+              let lazy = ConcurrentLazy::new(|| 1);
+              let a = lazy.force();
+              let b = lazy.force();
+              assert_eq!(*a, *b);
+          }
+
+    methods:
+      - name: "force"
+        signature: "fn force(&self) -> &T"
+        description: |
+          READY はロックレスで即時返却し、
+          COMPUTING はブロッキング待機で復帰する。
+        examples:
+          - description: "評価済みの再取得"
+            code: |
+              let lazy = ConcurrentLazy::new(|| 42);
+              let first = lazy.force();
+              let second = lazy.force();
+              assert_eq!(*first, *second);
+
+    implementations:
+      - type: "ConcurrentLazy<T, F>"
+        description: |
+          待機の実装は Condvar または parking を用い、
+          スピン待機を排除する。
+
+  # ======================================================================
+  # 2. Lazy の状態管理軽量化
+  # ======================================================================
+  - id: LZ-002
+    name: "単一スレッド Lazy のアトミック削減"
+    description: |
+      問題: Lazy は単一スレッド向けにも関わらずアトミック状態を使用し、
+      評価済みの参照取得でもフェンスが発生する。
+      原因: concurrent と同一の状態マシンを流用しているため。
+      解決策: Lazy は Cell などの非アトミック状態に切り替え、
+      READY パスでフェンスを回避する。
+      計算量は O(1) を維持しつつ、
+      評価済みアクセスの定数コストを削減する。
+
+    methods:
+      - name: "force"
+        signature: "fn force(&self) -> &T"
+        description: |
+          READY パスでアトミック操作を発生させない。
+        examples:
+          - description: "評価済みの再取得"
+            code: |
+              let lazy = Lazy::new(|| 42);
+              let a = lazy.force();
+              let b = lazy.force();
+              assert_eq!(*a, *b);
+
+    implementations:
+      - type: "Lazy<T, F>"
+        description: |
+          単一スレッド前提の内部状態へ置き換え、
+          既存 API と挙動を維持する。
+
+  # ======================================================================
+  # 3. Poisoned 状態の低コスト化
+  # ======================================================================
+  - id: LZ-003
+    name: "Poisoned 判定の軽量化"
+    description: |
+      問題: Poisoned 判定も毎回アトミックで判定されるため、
+      評価済み取得のコストが増加する。
+      原因: READY/POISONED の判定が同じパスを通る設計。
+      解決策: READY パスを最短化し、
+      Poisoned の判定は READY 以外の場合のみ行う。
+      計算量は O(1) を維持する。
+
+    methods:
+      - name: "try_force"
+        signature: "fn try_force(&self) -> Result<&T, LazyPoisonedError>"
+        description: |
+          READY の場合は即時返却し、
+          それ以外のみエラー判定を行う。
+        examples:
+          - description: "Poisoned 判定"
+            code: |
+              let lazy = Lazy::new(|| 1);
+              assert!(lazy.try_force().is_ok());
+
+    implementations:
+      - type: "LazyPoisonedError"
+        description: |
+          例外ではなく Result 型で失敗を表現する。
+
+# 非機能要件
+non_functional_requirements:
+  performance:
+    - "control_bench で ConcurrentLazy::force の CPU サンプル比率を 25% 以上削減する。"
+    - "Lazy::force の評価済みパスでアトミック操作を 0 にする。"
+  compatibility:
+    - "既存 API の型・挙動・単回評価保証を維持する。"
+  testing:
+    - "単回評価と参照透過性を確認するテストを追加する。"
+    - "競合時の待機がスピンせずブロッキングになることを計測で確認する。"
+
+# 将来の拡張
+future_extensions:
+  - id: "LZ-FUTURE-001"
+    name: "非同期評価の Lazy コンテキスト"
+    description: |
+      AsyncIO と統合した非同期 Lazy を提供し、
+      非同期ランタイム上での待機を最適化する。
+    rationale: |
+      まずは同期版の競合コスト削減を優先するため。

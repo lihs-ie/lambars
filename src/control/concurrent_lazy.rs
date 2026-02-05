@@ -7,12 +7,12 @@
 //!
 //! # Safety
 //!
-//! This module uses unsafe code to implement a lock-free state machine.
+//! This module uses unsafe code to implement a state machine with blocking wait.
 //! The following invariants are maintained:
 //! - `value` is only initialized when `state` is `STATE_READY`
 //! - `initializer` is `Some` only when `state` is `STATE_EMPTY`
 //! - Transition to `STATE_COMPUTING` is done via `compare_exchange` for exclusivity
-//! - Multiple threads can safely access via Atomic operations and spin-wait
+//! - Multiple threads can safely access via atomic operations and `Condvar` blocking wait
 //!
 //! # Referential Transparency Note
 //!
@@ -28,12 +28,12 @@
 //! should ensure their initialization functions do not panic, or handle the
 //! poisoned state explicitly via `is_poisoned()` before calling `force()`.
 //!
-//! # Re-entry Warning
+//! # Performance
 //!
-//! Calling `force()` recursively from within the initialization function on the
-//! same thread will cause a deadlock detection panic. The spin-wait mechanism
-//! has an iteration limit that will trigger a panic if exceeded, preventing
-//! infinite spinning.
+//! This implementation uses `Mutex` + `Condvar` for blocking wait instead of spin-wait.
+//! This significantly reduces CPU usage during contention compared to spin-wait approaches.
+//! The READY path remains lock-free with only an atomic load and Acquire fence - the
+//! `Mutex` is only acquired when initialization is in progress.
 //!
 //! # Examples
 //!
@@ -64,6 +64,7 @@ use std::fmt;
 use std::mem::{ManuallyDrop, MaybeUninit};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{Condvar, Mutex};
 
 /// State: not yet initialized
 const STATE_EMPTY: u8 = 0;
@@ -116,7 +117,10 @@ impl std::error::Error for ConcurrentLazyPoisonedError {}
 /// - `T: Send + Sync`
 /// - `F: Send`
 ///
-/// After initialization, accessing the value is lock-free (uses `AtomicU8::load`).
+/// After initialization, accessing the value is lock-free (uses atomic load with Acquire ordering).
+/// The `Mutex` + `Condvar` is only used when waiting for another thread to complete
+/// initialization, making the common case (accessing an already-initialized value)
+/// very fast.
 ///
 /// # Examples
 ///
@@ -155,9 +159,18 @@ impl std::error::Error for ConcurrentLazyPoisonedError {}
 /// }
 /// ```
 pub struct ConcurrentLazy<T, F = fn() -> T> {
+    /// Atomic state for lock-free fast path.
     state: AtomicU8,
+    /// The cached value (initialized when state is `STATE_READY`).
     value: UnsafeCell<MaybeUninit<T>>,
+    /// The initialization function (consumed when initialization starts).
     initializer: UnsafeCell<Option<F>>,
+    /// Condvar for blocking wait during initialization.
+    /// Only used when another thread is computing - the fast path doesn't touch this.
+    wait_condvar: Condvar,
+    /// Mutex paired with the Condvar. Used to ensure proper synchronization
+    /// between state updates and condvar notifications.
+    wait_mutex: Mutex<()>,
 }
 
 // # Safety
@@ -192,11 +205,14 @@ impl<T, F: FnOnce() -> T> ConcurrentLazy<T, F> {
     /// // Nothing printed yet
     /// ```
     #[inline]
-    pub const fn new(initializer: F) -> Self {
+    #[allow(clippy::missing_const_for_fn)] // Condvar::new and Mutex::new are not const
+    pub fn new(initializer: F) -> Self {
         Self {
             state: AtomicU8::new(STATE_EMPTY),
             value: UnsafeCell::new(MaybeUninit::uninit()),
             initializer: UnsafeCell::new(Some(initializer)),
+            wait_condvar: Condvar::new(),
+            wait_mutex: Mutex::new(()),
         }
     }
 
@@ -208,7 +224,7 @@ impl<T, F: FnOnce() -> T> ConcurrentLazy<T, F> {
     ///
     /// This method is thread-safe. If multiple threads call `force()` concurrently,
     /// only one will execute the initialization function, and all others will
-    /// wait for it to complete before returning the value.
+    /// block (using `Condvar::wait`) until it completes.
     ///
     /// # Panics
     ///
@@ -226,39 +242,38 @@ impl<T, F: FnOnce() -> T> ConcurrentLazy<T, F> {
     /// assert_eq!(*value, 42);
     /// ```
     pub fn force(&self) -> &T {
-        let mut state = self.state.load(Ordering::Acquire);
+        let state = self.state.load(Ordering::Acquire);
 
+        if state == STATE_READY {
+            // SAFETY: Acquire load synchronizes with Release store in do_init().
+            return unsafe { (*self.value.get()).assume_init_ref() };
+        }
+
+        self.force_slow(state)
+    }
+
+    #[cold]
+    fn force_slow(&self, mut state: u8) -> &T {
         loop {
             match state {
                 STATE_READY => {
-                    // SAFETY: Transition to STATE_READY is done in do_init() after value.write()
-                    // completes with Release ordering. The Acquire load here establishes
-                    // happens-before relationship, guaranteeing that write is visible.
+                    // SAFETY: Acquire load synchronizes with Release store in do_init().
                     return unsafe { (*self.value.get()).assume_init_ref() };
                 }
-                STATE_POISONED => {
-                    panic!("ConcurrentLazy instance has been poisoned");
-                }
+                STATE_POISONED => panic!("ConcurrentLazy instance has been poisoned"),
                 STATE_EMPTY => {
-                    // Use compare_exchange_weak: allows spurious failure but is faster
-                    // on some architectures, and we retry in the loop anyway
                     match self.state.compare_exchange_weak(
                         STATE_EMPTY,
                         STATE_COMPUTING,
                         Ordering::AcqRel,
                         Ordering::Acquire,
                     ) {
-                        Ok(_) => {
-                            return self.do_init();
-                        }
-                        Err(current_state) => {
-                            state = current_state;
-                        }
+                        Ok(_) => return self.do_init(),
+                        Err(current_state) => state = current_state,
                     }
                 }
                 STATE_COMPUTING => {
-                    // Another thread is initializing. Spin-wait with exponential backoff
-                    self.spin_wait();
+                    self.block_until_ready();
                     state = self.state.load(Ordering::Acquire);
                 }
                 _ => unreachable!("Invalid state"),
@@ -266,92 +281,65 @@ impl<T, F: FnOnce() -> T> ConcurrentLazy<T, F> {
         }
     }
 
-    /// Performs the initialization.
-    ///
-    /// # Safety
-    ///
-    /// Must only be called after successfully transitioning to `STATE_COMPUTING`.
+    /// Uses `Condvar::wait` for efficient blocking without CPU spinning.
+    #[cold]
+    fn block_until_ready(&self) {
+        let mut guard = self.wait_mutex.lock().unwrap_or_else(|e| e.into_inner());
+
+        while self.state.load(Ordering::Acquire) == STATE_COMPUTING {
+            guard = self
+                .wait_condvar
+                .wait(guard)
+                .unwrap_or_else(|e| e.into_inner());
+        }
+
+        drop(guard);
+    }
+
+    /// Uses a drop guard to ensure state transitions and waiters are notified if panic occurs.
     fn do_init(&self) -> &T {
-        // SAFETY: compare_exchange succeeded, so only this thread is in
-        // STATE_COMPUTING. Other threads are waiting in spin_wait().
+        struct InitGuard<'a> {
+            state: &'a AtomicU8,
+            condvar: &'a Condvar,
+            mutex: &'a Mutex<()>,
+        }
+
+        impl Drop for InitGuard<'_> {
+            fn drop(&mut self) {
+                if self.state.load(Ordering::Relaxed) == STATE_COMPUTING {
+                    // Acquire mutex to ensure proper synchronization with waiters
+                    let _lock = self.mutex.lock().unwrap_or_else(|e| e.into_inner());
+                    self.state.store(STATE_POISONED, Ordering::Release);
+                    self.condvar.notify_all();
+                }
+            }
+        }
+
+        let guard = InitGuard {
+            state: &self.state,
+            condvar: &self.wait_condvar,
+            mutex: &self.wait_mutex,
+        };
+
+        // SAFETY: compare_exchange succeeded, so only this thread is in STATE_COMPUTING.
         let initializer = unsafe { (*self.initializer.get()).take() }
             .expect("ConcurrentLazy: initializer already consumed");
 
-        let result = catch_unwind(AssertUnwindSafe(initializer));
+        let value = initializer();
 
-        // Note: Using match here for clarity. The Err case panics, so clippy's
-        // suggestion to use if let or map_or_else is not appropriate.
-        #[allow(clippy::single_match_else, clippy::option_if_let_else)]
-        match result {
-            Ok(value) => {
-                // SAFETY: Only the thread that acquired STATE_COMPUTING reaches here.
-                // value is uninitialized, so we initialize it with write().
-                unsafe {
-                    (*self.value.get()).write(value);
-                }
+        // SAFETY: Only the thread that acquired STATE_COMPUTING reaches here.
+        unsafe { (*self.value.get()).write(value) };
 
-                // Release ordering makes the write visible to threads waiting in spin_wait()
-                self.state.store(STATE_READY, Ordering::Release);
-
-                // SAFETY: Just initialized with write(). assume_init_ref() is safe.
-                unsafe { (*self.value.get()).assume_init_ref() }
-            }
-            Err(_) => {
-                self.state.store(STATE_POISONED, Ordering::Release);
-                panic!("ConcurrentLazy: initialization function panicked");
-            }
+        // Acquire mutex to ensure proper synchronization with waiters before notifying
+        {
+            let _lock = self.wait_mutex.lock().unwrap_or_else(|e| e.into_inner());
+            self.state.store(STATE_READY, Ordering::Release);
+            self.wait_condvar.notify_all();
         }
-    }
+        std::mem::forget(guard); // Disarm the guard
 
-    /// Maximum number of spin iterations before assuming deadlock.
-    ///
-    /// This value is chosen to be high enough to allow for legitimate long initializations
-    /// (even with thread scheduling delays), but low enough to detect re-entry deadlock
-    /// within a reasonable time frame.
-    const MAX_SPIN_ITERATIONS: u32 = 10_000;
-
-    /// Spin-waits for `STATE_COMPUTING` to transition to another state.
-    ///
-    /// Uses exponential backoff to reduce CPU usage and contention.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the state remains `STATE_COMPUTING` for too many iterations,
-    /// which typically indicates re-entry deadlock (calling `force()` recursively
-    /// during initialization on the same thread).
-    fn spin_wait(&self) {
-        let mut spin_count = 0u32;
-        let mut total_iterations = 0u32;
-
-        loop {
-            // Exponential backoff: spin count increases up to 64 iterations
-            let iterations = 1u32 << spin_count.min(6);
-            for _ in 0..iterations {
-                std::hint::spin_loop();
-                total_iterations = total_iterations.saturating_add(1);
-            }
-
-            let state = self.state.load(Ordering::Acquire);
-            if state != STATE_COMPUTING {
-                return;
-            }
-
-            // Check for potential deadlock (re-entry or excessively long initialization)
-            assert!(
-                total_iterations < Self::MAX_SPIN_ITERATIONS,
-                "ConcurrentLazy::force potential deadlock detected: \
-                 initialization did not complete after {total_iterations} spin iterations. \
-                 This may indicate recursive initialization (calling force() \
-                 from within the initializer on the same thread)."
-            );
-
-            spin_count += 1;
-
-            // After many spins, yield to scheduler to avoid wasting CPU
-            if spin_count > 10 {
-                std::thread::yield_now();
-            }
-        }
+        // SAFETY: Just initialized above.
+        unsafe { (*self.value.get()).assume_init_ref() }
     }
 
     /// Consumes the `ConcurrentLazy` and returns the inner value.
@@ -379,42 +367,23 @@ impl<T, F: FnOnce() -> T> ConcurrentLazy<T, F> {
     /// If the initialization function panics during `into_inner`, the panic is
     /// propagated after marking the instance as poisoned.
     pub fn into_inner(self) -> Result<T, ConcurrentLazyPoisonedError> {
-        // Prevent Drop from running since we're manually handling the fields
         let this = ManuallyDrop::new(self);
-        let state = this.state.load(Ordering::Acquire);
 
-        match state {
+        match this.state.load(Ordering::Acquire) {
             STATE_READY => {
                 // SAFETY: STATE_READY means value is initialized.
-                // We're consuming self (via ManuallyDrop), so we can take ownership.
                 Ok(unsafe { (*this.value.get()).assume_init_read() })
             }
-            STATE_POISONED => Err(ConcurrentLazyPoisonedError),
+            STATE_POISONED | STATE_COMPUTING => Err(ConcurrentLazyPoisonedError),
             STATE_EMPTY => {
                 // SAFETY: STATE_EMPTY means initializer is Some.
                 let initializer = unsafe { (*this.initializer.get()).take() }
                     .ok_or(ConcurrentLazyPoisonedError)?;
 
-                // Catch panics to ensure we transition to poisoned state
-                let result = catch_unwind(AssertUnwindSafe(initializer));
-
-                // Note: Using match for clarity - the Err case panics so clippy's
-                // suggestion to use if let or map_or_else is not appropriate
-                #[allow(clippy::single_match_else, clippy::option_if_let_else)]
-                match result {
-                    Ok(value) => Ok(value),
-                    Err(_) => {
-                        // Store poisoned state for consistency, even though we own the value
-                        // This is mostly for documentation purposes since the value is consumed
-                        this.state.store(STATE_POISONED, Ordering::Release);
-                        panic!("ConcurrentLazy: initialization function panicked");
-                    }
-                }
-            }
-            STATE_COMPUTING => {
-                // This shouldn't happen when consuming self (we have ownership),
-                // but handle it gracefully
-                Err(ConcurrentLazyPoisonedError)
+                catch_unwind(AssertUnwindSafe(initializer)).map_err(|_| {
+                    this.state.store(STATE_POISONED, Ordering::Release);
+                    panic!("ConcurrentLazy: initialization function panicked");
+                })
             }
             _ => unreachable!("Invalid state"),
         }
@@ -438,6 +407,8 @@ impl<T> ConcurrentLazy<T, fn() -> T> {
             state: AtomicU8::new(STATE_READY),
             value: UnsafeCell::new(MaybeUninit::new(value)),
             initializer: UnsafeCell::new(None),
+            wait_condvar: Condvar::new(),
+            wait_mutex: Mutex::new(()),
         }
     }
 
@@ -479,12 +450,9 @@ impl<T, F> ConcurrentLazy<T, F> {
     /// ```
     #[inline]
     pub fn get(&self) -> Option<&T> {
-        if self.state.load(Ordering::Acquire) == STATE_READY {
+        (self.state.load(Ordering::Acquire) == STATE_READY)
             // SAFETY: STATE_READY means value is initialized.
-            Some(unsafe { (*self.value.get()).assume_init_ref() })
-        } else {
-            None
-        }
+            .then(|| unsafe { (*self.value.get()).assume_init_ref() })
     }
 
     /// Returns whether the value has been initialized.
@@ -528,30 +496,23 @@ impl<T, F> ConcurrentLazy<T, F> {
 }
 
 impl<T, F: FnOnce() -> T> ConcurrentLazy<T, F> {
-    /// Maximum number of spin iterations for `try_force` before returning Err.
-    ///
-    /// This value is chosen to be high enough to allow for legitimate long initializations
-    /// (even with thread scheduling delays), but low enough to return Err in a reasonable time
-    /// instead of blocking indefinitely.
-    const TRY_FORCE_MAX_SPIN_ITERATIONS: u32 = 10_000;
-
     /// Tries to force evaluation without panicking on poisoned state.
     ///
     /// This is a pure functional alternative to `force()` that returns a `Result`
-    /// instead of panicking when the lazy value is poisoned or when another thread
-    /// is currently initializing the value.
+    /// instead of panicking when the lazy value is poisoned.
+    ///
+    /// Unlike `force()`, this method uses blocking wait to wait for initialization
+    /// to complete, which is efficient and does not waste CPU cycles.
     ///
     /// # Returns
     ///
     /// - `Ok(&T)` if the value is successfully computed or already cached
-    /// - `Err(ConcurrentLazyPoisonedError)` if the lazy value is poisoned or
-    ///   initialization is in progress and did not complete within the timeout
+    /// - `Err(ConcurrentLazyPoisonedError)` if the lazy value is poisoned
     ///
     /// # Errors
     ///
     /// Returns `Err(ConcurrentLazyPoisonedError)` if:
     /// - The lazy value is poisoned (initialization previously panicked)
-    /// - Another thread is currently initializing and did not complete within the spin timeout
     ///
     /// # Panics
     ///
@@ -574,19 +535,25 @@ impl<T, F: FnOnce() -> T> ConcurrentLazy<T, F> {
     /// assert!(poisoned.try_force().is_err());
     /// ```
     pub fn try_force(&self) -> Result<&T, ConcurrentLazyPoisonedError> {
-        let mut state = self.state.load(Ordering::Acquire);
-        let mut total_iterations = 0u32;
-        let mut spin_count = 0u32;
+        let state = self.state.load(Ordering::Acquire);
 
+        if state == STATE_READY {
+            // SAFETY: STATE_READY means value is initialized.
+            return Ok(unsafe { (*self.value.get()).assume_init_ref() });
+        }
+
+        self.try_force_slow(state)
+    }
+
+    #[cold]
+    fn try_force_slow(&self, mut state: u8) -> Result<&T, ConcurrentLazyPoisonedError> {
         loop {
             match state {
                 STATE_READY => {
-                    // SAFETY: Same as force() - state is STATE_READY so value is initialized
+                    // SAFETY: STATE_READY means value is initialized.
                     return Ok(unsafe { (*self.value.get()).assume_init_ref() });
                 }
-                STATE_POISONED => {
-                    return Err(ConcurrentLazyPoisonedError);
-                }
+                STATE_POISONED => return Err(ConcurrentLazyPoisonedError),
                 STATE_EMPTY => {
                     match self.state.compare_exchange_weak(
                         STATE_EMPTY,
@@ -594,33 +561,12 @@ impl<T, F: FnOnce() -> T> ConcurrentLazy<T, F> {
                         Ordering::AcqRel,
                         Ordering::Acquire,
                     ) {
-                        Ok(_) => {
-                            return Ok(self.do_init());
-                        }
-                        Err(s) => {
-                            state = s;
-                        }
+                        Ok(_) => return Ok(self.do_init()),
+                        Err(s) => state = s,
                     }
                 }
                 STATE_COMPUTING => {
-                    // Spin-wait with exponential backoff, but return Err instead of panicking
-                    if total_iterations >= Self::TRY_FORCE_MAX_SPIN_ITERATIONS {
-                        return Err(ConcurrentLazyPoisonedError);
-                    }
-
-                    let iterations = 1u32 << spin_count.min(6);
-                    for _ in 0..iterations {
-                        std::hint::spin_loop();
-                        total_iterations = total_iterations.saturating_add(1);
-                    }
-
-                    spin_count += 1;
-
-                    // After many spins, yield to scheduler
-                    if spin_count > 10 {
-                        std::thread::yield_now();
-                    }
-
+                    self.block_until_ready();
                     state = self.state.load(Ordering::Acquire);
                 }
                 _ => unreachable!("Invalid state"),
@@ -820,26 +766,30 @@ impl<T: Default> Default for ConcurrentLazy<T> {
 
 impl<T: fmt::Debug, F> fmt::Debug for ConcurrentLazy<T, F> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.state.load(Ordering::Acquire) {
-            STATE_READY => {
-                // SAFETY: STATE_READY means value is initialized.
-                let value = unsafe { (*self.value.get()).assume_init_ref() };
-                fmt::Debug::fmt(value, formatter)
-            }
-            STATE_EMPTY | STATE_COMPUTING => formatter.write_str("<uninit>"),
-            STATE_POISONED => formatter.write_str("<poisoned>"),
-            _ => unreachable!(),
-        }
+        self.format_state(formatter, |value, f| fmt::Debug::fmt(value, f))
     }
 }
 
 impl<T: fmt::Display, F> fmt::Display for ConcurrentLazy<T, F> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.format_state(formatter, |value, f| fmt::Display::fmt(value, f))
+    }
+}
+
+impl<T, F> ConcurrentLazy<T, F> {
+    fn format_state<Fmt>(
+        &self,
+        formatter: &mut fmt::Formatter<'_>,
+        format_value: Fmt,
+    ) -> fmt::Result
+    where
+        Fmt: FnOnce(&T, &mut fmt::Formatter<'_>) -> fmt::Result,
+    {
         match self.state.load(Ordering::Acquire) {
             STATE_READY => {
                 // SAFETY: STATE_READY means value is initialized.
                 let value = unsafe { (*self.value.get()).assume_init_ref() };
-                fmt::Display::fmt(value, formatter)
+                format_value(value, formatter)
             }
             STATE_EMPTY | STATE_COMPUTING => formatter.write_str("<uninit>"),
             STATE_POISONED => formatter.write_str("<poisoned>"),
@@ -850,13 +800,9 @@ impl<T: fmt::Display, F> fmt::Display for ConcurrentLazy<T, F> {
 
 impl<T, F> Drop for ConcurrentLazy<T, F> {
     fn drop(&mut self) {
-        // Only drop the value if it was initialized
         if *self.state.get_mut() == STATE_READY {
             // SAFETY: STATE_READY means value is initialized.
-            // We have &mut self, so exclusive access is guaranteed.
-            unsafe {
-                (*self.value.get()).assume_init_drop();
-            }
+            unsafe { (*self.value.get()).assume_init_drop() };
         }
     }
 }
@@ -1106,8 +1052,8 @@ mod tests {
 
     // Note: Testing actual re-entry deadlock detection is difficult because
     // it requires calling force() from within the initializer on the same thread.
-    // The MAX_SPIN_ITERATIONS constant is set high enough to allow legitimate
-    // long-running initializations but will eventually detect true deadlocks.
+    // The current implementation uses Mutex + Condvar for blocking wait, which
+    // means a recursive call from the same thread would block indefinitely.
     //
     // A proper test would require simulating a scenario where the initializer
     // calls force() recursively, which is architecturally prevented by the
