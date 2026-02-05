@@ -45,6 +45,8 @@ use lambars::persistent::{
     PersistentVector, TransientHashMap, TransientTreeMap,
 };
 
+const DEFAULT_LARGE_LIST_THRESHOLD: usize = 50_000;
+
 type TaskIdCollection = OrderedUniqueSet<TaskId>;
 use lambars::typeclass::{Semigroup, Traversable};
 
@@ -1207,26 +1209,16 @@ pub type PrefixIndex = PersistentTreeMap<NgramKey, TaskIdCollection>;
 /// Reusable buffer for merge operations (TB-003).
 ///
 /// This structure reduces allocation overhead during merge operations by:
-/// 1. Pre-allocating capacity based on input sizes via `prepare()`
+/// 1. Pre-allocating capacity based on input sizes via `prepare()` (adaptive)
 /// 2. Writing merge results directly to the buffer
 /// 3. Extracting results via `take_with_capacity()` while preserving buffer capacity
 ///
 /// # Buffer Lifecycle
 ///
 /// Each merge iteration:
-/// 1. `prepare(capacity_hint)` - reserves capacity if needed (clamped to `MAX_BUFFER_CAPACITY`)
+/// 1. `prepare(capacity_hint)` - reserves capacity if needed (clamped to controller.max)
 /// 2. `merge_posting_lists_3way_into()` or `merge_add_only_into()` - writes to buffer
-/// 3. `take_with_capacity()` - returns results while preserving buffer capacity
-///
-/// The `take_with_capacity()` method uses `drain()` to extract elements, which
-/// preserves the buffer's allocated capacity. This avoids reallocation on
-/// subsequent iterations in tight loops.
-///
-/// # Capacity Management
-///
-/// - Initial capacity is clamped to `MAX_BUFFER_CAPACITY` (10,000)
-/// - If buffer grows beyond `MAX_BUFFER_CAPACITY` during merge, it is reset
-///   to `MAX_BUFFER_CAPACITY` after `take_with_capacity()`
+/// 3. `take_with_capacity()` - returns results while preserving buffer capacity (swap reuse)
 ///
 /// # Usage
 ///
@@ -1236,35 +1228,214 @@ pub type PrefixIndex = PersistentTreeMap<NgramKey, TaskIdCollection>;
 ///     buffer.prepare(capacity_hint);
 ///     merge_into(&mut buffer.result);
 ///     let merged = buffer.take_with_capacity();
-///     // buffer.result.capacity() is still >= capacity_hint (up to MAX_BUFFER_CAPACITY)
+///     // buffer.result.capacity() is still >= capacity_hint
 /// }
 /// ```
-/// Maximum capacity for `MergeBuffer` to prevent excessive memory usage.
-/// This limit ensures memory requirements stay within +5% of existing usage.
-const MAX_BUFFER_CAPACITY: usize = 10_000;
+/// Minimumデフォルト容量（環境変数で上書き可能）。
+const DEFAULT_BUFFER_CAPACITY_MIN: usize = 10_000;
+/// 最大デフォルト容量（環境変数で上書き可能）。
+const DEFAULT_BUFFER_CAPACITY_MAX: usize = 200_000;
+
+/// ランタイムの容量推奨値を管理する軽量コントローラ。
+#[derive(Debug)]
+pub struct AdaptiveCapacityController {
+    recommended: std::sync::atomic::AtomicUsize,
+    min_capacity: usize,
+    max_capacity: usize,
+}
+
+impl AdaptiveCapacityController {
+    /// 推奨容量を再計算する間隔（マージ回数ベース）。
+    pub const UPDATE_INTERVAL: usize = 1_000;
+
+    #[must_use]
+    pub fn new() -> Self {
+        let min_capacity = std::env::var("LAMBARS_MERGE_BUFFER_CAPACITY_MIN")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(DEFAULT_BUFFER_CAPACITY_MIN)
+            .max(1);
+
+        let max_capacity = std::env::var("LAMBARS_MERGE_BUFFER_CAPACITY_MAX")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(DEFAULT_BUFFER_CAPACITY_MAX)
+            .max(min_capacity);
+
+        Self {
+            recommended: std::sync::atomic::AtomicUsize::new(min_capacity),
+            min_capacity,
+            max_capacity,
+        }
+    }
+
+    /// 現在の推奨容量を返す（Relaxed 読み取り）。
+    #[must_use]
+    pub fn recommended_capacity(&self) -> usize {
+        self.recommended
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .clamp(self.min_capacity, self.max_capacity)
+    }
+
+    /// 最大許容容量を返す。
+    #[must_use]
+    pub const fn max_capacity(&self) -> usize {
+        self.max_capacity
+    }
+
+    /// 観測値の95パーセンタイルから推奨容量を更新する。
+    pub fn update_from_percentile(&self, percentile_95: usize) {
+        let clamped = percentile_95.clamp(self.min_capacity, self.max_capacity);
+        self.recommended
+            .store(clamped, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// マージ時に収集するメトリクス（純粋関数の出力）。
+#[derive(Debug, Default, Clone)]
+pub struct MergeStats {
+    pub requested_capacity: usize,
+    pub reused_capacity: usize,
+    pub is_large_list: bool,
+    pub used_fast_path: bool,
+}
+
+/// メトリクス送信インタフェース（副作用は呼び出し側に分離）。
+pub trait MetricsSink {
+    fn record(&self, stats: &MergeStats);
+}
+
+/// デフォルトのノーオペ実装（オーバーヘッドゼロ）。
+pub struct NoOpMetricsSink;
+
+impl MetricsSink for NoOpMetricsSink {
+    fn record(&self, _stats: &MergeStats) {}
+}
+
+/// 固定長リングバッファでオンラインP95を推定し、
+/// AdaptiveCapacityController を更新するメトリクスシンク。
+pub struct RingBufferMetricsSink {
+    controller: std::sync::Arc<AdaptiveCapacityController>,
+    ring: std::sync::Mutex<RingBuffer<usize, 1_024>>, // 固定メモリ
+    count: std::sync::atomic::AtomicUsize,
+}
+
+impl RingBufferMetricsSink {
+    #[must_use]
+    pub fn new(controller: std::sync::Arc<AdaptiveCapacityController>) -> Self {
+        Self {
+            controller,
+            ring: std::sync::Mutex::new(RingBuffer::new()),
+            count: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+}
+
+impl MetricsSink for RingBufferMetricsSink {
+    fn record(&self, stats: &MergeStats) {
+        let count = self
+            .count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            .saturating_add(1);
+
+        {
+            let mut ring = self.ring.lock().expect("ring buffer mutex poisoned");
+            ring.push(stats.requested_capacity);
+        }
+
+        if count % AdaptiveCapacityController::UPDATE_INTERVAL == 0 {
+            let ring = self.ring.lock().expect("ring buffer mutex poisoned");
+            let p95 = ring.percentile(0.95);
+            self.controller.update_from_percentile(p95);
+        }
+    }
+}
+
+/// 固定長リングバッファ（上書き方式）。
+#[derive(Debug)]
+struct RingBuffer<T, const N: usize> {
+    data: [T; N],
+    head: usize,
+    len: usize,
+}
+
+impl<T: Copy + Default, const N: usize> RingBuffer<T, N> {
+    #[must_use]
+    fn new() -> Self {
+        Self {
+            data: [T::default(); N],
+            head: 0,
+            len: 0,
+        }
+    }
+
+    fn push(&mut self, value: T) {
+        self.data[self.head] = value;
+        self.head = (self.head + 1) % N;
+        if self.len < N {
+            self.len += 1;
+        }
+    }
+
+    #[must_use]
+    fn percentile(&self, p: f64) -> T
+    where
+        T: Ord,
+    {
+        if self.len == 0 {
+            return T::default();
+        }
+        let mut sorted: Vec<T> = self.data[..self.len].to_vec();
+        let idx = ((self.len as f64 * p) as usize).min(self.len - 1);
+        sorted.select_nth_unstable(idx);
+        sorted[idx]
+    }
+}
+
+#[must_use]
+fn large_list_threshold() -> usize {
+    std::env::var("LAMBARS_LARGE_LIST_THRESHOLD")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_LARGE_LIST_THRESHOLD)
+        .max(1)
+}
+
+#[must_use]
+fn large_list_fast_path_enabled() -> bool {
+    std::env::var("LAMBARS_ENABLE_LARGE_LIST_FAST_PATH")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
 
 #[derive(Debug, Default)]
 pub struct MergeBuffer {
     /// Internal buffer for storing merge results.
     result: Vec<TaskId>,
+    /// 再利用用のスペアバッファ。
+    spare: Vec<TaskId>,
 }
 
 impl MergeBuffer {
     /// Creates a new empty `MergeBuffer`.
     #[must_use]
     pub const fn new() -> Self {
-        Self { result: Vec::new() }
+        Self {
+            result: Vec::new(),
+            spare: Vec::new(),
+        }
     }
 
     /// Creates a new `MergeBuffer` with the specified capacity.
     ///
-    /// The capacity is clamped to `MAX_BUFFER_CAPACITY` (10,000) to prevent
-    /// excessive memory usage.
+    /// The capacity is clamped to `DEFAULT_BUFFER_CAPACITY_MAX` to prevent
+    /// excessive memory usage at construction time.
     #[must_use]
     pub fn with_capacity(capacity: usize) -> Self {
-        let clamped_capacity = capacity.min(MAX_BUFFER_CAPACITY);
+        let clamped_capacity = capacity.min(DEFAULT_BUFFER_CAPACITY_MAX);
         Self {
             result: Vec::with_capacity(clamped_capacity),
+            spare: Vec::new(),
         }
     }
 
@@ -1272,14 +1443,17 @@ impl MergeBuffer {
     ///
     /// This method:
     /// 1. Clears existing contents (O(1) for POD types like `TaskId`)
-    /// 2. Reserves additional capacity if needed (clamped to `MAX_BUFFER_CAPACITY`)
+    /// 2. Reserves additional capacity if needed (clamped to controller.max_capacity())
     ///
     /// The buffer's existing capacity is preserved, enabling reuse.
-    fn prepare(&mut self, capacity_hint: usize) {
-        let target = capacity_hint.min(MAX_BUFFER_CAPACITY);
+    fn prepare(&mut self, capacity_hint: usize, controller: &AdaptiveCapacityController) {
+        let target = capacity_hint
+            .max(controller.recommended_capacity())
+            .min(controller.max_capacity());
         self.result.clear();
         if self.result.capacity() < target {
-            self.result.reserve(target - self.result.capacity());
+            self.result
+                .reserve_exact(target.saturating_sub(self.result.capacity()));
         }
     }
 
@@ -1320,54 +1494,31 @@ impl MergeBuffer {
         std::mem::take(&mut self.result)
     }
 
-    /// Returns the buffer contents while preserving capacity using drain.
+    /// swap 方式で容量を維持しつつ Vec を返す。
     ///
-    /// This method drains the buffer contents into a new Vec while preserving
-    /// the buffer's capacity. The drain approach avoids reallocation because
-    /// the original buffer keeps its allocated memory.
-    ///
-    /// # Capacity Management
-    ///
-    /// If the buffer's capacity exceeds `MAX_BUFFER_CAPACITY` (10,000) after
-    /// a large merge, the buffer is reset to `MAX_BUFFER_CAPACITY` to prevent
-    /// excessive memory retention.
-    ///
-    /// # Performance
-    ///
-    /// - O(n) for collecting drained elements into a new Vec
-    /// - Capacity preserved: The buffer retains its original capacity (up to limit)
-    /// - Allocation: Only the returned Vec is newly allocated (capacity = length)
-    ///
-    /// # Trade-off
-    ///
-    /// This implementation trades a small allocation per call (for the returned Vec)
-    /// for guaranteed capacity preservation on the buffer. The alternative
-    /// (`take_owned()`) has zero allocation cost but loses capacity, requiring
-    /// reallocation on the next `prepare()` call.
-    ///
-    /// For tight loops where the buffer is reused many times, this approach
-    /// is more efficient because:
-    /// 1. The buffer never needs reallocation (capacity preserved up to limit)
-    /// 2. The returned Vec allocation is small (exact size, no slack)
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let mut buffer = MergeBuffer::with_capacity(100);
-    /// for _ in 0..10 {
-    ///     buffer.result.push(TaskId::new(1));
-    ///     let result = buffer.take_with_capacity();
-    ///     // buffer.result.capacity() is still >= 100
-    /// }
-    /// ```
+    /// - result と spare を入れ替え、旧 result を返却する
+    /// - result を返却 Vec と同じ capacity で再確保し、次回以降の再利用を保証
     fn take_with_capacity(&mut self) -> Vec<TaskId> {
-        // Drain preserves capacity while moving elements out
-        let output: Vec<TaskId> = self.result.drain(..).collect();
-        // Reset buffer if capacity exceeds limit to prevent excessive memory retention
-        if self.result.capacity() > MAX_BUFFER_CAPACITY {
-            self.result = Vec::with_capacity(MAX_BUFFER_CAPACITY);
-        }
+        std::mem::swap(&mut self.result, &mut self.spare);
+        let output = std::mem::take(&mut self.spare);
+        self.result = Vec::with_capacity(output.capacity());
         output
+    }
+
+    /// 使用済み Vec をプールに戻す（容量は上限でクリップ）。
+    fn return_buffer(
+        &mut self,
+        mut returned: Vec<TaskId>,
+        controller: &AdaptiveCapacityController,
+    ) {
+        let capped = returned.capacity().min(controller.max_capacity());
+        if capped < returned.capacity() {
+            returned.shrink_to(capped);
+        }
+        returned.clear();
+        if returned.capacity() > self.spare.capacity() {
+            self.spare = returned;
+        }
     }
 }
 
@@ -5810,20 +5961,27 @@ impl SearchIndex {
         let mut transient = index.clone().transient();
         // TB-003: Reuse buffer across iterations
         let mut buffer = MergeBuffer::new();
+        let controller = std::sync::Arc::new(AdaptiveCapacityController::new());
+        let metrics_sink = RingBufferMetricsSink::new(controller.clone());
 
         for key in all_keys {
             let key_str = key.as_str();
             let add_slice = add.get(key).map_or(&[] as &[TaskId], Vec::as_slice);
             let remove_slice = remove.get(key).map_or(&[] as &[TaskId], Vec::as_slice);
+            let mut stats = MergeStats::default();
             // TB-002: Use iter_sorted() instead of to_sorted_vec()
             let merged = Self::merge_single_posting_list_with_buffer(
                 transient.get(key_str),
                 add_slice,
                 remove_slice,
                 &mut buffer,
+                controller.as_ref(),
+                &mut stats,
             );
+            metrics_sink.record(&stats);
 
             if merged.is_empty() {
+                buffer.return_buffer(merged, controller.as_ref());
                 transient.remove(key_str);
             } else {
                 transient.insert(key.clone(), TaskIdCollection::from_sorted_vec(merged));
@@ -5842,11 +6000,27 @@ impl SearchIndex {
         config: &SearchIndexConfig,
     ) -> MergeNgramDeltaResult {
         let all_keys: std::collections::HashSet<_> = add.keys().chain(remove.keys()).collect();
+        let controller = std::sync::Arc::new(AdaptiveCapacityController::new());
+        let metrics_sink = RingBufferMetricsSink::new(controller.clone());
 
         if config.use_merge_ngram_delta_bulk_insert {
-            Self::merge_ngram_delta_bulk(index, add, remove, &all_keys)
+            Self::merge_ngram_delta_bulk(
+                index,
+                add,
+                remove,
+                &all_keys,
+                controller.as_ref(),
+                &metrics_sink,
+            )
         } else {
-            Self::merge_ngram_delta_individual(index, add, remove, &all_keys)
+            Self::merge_ngram_delta_individual(
+                index,
+                add,
+                remove,
+                &all_keys,
+                controller.as_ref(),
+                &metrics_sink,
+            )
         }
     }
 
@@ -5868,6 +6042,8 @@ impl SearchIndex {
         add_slice: &'a [TaskId],
         remove_slice: &'a [TaskId],
         buffer: &mut MergeBuffer,
+        controller: &AdaptiveCapacityController,
+        stats: &mut MergeStats,
     ) -> Vec<TaskId> {
         #[cfg(debug_assertions)]
         {
@@ -5880,7 +6056,26 @@ impl SearchIndex {
         }
 
         let existing_len = existing.map_or(0, TaskIdCollection::len);
-        buffer.prepare(existing_len + add_slice.len());
+        let total_len = existing_len + add_slice.len();
+        stats.requested_capacity = total_len;
+        stats.reused_capacity = buffer.result.capacity();
+
+        let threshold = large_list_threshold();
+        stats.is_large_list = total_len >= threshold;
+
+        if stats.is_large_list && large_list_fast_path_enabled() {
+            stats.used_fast_path = true;
+            let existing_iter = existing.into_iter().flat_map(|c| c.iter_sorted());
+            return Self::merge_large_posting_list_sorted(
+                existing_iter,
+                existing_len,
+                add_slice.iter(),
+                add_slice.len(),
+                remove_slice,
+            );
+        }
+
+        buffer.prepare(total_len, controller);
 
         // Use static dispatch via flat_map instead of Box<dyn Iterator>
         let existing_iter = existing.into_iter().flat_map(|c| c.iter_sorted());
@@ -5902,12 +6097,67 @@ impl SearchIndex {
         buffer.take_with_capacity()
     }
 
+    /// 大規模ポスティングリスト専用のソート済み差分マージ。
+    ///
+    /// 事前条件: existing / add / remove はすべてソート済みかつ重複なし。
+    /// 計算量: O(n + m + k)
+    fn merge_large_posting_list_sorted<'a>(
+        existing: impl Iterator<Item = &'a TaskId>,
+        existing_len: usize,
+        add: impl Iterator<Item = &'a TaskId>,
+        add_len: usize,
+        remove: &'a [TaskId],
+    ) -> Vec<TaskId> {
+        let mut out = Vec::with_capacity(existing_len + add_len);
+        let mut existing = existing.peekable();
+        let mut add = add.peekable();
+        let mut k = 0;
+
+        loop {
+            let next_ref = match (existing.peek(), add.peek()) {
+                (None, None) => break,
+                (Some(&e), None) => {
+                    existing.next();
+                    e
+                }
+                (None, Some(&a)) => {
+                    add.next();
+                    a
+                }
+                (Some(&e), Some(&a)) => {
+                    if e <= a {
+                        existing.next();
+                        e
+                    } else {
+                        add.next();
+                        a
+                    }
+                }
+            };
+
+            while k < remove.len() && remove[k] < *next_ref {
+                k += 1;
+            }
+
+            let is_removed = remove.get(k).is_some_and(|r| r == next_ref);
+            let is_duplicate = out.last().is_some_and(|last| last == next_ref);
+
+            if !is_removed && !is_duplicate {
+                out.push(next_ref.clone());
+            }
+        }
+
+        out
+    }
+
     /// Original merge implementation using individual inserts with buffer reuse (TB-003).
     fn merge_ngram_delta_individual(
         index: &NgramIndex,
         add: &MutableIndex,
         remove: &MutableIndex,
         all_keys: &std::collections::HashSet<&NgramKey>,
+        controller: &AdaptiveCapacityController,
+        metrics_sink: &impl MetricsSink,
     ) -> MergeNgramDeltaResult {
         let mut result = index.clone().transient();
         let mut buffer = MergeBuffer::new();
@@ -5916,14 +6166,19 @@ impl SearchIndex {
             let key_str = key.as_str();
             let add_slice = add.get(*key).map_or(&[] as &[TaskId], Vec::as_slice);
             let remove_slice = remove.get(*key).map_or(&[] as &[TaskId], Vec::as_slice);
+            let mut stats = MergeStats::default();
             let merged = Self::merge_single_posting_list_with_buffer(
                 result.get(key_str),
                 add_slice,
                 remove_slice,
                 &mut buffer,
+                controller,
+                &mut stats,
             );
+            metrics_sink.record(&stats);
 
             if merged.is_empty() {
+                buffer.return_buffer(merged, controller);
                 result.remove(key_str);
             } else {
                 result.insert((*key).clone(), TaskIdCollection::from_sorted_vec(merged));
@@ -5940,6 +6195,8 @@ impl SearchIndex {
         add: &MutableIndex,
         remove: &MutableIndex,
         all_keys: &std::collections::HashSet<&NgramKey>,
+        controller: &AdaptiveCapacityController,
+        metrics_sink: &impl MetricsSink,
     ) -> MergeNgramDeltaResult {
         const CHUNK_SIZE: usize = MAX_BULK_INSERT - 1;
 
@@ -5952,14 +6209,19 @@ impl SearchIndex {
             let key_str = key.as_str();
             let add_slice = add.get(*key).map_or(&[] as &[TaskId], Vec::as_slice);
             let remove_slice = remove.get(*key).map_or(&[] as &[TaskId], Vec::as_slice);
+            let mut stats = MergeStats::default();
             let merged = Self::merge_single_posting_list_with_buffer(
                 result.get(key_str),
                 add_slice,
                 remove_slice,
                 &mut buffer,
+                controller,
+                &mut stats,
             );
+            metrics_sink.record(&stats);
 
             if merged.is_empty() {
+                buffer.return_buffer(merged, controller);
                 keys_to_remove.push(key_str);
             } else {
                 entries_to_insert.push(((*key).clone(), TaskIdCollection::from_sorted_vec(merged)));
@@ -5977,8 +6239,15 @@ impl SearchIndex {
             if let Ok(updated) = result.insert_bulk_owned(chunk_vec) {
                 result = updated;
             } else {
-                let fallback =
-                    Self::merge_ngram_delta_individual(index, add, remove, all_keys).into_index();
+                let fallback = Self::merge_ngram_delta_individual(
+                    index,
+                    add,
+                    remove,
+                    all_keys,
+                    controller,
+                    metrics_sink,
+                )
+                .into_index();
                 return MergeNgramDeltaResult::Fallback {
                     index: fallback,
                     reason: MergeNgramDeltaFallbackReason::TooManyEntries {
@@ -20065,7 +20334,16 @@ mod merge_posting_lists_3way_into_tests {
         let add = task_ids(&[2, 1]); // unsorted
         let remove: Vec<TaskId> = vec![];
         let mut buffer = crate::api::query::MergeBuffer::new();
-        SearchIndex::merge_single_posting_list_with_buffer(None, &add, &remove, &mut buffer);
+        let controller = AdaptiveCapacityController::new();
+        let mut stats = MergeStats::default();
+        SearchIndex::merge_single_posting_list_with_buffer(
+            None,
+            &add,
+            &remove,
+            &mut buffer,
+            &controller,
+            &mut stats,
+        );
     }
 
     #[cfg(debug_assertions)]
@@ -20076,7 +20354,16 @@ mod merge_posting_lists_3way_into_tests {
         let add: Vec<TaskId> = vec![];
         let remove = task_ids(&[3, 1]); // unsorted
         let mut buffer = crate::api::query::MergeBuffer::new();
-        SearchIndex::merge_single_posting_list_with_buffer(None, &add, &remove, &mut buffer);
+        let controller = AdaptiveCapacityController::new();
+        let mut stats = MergeStats::default();
+        SearchIndex::merge_single_posting_list_with_buffer(
+            None,
+            &add,
+            &remove,
+            &mut buffer,
+            &controller,
+            &mut stats,
+        );
     }
 
     #[cfg(debug_assertions)]
@@ -20087,7 +20374,16 @@ mod merge_posting_lists_3way_into_tests {
         let add = task_ids(&[2, 2, 4]); // duplicate
         let remove: Vec<TaskId> = vec![];
         let mut buffer = crate::api::query::MergeBuffer::new();
-        SearchIndex::merge_single_posting_list_with_buffer(None, &add, &remove, &mut buffer);
+        let controller = AdaptiveCapacityController::new();
+        let mut stats = MergeStats::default();
+        SearchIndex::merge_single_posting_list_with_buffer(
+            None,
+            &add,
+            &remove,
+            &mut buffer,
+            &controller,
+            &mut stats,
+        );
     }
 
     #[cfg(debug_assertions)]
@@ -20098,7 +20394,16 @@ mod merge_posting_lists_3way_into_tests {
         let add: Vec<TaskId> = vec![];
         let remove = task_ids(&[3, 3]); // duplicate
         let mut buffer = crate::api::query::MergeBuffer::new();
-        SearchIndex::merge_single_posting_list_with_buffer(None, &add, &remove, &mut buffer);
+        let controller = AdaptiveCapacityController::new();
+        let mut stats = MergeStats::default();
+        SearchIndex::merge_single_posting_list_with_buffer(
+            None,
+            &add,
+            &remove,
+            &mut buffer,
+            &controller,
+            &mut stats,
+        );
     }
 
     #[rstest]
@@ -20134,7 +20439,23 @@ mod merge_posting_lists_3way_into_tests {
 mod merge_buffer_capacity_tests {
     use super::*;
     use rstest::rstest;
+    use std::sync::{Mutex, OnceLock};
     use uuid::Uuid;
+
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("ENV_LOCK poisoned")
+    }
+
+    #[allow(unsafe_code)]
+    fn set_env(key: &str, value: &str) {
+        let _guard = env_guard();
+        unsafe { std::env::set_var(key, value) };
+    }
 
     fn task_id(value: u128) -> TaskId {
         TaskId::from_uuid(Uuid::from_u128(value))
@@ -20195,27 +20516,6 @@ mod merge_buffer_capacity_tests {
     }
 
     #[rstest]
-    fn take_with_capacity_resets_capacity_when_exceeds_limit() {
-        let mut buffer = MergeBuffer::new();
-        // Manually push more than MAX_BUFFER_CAPACITY (10,000) elements
-        // to simulate a large merge result
-        for i in 0..15_000_u128 {
-            buffer.result.push(task_id(i));
-        }
-        assert!(buffer.result.capacity() >= 15_000);
-
-        let result = buffer.take_with_capacity();
-
-        assert_eq!(result.len(), 15_000);
-        // After take_with_capacity, buffer should be reset to MAX_BUFFER_CAPACITY
-        assert!(
-            buffer.result.capacity() <= 10_000,
-            "Buffer capacity should be reset to MAX_BUFFER_CAPACITY, but was {}",
-            buffer.result.capacity()
-        );
-    }
-
-    #[rstest]
     fn take_with_capacity_preserves_capacity_within_limit() {
         let mut buffer = MergeBuffer::with_capacity(5_000);
         // Push elements within limit
@@ -20231,6 +20531,80 @@ mod merge_buffer_capacity_tests {
             buffer.result.capacity() >= 5_000,
             "Buffer capacity should be preserved, but was {}",
             buffer.result.capacity()
+        );
+    }
+
+    #[rstest]
+    fn return_buffer_clips_to_max_capacity() {
+        set_env("LAMBARS_MERGE_BUFFER_CAPACITY_MIN", "1");
+        set_env("LAMBARS_MERGE_BUFFER_CAPACITY_MAX", "500");
+        let controller = AdaptiveCapacityController::new();
+        let mut buffer = MergeBuffer::new();
+        let returned: Vec<TaskId> = Vec::with_capacity(2_000);
+        buffer.return_buffer(returned, &controller);
+        assert_eq!(buffer.spare.capacity(), 500);
+    }
+
+    #[rstest]
+    fn adaptive_controller_clamps_to_bounds() {
+        set_env("LAMBARS_MERGE_BUFFER_CAPACITY_MIN", "1000");
+        set_env("LAMBARS_MERGE_BUFFER_CAPACITY_MAX", "2000");
+        let controller = AdaptiveCapacityController::new();
+        controller.update_from_percentile(10_000);
+        assert_eq!(controller.recommended_capacity(), 2_000);
+    }
+
+    #[rstest]
+    fn fast_path_triggers_when_enabled() {
+        set_env("LAMBARS_ENABLE_LARGE_LIST_FAST_PATH", "1");
+        set_env("LAMBARS_LARGE_LIST_THRESHOLD", "4");
+        let controller = AdaptiveCapacityController::new();
+        let mut buffer = MergeBuffer::new();
+        let existing = vec![task_id(1), task_id(3), task_id(5), task_id(7)];
+        let add = vec![task_id(2), task_id(4)];
+        let remove = vec![task_id(3)];
+        let mut stats = MergeStats::default();
+
+        let merged = SearchIndex::merge_single_posting_list_with_buffer(
+            Some(&OrderedUniqueSet::from_sorted_vec(existing.clone())),
+            &add,
+            &remove,
+            &mut buffer,
+            &controller,
+            &mut stats,
+        );
+
+        assert!(stats.used_fast_path);
+        assert_eq!(
+            merged,
+            vec![task_id(1), task_id(2), task_id(4), task_id(5), task_id(7)]
+        );
+    }
+
+    #[rstest]
+    fn fast_path_disabled_uses_legacy() {
+        set_env("LAMBARS_ENABLE_LARGE_LIST_FAST_PATH", "0");
+        set_env("LAMBARS_LARGE_LIST_THRESHOLD", "4");
+        let controller = AdaptiveCapacityController::new();
+        let mut buffer = MergeBuffer::new();
+        let existing = vec![task_id(1), task_id(3), task_id(5), task_id(7)];
+        let add = vec![task_id(2), task_id(4)];
+        let remove = vec![task_id(3)];
+        let mut stats = MergeStats::default();
+
+        let merged = SearchIndex::merge_single_posting_list_with_buffer(
+            Some(&OrderedUniqueSet::from_sorted_vec(existing.clone())),
+            &add,
+            &remove,
+            &mut buffer,
+            &controller,
+            &mut stats,
+        );
+
+        assert!(!stats.used_fast_path);
+        assert_eq!(
+            merged,
+            vec![task_id(1), task_id(2), task_id(4), task_id(5), task_id(7)]
         );
     }
 }
