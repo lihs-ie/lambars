@@ -225,6 +225,8 @@ impl<T, F: FnOnce() -> T> Lazy<T, F> {
     /// let value = lazy.force();
     /// assert_eq!(*value, 42);
     /// ```
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
     pub fn force(&self) -> &T {
         let state = self.state.get();
 
@@ -270,6 +272,8 @@ impl<T, F: FnOnce() -> T> Lazy<T, F> {
     /// lazy.force_mut().push(4);
     /// assert_eq!(lazy.force().as_slice(), &[1, 2, 3, 4]);
     /// ```
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
     pub fn force_mut(&mut self) -> &mut T {
         let state = self.state.get();
 
@@ -286,29 +290,36 @@ impl<T, F: FnOnce() -> T> Lazy<T, F> {
         }
     }
 
-    /// Uses a drop guard to ensure state transitions to POISONED if panic occurs.
+    /// Initializes the value and returns a reference.
+    #[cold]
+    #[inline(never)]
     fn initialize(&self) -> &T {
-        self.state.set(STATE_COMPUTING);
-        let guard = PoisonGuard(&self.state);
-
-        // SAFETY: State was STATE_EMPTY, so initializer is Some.
-        let initializer =
-            unsafe { (*self.initializer.get()).take() }.expect("initializer already consumed");
-
-        let value = initializer();
-
-        // SAFETY: We are in STATE_COMPUTING, so we have exclusive access.
-        unsafe { (*self.value.get()).write(value) };
-
-        self.state.set(STATE_READY);
-        std::mem::forget(guard); // Disarm the guard
-
-        // SAFETY: Just initialized above.
+        self.do_initialize();
+        // SAFETY: do_initialize() guarantees value is initialized.
         unsafe { (*self.value.get()).assume_init_ref() }
     }
 
-    /// Uses a drop guard to ensure state transitions to POISONED if panic occurs.
+    /// Initializes the value and returns a mutable reference.
+    #[cold]
+    #[inline(never)]
     fn initialize_mut(&mut self) -> &mut T {
+        self.do_initialize();
+        // SAFETY: do_initialize() guarantees value is initialized.
+        unsafe { (*self.value.get()).assume_init_mut() }
+    }
+
+    /// Core initialization logic. Uses `PoisonGuard` for panic safety.
+    ///
+    /// # Preconditions
+    ///
+    /// This function must only be called when `state` is `STATE_EMPTY`.
+    #[inline]
+    fn do_initialize(&self) {
+        debug_assert_eq!(
+            self.state.get(),
+            STATE_EMPTY,
+            "do_initialize called when state is not STATE_EMPTY"
+        );
         self.state.set(STATE_COMPUTING);
         let guard = PoisonGuard(&self.state);
 
@@ -318,14 +329,11 @@ impl<T, F: FnOnce() -> T> Lazy<T, F> {
 
         let value = initializer();
 
-        // SAFETY: We have &mut self, exclusive access guaranteed.
+        // SAFETY: STATE_COMPUTING guarantees exclusive access.
         unsafe { (*self.value.get()).write(value) };
 
         self.state.set(STATE_READY);
-        std::mem::forget(guard); // Disarm the guard
-
-        // SAFETY: Just initialized above.
-        unsafe { (*self.value.get()).assume_init_mut() }
+        std::mem::forget(guard);
     }
 }
 
@@ -520,6 +528,8 @@ impl<T, F: FnOnce() -> T> Lazy<T, F> {
     /// let _ = catch_unwind(std::panic::AssertUnwindSafe(|| poisoned.force()));
     /// assert!(poisoned.try_force().is_err());
     /// ```
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
     pub fn try_force(&self) -> Result<&T, LazyPoisonedError> {
         let state = self.state.get();
 

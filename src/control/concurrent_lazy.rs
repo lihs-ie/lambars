@@ -241,6 +241,8 @@ impl<T, F: FnOnce() -> T> ConcurrentLazy<T, F> {
     /// let value = lazy.force();
     /// assert_eq!(*value, 42);
     /// ```
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
     pub fn force(&self) -> &T {
         let state = self.state.load(Ordering::Acquire);
 
@@ -253,32 +255,10 @@ impl<T, F: FnOnce() -> T> ConcurrentLazy<T, F> {
     }
 
     #[cold]
-    fn force_slow(&self, mut state: u8) -> &T {
-        loop {
-            match state {
-                STATE_READY => {
-                    // SAFETY: Acquire load synchronizes with Release store in do_init().
-                    return unsafe { (*self.value.get()).assume_init_ref() };
-                }
-                STATE_POISONED => panic!("ConcurrentLazy instance has been poisoned"),
-                STATE_EMPTY => {
-                    match self.state.compare_exchange_weak(
-                        STATE_EMPTY,
-                        STATE_COMPUTING,
-                        Ordering::AcqRel,
-                        Ordering::Acquire,
-                    ) {
-                        Ok(_) => return self.do_init(),
-                        Err(current_state) => state = current_state,
-                    }
-                }
-                STATE_COMPUTING => {
-                    self.block_until_ready();
-                    state = self.state.load(Ordering::Acquire);
-                }
-                _ => unreachable!("Invalid state"),
-            }
-        }
+    #[inline(never)]
+    fn force_slow(&self, state: u8) -> &T {
+        self.force_slow_inner(state)
+            .unwrap_or_else(|_| panic!("ConcurrentLazy instance has been poisoned"))
     }
 
     /// Uses `Condvar::wait` for efficient blocking without CPU spinning.
@@ -534,6 +514,8 @@ impl<T, F: FnOnce() -> T> ConcurrentLazy<T, F> {
     /// let _ = catch_unwind(std::panic::AssertUnwindSafe(|| poisoned.force()));
     /// assert!(poisoned.try_force().is_err());
     /// ```
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
     pub fn try_force(&self) -> Result<&T, ConcurrentLazyPoisonedError> {
         let state = self.state.load(Ordering::Acquire);
 
@@ -546,11 +528,19 @@ impl<T, F: FnOnce() -> T> ConcurrentLazy<T, F> {
     }
 
     #[cold]
-    fn try_force_slow(&self, mut state: u8) -> Result<&T, ConcurrentLazyPoisonedError> {
+    #[inline(never)]
+    fn try_force_slow(&self, state: u8) -> Result<&T, ConcurrentLazyPoisonedError> {
+        self.force_slow_inner(state)
+    }
+
+    /// Core slow-path logic shared by `force_slow` and `try_force_slow`.
+    #[cold]
+    #[inline(never)]
+    fn force_slow_inner(&self, mut state: u8) -> Result<&T, ConcurrentLazyPoisonedError> {
         loop {
             match state {
                 STATE_READY => {
-                    // SAFETY: STATE_READY means value is initialized.
+                    // SAFETY: Acquire load synchronizes with Release store in do_init().
                     return Ok(unsafe { (*self.value.get()).assume_init_ref() });
                 }
                 STATE_POISONED => return Err(ConcurrentLazyPoisonedError),
@@ -562,7 +552,7 @@ impl<T, F: FnOnce() -> T> ConcurrentLazy<T, F> {
                         Ordering::Acquire,
                     ) {
                         Ok(_) => return Ok(self.do_init()),
-                        Err(s) => state = s,
+                        Err(current_state) => state = current_state,
                     }
                 }
                 STATE_COMPUTING => {
