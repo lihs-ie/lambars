@@ -1,0 +1,480 @@
+# tasks_bulk 検索インデックス統合ボトルネック解消 詳細実装計画
+#
+# 概要:
+#   要件定義 20260205_1631_tasks_bulk_search_index_merge.yaml に基づき、
+#   SearchIndex のマージ処理を最適化する詳細タスクを定義する。
+#
+# 参照:
+#   - docs/internal/requirements/20260205_1631_tasks_bulk_search_index_merge.yaml
+
+version: "1.0.0"
+name: "tasks_bulk_search_index_merge_detail"
+created_at: "2026-02-05"
+requirement_reference: "20260205_1631_tasks_bulk_search_index_merge.yaml"
+
+# =============================================================================
+# 現状分析
+# =============================================================================
+current_state:
+  bottlenecks:
+    - name: "compute_merged_posting_list_sorted"
+      location: "benches/api/src/api/query.rs:5878-5992"
+      description: |
+        3-way マージ（existing, add, remove）を行う関数。
+        既にソート済みリストを前提としているため、単体では効率的だが、
+        呼び出し元で to_sorted_vec() が毎回行われている。
+      current_complexity: "O(n + m + r) where n=existing, m=add, r=remove"
+
+    - name: "merge_ngram_delta_individual / merge_ngram_delta_bulk"
+      location: "benches/api/src/api/query.rs:5736-5841"
+      description: |
+        各 n-gram キーに対して to_sorted_vec() を呼び出し、
+        compute_merged_posting_list_sorted でマージしている。
+        TaskIdCollection::to_sorted_vec() が Small 状態で O(n log n) ソートを伴う。
+      issue: "to_sorted_vec が毎回新しい Vec を生成"
+
+    - name: "merge_sorted_posting_lists"
+      location: "benches/api/src/api/query.rs:1992-2043"
+      description: |
+        2つの TaskIdCollection をマージする関数。
+        to_sorted_vec() を両方に呼び出してからマージしている。
+      issue: "to_sorted_vec が2回呼ばれる"
+
+    - name: "merge_bulk_ngram_index"
+      location: "benches/api/src/api/query.rs:5420-5491"
+      description: |
+        バルク更新で n-gram インデックスをマージする。
+        merge_sorted_posting_lists を呼び出している。
+      issue: "間接的に to_sorted_vec が呼ばれる"
+
+  data_structures:
+    - name: "TaskIdCollection (OrderedUniqueSet<TaskId>)"
+      location: "src/persistent/ordered_unique_set.rs"
+      description: |
+        - Small 状態 (n <= 8): SmallVec で保持、未ソート
+        - Large 状態 (n > 8): SortedVec で保持、ソート済み
+      existing_methods:
+        - "iter_sorted(): O(n log n) for Small, O(n) for Large"
+        - "to_sorted_vec(): O(n log n) for Small, O(n) for Large (新しい Vec を生成)"
+        - "merge(): 既に iter_sorted を使用"
+        - "difference(): 既に iter_sorted を使用"
+        - "intersection(): 既に iter_sorted を使用"
+
+# =============================================================================
+# 実装タスク一覧
+# =============================================================================
+tasks:
+  # ---------------------------------------------------------------------------
+  # TB-002: to_sorted_vec の削減 (優先度: 最高)
+  # ---------------------------------------------------------------------------
+  - id: "RUST-001"
+    requirement_id: "TB-002"
+    name: "merge_posting_lists_iter_sorted 関数の追加（共通コア化）"
+    priority: 1
+    category: "rust"
+    target_files:
+      - "benches/api/src/api/query.rs"
+    description: |
+      既存の compute_merged_posting_list_sorted のロジックを
+      イテレータベースの共通コア関数として抽出する。
+
+      重要: 既存の two-pointer remove アルゴリズムを踏襲し、
+      HashSet や二分探索は使用しない（O(n+m+r) を維持）。
+
+      compute_merged_posting_list_sorted は共通コアへ委譲する
+      ラッパーとして維持し、早期リターンと debug_assert を保持する。
+
+      ```rust
+      /// 共通コア関数: イテレータベースの 3-way merge
+      fn merge_posting_lists_iter_sorted<'a, E, A>(
+          existing: E,
+          add: A,
+          remove: &'a [TaskId],
+      ) -> Vec<TaskId>
+      where
+          E: Iterator<Item = &'a TaskId>,
+          A: Iterator<Item = &'a TaskId>,
+      {
+          // remove もソート済みスライスとして two-pointer で処理
+          // HashSet や二分探索は使用しない（O(n+m+r) を維持）
+      }
+
+      /// 既存関数: 共通コアへ委譲、debug_assert を維持
+      fn compute_merged_posting_list_sorted(
+          existing: &[TaskId],
+          add: &[TaskId],
+          remove: &[TaskId],
+      ) -> Vec<TaskId> {
+          #[cfg(debug_assertions)] {
+              debug_assert!(/* ソート済み検証 */);
+          }
+          merge_posting_lists_iter_sorted(existing.iter(), add.iter(), remove)
+      }
+      ```
+    implementation_steps:
+      - step: 1
+        action: |
+          merge_posting_lists_iter_sorted 関数を追加。
+          existing, add, remove すべてを two-pointer 方式で処理。
+          remove の should_remove 判定は既存の線形アルゴリズムを踏襲。
+      - step: 2
+        action: |
+          compute_merged_posting_list_sorted を共通コアへ委譲するよう変更。
+          早期リターン最適化と debug_assert は維持。
+      - step: 3
+        action: |
+          merge_ngram_delta_individual と merge_ngram_delta_bulk で
+          to_sorted_vec() の代わりに iter_sorted() を使用するよう変更。
+    test_strategy:
+      - "既存の compute_merged_posting_list_sorted_tests を流用"
+      - "イテレータ版と既存版の等価性テスト"
+      - "空リスト、単一要素、大量要素のパラメタライズドテスト"
+    preconditions:
+      - "prepare_posting_lists() が呼び出し済みであること"
+      - "全入力（existing, add, remove）がソート済み・重複除去済みであること"
+    dependencies: []
+
+  - id: "RUST-002"
+    requirement_id: "TB-002"
+    name: "merge_ngram_delta_individual を iter_sorted ベースに変更"
+    priority: 2
+    category: "rust"
+    target_files:
+      - "benches/api/src/api/query.rs"
+    description: |
+      merge_ngram_delta_individual 内の to_sorted_vec() 呼び出しを
+      iter_sorted() に置き換える。
+
+      重要: .cloned() は使用せず、イテレータのシグニチャを
+      Iterator<Item = &'a TaskId> で統一する。
+
+      現状:
+      ```rust
+      let existing: Vec<TaskId> = result
+          .get(key_str)
+          .map(TaskIdCollection::to_sorted_vec)
+          .unwrap_or_default();
+      ```
+
+      変更後:
+      ```rust
+      let existing_collection = result.get(key_str);
+      let merged = if let Some(collection) = existing_collection {
+          merge_posting_lists_iter_sorted(
+              collection.iter_sorted(),  // cloned() は使用しない
+              add.get(*key).map_or(&[] as &[TaskId], Vec::as_slice).iter(),
+              remove.get(*key).map_or(&[] as &[TaskId], Vec::as_slice),
+          )
+      } else {
+          merge_posting_lists_iter_sorted(
+              std::iter::empty(),
+              add.get(*key).map_or(&[] as &[TaskId], Vec::as_slice).iter(),
+              remove.get(*key).map_or(&[] as &[TaskId], Vec::as_slice),
+          )
+      };
+      ```
+    implementation_steps:
+      - step: 1
+        action: |
+          RUST-001 で追加した merge_posting_lists_iter_sorted を使用するよう変更。
+          cloned() は使用せず、&TaskId イテレータを直接渡す。
+      - step: 2
+        action: |
+          ユニットテストで既存動作との等価性を確認。
+    test_strategy:
+      - "merge_ngram_delta_tests の既存テストが通ること"
+      - "パフォーマンスベンチマークで改善を確認"
+    preconditions:
+      - "prepare_posting_lists() が呼び出し済みであること"
+    dependencies:
+      - "RUST-001"
+
+  - id: "RUST-003"
+    requirement_id: "TB-002"
+    name: "merge_ngram_delta_bulk を iter_sorted ベースに変更"
+    priority: 3
+    category: "rust"
+    target_files:
+      - "benches/api/src/api/query.rs"
+    description: |
+      merge_ngram_delta_bulk 内の to_sorted_vec() 呼び出しを
+      iter_sorted() に置き換える。
+      RUST-002 と同様の変更を bulk 版にも適用する。
+    implementation_steps:
+      - step: 1
+        action: |
+          RUST-001 で追加した merge_posting_lists_iter を使用するよう変更。
+      - step: 2
+        action: |
+          ユニットテストで既存動作との等価性を確認。
+    test_strategy:
+      - "merge_ngram_delta_bulk_* テストが通ること"
+      - "パフォーマンスベンチマークで改善を確認"
+    dependencies:
+      - "RUST-001"
+
+  - id: "RUST-004"
+    requirement_id: "TB-002"
+    name: "merge_sorted_posting_lists を iter_sorted ベースに変更"
+    priority: 4
+    category: "rust"
+    target_files:
+      - "benches/api/src/api/query.rs"
+    description: |
+      merge_sorted_posting_lists 関数内の to_sorted_vec() 呼び出しを
+      iter_sorted() に置き換える。
+
+      現状 (line 2005-2006):
+      ```rust
+      let existing_sorted = existing.to_sorted_vec();
+      let new_sorted = new_entries.to_sorted_vec();
+      ```
+
+      変更後:
+      ```rust
+      let existing_iter = existing.iter_sorted();
+      let new_iter = new_entries.iter_sorted();
+      ```
+    implementation_steps:
+      - step: 1
+        action: |
+          iter_sorted() を使用した two-pointer merge を実装。
+          結果は TaskIdCollection::from_sorted_vec で構築。
+      - step: 2
+        action: |
+          既存テストが通ることを確認。
+    test_strategy:
+      - "merge_* テストが通ること"
+      - "to_sorted_vec 呼び出し回数の削減を確認"
+    dependencies: []
+
+  # ---------------------------------------------------------------------------
+  # TB-001: マージアルゴリズムの改善 (優先度: 中)
+  # ---------------------------------------------------------------------------
+  - id: "RUST-005"
+    requirement_id: "TB-001"
+    name: "k-way merge 関数の追加"
+    priority: 5
+    category: "rust"
+    target_files:
+      - "benches/api/src/api/query.rs"
+    description: |
+      複数の PostingList を一度にマージする k-way merge 関数を追加。
+      BinaryHeap を使用して O(n log k) でマージする。
+
+      ```rust
+      fn merge_k_posting_lists<'a>(
+          lists: impl IntoIterator<Item = impl Iterator<Item = &'a TaskId>>,
+      ) -> Vec<TaskId>
+      ```
+    implementation_steps:
+      - step: 1
+        action: |
+          std::collections::BinaryHeap を使用した k-way merge を実装。
+          各リストの先頭要素を Heap に入れ、最小を取り出す。
+      - step: 2
+        action: |
+          重複排除ロジックを追加（連続する同一要素をスキップ）。
+      - step: 3
+        action: |
+          remove セットのフィルタリングを統合（オプショナル）。
+    test_strategy:
+      - "空リスト、単一リスト、複数リストのパラメタライズドテスト"
+      - "結果のソート順と重複排除を検証"
+      - "2-way merge との等価性テスト"
+    dependencies: []
+    future_extension: true
+    note: |
+      TB-FUTURE-001 で将来的にマージ戦略の自動選択を検討。
+      現段階では k-way merge 関数を追加するが、実際の使用は
+      パフォーマンス測定後に判断する。
+
+  # ---------------------------------------------------------------------------
+  # TB-003: 結合バッファの再利用 (優先度: 低)
+  # ---------------------------------------------------------------------------
+  - id: "RUST-006"
+    requirement_id: "TB-003"
+    name: "MergeBuffer 構造体の追加（外部バッファ方式）"
+    priority: 6
+    category: "rust"
+    target_files:
+      - "benches/api/src/api/query.rs"
+    description: |
+      マージ処理で再利用可能なバッファを提供する MergeBuffer 構造体を追加。
+      繰り返しのバルク更新でヒープ割り当てを削減する。
+
+      重要: SearchIndex の不変性を維持するため、MergeBuffer は
+      SearchIndex のフィールドとしては保持しない。
+      バッファは外部から明示的に渡す形式とする。
+
+      ```rust
+      /// 再利用可能なマージバッファ（外部管理）
+      pub struct MergeBuffer {
+          result_buffer: Vec<TaskId>,
+      }
+
+      impl MergeBuffer {
+          pub fn new() -> Self;
+          pub fn with_capacity(capacity: usize) -> Self;
+          pub fn clear(&mut self);
+          pub fn take_result(&mut self) -> Vec<TaskId>;
+      }
+
+      // 純粋関数のコアはそのまま維持
+      fn merge_posting_lists_iter_sorted(...) -> Vec<TaskId>;
+
+      // バッファ対応版は別関数として提供
+      fn merge_posting_lists_iter_sorted_with_buffer(
+          ...,
+          buffer: &mut MergeBuffer,
+      ) -> Vec<TaskId>;
+      ```
+    implementation_steps:
+      - step: 1
+        action: |
+          MergeBuffer 構造体を定義。
+      - step: 2
+        action: |
+          merge_posting_lists_iter_sorted のバッファ対応版を追加:
+          merge_posting_lists_iter_sorted_with_buffer
+          純粋関数のコアは変更しない。
+      - step: 3
+        action: |
+          バッファを使用する場合は呼び出し側で明示的に管理。
+          SearchIndex のフィールドには追加しない。
+    test_strategy:
+      - "バッファ再利用後も正しい結果が得られること"
+      - "メモリ割り当て回数の削減を確認（ベンチマーク）"
+    dependencies:
+      - "RUST-001"
+    future_extension: true
+    note: |
+      現段階では MergeBuffer の追加に留め、実際の統合は
+      パフォーマンス測定後に判断する。
+      SearchIndex の不変性を維持するため、バッファは外部管理とする。
+
+  # ---------------------------------------------------------------------------
+  # テスト・検証タスク
+  # ---------------------------------------------------------------------------
+  - id: "TEST-001"
+    requirement_id: "TB-002"
+    name: "iter_sorted ベース実装の等価性テスト"
+    priority: 7
+    category: "test"
+    target_files:
+      - "benches/api/src/api/query.rs"
+    description: |
+      to_sorted_vec ベースの既存実装と iter_sorted ベースの新実装が
+      同一の結果を返すことを検証するテストを追加。
+    implementation_steps:
+      - step: 1
+        action: |
+          プロパティベーステストを追加（proptest または quickcheck）。
+          ランダムな入力に対して両実装の結果が一致することを確認。
+      - step: 2
+        action: |
+          境界条件のテスト（空、単一要素、大量要素）。
+    test_strategy:
+      - "proptest で 1000 件以上のランダムケースを検証"
+    dependencies:
+      - "RUST-001"
+      - "RUST-002"
+      - "RUST-003"
+      - "RUST-004"
+
+  - id: "TEST-002"
+    name: "tasks_bulk ベンチマーク再計測"
+    priority: 8
+    category: "benchmark"
+    target_files:
+      - "benches/api/benchmarks/scripts/"
+    description: |
+      変更後に tasks_bulk ベンチマークを再実行し、
+      compute_merged_posting_list_sorted と to_sorted_vec の
+      CPU サンプル比率が 30% 以上削減されたことを確認する。
+    implementation_steps:
+      - step: 1
+        action: |
+          変更前のベンチマーク結果を保存（ベースライン）。
+      - step: 2
+        action: |
+          変更後にベンチマークを再実行。
+      - step: 3
+        action: |
+          flamegraph で CPU プロファイルを比較。
+    test_strategy:
+      - "tasks_bulk の RPS が低下しないこと"
+      - "compute_merged_posting_list_sorted の CPU 比率が削減されること"
+      - "to_sorted_vec の CPU 比率が削減されること"
+    dependencies:
+      - "RUST-001"
+      - "RUST-002"
+      - "RUST-003"
+      - "RUST-004"
+
+# =============================================================================
+# 実装順序と依存関係
+# =============================================================================
+implementation_order:
+  phase_1:
+    name: "to_sorted_vec 削減 (TB-002)"
+    description: |
+      最も効果が高い to_sorted_vec の削減を先に行う。
+      iter_sorted は既に OrderedUniqueSet に存在するため、
+      呼び出し側の変更のみで対応可能。
+    tasks:
+      - "RUST-001"  # merge_posting_lists_iter 関数追加
+      - "RUST-004"  # merge_sorted_posting_lists 変更
+      - "RUST-002"  # merge_ngram_delta_individual 変更
+      - "RUST-003"  # merge_ngram_delta_bulk 変更
+    estimated_effort: "2-3 hours"
+
+  phase_2:
+    name: "テスト・検証"
+    description: |
+      変更後の等価性とパフォーマンスを検証する。
+    tasks:
+      - "TEST-001"  # 等価性テスト
+      - "TEST-002"  # ベンチマーク再計測
+    estimated_effort: "1-2 hours"
+
+  phase_3:
+    name: "将来拡張 (オプショナル)"
+    description: |
+      パフォーマンス測定結果に基づき、追加の最適化を検討する。
+      現段階では実装せず、将来の拡張として記録に留める。
+    tasks:
+      - "RUST-005"  # k-way merge (TB-001)
+      - "RUST-006"  # MergeBuffer (TB-003)
+    estimated_effort: "2-4 hours (if needed)"
+    note: |
+      Phase 2 の測定結果で十分な改善が見られた場合は、
+      Phase 3 は実施しない。
+
+# =============================================================================
+# リスクと対策
+# =============================================================================
+risks:
+  - risk: "iter_sorted の Small 状態でのオーバーヘッド"
+    description: |
+      Small 状態 (n <= 8) では iter_sorted() が O(n log n) のソートを伴う。
+      to_sorted_vec() も同様なので、オーバーヘッドは同等だが、
+      イテレータの作成コストが追加される。
+    mitigation: |
+      Small 状態は要素数が 8 以下なので、ソートコストは無視できる。
+      イテレータ作成コストも SmallVec のコピーのみで軽微。
+
+  - risk: "API 互換性"
+    description: |
+      merge_posting_lists_iter は新規追加なので既存 API に影響なし。
+      内部実装の変更のみで、公開 API は変更しない。
+    mitigation: |
+      既存の compute_merged_posting_list_sorted は残し、
+      内部でイテレータ版を呼び出す形にすることも可能。
+
+  - risk: "テストカバレッジ"
+    description: |
+      イテレータベースの実装が既存テストでカバーされない可能性。
+    mitigation: |
+      等価性テスト (TEST-001) で既存実装との一致を検証。
+      既存のパラメタライズドテストも流用。
