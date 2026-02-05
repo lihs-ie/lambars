@@ -1048,9 +1048,13 @@ impl Default for SearchIndexConfig {
             max_tokens_per_task: 100,
             max_search_candidates: 1000,
             use_bulk_builder: true,
-            bulk_threshold: 100,
+            // Phase 3: Lower threshold from 100 to 10 to ensure all batch sizes
+            // (10/50/100) in tasks_bulk benchmark use the bulk path
+            bulk_threshold: 10,
             use_merge_ngram_delta_bulk_insert: true,
-            use_apply_bulk: false,
+            // Phase 3: Enable use_apply_bulk by default to ensure Add-only changes
+            // automatically use the optimized apply_bulk path
+            use_apply_bulk: true,
         }
     }
 }
@@ -2009,20 +2013,28 @@ impl SearchIndexBulkBuilder {
         }
 
         let mut sorted = self.entries;
-        let comparator = |(t1, _, o1): &(String, TaskId, usize),
-                          (t2, _, o2): &(String, TaskId, usize)|
-         -> std::cmp::Ordering { t1.cmp(t2).then(o1.cmp(o2)) };
+        // Sort by (token, task_id, order) to group same (token, task_id) pairs together
+        let comparator = |(t1, id1, o1): &(String, TaskId, usize),
+                          (t2, id2, o2): &(String, TaskId, usize)|
+         -> std::cmp::Ordering {
+            t1.cmp(t2).then_with(|| id1.cmp(id2)).then(o1.cmp(o2))
+        };
         if !sorted.is_sorted_by(|a, b| comparator(a, b).is_le()) {
             sorted.sort_unstable_by(comparator);
         }
 
-        // After sorting by (token, order), last occurrence wins
+        // After sorting, deduplicate (token, task_id) pairs while keeping all unique TaskIds per token.
+        // This ensures that multiple tasks with the same token are all indexed correctly.
+        // Example: "New Task 1" and "New Task 2" both have token "task" -> both TaskIds are kept.
         let deduped = sorted.into_iter().fold(
             Vec::new(),
             |mut accumulator: Vec<(String, TaskId)>, (token, task_id, _)| {
-                match accumulator.last_mut() {
-                    Some((last_token, last_task_id)) if last_token == &token => {
-                        *last_task_id = task_id;
+                match accumulator.last() {
+                    // Only skip if both token AND task_id match (exact duplicate)
+                    Some((last_token, last_task_id))
+                        if last_token == &token && last_task_id == &task_id =>
+                    {
+                        // Skip duplicate (same token, same task_id)
                     }
                     _ => {
                         accumulator.push((token, task_id));
@@ -11028,15 +11040,17 @@ mod search_index_config_tests {
     ///
     /// Verifies:
     /// - `use_bulk_builder`: true (enabled by default for Phase 1)
-    /// - `bulk_threshold`: 100 (minimum changes to use `BulkBuilder`)
+    /// - `bulk_threshold`: 10 (Phase 3: lowered from 100 for `tasks_bulk` optimization)
     /// - `use_merge_ngram_delta_bulk_insert`: true (enabled by default for Phase 3)
+    /// - `use_apply_bulk`: true (Phase 3: enabled by default for Add-only optimization)
     #[rstest]
     fn config_default_optimization_flags() {
         let config = SearchIndexConfig::default();
 
         assert!(config.use_bulk_builder);
-        assert_eq!(config.bulk_threshold, 100);
+        assert_eq!(config.bulk_threshold, 10);
         assert!(config.use_merge_ngram_delta_bulk_insert);
+        assert!(config.use_apply_bulk);
     }
 
     /// Tests that optimization flags can be disabled via explicit construction.
@@ -11059,6 +11073,8 @@ mod search_index_config_tests {
     // -------------------------------------------------------------------------
 
     /// Tests that `SearchIndexConfigBuilder` creates config with default values.
+    ///
+    /// Phase 3: Updated to reflect new defaults (`bulk_threshold`=10, `use_apply_bulk`=true)
     #[rstest]
     fn config_builder_default() {
         let config = SearchIndexConfigBuilder::new().build();
@@ -11071,8 +11087,9 @@ mod search_index_config_tests {
         assert_eq!(config.max_tokens_per_task, 100);
         assert_eq!(config.max_search_candidates, 1000);
         assert!(config.use_bulk_builder);
-        assert_eq!(config.bulk_threshold, 100);
+        assert_eq!(config.bulk_threshold, 10); // Phase 3: lowered from 100
         assert!(config.use_merge_ngram_delta_bulk_insert);
+        assert!(config.use_apply_bulk); // Phase 3: enabled by default
     }
 
     /// Tests that `SearchIndexConfigBuilder` can set optimization flags.
@@ -11129,21 +11146,16 @@ mod search_index_config_tests {
     // BENCH-001: use_apply_bulk Flag Tests
     // -------------------------------------------------------------------------
 
-    /// Tests that `use_apply_bulk` flag is present in config and defaults to false.
+    /// Tests that `use_apply_bulk` flag can be disabled via explicit construction.
+    ///
+    /// Phase 3: `use_apply_bulk` now defaults to true, so we test that it can be disabled.
     #[rstest]
-    fn config_use_apply_bulk_default_is_false() {
-        let config = SearchIndexConfig::default();
-        assert!(!config.use_apply_bulk);
-    }
-
-    /// Tests that `use_apply_bulk` flag can be set via explicit construction.
-    #[rstest]
-    fn config_use_apply_bulk_can_be_enabled() {
+    fn config_use_apply_bulk_can_be_disabled() {
         let config = SearchIndexConfig {
-            use_apply_bulk: true,
+            use_apply_bulk: false,
             ..Default::default()
         };
-        assert!(config.use_apply_bulk);
+        assert!(!config.use_apply_bulk);
     }
 
     /// Tests that `SearchIndexConfigBuilder` can set `use_apply_bulk` flag.
@@ -11164,8 +11176,8 @@ mod search_index_config_tests {
 
     /// Tests that `bulk_threshold` defaults to 10 for Phase 3 optimization.
     ///
-    /// Phase 3 requirement: Lower bulk_threshold from 100 to 10 to ensure
-    /// all batch sizes (10/50/100) in tasks_bulk benchmark use the bulk path.
+    /// Phase 3 requirement: Lower `bulk_threshold` from 100 to 10 to ensure
+    /// all batch sizes (10/50/100) in `tasks_bulk` benchmark use the bulk path.
     #[rstest]
     fn config_bulk_threshold_default_is_10_for_phase3() {
         let config = SearchIndexConfig::default();
@@ -11177,8 +11189,8 @@ mod search_index_config_tests {
 
     /// Tests that `use_apply_bulk` defaults to true for Phase 3 optimization.
     ///
-    /// Phase 3 requirement: Enable use_apply_bulk by default to ensure
-    /// Add-only changes automatically use the optimized apply_bulk path.
+    /// Phase 3 requirement: Enable `use_apply_bulk` by default to ensure
+    /// Add-only changes automatically use the optimized `apply_bulk` path.
     #[rstest]
     fn config_use_apply_bulk_default_is_true_for_phase3() {
         let config = SearchIndexConfig::default();
@@ -11188,7 +11200,7 @@ mod search_index_config_tests {
         );
     }
 
-    /// Tests that SearchIndexConfigBuilder preserves Phase 3 defaults.
+    /// Tests that `SearchIndexConfigBuilder` preserves Phase 3 defaults.
     #[rstest]
     fn config_builder_preserves_phase3_defaults() {
         let config = SearchIndexConfigBuilder::new().build();
@@ -18797,25 +18809,67 @@ mod search_index_bulk_builder_tests {
     }
 
     #[rstest]
-    fn test_builder_duplicate_keys_last_wins() {
+    /// Tests that when the same token is added with different TaskIds, all TaskIds are preserved.
+    ///
+    /// This is the correct behavior because different tasks may share the same token
+    /// (e.g., "New Task 1" and "New Task 2" both have token "task").
+    fn test_builder_same_token_different_task_ids_all_preserved() {
         let config = SearchIndexConfig::default();
         let task_id_1 = make_task_id(1);
         let task_id_2 = make_task_id(2);
         let task_id_3 = make_task_id(3);
 
         let index = SearchIndexBulkBuilder::new(config)
-            .add_entry("callback".to_string(), task_id_1)
-            .add_entry("callback".to_string(), task_id_2)
+            .add_entry("callback".to_string(), task_id_1.clone())
+            .add_entry("callback".to_string(), task_id_2.clone())
             .add_entry("callback".to_string(), task_id_3.clone())
             .build()
             .expect("build should succeed");
 
-        // The n-grams should only contain task_id_3 (last wins)
-        // Check that all n-grams for "callback" have task_id_3
+        // All TaskIds should be preserved since they are different
+        // Check that all n-grams for "callback" contain all three task_ids
         for (_key, collection) in &index {
-            for id in collection {
-                assert_eq!(id, &task_id_3);
-            }
+            let ids: std::collections::HashSet<_> = collection.iter().cloned().collect();
+            assert!(
+                ids.contains(&task_id_1),
+                "task_id_1 should be in collection"
+            );
+            assert!(
+                ids.contains(&task_id_2),
+                "task_id_2 should be in collection"
+            );
+            assert!(
+                ids.contains(&task_id_3),
+                "task_id_3 should be in collection"
+            );
+        }
+    }
+
+    /// Tests that when the same (token, task_id) pair is added multiple times, it's deduplicated.
+    #[rstest]
+    fn test_builder_duplicate_token_task_id_pair_deduplicated() {
+        let config = SearchIndexConfig::default();
+        let task_id = make_task_id(1);
+
+        let index = SearchIndexBulkBuilder::new(config)
+            .add_entry("callback".to_string(), task_id.clone())
+            .add_entry("callback".to_string(), task_id.clone())
+            .add_entry("callback".to_string(), task_id.clone())
+            .build()
+            .expect("build should succeed");
+
+        // The n-grams should contain task_id only once (deduplicated)
+        for (_key, collection) in &index {
+            assert_eq!(
+                collection.len(),
+                1,
+                "Collection should have exactly 1 entry"
+            );
+            assert_eq!(
+                collection.iter().next().unwrap(),
+                &task_id,
+                "The single entry should be task_id"
+            );
         }
     }
 
