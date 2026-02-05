@@ -2,13 +2,13 @@
 //!
 //! This module provides [`OrderedUniqueSet`], a persistent collection
 //! optimized for storing unique elements with automatic state transitions between
-//! small (inline) and large (hash-based) representations.
+//! small (inline) and large (sorted vec) representations.
 //!
 //! # Overview
 //!
 //! `OrderedUniqueSet` provides efficient storage for unique elements by:
 //! - Using inline storage (`SmallVec`) for small collections (up to 8 elements)
-//! - Automatically promoting to `PersistentHashSet` when exceeding 8 elements
+//! - Automatically promoting to sorted `Vec` when exceeding 8 elements
 //! - Automatically demoting back to inline storage when size drops to 8 or fewer
 //!
 //! # Functional Programming Principles
@@ -22,19 +22,21 @@
 //!
 //! | Operation      | Small (n <= 8)    | Large (n > 8)       |
 //! |----------------|-------------------|---------------------|
-//! | `insert`       | O(n)              | O(log32 n)          |
-//! | `remove`       | O(n)              | O(log32 n)          |
-//! | `contains`     | O(n)              | O(log32 n)          |
+//! | `insert`       | O(n)              | O(n)                |
+//! | `remove`       | O(n)              | O(n)                |
+//! | `contains`     | O(n)              | O(log n)            |
 //! | `len`          | O(1)              | O(1)                |
 //! | `is_empty`     | O(1)              | O(1)                |
-//! | `iter`         | O(1) + O(n)       | O(n) + O(n)         |
-//! | `iter_sorted`  | O(n log n)        | O(n) + O(n log n)   |
+//! | `iter`         | O(1) + O(n)       | O(1) + O(n)         |
+//! | `iter_sorted`  | O(n log n)        | O(1) + O(n)         |
+//! | `merge`        | O(n + m)          | O(n + m)            |
+//! | `difference`   | O(n + m)          | O(n + m)            |
+//! | `intersection` | O(n + m)          | O(n + m)            |
 //!
-//! **Note**: For Large state, `iter` and `iter_sorted` incur an additional O(n)
-//! allocation cost because `PersistentHashSet::iter` collects elements into a
-//! `Vec` first. The `iter_sorted` in Large state performs two allocations:
-//! one internal to `PersistentHashSet::iter`, and one in `iter_sorted` for
-//! collecting and sorting the elements (sorting is done in-place).
+//! **Note**: For Large state, elements are stored in a sorted `Vec`, which enables
+//! O(log n) binary search for `contains` and O(n) iteration without additional sorting.
+//! Set operations (`merge`, `difference`, `intersection`) use efficient two-pointer
+//! algorithms that run in linear time.
 //!
 //! # Examples
 //!
@@ -78,26 +80,87 @@
 
 use smallvec::SmallVec;
 use std::borrow::Borrow;
+use std::cmp::Ordering;
 use std::hash::Hash;
-
-use super::PersistentHashSet;
+use std::sync::Arc;
 
 /// The threshold for transitioning between Small and Large states.
-/// Collections with more than this many elements use `PersistentHashSet`.
+/// Collections with more than this many elements use sorted `Vec`.
 const SMALL_THRESHOLD: usize = 8;
 
-/// Internal representation of the collection state.
-///
-/// This enum is not publicly accessible to prevent external construction
-/// that could violate internal invariants.
+/// A sorted, deduplicated vector wrapped in `Arc` for structural sharing.
 #[derive(Clone)]
-enum OrderedUniqueSetInner<T: Clone + Eq + Hash> {
-    /// Empty collection.
+struct SortedVec<T>(Arc<Vec<T>>);
+
+impl<T: Clone + Ord> SortedVec<T> {
+    #[inline]
+    fn from_sorted(vec: Vec<T>) -> Self {
+        #[cfg(debug_assertions)]
+        debug_assert!(
+            is_strictly_sorted(&vec),
+            "{}",
+            SORTED_INVARIANT_PANIC_MESSAGE
+        );
+        Self(Arc::new(vec))
+    }
+
+    #[inline]
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    #[inline]
+    fn as_slice(&self) -> &[T] {
+        &self.0
+    }
+
+    #[inline]
+    fn contains<Q>(&self, element: &Q) -> bool
+    where
+        T: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        self.0
+            .binary_search_by(|item| item.borrow().cmp(element))
+            .is_ok()
+    }
+
+    fn insert(&self, element: T) -> Option<Self> {
+        match self.0.binary_search(&element) {
+            Ok(_) => None,
+            Err(position) => {
+                let mut new_vec = Vec::with_capacity(self.0.len() + 1);
+                new_vec.extend_from_slice(&self.0[..position]);
+                new_vec.push(element);
+                new_vec.extend_from_slice(&self.0[position..]);
+                Some(Self::from_sorted(new_vec))
+            }
+        }
+    }
+
+    fn remove<Q>(&self, element: &Q) -> Option<Self>
+    where
+        T: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        self.0
+            .binary_search_by(|item| item.borrow().cmp(element))
+            .ok()
+            .map(|position| {
+                let mut new_vec = Vec::with_capacity(self.0.len() - 1);
+                new_vec.extend_from_slice(&self.0[..position]);
+                new_vec.extend_from_slice(&self.0[position + 1..]);
+                Self::from_sorted(new_vec)
+            })
+    }
+}
+
+/// Internal representation of the collection state.
+#[derive(Clone)]
+enum OrderedUniqueSetInner<T: Clone + Eq + Hash + Ord> {
     Empty,
-    /// Small collection (up to 8 elements) stored inline.
     Small(SmallVec<[T; SMALL_THRESHOLD]>),
-    /// Large collection (more than 8 elements) stored in a hash set.
-    Large(PersistentHashSet<T>),
+    Large(SortedVec<T>),
 }
 
 /// A persistent collection for storing unique elements with automatic state transitions.
@@ -105,14 +168,13 @@ enum OrderedUniqueSetInner<T: Clone + Eq + Hash> {
 /// This collection automatically transitions between three states based on size:
 /// - Empty: No elements
 /// - Small: Up to 8 elements stored inline in a `SmallVec`
-/// - Large: More than 8 elements stored in a `PersistentHashSet`
+/// - Large: More than 8 elements stored in a sorted `Vec`
 ///
 /// All operations are immutable and return new instances.
 ///
 /// # Type Parameters
 ///
-/// * `T` - The element type. Must implement `Clone`, `Eq`, and `Hash`.
-///   `Ord` is only required for `iter_sorted`.
+/// * `T` - The element type. Must implement `Clone`, `Eq`, `Hash`, and `Ord`.
 ///
 /// # Examples
 ///
@@ -129,11 +191,11 @@ enum OrderedUniqueSetInner<T: Clone + Eq + Hash> {
 /// assert_eq!(sorted, vec![1, 2, 3]);
 /// ```
 #[derive(Clone)]
-pub struct OrderedUniqueSet<T: Clone + Eq + Hash> {
+pub struct OrderedUniqueSet<T: Clone + Eq + Hash + Ord> {
     inner: OrderedUniqueSetInner<T>,
 }
 
-impl<T: Clone + Eq + Hash> OrderedUniqueSet<T> {
+impl<T: Clone + Eq + Hash + Ord> OrderedUniqueSet<T> {
     /// Creates a new empty collection.
     ///
     /// # Examples
@@ -208,7 +270,7 @@ impl<T: Clone + Eq + Hash> OrderedUniqueSet<T> {
     /// # Complexity
     ///
     /// - O(n) for `Small` state (linear search)
-    /// - O(log32 n) for `Large` state (hash lookup)
+    /// - O(log n) for `Large` state (binary search)
     ///
     /// # Examples
     ///
@@ -230,12 +292,12 @@ impl<T: Clone + Eq + Hash> OrderedUniqueSet<T> {
     pub fn contains<Q>(&self, element: &Q) -> bool
     where
         T: Borrow<Q>,
-        Q: Hash + Eq + ?Sized,
+        Q: Ord + ?Sized,
     {
         match &self.inner {
             OrderedUniqueSetInner::Empty => false,
             OrderedUniqueSetInner::Small(vec) => vec.iter().any(|item| item.borrow() == element),
-            OrderedUniqueSetInner::Large(set) => set.contains(element),
+            OrderedUniqueSetInner::Large(sorted_vec) => sorted_vec.contains(element),
         }
     }
 
@@ -256,7 +318,7 @@ impl<T: Clone + Eq + Hash> OrderedUniqueSet<T> {
     /// # Complexity
     ///
     /// - O(n) for `Small` state (duplicate check + potential copy)
-    /// - O(log32 n) for `Large` state (hash-based insertion)
+    /// - O(n) for `Large` state (binary search + Vec rebuild)
     ///
     /// # Examples
     ///
@@ -289,13 +351,12 @@ impl<T: Clone + Eq + Hash> OrderedUniqueSet<T> {
                 }
 
                 if vec.len() >= SMALL_THRESHOLD {
-                    let set = vec
-                        .iter()
-                        .cloned()
-                        .fold(PersistentHashSet::new(), |set, item| set.insert(item))
-                        .insert(element);
+                    // Transition to Large state: create sorted vec
+                    let mut sorted: Vec<T> = vec.iter().cloned().collect();
+                    sorted.push(element);
+                    sorted.sort();
                     Self {
-                        inner: OrderedUniqueSetInner::Large(set),
+                        inner: OrderedUniqueSetInner::Large(SortedVec::from_sorted(sorted)),
                     }
                 } else {
                     let mut new_vec = vec.clone();
@@ -305,14 +366,12 @@ impl<T: Clone + Eq + Hash> OrderedUniqueSet<T> {
                     }
                 }
             }
-            OrderedUniqueSetInner::Large(set) => {
-                if set.contains(&element) {
-                    return self.clone();
-                }
-                Self {
-                    inner: OrderedUniqueSetInner::Large(set.insert(element)),
-                }
-            }
+            OrderedUniqueSetInner::Large(sorted_vec) => sorted_vec.insert(element).map_or_else(
+                || self.clone(),
+                |new_sorted_vec| Self {
+                    inner: OrderedUniqueSetInner::Large(new_sorted_vec),
+                },
+            ),
         }
     }
 
@@ -336,8 +395,7 @@ impl<T: Clone + Eq + Hash> OrderedUniqueSet<T> {
     /// # Complexity
     ///
     /// - O(n) for `Small` state (linear search + potential copy)
-    /// - O(n) for `Large` state when demoting (need to collect all elements)
-    /// - O(log32 n) for `Large` state without demotion
+    /// - O(n) for `Large` state (binary search + Vec rebuild)
     ///
     /// # Examples
     ///
@@ -361,25 +419,18 @@ impl<T: Clone + Eq + Hash> OrderedUniqueSet<T> {
     pub fn remove<Q>(&self, element: &Q) -> Self
     where
         T: Borrow<Q>,
-        Q: Hash + Eq + ?Sized,
+        Q: Ord + ?Sized,
     {
         match &self.inner {
-            OrderedUniqueSetInner::Empty => Self {
-                inner: OrderedUniqueSetInner::Empty,
-            },
+            OrderedUniqueSetInner::Empty => self.clone(),
             OrderedUniqueSetInner::Small(vec) => {
-                if !vec
-                    .iter()
-                    .any(|item| <T as Borrow<Q>>::borrow(item) == element)
-                {
+                let matches = |item: &T| T::borrow(item) == element;
+                if !vec.iter().any(matches) {
                     return self.clone();
                 }
 
-                let new_vec: SmallVec<[T; SMALL_THRESHOLD]> = vec
-                    .iter()
-                    .filter(|item| <T as Borrow<Q>>::borrow(item) != element)
-                    .cloned()
-                    .collect();
+                let new_vec: SmallVec<[T; SMALL_THRESHOLD]> =
+                    vec.iter().filter(|item| !matches(item)).cloned().collect();
 
                 Self {
                     inner: if new_vec.is_empty() {
@@ -389,40 +440,38 @@ impl<T: Clone + Eq + Hash> OrderedUniqueSet<T> {
                     },
                 }
             }
-            OrderedUniqueSetInner::Large(set) => {
-                if !set.contains(element) {
-                    return self.clone();
-                }
-
-                let new_set = set.remove(element);
-
-                if new_set.len() <= SMALL_THRESHOLD {
-                    let vec: SmallVec<[T; SMALL_THRESHOLD]> = new_set.iter().cloned().collect();
-                    Self {
-                        inner: if vec.is_empty() {
-                            OrderedUniqueSetInner::Empty
-                        } else {
-                            OrderedUniqueSetInner::Small(vec)
-                        },
+            OrderedUniqueSetInner::Large(sorted_vec) => sorted_vec.remove(element).map_or_else(
+                || self.clone(),
+                |new_sorted_vec| {
+                    if new_sorted_vec.len() <= SMALL_THRESHOLD {
+                        let vec: SmallVec<[T; SMALL_THRESHOLD]> =
+                            new_sorted_vec.as_slice().iter().cloned().collect();
+                        Self {
+                            inner: if vec.is_empty() {
+                                OrderedUniqueSetInner::Empty
+                            } else {
+                                OrderedUniqueSetInner::Small(vec)
+                            },
+                        }
+                    } else {
+                        Self {
+                            inner: OrderedUniqueSetInner::Large(new_sorted_vec),
+                        }
                     }
-                } else {
-                    Self {
-                        inner: OrderedUniqueSetInner::Large(new_set),
-                    }
-                }
-            }
+                },
+            ),
         }
     }
 
     /// Returns an iterator over references to the elements.
     ///
-    /// The order of elements is not guaranteed.
+    /// For Large state, elements are returned in sorted (ascending) order.
+    /// For Small state, order is not guaranteed.
     ///
     /// # Complexity
     ///
     /// - Small state: O(1) for iterator creation, O(n) for full traversal
-    /// - Large state: O(n) for iterator creation (collects elements into `Vec`),
-    ///   O(n) for full traversal
+    /// - Large state: O(1) for iterator creation, O(n) for full traversal
     ///
     /// # Examples
     ///
@@ -443,8 +492,8 @@ impl<T: Clone + Eq + Hash> OrderedUniqueSet<T> {
                 OrderedUniqueSetInner::Small(vec) => {
                     OrderedUniqueSetIteratorInner::Small(vec.iter())
                 }
-                OrderedUniqueSetInner::Large(set) => {
-                    OrderedUniqueSetIteratorInner::Large(set.iter())
+                OrderedUniqueSetInner::Large(sorted_vec) => {
+                    OrderedUniqueSetIteratorInner::Large(sorted_vec.as_slice().iter())
                 }
             },
         }
@@ -473,9 +522,7 @@ impl<T: Clone + Eq + Hash> OrderedUniqueSet<T> {
     const fn is_large_state(&self) -> bool {
         matches!(self.inner, OrderedUniqueSetInner::Large(_))
     }
-}
 
-impl<T: Clone + Eq + Hash + Ord> OrderedUniqueSet<T> {
     /// Returns an iterator over references to the elements in sorted order.
     ///
     /// Elements are sorted according to their `Ord` implementation.
@@ -483,14 +530,13 @@ impl<T: Clone + Eq + Hash + Ord> OrderedUniqueSet<T> {
     /// # Complexity
     ///
     /// - Small state: O(n log n) for sorting
-    /// - Large state: O(n) for element collection + O(n log n) for sorting
+    /// - Large state: O(1) for iterator creation, O(n) for full traversal
+    ///   (no sorting needed - elements are already sorted)
     ///
     /// # Memory Allocation
     ///
     /// - Small state (n <= 8): Uses `SmallVec` for temporary sorted storage (no heap allocation)
-    /// - Large state (n > 8): Two allocations occur:
-    ///   1. `PersistentHashSet::iter` collects elements into a `Vec` internally (O(n))
-    ///   2. A second `Vec` is allocated for collecting and sorting (sorting is done in-place)
+    /// - Large state (n > 8): No allocation (iterator over sorted slice)
     ///
     /// # Examples
     ///
@@ -520,12 +566,10 @@ impl<T: Clone + Eq + Hash + Ord> OrderedUniqueSet<T> {
                     inner: SortedIteratorInner::Small(sorted, 0),
                 }
             }
-            OrderedUniqueSetInner::Large(set) => {
-                // For Large state, we need a Vec since the set can exceed SMALL_THRESHOLD
-                let mut elements: Vec<&T> = set.iter().collect();
-                elements.sort_unstable();
+            OrderedUniqueSetInner::Large(sorted_vec) => {
+                // For Large state, elements are already sorted - just iterate over slice
                 OrderedUniqueSetSortedIterator {
-                    inner: SortedIteratorInner::Large(elements, 0),
+                    inner: SortedIteratorInner::Large(sorted_vec.as_slice().iter()),
                 }
             }
         }
@@ -543,8 +587,8 @@ impl<T: Clone + Eq + Hash + Ord> OrderedUniqueSet<T> {
     /// - No duplicate elements are allowed
     ///
     /// In debug builds, these preconditions are validated with `debug_assert!`.
-    /// In release builds, invalid input results in undefined behavior (incorrect
-    /// collection state).
+    /// In release builds, invalid input yields an incorrect collection state
+    /// (logic error, not memory unsafety).
     ///
     /// # Type Constraints
     ///
@@ -557,7 +601,7 @@ impl<T: Clone + Eq + Hash + Ord> OrderedUniqueSet<T> {
     /// # Memory Allocation
     ///
     /// - Small (n <= 8): Uses `SmallVec` inline storage, no heap allocation
-    /// - Large (n > 8): Allocates a `Vec` then builds `PersistentHashSet`
+    /// - Large (n > 8): Allocates a `Vec` wrapped in `SortedVec` for structural sharing
     ///
     /// # Examples
     ///
@@ -585,7 +629,10 @@ impl<T: Clone + Eq + Hash + Ord> OrderedUniqueSet<T> {
             );
 
             if small_buffer.len() >= SMALL_THRESHOLD {
-                let mut vec: Vec<T> = small_buffer.drain(..).collect();
+                let buffered_len = small_buffer.len();
+                let (lower, _) = iter.size_hint();
+                let mut vec = Vec::with_capacity(buffered_len + 1 + lower);
+                vec.extend(small_buffer.drain(..));
                 vec.push(element);
                 vec.extend(iter);
 
@@ -621,8 +668,8 @@ impl<T: Clone + Eq + Hash + Ord> OrderedUniqueSet<T> {
     /// - No duplicate elements are allowed
     ///
     /// In debug builds, these preconditions are validated with `debug_assert!`.
-    /// In release builds, invalid input results in undefined behavior (incorrect
-    /// collection state).
+    /// In release builds, invalid input yields an incorrect collection state
+    /// (logic error, not memory unsafety).
     ///
     /// # Type Constraints
     ///
@@ -655,9 +702,8 @@ impl<T: Clone + Eq + Hash + Ord> OrderedUniqueSet<T> {
         }
 
         if vec.len() <= SMALL_THRESHOLD {
-            let small_vec: SmallVec<[T; SMALL_THRESHOLD]> = SmallVec::from_vec(vec);
             Self {
-                inner: OrderedUniqueSetInner::Small(small_vec),
+                inner: OrderedUniqueSetInner::Small(SmallVec::from_vec(vec)),
             }
         } else {
             Self::from_large_vec(vec)
@@ -673,7 +719,7 @@ impl<T: Clone + Eq + Hash + Ord> OrderedUniqueSet<T> {
     ///
     /// - Empty: O(1)
     /// - Small: O(n log n) for sorting (clone is O(n))
-    /// - Large: O(n) for iteration + O(n log n) for sorting
+    /// - Large: O(n) for clone (already sorted)
     ///
     /// # Memory Allocation
     ///
@@ -701,27 +747,177 @@ impl<T: Clone + Eq + Hash + Ord> OrderedUniqueSet<T> {
                 result.sort();
                 result
             }
-            OrderedUniqueSetInner::Large(set) => {
-                let mut result: Vec<T> = set.iter().cloned().collect();
-                result.sort();
-                result
+            OrderedUniqueSetInner::Large(sorted_vec) => {
+                // Already sorted, just clone
+                sorted_vec.as_slice().to_vec()
             }
         }
     }
 
-    /// Helper method to construct Large state from a Vec.
+    /// Helper method to construct Large state from a sorted Vec.
     ///
-    /// Uses `PersistentHashSet::from_iter` which internally uses `TransientHashSet`
-    /// for efficient bulk construction without per-element COW overhead.
+    /// The input vec must already be sorted and deduplicated.
     fn from_large_vec(vec: Vec<T>) -> Self {
-        let set: PersistentHashSet<T> = vec.into_iter().collect();
         Self {
-            inner: OrderedUniqueSetInner::Large(set),
+            inner: OrderedUniqueSetInner::Large(SortedVec::from_sorted(vec)),
         }
+    }
+
+    /// Merges two sets, returning a new set containing all elements from both.
+    ///
+    /// This operation is equivalent to set union. Duplicate elements are
+    /// included only once in the result.
+    ///
+    /// # Complexity
+    ///
+    /// O(n + m) where n and m are the sizes of the two sets.
+    /// Uses a two-pointer merge algorithm for sorted sequences.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::OrderedUniqueSet;
+    ///
+    /// let set1 = OrderedUniqueSet::from_sorted_iter([1, 3, 5]);
+    /// let set2 = OrderedUniqueSet::from_sorted_iter([2, 3, 4]);
+    /// let merged = set1.merge(&set2);
+    /// assert_eq!(merged.to_sorted_vec(), vec![1, 2, 3, 4, 5]);
+    /// ```
+    #[must_use]
+    pub fn merge(&self, other: &Self) -> Self {
+        if self.is_empty() {
+            return other.clone();
+        }
+        if other.is_empty() {
+            return self.clone();
+        }
+
+        let mut left = self.iter_sorted().peekable();
+        let mut right = other.iter_sorted().peekable();
+        let mut result = Vec::with_capacity(self.len() + other.len());
+
+        while let (Some(left_element), Some(right_element)) = (left.peek(), right.peek()) {
+            match (*left_element).cmp(*right_element) {
+                Ordering::Less => {
+                    result.push((*left_element).clone());
+                    left.next();
+                }
+                Ordering::Greater => {
+                    result.push((*right_element).clone());
+                    right.next();
+                }
+                Ordering::Equal => {
+                    result.push((*left_element).clone());
+                    left.next();
+                    right.next();
+                }
+            }
+        }
+
+        result.extend(left.map(Clone::clone));
+        result.extend(right.map(Clone::clone));
+        Self::from_sorted_vec(result)
+    }
+
+    /// Returns the set difference (self - other).
+    ///
+    /// Returns a new set containing elements that are in self but not in other.
+    ///
+    /// # Complexity
+    ///
+    /// O(n + m) where n and m are the sizes of the two sets.
+    /// Uses a two-pointer algorithm for sorted sequences.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::OrderedUniqueSet;
+    ///
+    /// let set1 = OrderedUniqueSet::from_sorted_iter([1, 2, 3, 4, 5]);
+    /// let set2 = OrderedUniqueSet::from_sorted_iter([3, 4, 5, 6, 7]);
+    /// let diff = set1.difference(&set2);
+    /// assert_eq!(diff.to_sorted_vec(), vec![1, 2]);
+    /// ```
+    #[must_use]
+    pub fn difference(&self, other: &Self) -> Self {
+        if self.is_empty() || other.is_empty() {
+            return self.clone();
+        }
+
+        let mut left = self.iter_sorted().peekable();
+        let mut right = other.iter_sorted().peekable();
+        let mut result = Vec::with_capacity(self.len());
+
+        while let (Some(left_element), Some(right_element)) = (left.peek(), right.peek()) {
+            match (*left_element).cmp(*right_element) {
+                Ordering::Less => {
+                    result.push((*left_element).clone());
+                    left.next();
+                }
+                Ordering::Greater => {
+                    right.next();
+                }
+                Ordering::Equal => {
+                    left.next();
+                    right.next();
+                }
+            }
+        }
+
+        result.extend(left.map(Clone::clone));
+        Self::from_sorted_vec(result)
+    }
+
+    /// Returns the set intersection (self & other).
+    ///
+    /// Returns a new set containing elements that are in both self and other.
+    ///
+    /// # Complexity
+    ///
+    /// O(n + m) where n and m are the sizes of the two sets.
+    /// Uses a two-pointer algorithm for sorted sequences.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::OrderedUniqueSet;
+    ///
+    /// let set1 = OrderedUniqueSet::from_sorted_iter([1, 2, 3, 4, 5]);
+    /// let set2 = OrderedUniqueSet::from_sorted_iter([3, 4, 5, 6, 7]);
+    /// let inter = set1.intersection(&set2);
+    /// assert_eq!(inter.to_sorted_vec(), vec![3, 4, 5]);
+    /// ```
+    #[must_use]
+    pub fn intersection(&self, other: &Self) -> Self {
+        if self.is_empty() || other.is_empty() {
+            return Self::new();
+        }
+
+        let mut left = self.iter_sorted().peekable();
+        let mut right = other.iter_sorted().peekable();
+        let mut result = Vec::with_capacity(self.len().min(other.len()));
+
+        while let (Some(left_element), Some(right_element)) = (left.peek(), right.peek()) {
+            match (*left_element).cmp(*right_element) {
+                Ordering::Less => {
+                    left.next();
+                }
+                Ordering::Greater => {
+                    right.next();
+                }
+                Ordering::Equal => {
+                    result.push((*left_element).clone());
+                    left.next();
+                    right.next();
+                }
+            }
+        }
+
+        Self::from_sorted_vec(result)
     }
 }
 
-impl<T: Clone + Eq + Hash> Default for OrderedUniqueSet<T> {
+impl<T: Clone + Eq + Hash + Ord> Default for OrderedUniqueSet<T> {
     #[inline]
     fn default() -> Self {
         Self::new()
@@ -729,25 +925,25 @@ impl<T: Clone + Eq + Hash> Default for OrderedUniqueSet<T> {
 }
 
 /// Iterator over references to elements in an `OrderedUniqueSet`.
-pub struct OrderedUniqueSetIterator<'a, T: Clone + Eq + Hash> {
+pub struct OrderedUniqueSetIterator<'a, T> {
     inner: OrderedUniqueSetIteratorInner<'a, T>,
 }
 
-enum OrderedUniqueSetIteratorInner<'a, T: Clone + Eq + Hash> {
+enum OrderedUniqueSetIteratorInner<'a, T> {
     Empty,
     Small(std::slice::Iter<'a, T>),
-    Large(super::PersistentHashSetIterator<'a, T>),
+    Large(std::slice::Iter<'a, T>),
 }
 
-impl<'a, T: Clone + Eq + Hash> Iterator for OrderedUniqueSetIterator<'a, T> {
+impl<'a, T> Iterator for OrderedUniqueSetIterator<'a, T> {
     type Item = &'a T;
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         match &mut self.inner {
             OrderedUniqueSetIteratorInner::Empty => None,
-            OrderedUniqueSetIteratorInner::Small(iter) => iter.next(),
-            OrderedUniqueSetIteratorInner::Large(iter) => iter.next(),
+            OrderedUniqueSetIteratorInner::Small(iter)
+            | OrderedUniqueSetIteratorInner::Large(iter) => iter.next(),
         }
     }
 
@@ -755,19 +951,19 @@ impl<'a, T: Clone + Eq + Hash> Iterator for OrderedUniqueSetIterator<'a, T> {
     fn size_hint(&self) -> (usize, Option<usize>) {
         match &self.inner {
             OrderedUniqueSetIteratorInner::Empty => (0, Some(0)),
-            OrderedUniqueSetIteratorInner::Small(iter) => iter.size_hint(),
-            OrderedUniqueSetIteratorInner::Large(iter) => iter.size_hint(),
+            OrderedUniqueSetIteratorInner::Small(iter)
+            | OrderedUniqueSetIteratorInner::Large(iter) => iter.size_hint(),
         }
     }
 }
 
-impl<T: Clone + Eq + Hash> ExactSizeIterator for OrderedUniqueSetIterator<'_, T> {
+impl<T> ExactSizeIterator for OrderedUniqueSetIterator<'_, T> {
     #[inline]
     fn len(&self) -> usize {
         match &self.inner {
             OrderedUniqueSetIteratorInner::Empty => 0,
-            OrderedUniqueSetIteratorInner::Small(iter) => iter.len(),
-            OrderedUniqueSetIteratorInner::Large(iter) => iter.len(),
+            OrderedUniqueSetIteratorInner::Small(iter)
+            | OrderedUniqueSetIteratorInner::Large(iter) => iter.len(),
         }
     }
 }
@@ -777,19 +973,15 @@ impl<T: Clone + Eq + Hash> ExactSizeIterator for OrderedUniqueSetIterator<'_, T>
 /// This iterator uses different internal representations based on collection size:
 /// - Empty: No storage needed
 /// - Small: Uses `SmallVec` to avoid heap allocation for small collections
-/// - Large: Uses `Vec` for large collections
+/// - Large: Direct slice iterator (no allocation, already sorted)
 pub struct OrderedUniqueSetSortedIterator<'a, T> {
     inner: SortedIteratorInner<'a, T>,
 }
 
-/// Internal representation for sorted iterator.
 enum SortedIteratorInner<'a, T> {
-    /// Empty collection.
     Empty,
-    /// Small collection sorted in `SmallVec`.
     Small(SmallVec<[&'a T; SMALL_THRESHOLD]>, usize),
-    /// Large collection sorted in `Vec`.
-    Large(Vec<&'a T>, usize),
+    Large(std::slice::Iter<'a, T>),
 }
 
 impl<'a, T> Iterator for OrderedUniqueSetSortedIterator<'a, T> {
@@ -802,9 +994,7 @@ impl<'a, T> Iterator for OrderedUniqueSetSortedIterator<'a, T> {
             SortedIteratorInner::Small(elements, index) => {
                 elements.get(*index).copied().inspect(|_| *index += 1)
             }
-            SortedIteratorInner::Large(elements, index) => {
-                elements.get(*index).copied().inspect(|_| *index += 1)
-            }
+            SortedIteratorInner::Large(iter) => iter.next(),
         }
     }
 
@@ -813,7 +1003,7 @@ impl<'a, T> Iterator for OrderedUniqueSetSortedIterator<'a, T> {
         let remaining = match &self.inner {
             SortedIteratorInner::Empty => 0,
             SortedIteratorInner::Small(elements, index) => elements.len() - *index,
-            SortedIteratorInner::Large(elements, index) => elements.len() - *index,
+            SortedIteratorInner::Large(iter) => iter.len(),
         };
         (remaining, Some(remaining))
     }
@@ -825,30 +1015,26 @@ impl<T> ExactSizeIterator for OrderedUniqueSetSortedIterator<'_, T> {
         match &self.inner {
             SortedIteratorInner::Empty => 0,
             SortedIteratorInner::Small(elements, index) => elements.len() - *index,
-            SortedIteratorInner::Large(elements, index) => elements.len() - *index,
+            SortedIteratorInner::Large(iter) => iter.len(),
         }
     }
 }
 
-impl<T: Clone + Eq + Hash + std::fmt::Debug> std::fmt::Debug for OrderedUniqueSet<T> {
+impl<T: Clone + Eq + Hash + Ord + std::fmt::Debug> std::fmt::Debug for OrderedUniqueSet<T> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.debug_set().entries(self.iter()).finish()
     }
 }
 
-impl<T: Clone + Eq + Hash> PartialEq for OrderedUniqueSet<T> {
+impl<T: Clone + Eq + Hash + Ord> PartialEq for OrderedUniqueSet<T> {
     fn eq(&self, other: &Self) -> bool {
-        if self.len() != other.len() {
-            return false;
-        }
-        // All elements in self must be in other
-        self.iter().all(|element| other.contains(element))
+        self.len() == other.len() && self.iter().all(|element| other.contains(element))
     }
 }
 
-impl<T: Clone + Eq + Hash> Eq for OrderedUniqueSet<T> {}
+impl<T: Clone + Eq + Hash + Ord> Eq for OrderedUniqueSet<T> {}
 
-impl<'a, T: Clone + Eq + Hash> IntoIterator for &'a OrderedUniqueSet<T> {
+impl<'a, T: Clone + Eq + Hash + Ord> IntoIterator for &'a OrderedUniqueSet<T> {
     type Item = &'a T;
     type IntoIter = OrderedUniqueSetIterator<'a, T>;
 
@@ -862,26 +1048,6 @@ impl<'a, T: Clone + Eq + Hash> IntoIterator for &'a OrderedUniqueSet<T> {
 const SORTED_INVARIANT_PANIC_MESSAGE: &str =
     "from_sorted_* requires strictly increasing elements (sorted + deduplicated)";
 
-/// Checks if a slice is strictly sorted (ascending) and has no duplicates.
-///
-/// Returns `true` if the slice is strictly sorted, meaning each element is
-/// strictly less than the next. An empty slice or a slice with one element
-/// is considered strictly sorted.
-///
-/// This function is used for debug assertions in bulk construction methods
-/// to validate preconditions.
-///
-/// # Arguments
-///
-/// * `slice` - The slice to check
-///
-/// # Returns
-///
-/// `true` if the slice is strictly sorted, `false` otherwise
-///
-/// # Complexity
-///
-/// O(n) where n is the length of the slice.
 #[cfg(debug_assertions)]
 #[inline]
 fn is_strictly_sorted<T: Ord>(slice: &[T]) -> bool {
@@ -1166,5 +1332,346 @@ mod tests {
         assert!(collection.contains(&1));
         assert!(collection.contains(&2));
         assert!(collection.contains(&3));
+    }
+
+    // =========================================================================
+    // SortedVec Large representation tests (Phase 1-1)
+    // =========================================================================
+
+    #[rstest]
+    fn large_iter_sorted_returns_ascending_order_without_sort() {
+        // When Large uses SortedVec, iter_sorted should be O(n) not O(n log n)
+        let collection = OrderedUniqueSet::from_sorted_iter(1..=20);
+        assert!(collection.is_large_state());
+
+        // Should return in ascending order
+        let sorted: Vec<i32> = collection.iter_sorted().copied().collect();
+        assert_eq!(sorted, (1..=20).collect::<Vec<_>>());
+    }
+
+    #[rstest]
+    fn large_iter_returns_ascending_order() {
+        // With SortedVec representation, iter should also return ascending order
+        let collection = OrderedUniqueSet::from_sorted_iter(1..=15);
+        assert!(collection.is_large_state());
+
+        let elements: Vec<i32> = collection.iter().copied().collect();
+        // Elements should be in ascending order (SortedVec property)
+        assert_eq!(elements, (1..=15).collect::<Vec<_>>());
+    }
+
+    #[rstest]
+    fn large_contains_uses_binary_search() {
+        // This test verifies the behavior, not the implementation
+        // Binary search should correctly find elements
+        let collection = OrderedUniqueSet::from_sorted_iter(1..=1000);
+        assert!(collection.is_large_state());
+
+        // Check various elements - all in range should be found
+        assert!(collection.contains(&1));
+        assert!(collection.contains(&500));
+        assert!(collection.contains(&501));
+        assert!(collection.contains(&1000));
+        // Elements outside range should not be found
+        assert!(!collection.contains(&0));
+        assert!(!collection.contains(&1001));
+    }
+
+    #[rstest]
+    fn large_contains_finds_all_elements() {
+        let collection = OrderedUniqueSet::from_sorted_iter(1..=100);
+        assert!(collection.is_large_state());
+
+        for i in 1..=100 {
+            assert!(collection.contains(&i), "Should contain {i}");
+        }
+        assert!(!collection.contains(&0));
+        assert!(!collection.contains(&101));
+    }
+
+    // =========================================================================
+    // merge tests (Phase 1-2)
+    // =========================================================================
+
+    #[rstest]
+    fn merge_empty_with_empty_returns_empty() {
+        let empty1: OrderedUniqueSet<i32> = OrderedUniqueSet::new();
+        let empty2: OrderedUniqueSet<i32> = OrderedUniqueSet::new();
+
+        let merged = empty1.merge(&empty2);
+        assert!(merged.is_empty());
+        assert!(merged.is_empty_state());
+    }
+
+    #[rstest]
+    fn merge_empty_with_non_empty_returns_other() {
+        let empty: OrderedUniqueSet<i32> = OrderedUniqueSet::new();
+        let non_empty = OrderedUniqueSet::from_sorted_iter(1..=5);
+
+        let merged = empty.merge(&non_empty);
+        assert_eq!(merged.len(), 5);
+        assert_eq!(merged.to_sorted_vec(), vec![1, 2, 3, 4, 5]);
+    }
+
+    #[rstest]
+    fn merge_non_empty_with_empty_returns_self() {
+        let non_empty = OrderedUniqueSet::from_sorted_iter(1..=5);
+        let empty: OrderedUniqueSet<i32> = OrderedUniqueSet::new();
+
+        let merged = non_empty.merge(&empty);
+        assert_eq!(merged.len(), 5);
+        assert_eq!(merged.to_sorted_vec(), vec![1, 2, 3, 4, 5]);
+    }
+
+    #[rstest]
+    fn merge_disjoint_sets() {
+        let set1 = OrderedUniqueSet::from_sorted_iter([1, 3, 5]);
+        let set2 = OrderedUniqueSet::from_sorted_iter([2, 4, 6]);
+
+        let merged = set1.merge(&set2);
+        assert_eq!(merged.len(), 6);
+        assert_eq!(merged.to_sorted_vec(), vec![1, 2, 3, 4, 5, 6]);
+    }
+
+    #[rstest]
+    fn merge_overlapping_sets() {
+        let set1 = OrderedUniqueSet::from_sorted_iter([1, 2, 3, 4, 5]);
+        let set2 = OrderedUniqueSet::from_sorted_iter([3, 4, 5, 6, 7]);
+
+        let merged = set1.merge(&set2);
+        assert_eq!(merged.len(), 7);
+        assert_eq!(merged.to_sorted_vec(), vec![1, 2, 3, 4, 5, 6, 7]);
+    }
+
+    #[rstest]
+    fn merge_identical_sets() {
+        let set1 = OrderedUniqueSet::from_sorted_iter([1, 2, 3]);
+        let set2 = OrderedUniqueSet::from_sorted_iter([1, 2, 3]);
+
+        let merged = set1.merge(&set2);
+        assert_eq!(merged.len(), 3);
+        assert_eq!(merged.to_sorted_vec(), vec![1, 2, 3]);
+    }
+
+    #[rstest]
+    fn merge_small_with_large_returns_large() {
+        let small = OrderedUniqueSet::from_sorted_iter([1, 2, 3]); // Small state
+        let large = OrderedUniqueSet::from_sorted_iter(10..=20); // Large state
+
+        assert!(small.is_small_state());
+        assert!(large.is_large_state());
+
+        let merged = small.merge(&large);
+        // Result should be Large since total > 8
+        assert!(merged.is_large_state());
+        assert_eq!(merged.len(), 3 + 11);
+    }
+
+    #[rstest]
+    fn merge_is_commutative() {
+        let set1 = OrderedUniqueSet::from_sorted_iter([1, 3, 5, 7, 9]);
+        let set2 = OrderedUniqueSet::from_sorted_iter([2, 4, 6, 8, 10]);
+
+        let merged1 = set1.merge(&set2);
+        let merged2 = set2.merge(&set1);
+
+        assert_eq!(merged1, merged2);
+    }
+
+    #[rstest]
+    fn merge_preserves_original_collections() {
+        let set1 = OrderedUniqueSet::from_sorted_iter([1, 2, 3]);
+        let set2 = OrderedUniqueSet::from_sorted_iter([4, 5, 6]);
+
+        let _ = set1.merge(&set2);
+
+        // Original collections unchanged (immutability)
+        assert_eq!(set1.to_sorted_vec(), vec![1, 2, 3]);
+        assert_eq!(set2.to_sorted_vec(), vec![4, 5, 6]);
+    }
+
+    // =========================================================================
+    // difference tests (Phase 1-3)
+    // =========================================================================
+
+    #[rstest]
+    fn difference_empty_with_empty_returns_empty() {
+        let empty1: OrderedUniqueSet<i32> = OrderedUniqueSet::new();
+        let empty2: OrderedUniqueSet<i32> = OrderedUniqueSet::new();
+
+        let diff = empty1.difference(&empty2);
+        assert!(diff.is_empty());
+    }
+
+    #[rstest]
+    fn difference_empty_with_non_empty_returns_empty() {
+        let empty: OrderedUniqueSet<i32> = OrderedUniqueSet::new();
+        let non_empty = OrderedUniqueSet::from_sorted_iter(1..=5);
+
+        let diff = empty.difference(&non_empty);
+        assert!(diff.is_empty());
+    }
+
+    #[rstest]
+    fn difference_non_empty_with_empty_returns_self() {
+        let non_empty = OrderedUniqueSet::from_sorted_iter(1..=5);
+        let empty: OrderedUniqueSet<i32> = OrderedUniqueSet::new();
+
+        let diff = non_empty.difference(&empty);
+        assert_eq!(diff.len(), 5);
+        assert_eq!(diff.to_sorted_vec(), vec![1, 2, 3, 4, 5]);
+    }
+
+    #[rstest]
+    fn difference_disjoint_sets_returns_self() {
+        let set1 = OrderedUniqueSet::from_sorted_iter([1, 2, 3]);
+        let set2 = OrderedUniqueSet::from_sorted_iter([4, 5, 6]);
+
+        let diff = set1.difference(&set2);
+        assert_eq!(diff.len(), 3);
+        assert_eq!(diff.to_sorted_vec(), vec![1, 2, 3]);
+    }
+
+    #[rstest]
+    fn difference_overlapping_sets() {
+        let set1 = OrderedUniqueSet::from_sorted_iter([1, 2, 3, 4, 5]);
+        let set2 = OrderedUniqueSet::from_sorted_iter([3, 4, 5, 6, 7]);
+
+        let diff = set1.difference(&set2);
+        assert_eq!(diff.len(), 2);
+        assert_eq!(diff.to_sorted_vec(), vec![1, 2]);
+    }
+
+    #[rstest]
+    fn difference_identical_sets_returns_empty() {
+        let set1 = OrderedUniqueSet::from_sorted_iter([1, 2, 3]);
+        let set2 = OrderedUniqueSet::from_sorted_iter([1, 2, 3]);
+
+        let diff = set1.difference(&set2);
+        assert!(diff.is_empty());
+    }
+
+    #[rstest]
+    fn difference_subset_returns_empty() {
+        let set1 = OrderedUniqueSet::from_sorted_iter([2, 3, 4]);
+        let set2 = OrderedUniqueSet::from_sorted_iter([1, 2, 3, 4, 5]);
+
+        let diff = set1.difference(&set2);
+        assert!(diff.is_empty());
+    }
+
+    #[rstest]
+    fn difference_superset_returns_difference() {
+        let set1 = OrderedUniqueSet::from_sorted_iter([1, 2, 3, 4, 5]);
+        let set2 = OrderedUniqueSet::from_sorted_iter([2, 3, 4]);
+
+        let diff = set1.difference(&set2);
+        assert_eq!(diff.len(), 2);
+        assert_eq!(diff.to_sorted_vec(), vec![1, 5]);
+    }
+
+    #[rstest]
+    fn difference_preserves_original_collections() {
+        let set1 = OrderedUniqueSet::from_sorted_iter([1, 2, 3, 4, 5]);
+        let set2 = OrderedUniqueSet::from_sorted_iter([3, 4, 5]);
+
+        let _ = set1.difference(&set2);
+
+        // Original collections unchanged
+        assert_eq!(set1.to_sorted_vec(), vec![1, 2, 3, 4, 5]);
+        assert_eq!(set2.to_sorted_vec(), vec![3, 4, 5]);
+    }
+
+    // =========================================================================
+    // intersection tests (Phase 1-4)
+    // =========================================================================
+
+    #[rstest]
+    fn intersection_empty_with_empty_returns_empty() {
+        let empty1: OrderedUniqueSet<i32> = OrderedUniqueSet::new();
+        let empty2: OrderedUniqueSet<i32> = OrderedUniqueSet::new();
+
+        let inter = empty1.intersection(&empty2);
+        assert!(inter.is_empty());
+    }
+
+    #[rstest]
+    fn intersection_empty_with_non_empty_returns_empty() {
+        let empty: OrderedUniqueSet<i32> = OrderedUniqueSet::new();
+        let non_empty = OrderedUniqueSet::from_sorted_iter(1..=5);
+
+        let inter = empty.intersection(&non_empty);
+        assert!(inter.is_empty());
+    }
+
+    #[rstest]
+    fn intersection_non_empty_with_empty_returns_empty() {
+        let non_empty = OrderedUniqueSet::from_sorted_iter(1..=5);
+        let empty: OrderedUniqueSet<i32> = OrderedUniqueSet::new();
+
+        let inter = non_empty.intersection(&empty);
+        assert!(inter.is_empty());
+    }
+
+    #[rstest]
+    fn intersection_disjoint_sets_returns_empty() {
+        let set1 = OrderedUniqueSet::from_sorted_iter([1, 2, 3]);
+        let set2 = OrderedUniqueSet::from_sorted_iter([4, 5, 6]);
+
+        let inter = set1.intersection(&set2);
+        assert!(inter.is_empty());
+    }
+
+    #[rstest]
+    fn intersection_overlapping_sets() {
+        let set1 = OrderedUniqueSet::from_sorted_iter([1, 2, 3, 4, 5]);
+        let set2 = OrderedUniqueSet::from_sorted_iter([3, 4, 5, 6, 7]);
+
+        let inter = set1.intersection(&set2);
+        assert_eq!(inter.len(), 3);
+        assert_eq!(inter.to_sorted_vec(), vec![3, 4, 5]);
+    }
+
+    #[rstest]
+    fn intersection_identical_sets() {
+        let set1 = OrderedUniqueSet::from_sorted_iter([1, 2, 3]);
+        let set2 = OrderedUniqueSet::from_sorted_iter([1, 2, 3]);
+
+        let inter = set1.intersection(&set2);
+        assert_eq!(inter.len(), 3);
+        assert_eq!(inter.to_sorted_vec(), vec![1, 2, 3]);
+    }
+
+    #[rstest]
+    fn intersection_subset_returns_subset() {
+        let set1 = OrderedUniqueSet::from_sorted_iter([2, 3, 4]);
+        let set2 = OrderedUniqueSet::from_sorted_iter([1, 2, 3, 4, 5]);
+
+        let inter = set1.intersection(&set2);
+        assert_eq!(inter.len(), 3);
+        assert_eq!(inter.to_sorted_vec(), vec![2, 3, 4]);
+    }
+
+    #[rstest]
+    fn intersection_is_commutative() {
+        let set1 = OrderedUniqueSet::from_sorted_iter([1, 2, 3, 4, 5]);
+        let set2 = OrderedUniqueSet::from_sorted_iter([3, 4, 5, 6, 7]);
+
+        let inter1 = set1.intersection(&set2);
+        let inter2 = set2.intersection(&set1);
+
+        assert_eq!(inter1, inter2);
+    }
+
+    #[rstest]
+    fn intersection_preserves_original_collections() {
+        let set1 = OrderedUniqueSet::from_sorted_iter([1, 2, 3, 4, 5]);
+        let set2 = OrderedUniqueSet::from_sorted_iter([3, 4, 5, 6, 7]);
+
+        let _ = set1.intersection(&set2);
+
+        // Original collections unchanged
+        assert_eq!(set1.to_sorted_vec(), vec![1, 2, 3, 4, 5]);
+        assert_eq!(set2.to_sorted_vec(), vec![3, 4, 5, 6, 7]);
     }
 }

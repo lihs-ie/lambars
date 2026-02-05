@@ -16,8 +16,7 @@ local update_types = {"priority", "status", "description", "title", "full"}
 local backoff_skip_counter, backoff_skip_target = 0, 0
 local is_backoff_request, is_suppressed_request, is_fallback_request = false, false, false
 
--- REQ-MEASURE-401: リクエストカテゴリの追加
-request_categories = {
+local request_categories = {
     executed = 0,
     backoff = 0,
     suppressed = 0,
@@ -118,8 +117,7 @@ local function apply_backoff()
     backoff_skip_counter = 0
 end
 
-local function create_health_request(request_type, counter_field)
-    _G[counter_field] = _G[counter_field] + 1
+local function health_request()
     return wrk and wrk.format and wrk.format("GET", "/health") or ""
 end
 
@@ -129,7 +127,7 @@ local function fallback_request()
     last_request_is_update = false
     is_fallback_request = true
     request_categories.fallback = request_categories.fallback + 1
-    return wrk and wrk.format and wrk.format("GET", "/health") or ""
+    return health_request()
 end
 
 function request()
@@ -138,7 +136,7 @@ function request()
         if suppressed == true or suppressed == "true" then
             is_suppressed_request = true
             request_categories.suppressed = request_categories.suppressed + 1
-            return wrk and wrk.format and wrk.format("GET", "/health") or ""
+            return health_request()
         end
     end
     is_suppressed_request = false
@@ -147,7 +145,7 @@ function request()
         backoff_skip_counter = backoff_skip_counter + 1
         is_backoff_request = true
         request_categories.backoff = request_categories.backoff + 1
-        return wrk and wrk.format and wrk.format("GET", "/health") or ""
+        return health_request()
     end
     backoff_skip_counter = 0
     is_backoff_request = false
@@ -336,7 +334,6 @@ local function print_status_distribution(aggregated, lua_total, summary)
         request_categories.backoff, request_categories.suppressed, request_categories.fallback))
 end
 
--- 純粋関数: カテゴリ別集計
 local function aggregate_categories(categories)
     return {
         executed = categories.executed,
@@ -346,7 +343,6 @@ local function aggregate_categories(categories)
     }
 end
 
--- 純粋関数: 整合性検証
 local function verify_consistency(categories, total_requests)
     local sum = categories.executed + categories.backoff +
                 categories.suppressed + categories.fallback
@@ -354,21 +350,16 @@ local function verify_consistency(categories, total_requests)
 end
 
 function done(summary, latency, requests)
-    -- カテゴリ別集計（純粋関数）
     local categories = aggregate_categories(request_categories)
-
-    -- 整合性検証（純粋関数）
     local is_consistent, sum = verify_consistency(categories, summary.requests)
 
-    -- 副作用: 出力
     if not is_consistent then
         io.stderr:write(string.format(
             "[tasks_update] WARN: Inconsistency detected: total=%d, sum(categories)=%d\n",
             summary.requests, sum))
     end
 
-    -- 副作用: カテゴリ別集計の出力
-    io.write("\n--- Request Categories (REQ-MEASURE-401) ---\n")
+    io.write("\n--- Request Categories ---\n")
     io.write(string.format("  Executed:   %d\n", categories.executed))
     io.write(string.format("  Backoff:    %d\n", categories.backoff))
     io.write(string.format("  Suppressed: %d\n", categories.suppressed))
@@ -395,6 +386,11 @@ function done(summary, latency, requests)
         if stat[1] > 0 then
             io.stderr:write(string.format("[tasks_update] %s: %d\n", stat[2], stat[1]))
         end
+    end
+
+    local rc = pcall(require, "result_collector") and require("result_collector") or nil
+    if rc and rc.set_request_categories then
+        rc.set_request_categories(categories)
     end
 
     common.finalize_benchmark(summary, latency, requests)

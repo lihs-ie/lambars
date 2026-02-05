@@ -103,6 +103,12 @@ function M.set_scenario_metadata(metadata)
     M.results.scenario.contention_level = metadata.contention_level
 end
 
+function M.set_request_categories(categories)
+    if not categories then return end
+    local excluded = (categories.backoff or 0) + (categories.suppressed or 0) + (categories.fallback or 0)
+    M.results.meta.excluded_requests = excluded
+end
+
 function M.load_scenario_from_env()
     M.results.scenario.storage_mode = os.getenv("STORAGE_MODE")
     M.results.scenario.cache_mode = os.getenv("CACHE_MODE")
@@ -330,7 +336,9 @@ local function aggregate_error_counts()
 
     for status, count in pairs(M.results.status_distribution) do
         local status_num = tonumber(status)
-        if status_num and type(count) == "number" then
+        local is_number = status_num and type(count) == "number"
+
+        if is_number then
             if status_num >= 400 and status_num < 500 then
                 counts.count_4xx_total = counts.count_4xx_total + count
                 counts.total = counts.total + count
@@ -352,12 +360,11 @@ local function aggregate_error_counts()
     return counts
 end
 
--- REQ-MEASURE-401: tracked_requests の計算（純粋関数）
 local function calculate_tracked_requests(status_distribution)
     local tracked = 0
     if status_distribution and type(status_distribution) == "table" then
         for status, count in pairs(status_distribution) do
-            if tonumber(status) and type(count) == "number" then
+            if (tonumber(status) or status == "other") and type(count) == "number" then
                 tracked = tracked + count
             end
         end
@@ -366,8 +373,14 @@ local function calculate_tracked_requests(status_distribution)
 end
 
 local function set_error_metrics(http_error_counts, summary)
-    -- REQ-MEASURE-401: tracked_requests の計算
     local tracked_requests = calculate_tracked_requests(M.results.status_distribution)
+    if tracked_requests <= 0 and summary and summary.requests then
+        local network_errors = (summary.errors and summary.errors.connect or 0) +
+                               (summary.errors and summary.errors.read or 0) +
+                               (summary.errors and summary.errors.write or 0) +
+                               (summary.errors and summary.errors.timeout or 0)
+        tracked_requests = math.max(0, summary.requests - network_errors)
+    end
     M.results.meta.tracked_requests = tracked_requests
 
     if tracked_requests <= 0 then
@@ -382,7 +395,6 @@ local function set_error_metrics(http_error_counts, summary)
     end
 
     if M.results.status_distribution and type(M.results.status_distribution) == "table" and next(M.results.status_distribution) then
-        -- REQ-MEASURE-401: メトリクスの分離（分母を tracked_requests に変更）
         local success_count = 0
         for status, count in pairs(M.results.status_distribution) do
             local status_num = tonumber(status)
@@ -394,7 +406,8 @@ local function set_error_metrics(http_error_counts, summary)
         M.results.meta.success_rate = success_count / tracked_requests
 
         local total_http_errors = http_error_counts.count_4xx_total + http_error_counts.count_5xx_total
-        M.results.error_rate = total_http_errors / tracked_requests
+        local non_conflict_errors = http_error_counts.count_4xx_excluding_409 + http_error_counts.count_5xx_total
+        M.results.error_rate = non_conflict_errors / tracked_requests
         M.results.client_error_rate = http_error_counts.count_4xx_excluding_409 / tracked_requests
         M.results.conflict_count = http_error_counts.count_409
         M.results.conflict_rate = http_error_counts.count_409 / tracked_requests
@@ -445,7 +458,7 @@ end
         end
 
         if http_status_total > 0 then
-            M.results.total_requests = http_status_total
+            M.results.meta.tracked_requests = http_status_total
             M.results.status_distribution = {}
             for status, count in pairs(M.results.http_status) do
                 if (tonumber(status) or status == "other") and type(count) == "number" then
@@ -655,7 +668,7 @@ function M.format_text()
     else
         table.insert(lines, string.format("Network error rate:  %.2f%% (socket errors)", (M.results.network_error_rate or 0) * 100))
     end
-    table.insert(lines, format_rate("5xx error rate:     ", M.results.error_rate))
+    table.insert(lines, format_rate("Error rate (excl.409):", M.results.error_rate))
     table.insert(lines, format_rate("Client error rate:  ", M.results.client_error_rate))
     table.insert(lines, format_count("Conflict count:     ", M.results.conflict_count))
     table.insert(lines, format_rate("Conflict rate:      ", M.results.conflict_rate))
