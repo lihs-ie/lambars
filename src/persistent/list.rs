@@ -1552,7 +1552,7 @@ where
         while let Some(element) = seq.next_element()? {
             elements.push(element);
         }
-        Ok(elements.into_iter().collect())
+        Ok(PersistentList::build_from_vec(elements))
     }
 }
 
