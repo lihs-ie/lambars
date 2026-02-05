@@ -1291,8 +1291,42 @@ impl MergeBuffer {
     ///
     /// - No clone cost: O(1) for the move
     /// - No allocation: Buffer allocation deferred to next `prepare()` call
+    ///
+    /// # Note
+    ///
+    /// This method is retained for cases where capacity preservation is not needed
+    /// (e.g., final iteration of a loop). Use `take_with_capacity()` for tight loops
+    /// where reallocation should be avoided.
+    #[allow(dead_code)]
     fn take_owned(&mut self) -> Vec<TaskId> {
         std::mem::take(&mut self.result)
+    }
+
+    /// Returns the buffer contents by move while preserving capacity.
+    ///
+    /// Unlike `take_owned()`, this method reserves the same capacity after
+    /// moving out the contents, avoiding reallocation on the next merge.
+    ///
+    /// # Performance
+    ///
+    /// - No clone cost: O(1) for the move
+    /// - Capacity preserved: Avoids reallocation in tight loops
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut buffer = MergeBuffer::with_capacity(100);
+    /// for _ in 0..10 {
+    ///     buffer.result.push(TaskId::new(1));
+    ///     let result = buffer.take_with_capacity();
+    ///     // buffer.result.capacity() is still >= 100
+    /// }
+    /// ```
+    fn take_with_capacity(&mut self) -> Vec<TaskId> {
+        let capacity = self.result.capacity();
+        let result = std::mem::take(&mut self.result);
+        self.result.reserve(capacity);
+        result
     }
 }
 
@@ -5774,8 +5808,8 @@ impl SearchIndex {
     ///
     /// # Returns
     ///
-    /// The merged result is stored in `buffer.result` and returned via `buffer.take_owned()`.
-    /// A new buffer with appropriate capacity is allocated for the next iteration.
+    /// The merged result is stored in `buffer.result` and returned via `buffer.take_with_capacity()`.
+    /// The buffer's capacity is preserved for the next iteration, avoiding reallocation.
     fn merge_single_posting_list_with_buffer<'a>(
         existing: Option<&'a TaskIdCollection>,
         add_slice: &'a [TaskId],
@@ -5797,16 +5831,22 @@ impl SearchIndex {
 
         // Use static dispatch via flat_map instead of Box<dyn Iterator>
         let existing_iter = existing.into_iter().flat_map(|c| c.iter_sorted());
-        Self::merge_posting_lists_3way_into(
-            existing_iter,
-            add_slice.iter(),
-            remove_slice.iter(),
-            &mut buffer.result,
-        );
 
-        // Use take_owned to avoid O(n) clone overhead
-        // Buffer allocation for next iteration is deferred to prepare()
-        buffer.take_owned()
+        // Add-only fast path: skip remove checks when remove is empty
+        if remove_slice.is_empty() {
+            Self::merge_add_only_into(existing_iter, add_slice.iter(), &mut buffer.result);
+        } else {
+            Self::merge_posting_lists_3way_into(
+                existing_iter,
+                add_slice.iter(),
+                remove_slice.iter(),
+                &mut buffer.result,
+            );
+        }
+
+        // Use take_with_capacity to avoid O(n) clone overhead while preserving capacity
+        // This avoids reallocation on subsequent iterations in tight loops
+        buffer.take_with_capacity()
     }
 
     /// Original merge implementation using individual inserts with buffer reuse (TB-003).
@@ -5884,8 +5924,8 @@ impl SearchIndex {
             if let Ok(updated) = result.insert_bulk_owned(chunk_vec) {
                 result = updated;
             } else {
-                let fallback = Self::merge_ngram_delta_individual(index, add, remove, all_keys)
-                    .into_index();
+                let fallback =
+                    Self::merge_ngram_delta_individual(index, add, remove, all_keys).into_index();
                 return MergeNgramDeltaResult::Fallback {
                     index: fallback,
                     reason: MergeNgramDeltaFallbackReason::TooManyEntries {
@@ -5968,6 +6008,57 @@ impl SearchIndex {
                 remove.next();
             } else {
                 result.push(val.clone());
+            }
+        }
+    }
+
+    /// Computes `existing ∪ add` via 2-way merge (Add-only case).
+    ///
+    /// This is a specialized fast path for cases where there are no removals.
+    /// Avoids the overhead of checking the remove iterator.
+    ///
+    /// All inputs must be sorted and deduplicated. Time complexity: O(N).
+    ///
+    /// # Note
+    /// This function mutates the passed-in `result` buffer for performance.
+    /// The buffer is cleared at the start to ensure deterministic output
+    /// regardless of its prior state.
+    fn merge_add_only_into<'a>(
+        existing: impl Iterator<Item = &'a TaskId>,
+        add: impl Iterator<Item = &'a TaskId>,
+        result: &mut Vec<TaskId>,
+    ) {
+        result.clear();
+
+        let mut existing = existing.peekable();
+        let mut add = add.peekable();
+
+        loop {
+            match (existing.peek(), add.peek()) {
+                (None, None) => break,
+                (Some(&e), None) => {
+                    result.push(e.clone());
+                    existing.next();
+                }
+                (None, Some(&a)) => {
+                    result.push(a.clone());
+                    add.next();
+                }
+                (Some(&e), Some(&a)) => match e.cmp(a) {
+                    std::cmp::Ordering::Less => {
+                        result.push(e.clone());
+                        existing.next();
+                    }
+                    std::cmp::Ordering::Equal => {
+                        result.push(e.clone());
+                        existing.next();
+                        add.next();
+                    }
+                    std::cmp::Ordering::Greater => {
+                        result.push(a.clone());
+                        add.next();
+                    }
+                },
             }
         }
     }
@@ -11065,6 +11156,50 @@ mod search_index_config_tests {
             .use_apply_bulk(false)
             .build();
         assert!(!config2.use_apply_bulk);
+    }
+
+    // -------------------------------------------------------------------------
+    // Phase 3: BULK_THRESHOLD Optimization Tests (REQ-PERF-MERGE-BUFFER-001)
+    // -------------------------------------------------------------------------
+
+    /// Tests that `bulk_threshold` defaults to 10 for Phase 3 optimization.
+    ///
+    /// Phase 3 requirement: Lower bulk_threshold from 100 to 10 to ensure
+    /// all batch sizes (10/50/100) in tasks_bulk benchmark use the bulk path.
+    #[rstest]
+    fn config_bulk_threshold_default_is_10_for_phase3() {
+        let config = SearchIndexConfig::default();
+        assert_eq!(
+            config.bulk_threshold, 10,
+            "Phase 3: bulk_threshold should default to 10 for tasks_bulk optimization"
+        );
+    }
+
+    /// Tests that `use_apply_bulk` defaults to true for Phase 3 optimization.
+    ///
+    /// Phase 3 requirement: Enable use_apply_bulk by default to ensure
+    /// Add-only changes automatically use the optimized apply_bulk path.
+    #[rstest]
+    fn config_use_apply_bulk_default_is_true_for_phase3() {
+        let config = SearchIndexConfig::default();
+        assert!(
+            config.use_apply_bulk,
+            "Phase 3: use_apply_bulk should default to true for Add-only optimization"
+        );
+    }
+
+    /// Tests that SearchIndexConfigBuilder preserves Phase 3 defaults.
+    #[rstest]
+    fn config_builder_preserves_phase3_defaults() {
+        let config = SearchIndexConfigBuilder::new().build();
+        assert_eq!(
+            config.bulk_threshold, 10,
+            "Builder should preserve Phase 3 bulk_threshold default"
+        );
+        assert!(
+            config.use_apply_bulk,
+            "Builder should preserve Phase 3 use_apply_bulk default"
+        );
     }
 }
 
@@ -19835,12 +19970,7 @@ mod merge_posting_lists_3way_into_tests {
         let add = task_ids(&[2, 1]); // unsorted
         let remove: Vec<TaskId> = vec![];
         let mut buffer = crate::api::query::MergeBuffer::new();
-        SearchIndex::merge_single_posting_list_with_buffer(
-            None,
-            &add,
-            &remove,
-            &mut buffer,
-        );
+        SearchIndex::merge_single_posting_list_with_buffer(None, &add, &remove, &mut buffer);
     }
 
     #[cfg(debug_assertions)]
@@ -19851,12 +19981,7 @@ mod merge_posting_lists_3way_into_tests {
         let add: Vec<TaskId> = vec![];
         let remove = task_ids(&[3, 1]); // unsorted
         let mut buffer = crate::api::query::MergeBuffer::new();
-        SearchIndex::merge_single_posting_list_with_buffer(
-            None,
-            &add,
-            &remove,
-            &mut buffer,
-        );
+        SearchIndex::merge_single_posting_list_with_buffer(None, &add, &remove, &mut buffer);
     }
 
     #[cfg(debug_assertions)]
@@ -19867,12 +19992,7 @@ mod merge_posting_lists_3way_into_tests {
         let add = task_ids(&[2, 2, 4]); // duplicate
         let remove: Vec<TaskId> = vec![];
         let mut buffer = crate::api::query::MergeBuffer::new();
-        SearchIndex::merge_single_posting_list_with_buffer(
-            None,
-            &add,
-            &remove,
-            &mut buffer,
-        );
+        SearchIndex::merge_single_posting_list_with_buffer(None, &add, &remove, &mut buffer);
     }
 
     #[cfg(debug_assertions)]
@@ -19883,12 +20003,7 @@ mod merge_posting_lists_3way_into_tests {
         let add: Vec<TaskId> = vec![];
         let remove = task_ids(&[3, 3]); // duplicate
         let mut buffer = crate::api::query::MergeBuffer::new();
-        SearchIndex::merge_single_posting_list_with_buffer(
-            None,
-            &add,
-            &remove,
-            &mut buffer,
-        );
+        SearchIndex::merge_single_posting_list_with_buffer(None, &add, &remove, &mut buffer);
     }
 
     #[rstest]
@@ -19912,9 +20027,227 @@ mod merge_posting_lists_3way_into_tests {
     fn remove_smaller_than_min_is_ignored() {
         // Tests the `while remove.peek() < val` branch
         // Remove elements [1, 2, 3] are all smaller than min(existing=5, add=6)
+        assert_eq!(merge(&[5, 7], &[6, 8], &[1, 2, 3]), task_ids(&[5, 6, 7, 8]));
+    }
+}
+
+// =============================================================================
+// MergeBuffer Capacity Retention Tests (REQ-PERF-MERGE-BUFFER-001)
+// =============================================================================
+
+#[cfg(test)]
+mod merge_buffer_capacity_tests {
+    use super::*;
+    use rstest::rstest;
+    use uuid::Uuid;
+
+    fn task_id(value: u128) -> TaskId {
+        TaskId::from_uuid(Uuid::from_u128(value))
+    }
+
+    #[rstest]
+    fn take_with_capacity_preserves_capacity() {
+        let mut buffer = MergeBuffer::with_capacity(100);
+        buffer.result.push(task_id(1));
+        buffer.result.push(task_id(2));
+
+        let result = buffer.take_with_capacity();
+
+        assert_eq!(result.len(), 2);
+        assert!(buffer.result.is_empty());
+        assert!(buffer.result.capacity() >= 100);
+    }
+
+    #[rstest]
+    fn take_with_capacity_multiple_iterations() {
+        let mut buffer = MergeBuffer::with_capacity(100);
+
+        for i in 0..5 {
+            buffer.result.push(task_id(i));
+            let result = buffer.take_with_capacity();
+            assert_eq!(result.len(), 1);
+            assert!(
+                buffer.result.capacity() >= 100,
+                "Iteration {i}: capacity should be preserved, but was {}",
+                buffer.result.capacity()
+            );
+        }
+    }
+
+    #[rstest]
+    fn take_with_capacity_returns_correct_content() {
+        let mut buffer = MergeBuffer::with_capacity(50);
+        buffer.result.push(task_id(10));
+        buffer.result.push(task_id(20));
+        buffer.result.push(task_id(30));
+
+        let result = buffer.take_with_capacity();
+
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0], task_id(10));
+        assert_eq!(result[1], task_id(20));
+        assert_eq!(result[2], task_id(30));
+    }
+
+    #[rstest]
+    fn take_with_capacity_on_empty_buffer_preserves_capacity() {
+        let mut buffer = MergeBuffer::with_capacity(200);
+
+        let result = buffer.take_with_capacity();
+
+        assert!(result.is_empty());
+        assert!(buffer.result.capacity() >= 200);
+    }
+}
+
+// =============================================================================
+// merge_add_only_into Tests (REQ-PERF-MERGE-BUFFER-001 Phase 2)
+// =============================================================================
+
+#[cfg(test)]
+mod merge_add_only_into_tests {
+    use super::*;
+    use rstest::rstest;
+    use uuid::Uuid;
+
+    fn task_id(value: u128) -> TaskId {
+        TaskId::from_uuid(Uuid::from_u128(value))
+    }
+
+    fn task_ids(values: &[u128]) -> Vec<TaskId> {
+        values.iter().map(|&v| task_id(v)).collect()
+    }
+
+    fn merge(existing: &[u128], add: &[u128]) -> Vec<TaskId> {
+        let existing: Vec<TaskId> = existing.iter().map(|&v| task_id(v)).collect();
+        let add: Vec<TaskId> = add.iter().map(|&v| task_id(v)).collect();
+        let mut result = Vec::new();
+        SearchIndex::merge_add_only_into(existing.iter(), add.iter(), &mut result);
+        result
+    }
+
+    #[rstest]
+    fn empty_both() {
+        assert_eq!(merge(&[], &[]), vec![]);
+    }
+
+    #[rstest]
+    fn existing_only() {
         assert_eq!(
-            merge(&[5, 7], &[6, 8], &[1, 2, 3]),
-            task_ids(&[5, 6, 7, 8])
+            merge(&[1, 2, 3], &[]),
+            vec![task_id(1), task_id(2), task_id(3)]
         );
+    }
+
+    #[rstest]
+    fn add_only() {
+        assert_eq!(
+            merge(&[], &[1, 2, 3]),
+            vec![task_id(1), task_id(2), task_id(3)]
+        );
+    }
+
+    #[rstest]
+    fn union_without_overlap() {
+        assert_eq!(
+            merge(&[1, 3], &[2, 4]),
+            vec![task_id(1), task_id(2), task_id(3), task_id(4)]
+        );
+    }
+
+    #[rstest]
+    fn union_with_overlap_deduplicates() {
+        assert_eq!(
+            merge(&[1, 2, 3], &[2, 3, 4]),
+            vec![task_id(1), task_id(2), task_id(3), task_id(4)]
+        );
+    }
+
+    #[rstest]
+    fn interleaved() {
+        assert_eq!(
+            merge(&[1, 3, 5, 7], &[2, 4, 6, 8]),
+            vec![
+                task_id(1),
+                task_id(2),
+                task_id(3),
+                task_id(4),
+                task_id(5),
+                task_id(6),
+                task_id(7),
+                task_id(8)
+            ]
+        );
+    }
+
+    #[rstest]
+    fn single_element_existing() {
+        assert_eq!(merge(&[5], &[]), vec![task_id(5)]);
+    }
+
+    #[rstest]
+    fn single_element_add() {
+        assert_eq!(merge(&[], &[5]), vec![task_id(5)]);
+    }
+
+    #[rstest]
+    fn single_element_both_same() {
+        assert_eq!(merge(&[5], &[5]), vec![task_id(5)]);
+    }
+
+    #[rstest]
+    fn single_element_both_different() {
+        assert_eq!(merge(&[3], &[7]), vec![task_id(3), task_id(7)]);
+    }
+
+    #[rstest]
+    fn large_existing_small_add() {
+        assert_eq!(
+            merge(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10], &[15]),
+            vec![
+                task_id(1),
+                task_id(2),
+                task_id(3),
+                task_id(4),
+                task_id(5),
+                task_id(6),
+                task_id(7),
+                task_id(8),
+                task_id(9),
+                task_id(10),
+                task_id(15)
+            ]
+        );
+    }
+
+    #[rstest]
+    fn small_existing_large_add() {
+        assert_eq!(
+            merge(&[5], &[1, 2, 3, 4, 6, 7, 8, 9, 10]),
+            vec![
+                task_id(1),
+                task_id(2),
+                task_id(3),
+                task_id(4),
+                task_id(5),
+                task_id(6),
+                task_id(7),
+                task_id(8),
+                task_id(9),
+                task_id(10)
+            ]
+        );
+    }
+
+    #[rstest]
+    fn result_buffer_reuse() {
+        // Test that result buffer is properly cleared and reused
+        let mut result = task_ids(&[999, 888, 777]); // Pre-fill with garbage
+        let existing = task_ids(&[1, 2]);
+        let add = task_ids(&[3, 4]);
+
+        SearchIndex::merge_add_only_into(existing.iter(), add.iter(), &mut result);
+
+        assert_eq!(result, task_ids(&[1, 2, 3, 4]));
     }
 }
