@@ -1034,7 +1034,7 @@ pub struct SearchIndexConfig {
     /// When enabled and all changes are `TaskChange::Add`, the optimized
     /// `apply_bulk` method is used instead of `apply_changes`.
     ///
-    /// Default: `false` (existing behavior maintained)
+    /// Default: `true` (Phase 3: enabled for Add-only optimization in `tasks_bulk`)
     pub use_apply_bulk: bool,
 }
 
@@ -1209,19 +1209,24 @@ pub type PrefixIndex = PersistentTreeMap<NgramKey, TaskIdCollection>;
 /// This structure reduces allocation overhead during merge operations by:
 /// 1. Pre-allocating capacity based on input sizes via `prepare()`
 /// 2. Writing merge results directly to the buffer
-/// 3. Moving the buffer out via `take_owned()` to avoid O(n) clone
+/// 3. Extracting results via `take_with_capacity()` while preserving buffer capacity
 ///
 /// # Buffer Lifecycle
 ///
 /// Each merge iteration:
-/// 1. `prepare(capacity_hint)` - reserves capacity if current buffer is empty/small
-/// 2. `merge_posting_lists_3way_into()` - writes to buffer (clears first)
-/// 3. `take_owned()` - moves the buffer out, leaving an empty Vec
+/// 1. `prepare(capacity_hint)` - reserves capacity if needed (clamped to `MAX_BUFFER_CAPACITY`)
+/// 2. `merge_posting_lists_3way_into()` or `merge_add_only_into()` - writes to buffer
+/// 3. `take_with_capacity()` - returns results while preserving buffer capacity
 ///
-/// Note: After `take_owned()`, the buffer is left empty with zero capacity.
-/// Capacity is re-allocated on the next `prepare()` call, not retained.
-/// This avoids the O(n) clone cost of `take_clone()` at the trade-off of
-/// one allocation per iteration.
+/// The `take_with_capacity()` method uses `drain()` to extract elements, which
+/// preserves the buffer's allocated capacity. This avoids reallocation on
+/// subsequent iterations in tight loops.
+///
+/// # Capacity Management
+///
+/// - Initial capacity is clamped to `MAX_BUFFER_CAPACITY` (10,000)
+/// - If buffer grows beyond `MAX_BUFFER_CAPACITY` during merge, it is reset
+///   to `MAX_BUFFER_CAPACITY` after `take_with_capacity()`
 ///
 /// # Usage
 ///
@@ -1230,10 +1235,14 @@ pub type PrefixIndex = PersistentTreeMap<NgramKey, TaskIdCollection>;
 /// for key in keys {
 ///     buffer.prepare(capacity_hint);
 ///     merge_into(&mut buffer.result);
-///     let merged = buffer.take_owned();
-///     // merged is the Vec, buffer is now empty
+///     let merged = buffer.take_with_capacity();
+///     // buffer.result.capacity() is still >= capacity_hint (up to MAX_BUFFER_CAPACITY)
 /// }
 /// ```
+/// Maximum capacity for `MergeBuffer` to prevent excessive memory usage.
+/// This limit ensures memory requirements stay within +5% of existing usage.
+const MAX_BUFFER_CAPACITY: usize = 10_000;
+
 #[derive(Debug, Default)]
 pub struct MergeBuffer {
     /// Internal buffer for storing merge results.
@@ -1248,10 +1257,14 @@ impl MergeBuffer {
     }
 
     /// Creates a new `MergeBuffer` with the specified capacity.
+    ///
+    /// The capacity is clamped to `MAX_BUFFER_CAPACITY` (10,000) to prevent
+    /// excessive memory usage.
     #[must_use]
     pub fn with_capacity(capacity: usize) -> Self {
+        let clamped_capacity = capacity.min(MAX_BUFFER_CAPACITY);
         Self {
-            result: Vec::with_capacity(capacity),
+            result: Vec::with_capacity(clamped_capacity),
         }
     }
 
@@ -1259,13 +1272,14 @@ impl MergeBuffer {
     ///
     /// This method:
     /// 1. Clears existing contents (O(1) for POD types like `TaskId`)
-    /// 2. Reserves additional capacity if needed
+    /// 2. Reserves additional capacity if needed (clamped to `MAX_BUFFER_CAPACITY`)
     ///
     /// The buffer's existing capacity is preserved, enabling reuse.
     fn prepare(&mut self, capacity_hint: usize) {
+        let target = capacity_hint.min(MAX_BUFFER_CAPACITY);
         self.result.clear();
-        if self.result.capacity() < capacity_hint {
-            self.result.reserve(capacity_hint - self.result.capacity());
+        if self.result.capacity() < target {
+            self.result.reserve(target - self.result.capacity());
         }
     }
 
@@ -1306,15 +1320,35 @@ impl MergeBuffer {
         std::mem::take(&mut self.result)
     }
 
-    /// Returns the buffer contents by move while preserving capacity.
+    /// Returns the buffer contents while preserving capacity using drain.
     ///
-    /// Unlike `take_owned()`, this method reserves the same capacity after
-    /// moving out the contents, avoiding reallocation on the next merge.
+    /// This method drains the buffer contents into a new Vec while preserving
+    /// the buffer's capacity. The drain approach avoids reallocation because
+    /// the original buffer keeps its allocated memory.
+    ///
+    /// # Capacity Management
+    ///
+    /// If the buffer's capacity exceeds `MAX_BUFFER_CAPACITY` (10,000) after
+    /// a large merge, the buffer is reset to `MAX_BUFFER_CAPACITY` to prevent
+    /// excessive memory retention.
     ///
     /// # Performance
     ///
-    /// - No clone cost: O(1) for the move
-    /// - Capacity preserved: Avoids reallocation in tight loops
+    /// - O(n) for collecting drained elements into a new Vec
+    /// - Capacity preserved: The buffer retains its original capacity (up to limit)
+    /// - Allocation: Only the returned Vec is newly allocated (capacity = length)
+    ///
+    /// # Trade-off
+    ///
+    /// This implementation trades a small allocation per call (for the returned Vec)
+    /// for guaranteed capacity preservation on the buffer. The alternative
+    /// (`take_owned()`) has zero allocation cost but loses capacity, requiring
+    /// reallocation on the next `prepare()` call.
+    ///
+    /// For tight loops where the buffer is reused many times, this approach
+    /// is more efficient because:
+    /// 1. The buffer never needs reallocation (capacity preserved up to limit)
+    /// 2. The returned Vec allocation is small (exact size, no slack)
     ///
     /// # Example
     ///
@@ -1327,10 +1361,13 @@ impl MergeBuffer {
     /// }
     /// ```
     fn take_with_capacity(&mut self) -> Vec<TaskId> {
-        let capacity = self.result.capacity();
-        let result = std::mem::take(&mut self.result);
-        self.result.reserve(capacity);
-        result
+        // Drain preserves capacity while moving elements out
+        let output: Vec<TaskId> = self.result.drain(..).collect();
+        // Reset buffer if capacity exceeds limit to prevent excessive memory retention
+        if self.result.capacity() > MAX_BUFFER_CAPACITY {
+            self.result = Vec::with_capacity(MAX_BUFFER_CAPACITY);
+        }
+        output
     }
 }
 
@@ -1854,8 +1891,8 @@ impl std::error::Error for SearchIndexError {}
 /// # Algorithm
 ///
 /// 1. Collect all entries with their original insertion order
-/// 2. Sort entries by key, then by order (for deterministic duplicate handling)
-/// 3. Deduplicate keys (last value wins, preserving insertion order semantics)
+/// 2. Sort entries by (token, `task_id`, order) for deterministic duplicate handling
+/// 3. Deduplicate (token, `task_id`) pairs - same token with different `TaskId`s are preserved
 /// 4. Generate n-grams for all entries in a single pass
 /// 5. Build the final immutable index
 ///
@@ -1962,16 +1999,20 @@ impl SearchIndexBulkBuilder {
     ///
     /// # Duplicate Handling
     ///
-    /// When the same token appears multiple times:
-    /// - **Last value wins**: The task ID from the last occurrence is kept
-    /// - Original insertion order is preserved for deterministic behavior
+    /// Duplicates are handled at the `(token, task_id)` pair level:
+    /// - Same `(token, task_id)` pair: Only one entry is kept (deduplicated)
+    /// - Same token with different `task_id`s: All entries are preserved
+    ///
+    /// This allows multiple tasks to be indexed under the same token while
+    /// avoiding duplicate entries for the same task.
     ///
     /// # Example
     ///
     /// ```rust,ignore
     /// let builder = SearchIndexBulkBuilder::new(config)
     ///     .add_entry("callback".to_string(), task_id1)
-    ///     .add_entry("callback".to_string(), task_id2); // task_id2 wins
+    ///     .add_entry("callback".to_string(), task_id2) // both task_id1 and task_id2 are kept
+    ///     .add_entry("callback".to_string(), task_id1); // duplicate (token, task_id1) is removed
     /// ```
     #[must_use]
     pub fn add_entry(mut self, normalized_token: String, task_id: TaskId) -> Self {
@@ -1985,8 +2026,8 @@ impl SearchIndexBulkBuilder {
     /// This method consumes the builder and produces an immutable [`NgramIndex`].
     /// The build process:
     /// 1. Validates entry count against [`MAX_BULK_ENTRIES`]
-    /// 2. Sorts entries by (token, `insertion_order`) for deterministic deduplication
-    /// 3. Deduplicates tokens (last value wins for duplicate tokens)
+    /// 2. Sorts entries by (token, `task_id`, order) for deterministic deduplication
+    /// 3. Deduplicates `(token, task_id)` pairs - same token with different `TaskId`s are preserved
     /// 4. Generates n-grams and validates against [`MAX_TOTAL_NGRAMS`]
     /// 5. Estimates memory usage and validates against [`MAX_ESTIMATED_MEMORY`]
     /// 6. Builds the final immutable index with sorted keys for determinism
@@ -20151,6 +20192,46 @@ mod merge_buffer_capacity_tests {
 
         assert!(result.is_empty());
         assert!(buffer.result.capacity() >= 200);
+    }
+
+    #[rstest]
+    fn take_with_capacity_resets_capacity_when_exceeds_limit() {
+        let mut buffer = MergeBuffer::new();
+        // Manually push more than MAX_BUFFER_CAPACITY (10,000) elements
+        // to simulate a large merge result
+        for i in 0..15_000_u128 {
+            buffer.result.push(task_id(i));
+        }
+        assert!(buffer.result.capacity() >= 15_000);
+
+        let result = buffer.take_with_capacity();
+
+        assert_eq!(result.len(), 15_000);
+        // After take_with_capacity, buffer should be reset to MAX_BUFFER_CAPACITY
+        assert!(
+            buffer.result.capacity() <= 10_000,
+            "Buffer capacity should be reset to MAX_BUFFER_CAPACITY, but was {}",
+            buffer.result.capacity()
+        );
+    }
+
+    #[rstest]
+    fn take_with_capacity_preserves_capacity_within_limit() {
+        let mut buffer = MergeBuffer::with_capacity(5_000);
+        // Push elements within limit
+        for i in 0..5_000_u128 {
+            buffer.result.push(task_id(i));
+        }
+
+        let result = buffer.take_with_capacity();
+
+        assert_eq!(result.len(), 5_000);
+        // Capacity should be preserved (not reset) since it's within limit
+        assert!(
+            buffer.result.capacity() >= 5_000,
+            "Buffer capacity should be preserved, but was {}",
+            buffer.result.capacity()
+        );
     }
 }
 
