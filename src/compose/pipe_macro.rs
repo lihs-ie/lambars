@@ -790,10 +790,10 @@ mod io_pipe_tests {
             => |x| x * 2
         );
 
-        // IO が作成されただけでは実行されない
+        // IO is not executed just by being created
         assert_eq!(counter.get(), 0);
 
-        // run_unsafe() を呼ぶと実行される
+        // Calling run_unsafe() triggers execution
         let result = io.run_unsafe();
         assert_eq!(result, 10);
         assert_eq!(counter.get(), 1);

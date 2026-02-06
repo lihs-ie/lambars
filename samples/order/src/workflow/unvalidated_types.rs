@@ -1,19 +1,19 @@
-//! 未検証の入力型
+//! Unvalidated input types
 //!
-//! 外部から受け取った未検証のデータを表す型を定義する。
-//! 全てのフィールドは String または数値型で、バリデーション前の生データを保持する。
+//! Defines types representing unvalidated data received from external sources.
+//! All fields are String or numeric types, holding raw data before validation.
 //!
-//! # 型一覧
+//! # Type List
 //!
-//! - [`UnvalidatedCustomerInfo`] - 未検証の顧客情報
-//! - [`UnvalidatedAddress`] - 未検証の住所
-//! - [`UnvalidatedOrderLine`] - 未検証の注文明細
-//! - [`UnvalidatedOrder`] - 未検証の注文
+//! - [`UnvalidatedCustomerInfo`] - Unvalidated customer information
+//! - [`UnvalidatedAddress`] - Unvalidated address
+//! - [`UnvalidatedOrderLine`] - Unvalidated order line
+//! - [`UnvalidatedOrder`] - Unvalidated order
 //!
-//! # 設計方針
+//! # Design Policy
 //!
-//! これらの型は意図的にバリデーションロジックを含まない。
-//! バリデーションは別のステップで行い、検証済みの型に変換される。
+//! These types intentionally do not contain validation logic.
+//! Validation is performed in a separate step, converting to validated types.
 
 use rust_decimal::Decimal;
 
@@ -21,10 +21,10 @@ use rust_decimal::Decimal;
 // UnvalidatedCustomerInfo
 // =============================================================================
 
-/// 未検証の顧客情報
+/// Unvalidated customer information
 ///
-/// 外部から受け取った未検証の顧客情報を表す型。
-/// 全てのフィールドは String 型で、バリデーション前の生データを保持する。
+/// A type representing unvalidated customer information received from external sources.
+/// All fields are String type, holding raw data before validation.
 ///
 /// # Examples
 ///
@@ -48,16 +48,16 @@ pub struct UnvalidatedCustomerInfo {
 }
 
 impl UnvalidatedCustomerInfo {
-    /// 新しい `UnvalidatedCustomerInfo` を生成する
+    /// Creates a new `UnvalidatedCustomerInfo`
     ///
-    /// バリデーションは行わない。バリデーションは後続のステップで行う。
+    /// No validation is performed. Validation is done in subsequent steps.
     ///
     /// # Arguments
     ///
-    /// * `first_name` - 名
-    /// * `last_name` - 姓
-    /// * `email_address` - メールアドレス
-    /// * `vip_status` - VIP ステータス文字列（"Normal", "VIP" 等）
+    /// * `first_name` - First name
+    /// * `last_name` - Last name
+    /// * `email_address` - Email address
+    /// * `vip_status` - VIP status string ("Normal", "VIP", etc.)
     ///
     /// # Examples
     ///
@@ -86,25 +86,25 @@ impl UnvalidatedCustomerInfo {
         }
     }
 
-    /// 名への参照を返す
+    /// Returns a reference to the first name
     #[must_use]
     pub fn first_name(&self) -> &str {
         &self.first_name
     }
 
-    /// 姓への参照を返す
+    /// Returns a reference to the last name
     #[must_use]
     pub fn last_name(&self) -> &str {
         &self.last_name
     }
 
-    /// メールアドレスへの参照を返す
+    /// Returns a reference to the email address
     #[must_use]
     pub fn email_address(&self) -> &str {
         &self.email_address
     }
 
-    /// VIP ステータスへの参照を返す
+    /// Returns a reference to VIP status
     #[must_use]
     pub fn vip_status(&self) -> &str {
         &self.vip_status
@@ -115,10 +115,10 @@ impl UnvalidatedCustomerInfo {
 // UnvalidatedAddress
 // =============================================================================
 
-/// 未検証の住所
+/// Unvalidated address
 ///
-/// 外部から受け取った未検証の住所を表す型。
-/// 全てのフィールドは String 型で、バリデーション前の生データを保持する。
+/// A type representing an unvalidated address received from external sources.
+/// All fields are String type, holding raw data before validation.
 ///
 /// # Examples
 ///
@@ -150,20 +150,20 @@ pub struct UnvalidatedAddress {
 }
 
 impl UnvalidatedAddress {
-    /// 新しい `UnvalidatedAddress` を生成する
+    /// Creates a new `UnvalidatedAddress`
     ///
-    /// バリデーションは行わない。バリデーションは後続のステップで行う。
+    /// No validation is performed. Validation is done in subsequent steps.
     ///
     /// # Arguments
     ///
-    /// * `address_line1` - 住所行1
-    /// * `address_line2` - 住所行2（空文字列の場合もあり）
-    /// * `address_line3` - 住所行3（空文字列の場合もあり）
-    /// * `address_line4` - 住所行4（空文字列の場合もあり）
-    /// * `city` - 市
-    /// * `zip_code` - 郵便番号
-    /// * `state` - 州コード
-    /// * `country` - 国名
+    /// * `address_line1` - address line 1
+    /// * `address_line2` - Address line 2 (may be empty string)
+    /// * `address_line3` - Address line 3 (may be empty string)
+    /// * `address_line4` - Address line 4 (may be empty string)
+    /// * `city` - City
+    /// * `zip_code` - ZIP code
+    /// * `state` - State code
+    /// * `country` - Country name
     #[must_use]
     #[allow(clippy::too_many_arguments)]
     pub const fn new(
@@ -188,49 +188,49 @@ impl UnvalidatedAddress {
         }
     }
 
-    /// 住所行1への参照を返す
+    /// Returns a reference to address line 1
     #[must_use]
     pub fn address_line1(&self) -> &str {
         &self.address_line1
     }
 
-    /// 住所行2への参照を返す
+    /// Returns a reference to address line 2
     #[must_use]
     pub fn address_line2(&self) -> &str {
         &self.address_line2
     }
 
-    /// 住所行3への参照を返す
+    /// Returns a reference to address line 3
     #[must_use]
     pub fn address_line3(&self) -> &str {
         &self.address_line3
     }
 
-    /// 住所行4への参照を返す
+    /// Returns a reference to address line 4
     #[must_use]
     pub fn address_line4(&self) -> &str {
         &self.address_line4
     }
 
-    /// 市への参照を返す
+    /// Returns a reference to the city
     #[must_use]
     pub fn city(&self) -> &str {
         &self.city
     }
 
-    /// 郵便番号への参照を返す
+    /// Returns a reference to the ZIP code
     #[must_use]
     pub fn zip_code(&self) -> &str {
         &self.zip_code
     }
 
-    /// 州コードへの参照を返す
+    /// Returns a reference to the state code
     #[must_use]
     pub fn state(&self) -> &str {
         &self.state
     }
 
-    /// 国名への参照を返す
+    /// Returns a reference to the country name
     #[must_use]
     pub fn country(&self) -> &str {
         &self.country
@@ -241,10 +241,10 @@ impl UnvalidatedAddress {
 // UnvalidatedOrderLine
 // =============================================================================
 
-/// 未検証の注文明細
+/// Unvalidated order line
 ///
-/// 外部から受け取った未検証の注文明細を表す型。
-/// 注文明細ID、製品コード、数量を保持する。
+/// A type representing an unvalidated order line received from external sources.
+/// Holds the order line ID, product code, and quantity.
 ///
 /// # Examples
 ///
@@ -268,15 +268,15 @@ pub struct UnvalidatedOrderLine {
 }
 
 impl UnvalidatedOrderLine {
-    /// 新しい `UnvalidatedOrderLine` を生成する
+    /// Creates a new `UnvalidatedOrderLine`
     ///
-    /// バリデーションは行わない。バリデーションは後続のステップで行う。
+    /// No validation is performed. Validation is done in subsequent steps.
     ///
     /// # Arguments
     ///
-    /// * `order_line_id` - 注文明細ID
-    /// * `product_code` - 製品コード（"W1234" や "G123" 形式）
-    /// * `quantity` - 数量（個数または重量）
+    /// * `order_line_id` - Order line ID
+    /// * `product_code` - Product code (format: "W1234" or "G123")
+    /// * `quantity` - Quantity (count or weight)
     ///
     /// # Examples
     ///
@@ -299,19 +299,19 @@ impl UnvalidatedOrderLine {
         }
     }
 
-    /// 注文明細IDへの参照を返す
+    /// Returns a reference to Order line ID
     #[must_use]
     pub fn order_line_id(&self) -> &str {
         &self.order_line_id
     }
 
-    /// 製品コードへの参照を返す
+    /// Returns a reference to Product code
     #[must_use]
     pub fn product_code(&self) -> &str {
         &self.product_code
     }
 
-    /// 数量を返す
+    /// Returns the quantity
     #[must_use]
     pub const fn quantity(&self) -> Decimal {
         self.quantity
@@ -322,10 +322,10 @@ impl UnvalidatedOrderLine {
 // UnvalidatedOrder
 // =============================================================================
 
-/// 未検証の注文
+/// Unvalidated order
 ///
-/// 外部から受け取った未検証の注文を表す型。
-/// `PlaceOrder` ワークフローの入力として使用される。
+/// A type representing an unvalidated order received from external sources.
+/// Used as input to the `PlaceOrder` workflow.
 ///
 /// # Examples
 ///
@@ -378,18 +378,18 @@ pub struct UnvalidatedOrder {
 }
 
 impl UnvalidatedOrder {
-    /// 新しい `UnvalidatedOrder` を生成する
+    /// Creates a new `UnvalidatedOrder`
     ///
-    /// バリデーションは行わない。バリデーションは後続のステップで行う。
+    /// No validation is performed. Validation is done in subsequent steps.
     ///
     /// # Arguments
     ///
-    /// * `order_id` - 注文ID
-    /// * `customer_info` - 顧客情報
-    /// * `shipping_address` - 配送先住所
-    /// * `billing_address` - 請求先住所
-    /// * `lines` - 注文明細リスト
-    /// * `promotion_code` - プロモーションコード（空文字列の場合もあり）
+    /// * `order_id` - Order ID
+    /// * `customer_info` - customer information
+    /// * `shipping_address` - Shipping address
+    /// * `billing_address` - Billing address
+    /// * `lines` - order linelist
+    /// * `promotion_code` - Promotion code (may be empty string)
     #[must_use]
     #[allow(clippy::too_many_arguments)]
     pub const fn new(
@@ -410,37 +410,37 @@ impl UnvalidatedOrder {
         }
     }
 
-    /// 注文IDへの参照を返す
+    /// Returns a reference to Order ID
     #[must_use]
     pub fn order_id(&self) -> &str {
         &self.order_id
     }
 
-    /// 顧客情報への参照を返す
+    /// Returns a reference to customer information
     #[must_use]
     pub const fn customer_info(&self) -> &UnvalidatedCustomerInfo {
         &self.customer_info
     }
 
-    /// 配送先住所への参照を返す
+    /// Returns a reference to Shipping address
     #[must_use]
     pub const fn shipping_address(&self) -> &UnvalidatedAddress {
         &self.shipping_address
     }
 
-    /// 請求先住所への参照を返す
+    /// Returns a reference to Billing address
     #[must_use]
     pub const fn billing_address(&self) -> &UnvalidatedAddress {
         &self.billing_address
     }
 
-    /// 注文明細リストへの参照を返す
+    /// Returns a reference to order linelist
     #[must_use]
     pub fn lines(&self) -> &[UnvalidatedOrderLine] {
         &self.lines
     }
 
-    /// プロモーションコードへの参照を返す
+    /// Returns a reference to Promotion code
     #[must_use]
     pub fn promotion_code(&self) -> &str {
         &self.promotion_code

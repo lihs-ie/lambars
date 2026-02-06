@@ -1,7 +1,7 @@
-//! ダミー依存関数
+//! Dummy dependency functions
 //!
-//! `PlaceOrder` ワークフローに注入するダミーの依存関数を提供する。
-//! 実際のアプリケーションでは、外部サービスとの統合実装に置き換える。
+//! Provides dummy dependency functions to be injected into the `PlaceOrder` workflow.
+//! In a real application, these would be replaced with actual external service integrations.
 
 use std::rc::Rc;
 
@@ -19,17 +19,17 @@ use crate::workflow::validated_types::{AddressValidationError, CheckedAddress, P
 // check_product_exists (REQ-090)
 // =============================================================================
 
-/// 製品が存在するかどうかを確認するダミー関数
+/// Dummy function to check whether a product exists
 ///
-/// 製品コードの形式が正しければ存在するものとして `true` を返す。
+/// Returns `true` if the product code format is valid, treating it as existing.
 ///
 /// # Arguments
 ///
-/// * `product_code` - 確認する製品コード
+/// * `product_code` - Product code to check
 ///
 /// # Returns
 ///
-/// 製品が存在する場合 `true`
+/// `true` if the product exists
 ///
 /// # Examples
 ///
@@ -42,7 +42,7 @@ use crate::workflow::validated_types::{AddressValidationError, CheckedAddress, P
 /// ```
 #[must_use]
 pub const fn check_product_exists(_product_code: &ProductCode) -> bool {
-    // ダミー実装: 全ての製品が存在するものとする
+    // Dummy implementation: treat all products as existing
     true
 }
 
@@ -50,23 +50,23 @@ pub const fn check_product_exists(_product_code: &ProductCode) -> bool {
 // check_address_exists (REQ-090)
 // =============================================================================
 
-/// 住所が有効かどうかを確認するダミー関数
+/// Dummy function to check whether an address is valid
 ///
-/// 住所の形式が正しければ有効なものとして `Ok(CheckedAddress)` を返す。
+/// Returns `Ok(CheckedAddress)` if the address format is valid.
 ///
 /// # Arguments
 ///
-/// * `address` - 確認する住所
+/// * `address` - Address to check
 ///
 /// # Returns
 ///
-/// * `Ok(CheckedAddress)` - 住所が有効な場合
-/// * `Err(AddressValidationError)` - 住所が無効な場合（このダミー実装では発生しない）
+/// * `Ok(CheckedAddress)` - When the address is valid
+/// * `Err(AddressValidationError)` - When the address is invalid (does not occur in this dummy implementation)
 ///
 /// # Errors
 ///
-/// このダミー実装ではエラーは返さない。
-/// 実際の実装では、住所が見つからない場合に `AddressValidationError` を返す。
+/// This dummy implementation does not return errors.
+/// In a real implementation, `AddressValidationError` would be returned when the address is not found.
 ///
 /// # Examples
 ///
@@ -91,7 +91,7 @@ pub const fn check_product_exists(_product_code: &ProductCode) -> bool {
 pub fn check_address_exists(
     address: &UnvalidatedAddress,
 ) -> Result<CheckedAddress, AddressValidationError> {
-    // ダミー実装: 全ての住所を有効として CheckedAddress にラップ
+    // Dummy implementation: treat all addresses as valid and wrap in CheckedAddress
     Ok(CheckedAddress::new(address.clone()))
 }
 
@@ -99,17 +99,17 @@ pub fn check_address_exists(
 // get_pricing_function (REQ-090)
 // =============================================================================
 
-/// 価格計算関数を返すダミー関数
+/// Dummy function that returns a pricing function
 ///
-/// 製品コードに応じた固定価格を返す関数を生成する。
+/// Generates a function that returns a fixed price based on the product code.
 ///
 /// # Arguments
 ///
-/// * `_pricing_method` - 価格計算方法（このダミー実装では使用しない）
+/// * `_pricing_method` - Pricing method (not used in this dummy implementation)
 ///
 /// # Returns
 ///
-/// 製品コードを受け取り価格を返す関数
+/// A function that takes a product code and returns a price
 ///
 /// # Examples
 ///
@@ -127,7 +127,7 @@ pub fn check_address_exists(
 /// ```
 #[must_use]
 pub fn get_pricing_function(_pricing_method: &PricingMethod) -> Rc<dyn Fn(&ProductCode) -> Price> {
-    // ダミー実装: Widget は 100、Gizmo は 50 の固定価格
+    // Dummy implementation: fixed price of 100 for Widget, 50 for Gizmo
     Rc::new(|product_code: &ProductCode| match product_code {
         ProductCode::Widget(_) => Price::unsafe_create(Decimal::from(100)),
         ProductCode::Gizmo(_) => Price::unsafe_create(Decimal::from(50)),
@@ -138,30 +138,30 @@ pub fn get_pricing_function(_pricing_method: &PricingMethod) -> Rc<dyn Fn(&Produ
 // calculate_shipping_cost (REQ-090)
 // =============================================================================
 
-/// 配送コストを計算するダミー関数
+/// Dummy function to calculate shipping cost
 ///
-/// 固定の配送コストを返す。
+/// Returns a fixed shipping cost.
 ///
 /// # Arguments
 ///
-/// * `_priced_order` - 価格計算済み注文（このダミー実装では使用しない）
+/// * `_priced_order` - Priced order (not used in this dummy implementation)
 ///
 /// # Returns
 ///
-/// 配送コスト（固定 10）
+/// Shipping cost (fixed at 10)
 ///
 /// # Examples
 ///
 /// ```ignore
 /// use order_taking_sample::api::calculate_shipping_cost;
 ///
-/// // PricedOrder を生成して渡す（省略）
+/// // Create and pass a PricedOrder (omitted)
 /// // let cost = calculate_shipping_cost(&priced_order);
 /// // assert_eq!(cost.value(), Decimal::from(10));
 /// ```
 #[must_use]
 pub fn calculate_shipping_cost(_priced_order: &PricedOrder) -> Price {
-    // ダミー実装: 固定配送コスト
+    // Dummy implementation: fixed shipping cost
     Price::unsafe_create(Decimal::from(10))
 }
 
@@ -169,30 +169,30 @@ pub fn calculate_shipping_cost(_priced_order: &PricedOrder) -> Price {
 // create_acknowledgment_letter (REQ-090)
 // =============================================================================
 
-/// 確認メールを生成するダミー関数
+/// Dummy function to generate an acknowledgment letter
 ///
-/// 注文情報から確認メールの HTML を生成する。
+/// Generates HTML for an acknowledgment email from order information.
 ///
 /// # Arguments
 ///
-/// * `order` - 配送方法付きの価格計算済み注文
+/// * `order` - Priced order with shipping method
 ///
 /// # Returns
 ///
-/// 確認メールの HTML
+/// HTML for the acknowledgment email
 ///
 /// # Examples
 ///
 /// ```ignore
 /// use order_taking_sample::api::create_acknowledgment_letter;
 ///
-/// // PricedOrderWithShippingMethod を生成して渡す（省略）
+/// // Create and pass a PricedOrderWithShippingMethod (omitted)
 /// // let html = create_acknowledgment_letter(&order);
 /// // assert!(html.value().contains("<p>"));
 /// ```
 #[must_use]
 pub fn create_acknowledgment_letter(order: &PricedOrderWithShippingMethod) -> HtmlString {
-    // ダミー実装: シンプルな HTML を生成
+    // Dummy implementation: generate simple HTML
     let order_id = order.priced_order().order_id().value();
     HtmlString::new(format!(
         "<h1>Order Confirmation</h1><p>Your order {order_id} has been received.</p>"
@@ -203,30 +203,30 @@ pub fn create_acknowledgment_letter(order: &PricedOrderWithShippingMethod) -> Ht
 // send_acknowledgment (REQ-090)
 // =============================================================================
 
-/// 確認メールを送信するダミー関数
+/// Dummy function to send an acknowledgment email
 ///
-/// 確認メールを送信した結果を返す。
+/// Returns the result of sending the acknowledgment email.
 ///
 /// # Arguments
 ///
-/// * `_acknowledgment` - 送信する確認メール情報
+/// * `_acknowledgment` - Acknowledgment information to send
 ///
 /// # Returns
 ///
-/// 送信結果を返す `IO<SendResult>`
+/// `IO<SendResult>` returning the send result
 ///
 /// # Examples
 ///
 /// ```ignore
 /// use order_taking_sample::api::send_acknowledgment;
 ///
-/// // OrderAcknowledgment を生成して渡す（省略）
+/// // Create and pass an OrderAcknowledgment (omitted)
 /// // let io_result = send_acknowledgment(&acknowledgment);
 /// // let result = io_result.run_unsafe();
 /// // assert!(matches!(result, SendResult::Sent));
 /// ```
 #[must_use]
 pub fn send_acknowledgment(_acknowledgment: &OrderAcknowledgment) -> IO<SendResult> {
-    // ダミー実装: 常に送信成功を返す
+    // Dummy implementation: always return success
     IO::pure(SendResult::Sent)
 }

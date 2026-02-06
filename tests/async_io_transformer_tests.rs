@@ -14,7 +14,7 @@ use rstest::rstest;
 #[rstest]
 #[tokio::test]
 async fn test_reader_transformer_pure_async_io() {
-    // ReaderT::pure_async_io は環境を無視して値を返す
+    // ReaderT::pure_async_io ignores the environment and returns the value
     let reader: ReaderT<i32, AsyncIO<i32>> = ReaderT::pure_async_io(42);
     let async_io = reader.run(999);
     let result = async_io.await;
@@ -24,7 +24,7 @@ async fn test_reader_transformer_pure_async_io() {
 #[rstest]
 #[tokio::test]
 async fn test_reader_transformer_new_with_async_io() {
-    // ReaderT::new で環境から AsyncIO を生成
+    // ReaderT::new creates an AsyncIO from the environment
     let reader: ReaderT<i32, AsyncIO<i32>> =
         ReaderT::new(|environment| AsyncIO::pure(environment * 2));
     let async_io = reader.run(21);
@@ -35,7 +35,7 @@ async fn test_reader_transformer_new_with_async_io() {
 #[rstest]
 #[tokio::test]
 async fn test_reader_transformer_fmap_async_io() {
-    // fmap_async_io で値を変換
+    // fmap_async_io transforms the value
     let reader: ReaderT<i32, AsyncIO<i32>> = ReaderT::new(AsyncIO::pure);
     let mapped = reader.fmap_async_io(|value| value * 2);
     let async_io = mapped.run(21);
@@ -46,7 +46,7 @@ async fn test_reader_transformer_fmap_async_io() {
 #[rstest]
 #[tokio::test]
 async fn test_reader_transformer_flat_map_async_io() {
-    // flat_map_async_io でチェーン
+    // flat_map_async_io chains computations
     let reader: ReaderT<i32, AsyncIO<i32>> = ReaderT::new(AsyncIO::pure);
     let chained = reader.flat_map_async_io(|value| {
         ReaderT::new(move |environment| AsyncIO::pure(value + environment))
@@ -59,7 +59,7 @@ async fn test_reader_transformer_flat_map_async_io() {
 #[rstest]
 #[tokio::test]
 async fn test_reader_transformer_ask_async_io() {
-    // ask_async_io で環境を取得
+    // ask_async_io retrieves the environment
     let reader: ReaderT<i32, AsyncIO<i32>> = ReaderT::ask_async_io();
     let async_io = reader.run(42);
     let result = async_io.await;
@@ -69,7 +69,7 @@ async fn test_reader_transformer_ask_async_io() {
 #[rstest]
 #[tokio::test]
 async fn test_reader_transformer_local_async_io() {
-    // local_async_io で環境を変更
+    // local_async_io modifies the environment
     let reader: ReaderT<i32, AsyncIO<i32>> =
         ReaderT::new(|environment| AsyncIO::pure(environment * 2));
     let modified = ReaderT::local_async_io(|environment| environment + 10, reader);
@@ -81,7 +81,7 @@ async fn test_reader_transformer_local_async_io() {
 #[rstest]
 #[tokio::test]
 async fn test_reader_transformer_chain_multiple() {
-    // 複数のチェーン
+    // Multiple chained operations
     let reader: ReaderT<i32, AsyncIO<i32>> = ReaderT::ask_async_io();
     let chained = reader
         .flat_map_async_io(|env1| ReaderT::new(move |env2| AsyncIO::pure(env1 + env2)))
@@ -98,7 +98,7 @@ async fn test_reader_transformer_chain_multiple() {
 #[rstest]
 #[tokio::test]
 async fn test_state_transformer_pure_async_io() {
-    // StateT::pure_async_io は状態を変更せずに値を返す
+    // StateT::pure_async_io returns the value without changing the state
     let state: StateT<i32, AsyncIO<(String, i32)>> = StateT::pure_async_io("hello".to_string());
     let async_io = state.run(42);
     let result = async_io.await;
@@ -108,7 +108,7 @@ async fn test_state_transformer_pure_async_io() {
 #[rstest]
 #[tokio::test]
 async fn test_state_transformer_new_with_async_io() {
-    // StateT::new で状態遷移を定義
+    // StateT::new defines the state transition
     let state: StateT<i32, AsyncIO<(i32, i32)>> =
         StateT::new(|current_state| AsyncIO::pure((current_state * 2, current_state + 1)));
     let async_io = state.run(10);
@@ -119,7 +119,7 @@ async fn test_state_transformer_new_with_async_io() {
 #[rstest]
 #[tokio::test]
 async fn test_state_transformer_eval_async() {
-    // eval_async は結果値のみを返す
+    // eval_async returns only the result value
     let state: StateT<i32, AsyncIO<(i32, i32)>> =
         StateT::new(|current_state| AsyncIO::pure((current_state * 2, current_state + 1)));
     let result = state.eval_async(10).await;
@@ -129,7 +129,7 @@ async fn test_state_transformer_eval_async() {
 #[rstest]
 #[tokio::test]
 async fn test_state_transformer_exec_async() {
-    // exec_async は最終状態のみを返す
+    // exec_async returns only the final state
     let state: StateT<i32, AsyncIO<(i32, i32)>> =
         StateT::new(|current_state| AsyncIO::pure((current_state * 2, current_state + 1)));
     let result = state.exec_async(10).await;
@@ -139,7 +139,7 @@ async fn test_state_transformer_exec_async() {
 #[rstest]
 #[tokio::test]
 async fn test_state_transformer_fmap_async_io() {
-    // fmap_async_io で値を変換
+    // fmap_async_io transforms the value
     let state: StateT<i32, AsyncIO<(i32, i32)>> =
         StateT::new(|current_state| AsyncIO::pure((current_state, current_state + 1)));
     let mapped = state.fmap_async_io(|value| value * 2);
@@ -150,7 +150,7 @@ async fn test_state_transformer_fmap_async_io() {
 #[rstest]
 #[tokio::test]
 async fn test_state_transformer_flat_map_async_io() {
-    // flat_map_async_io でチェーン
+    // flat_map_async_io chains computations
     let state: StateT<i32, AsyncIO<(i32, i32)>> =
         StateT::new(|current_state| AsyncIO::pure((current_state, current_state + 1)));
     let chained = state.flat_map_async_io(|value| {
@@ -164,7 +164,7 @@ async fn test_state_transformer_flat_map_async_io() {
 #[rstest]
 #[tokio::test]
 async fn test_state_transformer_get_async_io() {
-    // get_async_io で現在の状態を取得
+    // get_async_io retrieves the current state
     let state: StateT<i32, AsyncIO<(i32, i32)>> = StateT::get_async_io();
     let result = state.run(42).await;
     assert_eq!(result, (42, 42));
@@ -173,7 +173,7 @@ async fn test_state_transformer_get_async_io() {
 #[rstest]
 #[tokio::test]
 async fn test_state_transformer_put_async_io() {
-    // put_async_io で状態を置換
+    // put_async_io replaces the state
     let state: StateT<i32, AsyncIO<((), i32)>> =
         StateT::<i32, AsyncIO<((), i32)>>::put_async_io(100);
     let result = state.run(42).await;
@@ -183,7 +183,7 @@ async fn test_state_transformer_put_async_io() {
 #[rstest]
 #[tokio::test]
 async fn test_state_transformer_modify_async_io() {
-    // modify_async_io で状態を変更
+    // modify_async_io modifies the state
     let state: StateT<i32, AsyncIO<((), i32)>> =
         StateT::<i32, AsyncIO<((), i32)>>::modify_async_io(|current_state| current_state * 2);
     let result = state.run(21).await;
@@ -193,7 +193,7 @@ async fn test_state_transformer_modify_async_io() {
 #[rstest]
 #[tokio::test]
 async fn test_state_transformer_chain_multiple() {
-    // 複数のチェーン
+    // Multiple chained operations
     let increment: StateT<i32, AsyncIO<((), i32)>> =
         StateT::<i32, AsyncIO<((), i32)>>::modify_async_io(|count| count + 1);
 
@@ -214,22 +214,22 @@ async fn test_state_transformer_chain_multiple() {
 #[rstest]
 #[tokio::test]
 async fn test_combined_reader_and_state_workflow() {
-    // 環境から値を読み取り、状態を更新するワークフロー
+    // Workflow that reads a value from the environment and updates the state
 
-    // 設定：環境は乗数、状態はカウンター
+    // Setup: the environment is a multiplier, the state is a counter
     #[derive(Clone)]
     struct Config {
         multiplier: i32,
     }
 
-    // ReaderT で環境を読み取り
+    // Read the environment using ReaderT
     let read_config: ReaderT<Config, AsyncIO<i32>> =
         ReaderT::new(|config: Config| AsyncIO::pure(config.multiplier));
 
     let async_io = read_config.run(Config { multiplier: 5 });
     let multiplier = async_io.await;
 
-    // StateT で状態を更新
+    // Update the state using StateT
     let update_state: StateT<i32, AsyncIO<(i32, i32)>> =
         StateT::new(move |current| AsyncIO::pure((current * multiplier, current + 1)));
 

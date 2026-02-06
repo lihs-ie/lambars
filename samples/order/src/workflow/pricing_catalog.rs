@@ -1,15 +1,15 @@
-//! 不変の価格カタログ
+//! Immutable pricing catalog
 //!
-//! `PersistentHashMap` を使用した不変の価格カタログを提供する。
-//! 商品コードから価格へのマッピングを管理し、不変更新をサポートする。
+//! Provides an immutable pricing catalog using `PersistentHashMap`.
+//! Manages product code to price mappings and supports immutable updates.
 //!
-//! # 設計原則
+//! # Design Principles
 //!
-//! - 不変性: 全ての更新操作は新しいカタログを返し、元のカタログは変更されない
-//! - 構造的共有: `PersistentHashMap` により効率的な不変更新を実現
-//! - 型安全性: `ProductCode` をキーとして使用し、型の誤用を防ぐ
+//! - Immutability: all update operations return a new catalog; the original is not modified
+//! - Structural sharing: achieves efficient immutable updates via `PersistentHashMap`
+//! - Type safety: uses `ProductCode` as a key, preventing type misuse
 //!
-//! # 使用例
+//! # Usage Examples
 //!
 //! ```
 //! use order_taking_sample::workflow::PricingCatalog;
@@ -22,10 +22,10 @@
 //!
 //! let updated_catalog = catalog.set_price(&widget_code, price);
 //!
-//! // 元のカタログは空のまま
+//! // The original catalog remains empty
 //! assert!(catalog.is_empty());
 //!
-//! // 新しいカタログには価格が設定されている
+//! // The new catalog has prices set
 //! assert_eq!(updated_catalog.len(), 1);
 //! ```
 
@@ -34,22 +34,22 @@ use lambars::persistent::PersistentHashMap;
 use std::rc::Rc;
 
 // =============================================================================
-// PricingCatalog 型
+// PricingCatalog type
 // =============================================================================
 
-/// 不変の価格カタログ
+/// Immutable pricing catalog
 ///
-/// `PersistentHashMap` を使用して商品コードから価格へのマッピングを管理する。
-/// 全ての更新操作は新しいカタログを返し、元のカタログは変更されない。
+/// Manages product code to price mappings using `PersistentHashMap`.
+/// All update operations return a new catalog; the original is not modified.
 ///
-/// # 構造的共有
+/// # Structural Sharing
 ///
-/// 内部で使用される `PersistentHashMap` は HAMT（Hash Array Mapped Trie）ベースで、
-/// 更新時に変更されない部分は共有される。これにより、効率的な不変更新が可能。
+/// The internal `PersistentHashMap` is based on HAMT (Hash Array Mapped Trie),
+/// where unchanged parts are shared during updates. This enables efficient immutable updates.
 ///
-/// # 時間計算量
+/// # Time Complexity
 ///
-/// | 操作 | 計算量 |
+/// | Operation | Complexity |
 /// |------|--------|
 /// | get_price | O(log32 N) |
 /// | set_price | O(log32 N) |
@@ -68,7 +68,7 @@ impl Default for PricingCatalog {
 }
 
 impl PricingCatalog {
-    /// 空の価格カタログを作成する
+    /// Creates an empty pricing catalog
     ///
     /// # Examples
     ///
@@ -85,12 +85,12 @@ impl PricingCatalog {
         }
     }
 
-    /// 単一のエントリを持つ価格カタログを作成する
+    /// Creates a pricing catalog with a single entry
     ///
     /// # Arguments
     ///
-    /// * `product_code` - 商品コード
-    /// * `price` - 価格
+    /// * `product_code` - Product code
+    /// * `price` - Price
     ///
     /// # Examples
     ///
@@ -110,11 +110,11 @@ impl PricingCatalog {
         Self::new().set_price(product_code, price)
     }
 
-    /// エントリのイテレータから価格カタログを作成する
+    /// Creates a pricing catalog from an iterator of entries
     ///
     /// # Arguments
     ///
-    /// * `entries` - (`ProductCode`, `Price`) のイテレータ
+    /// * `entries` - Iterator of (`ProductCode`, `Price`) pairs
     ///
     /// # Examples
     ///
@@ -139,14 +139,14 @@ impl PricingCatalog {
             })
     }
 
-    /// 指定した商品コードの価格を設定した新しいカタログを返す
+    /// Returns a new catalog with the price set for the specified product code
     ///
-    /// 元のカタログは変更されない（不変更新）。
+    /// The original catalog is not modified (immutable update).
     ///
     /// # Arguments
     ///
-    /// * `product_code` - 商品コード
-    /// * `price` - 価格
+    /// * `product_code` - Product code
+    /// * `price` - Price
     ///
     /// # Examples
     ///
@@ -161,7 +161,7 @@ impl PricingCatalog {
     ///
     /// let new_catalog = catalog.set_price(&code, price);
     ///
-    /// assert!(catalog.is_empty()); // 元は変更されない
+    /// assert!(catalog.is_empty()); // The original is not modified
     /// assert_eq!(new_catalog.len(), 1);
     /// ```
     #[must_use]
@@ -171,27 +171,27 @@ impl PricingCatalog {
         }
     }
 
-    /// 指定した商品コードの価格を取得する
+    /// Gets the price for the specified product code
     ///
     /// # Arguments
     ///
-    /// * `product_code` - 商品コード
+    /// * `product_code` - Product code
     ///
     /// # Returns
     ///
-    /// 価格が存在する場合は `Some(&Price)`、存在しない場合は `None`
+    /// Returns `Some(&Price)` if the price exists, `None` otherwise
     #[must_use]
     pub fn get_price(&self, product_code: &ProductCode) -> Option<&Price> {
         self.prices.get(product_code.value())
     }
 
-    /// 指定した商品コードのエントリを削除した新しいカタログを返す
+    /// Returns a new catalog with the entry for the specified product code removed
     ///
-    /// 元のカタログは変更されない（不変更新）。
+    /// The original catalog is not modified (immutable update).
     ///
     /// # Arguments
     ///
-    /// * `product_code` - 商品コード
+    /// * `product_code` - Product code
     #[must_use]
     pub fn remove_price(&self, product_code: &ProductCode) -> Self {
         Self {
@@ -199,24 +199,24 @@ impl PricingCatalog {
         }
     }
 
-    /// 指定した商品コードが存在するかを返す
+    /// Returns whether the specified product code exists
     ///
     /// # Arguments
     ///
-    /// * `product_code` - 商品コード
+    /// * `product_code` - Product code
     #[must_use]
     pub fn contains(&self, product_code: &ProductCode) -> bool {
         self.prices.contains_key(product_code.value())
     }
 
-    /// 2つのカタログをマージした新しいカタログを返す
+    /// Returns a new catalog merging two catalogs
     ///
-    /// キーが重複する場合は other の値が優先される。
-    /// 元のカタログは両方とも変更されない。
+    /// When keys overlap, values from `other` take precedence.
+    /// Neither original catalog is modified.
     ///
     /// # Arguments
     ///
-    /// * `other` - マージするカタログ
+    /// * `other` - Catalog to merge
     #[must_use]
     pub fn merge(&self, other: &Self) -> Self {
         Self {
@@ -224,19 +224,19 @@ impl PricingCatalog {
         }
     }
 
-    /// カタログ内のエントリ数を返す
+    /// Returns the number of entries in the catalog
     #[must_use]
     pub fn len(&self) -> usize {
         self.prices.len()
     }
 
-    /// カタログが空かどうかを返す
+    /// Returns whether the catalog is empty
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.prices.is_empty()
     }
 
-    /// カタログ内の全エントリのイテレータを返す
+    /// Returns an iterator over all entries in the catalog
     pub fn iter(&self) -> impl Iterator<Item = (&String, &Price)> {
         self.prices.iter()
     }
@@ -246,18 +246,18 @@ impl PricingCatalog {
 // create_catalog_pricing_function
 // =============================================================================
 
-/// `PricingCatalog` から価格取得関数を生成する
+/// Generates a pricing function from a `PricingCatalog`
 ///
-/// カタログに存在しない商品コードにはデフォルト価格を適用する。
+/// Applies a default price for product codes not found in the catalog.
 ///
 /// # Arguments
 ///
-/// * `catalog` - 価格カタログ
-/// * `default_price` - カタログにない商品のデフォルト価格
+/// * `catalog` - Pricing catalog
+/// * `default_price` - Default price for products not in the catalog
 ///
 /// # Returns
 ///
-/// Clone 可能な価格取得関数
+/// A cloneable pricing function
 ///
 /// # Examples
 ///
@@ -273,10 +273,10 @@ impl PricingCatalog {
 /// let default_price = Price::create(Decimal::from(10)).unwrap();
 /// let get_price = create_catalog_pricing_function(catalog, default_price);
 ///
-/// // カタログにある商品
+/// // Products in the catalog
 /// assert_eq!(get_price(&widget_code).value(), Decimal::from(100));
 ///
-/// // カタログにない商品はデフォルト価格
+/// // Products not in the catalog use the default price
 /// let unknown_code = ProductCode::create("field", "W9999").unwrap();
 /// assert_eq!(get_price(&unknown_code).value(), Decimal::from(10));
 /// ```

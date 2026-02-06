@@ -1,14 +1,14 @@
-//! エンドツーエンド統合テスト
+//! End-to-endIntegration tests
 //!
-//! PlaceOrder ワークフロー全体のエンドツーエンドテスト。
-//! api_integration_tests.rs を補完する形で、追加のシナリオをテストする。
+//! End-to-end tests for the entire PlaceOrder workflow.
+//! Tests additional scenarios, complementing api_integration_tests.rs.
 //!
-//! テストシナリオ:
-//! - VIP 顧客の無料配送
-//! - プロモーションコード適用
-//! - 請求金額ゼロ（BillableOrderPlaced なし）
-//! - 確認メール送信失敗
-//! - バリデーション失敗の詳細
+//! Test scenarios:
+//! - Free shipping for VIP customers
+//! - Promotion code application
+//! - Zero billing amount (no BillableOrderPlaced)
+//! - Acknowledgment email send failure
+//! - Validation failure details
 
 use order_taking_sample::api::{HttpRequest, place_order_api};
 use order_taking_sample::dto::PlaceOrderEventDto;
@@ -17,13 +17,13 @@ use rust_decimal::Decimal;
 use serde_json::Value;
 
 // =============================================================================
-// VIP 顧客シナリオ
+// VIP customer scenarios
 // =============================================================================
 
 mod vip_customer_scenarios {
     use super::*;
 
-    /// VIP 顧客の注文フロー - 無料配送が適用される
+    /// VIP customer order flow - free shipping is applied
     #[rstest]
     fn test_vip_customer_free_shipping() {
         let json = r#"{
@@ -72,7 +72,7 @@ mod vip_customer_scenarios {
 
         let events: Vec<PlaceOrderEventDto> = serde_json::from_str(response.body()).unwrap();
 
-        // BillableOrderPlaced を確認（VIP は配送料が無料なので、製品価格のみ）
+        // Verify BillableOrderPlaced (VIP has free shipping, so product price only)
         let billable_event = events.iter().find_map(|e| match e {
             PlaceOrderEventDto::BillableOrderPlaced(data) => Some(data),
             _ => None,
@@ -83,17 +83,17 @@ mod vip_customer_scenarios {
             "BillableOrderPlaced should be present"
         );
 
-        // VIP 顧客は無料配送のため、配送料 $5 が含まれていないはず
-        // Widget 価格 = $10、数量 10 なので $100 が請求金額
+        // VIP customer has free shipping, so the $5 shipping charge should not be included
+        // Widget price = $10, quantity 10, so $100 is the billing amount
         let billable = billable_event.unwrap();
-        // 実際の配送料ロジックによるが、VIP は $0 のはず
+        // Through the actual shipping cost logic, VIP should be $0
         assert!(
             billable.amount_to_bill > Decimal::ZERO,
             "Billing amount should be positive"
         );
     }
 
-    /// VIP ステータスが小文字で指定された場合も受け入れられる
+    /// VIP status specified in lowercase is also accepted
     #[rstest]
     fn test_vip_status_lowercase_accepted() {
         let json = r#"{
@@ -138,20 +138,20 @@ mod vip_customer_scenarios {
         let io_response = place_order_api(&request);
         let response = io_response.run_unsafe();
 
-        // 小文字の "vip" が受け入れられる
+        // Lowercase "vip" is accepted
         assert_eq!(response.status_code(), 200);
     }
 }
 
 // =============================================================================
-// プロモーションコードシナリオ
+// Promotion code scenarios
 // =============================================================================
 
 mod promotion_code_scenarios {
     use super::*;
 
-    /// プロモーションコードが適用された注文
-    /// コメント行が追加される
+    /// Order with promotion code applied
+    /// A comment line is added
     #[rstest]
     fn test_promotion_code_adds_comment_line() {
         let json = r#"{
@@ -200,7 +200,7 @@ mod promotion_code_scenarios {
 
         let events: Vec<PlaceOrderEventDto> = serde_json::from_str(response.body()).unwrap();
 
-        // ShippableOrderPlaced イベントを確認
+        // Verify the ShippableOrderPlaced event
         let shippable_event = events.iter().find_map(|e| match e {
             PlaceOrderEventDto::ShippableOrderPlaced(data) => Some(data),
             _ => None,
@@ -211,11 +211,11 @@ mod promotion_code_scenarios {
             "ShippableOrderPlaced should be present"
         );
 
-        // プロモーションコード適用時はコメント行が追加される
-        // (実装によっては shipment_lines にコメントが含まれる)
+        // A comment line is added when a promotion code is applied
+        // (Depending on implementation, comments may be included in shipment_lines)
     }
 
-    /// 空のプロモーションコード（適用なし）
+    /// Empty promotion code (no promotion applied)
     #[rstest]
     fn test_empty_promotion_code_no_effect() {
         let json = r#"{
@@ -268,13 +268,13 @@ mod promotion_code_scenarios {
 }
 
 // =============================================================================
-// バリデーション失敗シナリオ
+// Validation failure scenarios
 // =============================================================================
 
 mod validation_failure_scenarios {
     use super::*;
 
-    /// 空の注文ID でバリデーション失敗
+    /// Validation failure with empty order ID
     #[rstest]
     fn test_empty_order_id_validation_failure() {
         let json = r#"{
@@ -332,7 +332,7 @@ mod validation_failure_scenarios {
         );
     }
 
-    /// 無効なメールアドレスでバリデーション失敗
+    /// Validation failure with invalid email address
     #[rstest]
     fn test_invalid_email_validation_failure() {
         let json = r#"{
@@ -386,7 +386,7 @@ mod validation_failure_scenarios {
         );
     }
 
-    /// 無効な州コードでバリデーション失敗
+    /// Validation failure with invalid state code
     #[rstest]
     fn test_invalid_state_code_validation_failure() {
         let json = r#"{
@@ -440,7 +440,7 @@ mod validation_failure_scenarios {
         );
     }
 
-    /// 無効な製品コードでバリデーション失敗
+    /// Validation failure with invalid product code
     #[rstest]
     fn test_invalid_product_code_validation_failure() {
         let json = r#"{
@@ -494,7 +494,7 @@ mod validation_failure_scenarios {
         );
     }
 
-    /// 数量ゼロでバリデーション失敗
+    /// Validation failure with zero quantity
     #[rstest]
     fn test_zero_quantity_validation_failure() {
         let json = r#"{
@@ -544,13 +544,13 @@ mod validation_failure_scenarios {
 }
 
 // =============================================================================
-// 複雑な注文シナリオ
+// Complex order scenarios
 // =============================================================================
 
 mod complex_order_scenarios {
     use super::*;
 
-    /// 複数の住所行を含む注文
+    /// multipleaddresslineincludesorder
     #[rstest]
     fn test_order_with_multiple_address_lines() {
         let json = r#"{
@@ -599,7 +599,7 @@ mod complex_order_scenarios {
 
         let events: Vec<PlaceOrderEventDto> = serde_json::from_str(response.body()).unwrap();
 
-        // ShippableOrderPlaced の住所を確認
+        // Verify ShippableOrderPlaced address
         let shippable_event = events.iter().find_map(|e| match e {
             PlaceOrderEventDto::ShippableOrderPlaced(data) => Some(data),
             _ => None,
@@ -611,7 +611,7 @@ mod complex_order_scenarios {
         assert_eq!(shippable.shipping_address.address_line2, "Suite 100");
     }
 
-    /// 多くの明細行を含む注文
+    /// Order with many lines
     #[rstest]
     fn test_order_with_many_lines() {
         let json = r#"{
@@ -660,7 +660,7 @@ mod complex_order_scenarios {
 
         let events: Vec<PlaceOrderEventDto> = serde_json::from_str(response.body()).unwrap();
 
-        // ShippableOrderPlaced の明細行数を確認
+        // Verify ShippableOrderPlaced line count
         let shippable_event = events.iter().find_map(|e| match e {
             PlaceOrderEventDto::ShippableOrderPlaced(data) => Some(data),
             _ => None,
@@ -675,10 +675,10 @@ mod complex_order_scenarios {
         );
     }
 
-    /// 最大数量での注文
-    /// Widget は UnitQuantity で、最大値は 1000
-    /// ただし、Widget 1000 個 x $10 = $10,000 は Price の上限 $1,000 を超えるため
-    /// PricingError になる可能性がある
+    /// Order with maximum quantity
+    /// Widget uses UnitQuantity with a maximum value of 1000
+    /// However, 1000 Widget x $10 = $10,000 exceeds the Price upper limit of $1,000, so
+    /// a PricingError may occur
     #[rstest]
     fn test_order_with_max_quantity() {
         let json = r#"{
@@ -723,12 +723,12 @@ mod complex_order_scenarios {
         let io_response = place_order_api(&request);
         let response = io_response.run_unsafe();
 
-        // 最大数量 1000 x $10 = $10,000 は Price の上限を超えるため
-        // PricingError（400）になるはず
+        // Maximum quantity 1000 x $10 = $10,000 exceeds Price upper limit,
+        // so it should result in PricingError (400)
         assert_eq!(response.status_code(), 400);
     }
 
-    /// 最大数量超過での注文
+    /// Order exceeding maximum quantity
     #[rstest]
     fn test_order_with_exceeded_quantity() {
         let json = r#"{
@@ -773,19 +773,19 @@ mod complex_order_scenarios {
         let io_response = place_order_api(&request);
         let response = io_response.run_unsafe();
 
-        // 1001 は最大数量を超えるので失敗
+        // 1001 exceeds maximum quantity so it fails
         assert_eq!(response.status_code(), 400);
     }
 }
 
 // =============================================================================
-// イベント詳細検証
+// Event detail verification
 // =============================================================================
 
 mod event_detail_verification {
     use super::*;
 
-    /// BillableOrderPlaced の金額が正しく計算されている
+    /// BillableOrderPlaced amount is calculated correctly
     #[rstest]
     fn test_billable_amount_calculation() {
         let json = r#"{
@@ -842,16 +842,16 @@ mod event_detail_verification {
         assert!(billable_event.is_some());
         let billable = billable_event.unwrap();
 
-        // 実装に基づく金額を検証（請求金額が正の値であること）
-        // 具体的な金額は実装依存なので、ゼロより大きいことを確認
+        // Verify amount based on implementation (billing amount should be positive)
+        // Exact amount is implementation-dependent, so verify it is greater than zero
         assert!(
             billable.amount_to_bill > Decimal::ZERO,
             "Billing amount should be positive"
         );
     }
 
-    /// ShippableOrderPlaced のイベントに PDF 情報が含まれている
-    /// (PDF データは実装によってはダミーまたは空の場合がある)
+    /// ShippableOrderPlaced event includes PDF information
+    /// (PDF data may be dummy or empty depending on implementation)
     #[rstest]
     fn test_shippable_event_contains_pdf_info() {
         let json = r#"{
@@ -908,13 +908,13 @@ mod event_detail_verification {
         assert!(shippable_event.is_some());
         let shippable = shippable_event.unwrap();
 
-        // PDF 名が設定されていることを確認
+        // Verify PDF name is set
         assert!(
             !shippable.pdf_name.is_empty(),
             "PDF name should not be empty"
         );
 
-        // PDF データが Base64 として有効かを確認（空でない場合）
+        // Verify PDF data is valid Base64 (if not empty)
         if !shippable.pdf_data.is_empty() {
             use base64::Engine;
             let decode_result =
@@ -927,7 +927,7 @@ mod event_detail_verification {
         }
     }
 
-    /// AcknowledgmentSent のメールアドレスが正しい
+    /// AcknowledgmentSent has the correct email address
     #[rstest]
     fn test_acknowledgment_email_address() {
         let json = r#"{

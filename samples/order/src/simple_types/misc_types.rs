@@ -1,6 +1,6 @@
-//! その他の型の定義
+//! Miscellaneous type definitions
 //!
-//! `VipStatus`, `PromotionCode`, `PdfAttachment` を定義する。
+//! Defines `VipStatus`, `PromotionCode`, and `PdfAttachment`.
 
 use super::error::ValidationError;
 
@@ -8,9 +8,9 @@ use super::error::ValidationError;
 // VipStatus
 // =============================================================================
 
-/// 顧客の VIP ステータスを表す列挙型
+/// Enum representing a customer's VIP status
 ///
-/// Normal（通常）または Vip（VIP 顧客）のいずれか。
+/// Either Normal (regular) or Vip (VIP customer).
 ///
 /// # Examples
 ///
@@ -25,35 +25,35 @@ use super::error::ValidationError;
 /// assert!(matches!(vip, VipStatus::Vip));
 /// assert_eq!(vip.value(), "VIP");
 ///
-/// // 無効な値はエラー
+/// // Invalid values cause an error
 /// assert!(VipStatus::create("VipStatus", "Premium").is_err());
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum VipStatus {
-    /// 通常の顧客
+    /// Regular customer
     Normal,
-    /// VIP 顧客
+    /// VIP customer
     Vip,
 }
 
 impl VipStatus {
-    /// 文字列から `VipStatus` を生成する
+    /// Creates a `VipStatus` from a string
     ///
-    /// "normal", "Normal", "vip", "VIP" を受け入れる。
+    /// Accepts "normal", "Normal", "vip", "VIP".
     ///
     /// # Arguments
     ///
-    /// * `field_name` - エラーメッセージに使用するフィールド名
-    /// * `value` - 入力文字列
+    /// * `field_name` - Field name used in error messages
+    /// * `value` - Input string
     ///
     /// # Returns
     ///
-    /// * `Ok(VipStatus)` - バリデーション成功時
-    /// * `Err(ValidationError)` - 無効な値の場合
+    /// * `Ok(VipStatus)` - On successful validation
+    /// * `Err(ValidationError)` - If the value is invalid
     ///
     /// # Errors
     ///
-    /// "normal", "Normal", "vip", "VIP" 以外の値の場合に `ValidationError` を返す。
+    /// Returns `ValidationError` for values other than "normal", "Normal", "vip", "VIP".
     pub fn create(field_name: &str, value: &str) -> Result<Self, ValidationError> {
         match value {
             "normal" | "Normal" => Ok(Self::Normal),
@@ -65,7 +65,7 @@ impl VipStatus {
         }
     }
 
-    /// `VipStatus` を文字列として返す
+    /// Returns the `VipStatus` as a string
     #[must_use]
     pub const fn value(&self) -> &'static str {
         match self {
@@ -79,9 +79,9 @@ impl VipStatus {
 // PromotionCode
 // =============================================================================
 
-/// プロモーションコードを表す型
+/// Type representing a promotion code
 ///
-/// 特にバリデーションなしの単純なラッパー型。
+/// A simple wrapper type with no validation.
 ///
 /// # Examples
 ///
@@ -91,7 +91,7 @@ impl VipStatus {
 /// let promo = PromotionCode::new("SUMMER2024".to_string());
 /// assert_eq!(promo.value(), "SUMMER2024");
 ///
-/// // 空文字列も許可される（バリデーションなし）
+/// // Empty strings are allowed (no validation)
 /// let empty = PromotionCode::new(String::new());
 /// assert_eq!(empty.value(), "");
 /// ```
@@ -99,15 +99,15 @@ impl VipStatus {
 pub struct PromotionCode(String);
 
 impl PromotionCode {
-    /// 文字列から `PromotionCode` を生成する
+    /// Creates a `PromotionCode` from a string
     ///
-    /// バリデーションなしで直接生成する。
+    /// Creates directly without validation.
     #[must_use]
     pub const fn new(value: String) -> Self {
         Self(value)
     }
 
-    /// 内部のプロモーションコード文字列への参照を返す
+    /// Returns a reference to the inner Promotion codestring
     #[must_use]
     pub fn value(&self) -> &str {
         &self.0
@@ -118,9 +118,9 @@ impl PromotionCode {
 // PdfAttachment
 // =============================================================================
 
-/// PDF 添付ファイルを表す構造体
+/// Struct representing a PDF attachment
 ///
-/// ファイル名とバイトデータを保持する。
+/// Holds a file name and byte data.
 ///
 /// # Examples
 ///
@@ -136,26 +136,26 @@ impl PromotionCode {
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PdfAttachment {
-    /// ファイル名
+    /// File name
     name: String,
-    /// PDF のバイトデータ
+    /// PDF byte data
     bytes: Vec<u8>,
 }
 
 impl PdfAttachment {
-    /// ファイル名とバイトデータから `PdfAttachment` を生成する
+    /// Creates a `PdfAttachment` from a file name and byte data
     #[must_use]
     pub const fn new(name: String, bytes: Vec<u8>) -> Self {
         Self { name, bytes }
     }
 
-    /// ファイル名への参照を返す
+    /// Returns a reference to the file name
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
     }
 
-    /// バイトデータへの参照を返す
+    /// Returns a reference to the byte data
     #[must_use]
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
@@ -226,7 +226,7 @@ mod tests {
 
     #[rstest]
     fn test_vip_status_create_mixed_case() {
-        // "Vip" や "NORMAL" はエラー（厳密なマッチング）
+        // "Vip" and "NORMAL" are errors (strict matching)
         let result1 = VipStatus::create("VipStatus", "Vip");
         let result2 = VipStatus::create("VipStatus", "NORMAL");
 
@@ -346,7 +346,7 @@ mod tests {
 
     #[rstest]
     fn test_pdf_attachment_new_pdf_header() {
-        // PDF ファイルの先頭バイト（%PDF-）
+        // Leading bytes of a PDF file (%PDF-)
         let pdf_header = vec![0x25, 0x50, 0x44, 0x46, 0x2D];
         let pdf = PdfAttachment::new("invoice.pdf".to_string(), pdf_header.clone());
 

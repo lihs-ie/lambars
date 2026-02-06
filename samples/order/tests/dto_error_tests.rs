@@ -1,6 +1,6 @@
-//! エラー DTO のテスト
+//! Tests for error DTOs
 //!
-//! PlaceOrderErrorDto のテスト
+//! Tests for PlaceOrderErrorDto
 
 use order_taking_sample::dto::PlaceOrderErrorDto;
 use order_taking_sample::simple_types::ValidationError;
@@ -10,7 +10,7 @@ use order_taking_sample::workflow::{
 use rstest::rstest;
 
 // =============================================================================
-// PlaceOrderErrorDto のテスト
+// Tests for PlaceOrderErrorDto
 // =============================================================================
 
 mod place_order_error_dto_tests {

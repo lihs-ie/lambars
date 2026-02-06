@@ -1,25 +1,25 @@
-//! DTO (Data Transfer Object) モジュール
+//! DTO (Data Transfer Object) module
 //!
-//! API との境界で使用するシリアライズ/デシリアライズ可能な型を定義する。
-//! ドメイン型との相互変換関数も提供する。
+//! Defines serializable/deserializable types used at the API boundary.
+//! Also provides conversion functions to and from domain types.
 //!
-//! # モジュール構成
+//! # Module Structure
 //!
-//! - [`input`] - 入力 DTO（`OrderFormDto` 等）
-//! - [`output`] - 出力 DTO（`PlaceOrderEventDto` 等）
-//! - [`error`] - エラー DTO（`PlaceOrderErrorDto`）
+//! - [`input`] - Input DTOs (`OrderFormDto`, etc.)
+//! - [`output`] - Output DTOs (`PlaceOrderEventDto`, etc.)
+//! - [`error`] - Error DTOs (`PlaceOrderErrorDto`)
 //!
-//! # 設計原則
+//! # Design Principles
 //!
-//! - 全ての DTO は `Serialize` と `Deserialize` を実装
-//! - ドメイン型への変換は純粋関数として実装
-//! - Decimal は文字列としてシリアライズ（精度保持のため）
+//! - All DTOs implement `Serialize` and `Deserialize`
+//! - Conversions to domain types are implemented as pure functions
+//! - Decimals are serialized as strings (to preserve precision)
 
 pub mod error;
 pub mod input;
 pub mod output;
 
-// 再エクスポート
+// Re-exports
 pub use error::PlaceOrderErrorDto;
 pub use input::{AddressDto, CustomerInfoDto, OrderFormDto, OrderFormLineDto};
 pub use output::{

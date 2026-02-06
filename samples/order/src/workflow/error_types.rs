@@ -1,14 +1,14 @@
-//! ワークフローエラー型
+//! workflowError types
 //!
-//! `PlaceOrder` ワークフローで発生するエラーを型安全に表現する。
+//! Expresses errors that occur in the `PlaceOrder` workflow in a type-safe manner.
 //!
-//! # 型一覧
+//! # Type List
 //!
-//! - [`WorkflowValidationError`] - 入力値の検証エラー（`ValidationError` の型エイリアス）
-//! - [`PricingError`] - 価格計算時のエラー
-//! - [`ServiceInfo`] - 外部サービスの情報
-//! - [`RemoteServiceError`] - 外部サービス呼び出しエラー
-//! - [`PlaceOrderError`] - ワークフロー全体のエラー
+//! - [`WorkflowValidationError`] - Input validation error (type alias for `ValidationError`)
+//! - [`PricingError`] - Pricing error
+//! - [`ServiceInfo`] - Remote service information
+//! - [`RemoteServiceError`] - Remote service call error
+//! - [`PlaceOrderError`] - Workflow-level error
 
 use thiserror::Error;
 
@@ -16,10 +16,10 @@ use thiserror::Error;
 // WorkflowValidationError
 // =============================================================================
 
-/// ワークフロー固有のバリデーションエラー
+/// Workflow-specific validation error
 ///
-/// Phase 1 の [`crate::simple_types::ValidationError`] の型エイリアスとして定義する。
-/// ワークフローモジュール内で名前の衝突を避け、明確に区別できるようにする。
+/// Defined as a type alias for Phase 1's [`crate::simple_types::ValidationError`].
+/// Avoids name collisions within the workflow module and allows clear distinction.
 ///
 /// # Examples
 ///
@@ -35,10 +35,10 @@ pub type WorkflowValidationError = crate::simple_types::ValidationError;
 // PricingError
 // =============================================================================
 
-/// 価格計算時のエラー
+/// Price calculation error
 ///
-/// 製品の価格が見つからない、プロモーションコードが無効、
-/// 価格計算結果が範囲外などのエラーを表現する。
+/// Represents errors such as product price not found, invalid promotion code,
+/// or price calculation result out of range.
 ///
 /// # Examples
 ///
@@ -55,11 +55,11 @@ pub struct PricingError {
 }
 
 impl PricingError {
-    /// 新しい `PricingError` を生成する
+    /// Creates a new `PricingError`
     ///
     /// # Arguments
     ///
-    /// * `message` - エラーメッセージ
+    /// * `message` - error message
     ///
     /// # Examples
     ///
@@ -76,7 +76,7 @@ impl PricingError {
         }
     }
 
-    /// エラーメッセージへの参照を返す
+    /// Returns a reference to error message
     ///
     /// # Examples
     ///
@@ -96,9 +96,9 @@ impl PricingError {
 // ServiceInfo
 // =============================================================================
 
-/// 外部サービスの情報
+/// External service information
 ///
-/// [`RemoteServiceError`] 内でエラーが発生したサービスを特定するために使用する。
+/// Used to identify the service where an error occurred within [`RemoteServiceError`].
 ///
 /// # Examples
 ///
@@ -119,12 +119,12 @@ pub struct ServiceInfo {
 }
 
 impl ServiceInfo {
-    /// 新しい `ServiceInfo` を生成する
+    /// Creates a new `ServiceInfo`
     ///
     /// # Arguments
     ///
-    /// * `name` - サービス名
-    /// * `endpoint` - サービスのエンドポイント URL
+    /// * `name` - servicename
+    /// * `endpoint` - The service endpoint URL
     ///
     /// # Examples
     ///
@@ -141,7 +141,7 @@ impl ServiceInfo {
         Self { name, endpoint }
     }
 
-    /// サービス名への参照を返す
+    /// Returns a reference to servicename
     ///
     /// # Examples
     ///
@@ -156,7 +156,7 @@ impl ServiceInfo {
         &self.name
     }
 
-    /// エンドポイントへの参照を返す
+    /// Returns a reference to the endpoint
     ///
     /// # Examples
     ///
@@ -176,9 +176,9 @@ impl ServiceInfo {
 // RemoteServiceError
 // =============================================================================
 
-/// 外部サービス呼び出し時のエラー
+/// Error during external service call
 ///
-/// どのサービスでどのようなエラーが発生したかを保持する。
+/// Holds information about which service encountered what error.
 ///
 /// # Examples
 ///
@@ -200,12 +200,12 @@ pub struct RemoteServiceError {
 }
 
 impl RemoteServiceError {
-    /// 新しい `RemoteServiceError` を生成する
+    /// Creates a new `RemoteServiceError`
     ///
     /// # Arguments
     ///
-    /// * `service` - エラーが発生したサービスの情報
-    /// * `exception_message` - エラーメッセージ
+    /// * `service` - Information about the service where the error occurred
+    /// * `exception_message` - error message
     ///
     /// # Examples
     ///
@@ -223,7 +223,7 @@ impl RemoteServiceError {
         }
     }
 
-    /// サービス情報への参照を返す
+    /// Returns a reference to serviceinformation
     ///
     /// # Examples
     ///
@@ -239,7 +239,7 @@ impl RemoteServiceError {
         &self.service
     }
 
-    /// エラーメッセージへの参照を返す
+    /// Returns a reference to error message
     ///
     /// # Examples
     ///
@@ -260,10 +260,10 @@ impl RemoteServiceError {
 // PlaceOrderError
 // =============================================================================
 
-/// `PlaceOrder` ワークフロー全体のエラー
+/// Error for the entire `PlaceOrder` workflow
 ///
-/// バリデーションエラー、価格計算エラー、外部サービスエラーのいずれかを保持する直和型。
-/// `From` トレイトの実装により、`?` 演算子で各エラー型から自動変換できる。
+/// A sum type holding either a Validation error, Pricing error, or Remote service error.
+/// The `From` trait implementations allow automatic conversion from each error type using the `?` operator.
 ///
 /// # Examples
 ///
@@ -276,25 +276,25 @@ impl RemoteServiceError {
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub enum PlaceOrderError {
-    /// 入力値の検証エラー
+    /// Input value validation error
     #[error("Validation error: {0}")]
     Validation(WorkflowValidationError),
 
-    /// 価格計算時のエラー
+    /// Price calculation error
     #[error("Pricing error: {0}")]
     Pricing(PricingError),
 
-    /// 外部サービス呼び出しエラー
+    /// External service call error
     #[error("Remote service error: {0}")]
     RemoteService(RemoteServiceError),
 }
 
 impl PlaceOrderError {
-    /// バリデーションエラーから `PlaceOrderError` を生成する
+    /// Creates a `PlaceOrderError` from a validation error
     ///
     /// # Arguments
     ///
-    /// * `error` - バリデーションエラー
+    /// * `error` - Validation error
     ///
     /// # Examples
     ///
@@ -311,11 +311,11 @@ impl PlaceOrderError {
         Self::Validation(error)
     }
 
-    /// 価格計算エラーから `PlaceOrderError` を生成する
+    /// Creates a `PlaceOrderError` from a pricing error
     ///
     /// # Arguments
     ///
-    /// * `error` - 価格計算エラー
+    /// * `error` - Pricing error
     ///
     /// # Examples
     ///
@@ -331,11 +331,11 @@ impl PlaceOrderError {
         Self::Pricing(error)
     }
 
-    /// 外部サービスエラーから `PlaceOrderError` を生成する
+    /// Creates a `PlaceOrderError` from a remote service error
     ///
     /// # Arguments
     ///
-    /// * `error` - 外部サービスエラー
+    /// * `error` - Remote service error
     ///
     /// # Examples
     ///
@@ -352,7 +352,7 @@ impl PlaceOrderError {
         Self::RemoteService(error)
     }
 
-    /// `Validation` バリアントかどうかを返す
+    /// Returns whether this is the `Validation` variant
     ///
     /// # Examples
     ///
@@ -368,7 +368,7 @@ impl PlaceOrderError {
         matches!(self, Self::Validation(_))
     }
 
-    /// `Pricing` バリアントかどうかを返す
+    /// Returns whether this is the `Pricing` variant
     ///
     /// # Examples
     ///
@@ -383,7 +383,7 @@ impl PlaceOrderError {
         matches!(self, Self::Pricing(_))
     }
 
-    /// `RemoteService` バリアントかどうかを返す
+    /// Returns whether this is the `RemoteService` variant
     ///
     /// # Examples
     ///

@@ -13,7 +13,7 @@ use proptest::prelude::*;
 // =============================================================================
 
 proptest! {
-    /// Get-Update Law: update した要素は get で取得できる
+    /// Get-Update Law: an updated element can be retrieved via get
     #[test]
     fn prop_get_update_law(
         elements in prop::collection::vec(any::<i32>(), 1..50)
@@ -30,7 +30,7 @@ proptest! {
         }
     }
 
-    /// Get-Update-Other Law: update は他のインデックスに影響しない
+    /// Get-Update-Other Law: update does not affect other indices
     #[test]
     fn prop_get_update_other_law(
         elements in prop::collection::vec(any::<i32>(), 2..50)
@@ -56,7 +56,7 @@ proptest! {
         }
     }
 
-    /// Push-Pop Law: push_back と pop_back は逆操作
+    /// Push-Pop Law: push_back and pop_back are inverse operations
     #[test]
     fn prop_push_pop_back_law(
         elements in prop::collection::vec(any::<i32>(), 0..50),
@@ -71,7 +71,7 @@ proptest! {
         }
     }
 
-    /// Push-Pop Front Law: push_front と pop_front は逆操作
+    /// Push-Pop Front Law: push_front and pop_front are inverse operations
     #[test]
     fn prop_push_pop_front_law(
         elements in prop::collection::vec(any::<i32>(), 0..50),
@@ -86,7 +86,7 @@ proptest! {
         }
     }
 
-    /// Length Law: push_back は長さを 1 増やす
+    /// Length Law: push_back increases the length by 1
     #[test]
     fn prop_push_back_length_law(
         elements in prop::collection::vec(any::<i32>(), 0..50),
@@ -99,7 +99,7 @@ proptest! {
         prop_assert_eq!(with_element.len(), original_length + 1);
     }
 
-    /// Length Law: push_front は長さを 1 増やす
+    /// Length Law: push_front increases the length by 1
     #[test]
     fn prop_push_front_length_law(
         elements in prop::collection::vec(any::<i32>(), 0..50),
@@ -112,7 +112,7 @@ proptest! {
         prop_assert_eq!(with_element.len(), original_length + 1);
     }
 
-    /// Append Identity Law (left): 空ベクターとの連結は恒等操作
+    /// Append Identity Law (left): appending with an empty vector is an identity operation
     #[test]
     fn prop_append_identity_left(
         elements in prop::collection::vec(any::<i32>(), 0..50)
@@ -124,7 +124,7 @@ proptest! {
         prop_assert_eq!(result, vector);
     }
 
-    /// Append Identity Law (right): 空ベクターとの連結は恒等操作
+    /// Append Identity Law (right): appending with an empty vector is an identity operation
     #[test]
     fn prop_append_identity_right(
         elements in prop::collection::vec(any::<i32>(), 0..50)

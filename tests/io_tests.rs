@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 // =============================================================================
-// IO 構造体の基本テスト
+// Basic IO Tests
 // =============================================================================
 
 mod basic_operations {
@@ -43,7 +43,7 @@ mod basic_operations {
 }
 
 // =============================================================================
-// 遅延評価のテスト（副作用が run_unsafe まで実行されないことを検証）
+// Lazy Evaluation Tests (side effects deferred until run_unsafe)
 // =============================================================================
 
 mod lazy_evaluation {
@@ -59,13 +59,13 @@ mod lazy_evaluation {
             42
         });
 
-        // IO を作成しただけでは実行されない
+        // Not executed just by creating the IO
         assert!(
             !executed.load(Ordering::SeqCst),
             "IO should not execute on creation"
         );
 
-        // run_unsafe で実行
+        // Executed via run_unsafe
         let result = io.run_unsafe();
         assert!(
             executed.load(Ordering::SeqCst),
@@ -85,7 +85,7 @@ mod lazy_evaluation {
         })
         .fmap(|x| x * 2);
 
-        // map しても実行されない
+        // Not executed even after map
         assert!(
             !executed.load(Ordering::SeqCst),
             "IO should not execute after map"
@@ -115,7 +115,7 @@ mod lazy_evaluation {
             })
         });
 
-        // flat_map しても実行されない
+        // Not executed even after flat_map
         assert!(
             !first_executed.load(Ordering::SeqCst),
             "First IO should not execute after flat_map"
@@ -133,7 +133,7 @@ mod lazy_evaluation {
 }
 
 // =============================================================================
-// Functor (fmap) のテスト
+// Functor (fmap) Tests
 // =============================================================================
 
 mod functor {
@@ -168,7 +168,7 @@ mod functor {
 }
 
 // =============================================================================
-// Monad (flat_map) のテスト
+// Monad (flat_map) Tests
 // =============================================================================
 
 mod monad {
@@ -216,7 +216,7 @@ mod monad {
 }
 
 // =============================================================================
-// Applicative (map2, product) のテスト
+// Applicative (map2, product) Tests
 // =============================================================================
 
 mod applicative {
@@ -248,7 +248,7 @@ mod applicative {
 }
 
 // =============================================================================
-// 便利なコンストラクタのテスト
+// Convenience Constructor Tests
 // =============================================================================
 
 mod convenience_constructors {
@@ -256,10 +256,9 @@ mod convenience_constructors {
 
     #[test]
     fn test_io_print_line_is_lazy() {
-        // print_line は IO を返すが、run_unsafe するまで出力しない
-        // 実際の出力テストは統合テストで行う
+        // print_line returns an IO but does not produce output until run_unsafe
         let io = IO::print_line("test message");
-        // run_unsafe を呼ばないので、何も出力されない
+        // No output since run_unsafe is not called
         drop(io);
     }
 
@@ -270,13 +269,13 @@ mod convenience_constructors {
         let start = std::time::Instant::now();
         let io = IO::delay(Duration::from_millis(100));
 
-        // delay IO を作成しても待機しない
+        // Creating a delay IO does not block
         assert!(
             start.elapsed() < Duration::from_millis(50),
             "delay should not execute on creation"
         );
 
-        // run_unsafe で待機 (戻り値は () なので無視)
+        // Blocks on run_unsafe
         #[allow(clippy::let_unit_value)]
         let () = io.run_unsafe();
         assert!(
@@ -305,7 +304,7 @@ mod convenience_constructors {
 }
 
 // =============================================================================
-// 複合的なテスト
+// Composite Operation Tests
 // =============================================================================
 
 mod composite_operations {

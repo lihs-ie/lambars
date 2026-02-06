@@ -1,13 +1,13 @@
-//! 入力 DTO
+//! Input DTOs
 //!
-//! API リクエストのデシリアライズに使用する DTO 型を定義する。
+//! Defines DTO types used for deserializing API requests.
 //!
-//! # 型一覧
+//! # Type List
 //!
-//! - [`CustomerInfoDto`] - 顧客情報 DTO
-//! - [`AddressDto`] - 住所 DTO
-//! - [`OrderFormLineDto`] - 注文明細 DTO
-//! - [`OrderFormDto`] - 注文フォーム DTO
+//! - [`CustomerInfoDto`] - Customer information DTO
+//! - [`AddressDto`] - Address DTO
+//! - [`OrderFormLineDto`] - Order line DTO
+//! - [`OrderFormDto`] - Order form DTO
 
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -21,9 +21,9 @@ use crate::workflow::{
 // CustomerInfoDto (REQ-075)
 // =============================================================================
 
-/// 顧客情報 DTO
+/// customer information DTO
 ///
-/// API から受け取る顧客情報をデシリアライズするための型。
+/// A type for deserializing customer information received from the API.
 ///
 /// # Examples
 ///
@@ -42,24 +42,24 @@ use crate::workflow::{
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CustomerInfoDto {
-    /// 名
+    /// First name
     pub first_name: String,
-    /// 姓
+    /// Last name
     pub last_name: String,
-    /// メールアドレス
+    /// Email address
     pub email_address: String,
-    /// VIP ステータス（"Normal" または "VIP"）
+    /// VIP status ("Normal" or "VIP")
     pub vip_status: String,
 }
 
 impl CustomerInfoDto {
-    /// `UnvalidatedCustomerInfo` に変換する
+    /// Converts to `UnvalidatedCustomerInfo`
     ///
-    /// 純粋関数としてドメイン型に変換する。バリデーションは行わない。
+    /// Converts to the domain type as a pure function. No validation is performed.
     ///
     /// # Returns
     ///
-    /// `UnvalidatedCustomerInfo` インスタンス
+    /// A `UnvalidatedCustomerInfo` instance
     ///
     /// # Examples
     ///
@@ -91,9 +91,9 @@ impl CustomerInfoDto {
 // AddressDto (REQ-076)
 // =============================================================================
 
-/// 住所 DTO
+/// address DTO
 ///
-/// API から受け取る住所をデシリアライズするための型。
+/// A type for deserializing addresses received from the API.
 ///
 /// # Examples
 ///
@@ -116,32 +116,32 @@ impl CustomerInfoDto {
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AddressDto {
-    /// 住所行1（必須）
+    /// Address line 1 (required)
     pub address_line1: String,
-    /// 住所行2（オプション、空文字列で None）
+    /// Address line 2 (optional, `None` for empty string)
     pub address_line2: String,
-    /// 住所行3（オプション、空文字列で None）
+    /// Address line 3 (optional, `None` for empty string)
     pub address_line3: String,
-    /// 住所行4（オプション、空文字列で None）
+    /// Address line 4 (optional, `None` for empty string)
     pub address_line4: String,
-    /// 市
+    /// City
     pub city: String,
-    /// 郵便番号
+    /// ZIP code
     pub zip_code: String,
-    /// 州コード
+    /// State code
     pub state: String,
-    /// 国名
+    /// Country name
     pub country: String,
 }
 
 impl AddressDto {
-    /// `UnvalidatedAddress` に変換する
+    /// Converts to `UnvalidatedAddress`
     ///
-    /// 純粋関数としてドメイン型に変換する。バリデーションは行わない。
+    /// Converts to the domain type as a pure function. No validation is performed.
     ///
     /// # Returns
     ///
-    /// `UnvalidatedAddress` インスタンス
+    /// A `UnvalidatedAddress` instance
     ///
     /// # Examples
     ///
@@ -176,17 +176,17 @@ impl AddressDto {
         )
     }
 
-    /// ドメインの `Address` から `AddressDto` を生成する
+    /// Creates an `AddressDto` from the domain `Address`
     ///
-    /// 純粋関数として DTO に変換する。
+    /// Converts to DTO as a pure function.
     ///
     /// # Arguments
     ///
-    /// * `address` - 変換元の `Address`
+    /// * `address` - Source `Address`
     ///
     /// # Returns
     ///
-    /// `AddressDto` インスタンス
+    /// A `AddressDto` instance
     ///
     /// # Examples
     ///
@@ -226,10 +226,10 @@ impl AddressDto {
 // OrderFormLineDto (REQ-077)
 // =============================================================================
 
-/// 注文明細 DTO
+/// order line DTO
 ///
-/// API から受け取る注文明細をデシリアライズするための型。
-/// 数量は精度を保持するため文字列としてシリアライズされる。
+/// A type for deserializing order lines received from the API.
+/// Quantity is serialized as a string to preserve precision.
 ///
 /// # Examples
 ///
@@ -249,23 +249,23 @@ impl AddressDto {
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OrderFormLineDto {
-    /// 注文明細ID
+    /// Order line ID
     pub order_line_id: String,
-    /// 製品コード
+    /// Product code
     pub product_code: String,
-    /// 数量（文字列形式の Decimal）
+    /// Quantity (Decimal in string format)
     #[serde(with = "rust_decimal::serde::str")]
     pub quantity: Decimal,
 }
 
 impl OrderFormLineDto {
-    /// `UnvalidatedOrderLine` に変換する
+    /// Converts to `UnvalidatedOrderLine`
     ///
-    /// 純粋関数としてドメイン型に変換する。バリデーションは行わない。
+    /// Converts to the domain type as a pure function. No validation is performed.
     ///
     /// # Returns
     ///
-    /// `UnvalidatedOrderLine` インスタンス
+    /// A `UnvalidatedOrderLine` instance
     ///
     /// # Examples
     ///
@@ -296,10 +296,10 @@ impl OrderFormLineDto {
 // OrderFormDto (REQ-078)
 // =============================================================================
 
-/// 注文フォーム DTO
+/// order form DTO
 ///
-/// API から受け取る注文全体をデシリアライズするための型。
-/// `PlaceOrder` ワークフローの入力として使用される。
+/// A type for deserializing an entire order received from the API.
+/// Used as input to the `PlaceOrder` workflow.
 ///
 /// # Examples
 ///
@@ -348,28 +348,28 @@ impl OrderFormLineDto {
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OrderFormDto {
-    /// 注文ID
+    /// Order ID
     pub order_id: String,
-    /// 顧客情報
+    /// Customer information
     pub customer_info: CustomerInfoDto,
-    /// 配送先住所
+    /// Shipping address
     pub shipping_address: AddressDto,
-    /// 請求先住所
+    /// Billing address
     pub billing_address: AddressDto,
-    /// 注文明細リスト
+    /// Order lines
     pub lines: Vec<OrderFormLineDto>,
-    /// プロモーションコード（空文字列の場合もあり）
+    /// Promotion code (may be empty string)
     pub promotion_code: String,
 }
 
 impl OrderFormDto {
-    /// `UnvalidatedOrder` に変換する
+    /// Converts to `UnvalidatedOrder`
     ///
-    /// 純粋関数としてドメイン型に変換する。バリデーションは行わない。
+    /// Converts to the domain type as a pure function. No validation is performed.
     ///
     /// # Returns
     ///
-    /// `UnvalidatedOrder` インスタンス
+    /// A `UnvalidatedOrder` instance
     ///
     /// # Examples
     ///

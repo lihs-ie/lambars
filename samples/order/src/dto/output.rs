@@ -1,7 +1,7 @@
-//! 出力 DTO
+//! Output DTOs
 //!
-//! API レスポンスのシリアライズに使用する DTO 型を定義する。
-//! 後続のステップで実装する。
+//! Defines DTO types used for serializing API responses.
+//! Implemented in subsequent steps.
 
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -16,20 +16,20 @@ use crate::workflow::{
 // ShippableOrderLineDto (REQ-079)
 // =============================================================================
 
-/// 配送対象の注文明細 DTO
+/// Shippable order line DTO
 ///
-/// 配送イベント内の明細情報をシリアライズするための型。
+/// A type for serializing line item information within a shipping event.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShippableOrderLineDto {
-    /// 製品コード
+    /// Product code
     pub product_code: String,
-    /// 数量（文字列形式）
+    /// Quantity (string format)
     #[serde(with = "rust_decimal::serde::str")]
     pub quantity: Decimal,
 }
 
 impl ShippableOrderLineDto {
-    /// ドメインの `ShippableOrderLine` から `ShippableOrderLineDto` を生成する
+    /// Creates a `ShippableOrderLineDto` from the domain `ShippableOrderLine`
     #[must_use]
     pub fn from_domain(line: &ShippableOrderLine) -> Self {
         Self {
@@ -43,26 +43,26 @@ impl ShippableOrderLineDto {
 // ShippableOrderPlacedDto (REQ-080)
 // =============================================================================
 
-/// 配送可能注文確定イベント DTO
+/// Shippable order placed event DTO
 ///
-/// 配送イベントをシリアライズするための型。
-/// PDF データは Base64 エンコードされる。
+/// A type for serializing a shipping event.
+/// PDF data is Base64 encoded.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShippableOrderPlacedDto {
-    /// 注文ID
+    /// Order ID
     pub order_id: String,
-    /// 配送先住所
+    /// Shipping address
     pub shipping_address: AddressDto,
-    /// 配送明細リスト
+    /// Shipment lines
     pub shipment_lines: Vec<ShippableOrderLineDto>,
-    /// PDF ファイル名
+    /// PDF file name
     pub pdf_name: String,
-    /// PDF データ（Base64 エンコード）
+    /// PDF data (Base64 encoded)
     pub pdf_data: String,
 }
 
 impl ShippableOrderPlacedDto {
-    /// ドメインの `ShippableOrderPlaced` から `ShippableOrderPlacedDto` を生成する
+    /// Creates a `ShippableOrderPlacedDto` from the domain `ShippableOrderPlaced`
     #[must_use]
     pub fn from_domain(event: &ShippableOrderPlaced) -> Self {
         use base64::Engine;
@@ -86,22 +86,22 @@ impl ShippableOrderPlacedDto {
 // BillableOrderPlacedDto (REQ-081)
 // =============================================================================
 
-/// 請求可能注文確定イベント DTO
+/// Billable order placed event DTO
 ///
-/// 請求イベントをシリアライズするための型。
+/// A type for serializing a billing event.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BillableOrderPlacedDto {
-    /// 注文ID
+    /// Order ID
     pub order_id: String,
-    /// 請求先住所
+    /// Billing address
     pub billing_address: AddressDto,
-    /// 請求金額（文字列形式）
+    /// Billing amount (string format)
     #[serde(with = "rust_decimal::serde::str")]
     pub amount_to_bill: Decimal,
 }
 
 impl BillableOrderPlacedDto {
-    /// ドメインの `BillableOrderPlaced` から `BillableOrderPlacedDto` を生成する
+    /// Creates a `BillableOrderPlacedDto` from the domain `BillableOrderPlaced`
     #[must_use]
     pub fn from_domain(event: &BillableOrderPlaced) -> Self {
         Self {
@@ -116,19 +116,19 @@ impl BillableOrderPlacedDto {
 // OrderAcknowledgmentSentDto (REQ-082)
 // =============================================================================
 
-/// 注文確認メール送信イベント DTO
+/// Order acknowledgment sent event DTO
 ///
-/// 確認メール送信イベントをシリアライズするための型。
+/// A type for serializing an acknowledgment sent event.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OrderAcknowledgmentSentDto {
-    /// 注文ID
+    /// Order ID
     pub order_id: String,
-    /// 送信先メールアドレス
+    /// Recipient email address
     pub email_address: String,
 }
 
 impl OrderAcknowledgmentSentDto {
-    /// ドメインの `OrderAcknowledgmentSent` から `OrderAcknowledgmentSentDto` を生成する
+    /// Creates an `OrderAcknowledgmentSentDto` from the domain `OrderAcknowledgmentSent`
     #[must_use]
     pub fn from_domain(event: &OrderAcknowledgmentSent) -> Self {
         Self {
@@ -142,25 +142,25 @@ impl OrderAcknowledgmentSentDto {
 // PricedOrderProductLineDto (REQ-083)
 // =============================================================================
 
-/// 価格付き製品注文明細 DTO
+/// Priced product order line DTO
 ///
-/// 価格付き製品明細をシリアライズするための型。
+/// A type for serializing a priced product line.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PricedOrderProductLineDto {
-    /// 注文明細ID
+    /// Order line ID
     pub order_line_id: String,
-    /// 製品コード
+    /// Product code
     pub product_code: String,
-    /// 数量（文字列形式）
+    /// Quantity (string format)
     #[serde(with = "rust_decimal::serde::str")]
     pub quantity: Decimal,
-    /// 明細価格（文字列形式）
+    /// Line price (string format)
     #[serde(with = "rust_decimal::serde::str")]
     pub line_price: Decimal,
 }
 
 impl PricedOrderProductLineDto {
-    /// ドメインの `PricedOrderProductLine` から `PricedOrderProductLineDto` を生成する
+    /// Creates a `PricedOrderProductLineDto` from the domain `PricedOrderProductLine`
     #[must_use]
     pub fn from_domain(line: &PricedOrderProductLine) -> Self {
         Self {
@@ -176,21 +176,21 @@ impl PricedOrderProductLineDto {
 // PricedOrderLineDto (REQ-084)
 // =============================================================================
 
-/// 価格付き注文明細 DTO
+/// Priced order line DTO
 ///
-/// 価格付き明細（製品またはコメント）をシリアライズするための型。
-/// `type` フィールドで判別する隣接タグ形式。
+/// A type for serializing a priced line (product or comment).
+/// Adjacently tagged format discriminated by the `type` field.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum PricedOrderLineDto {
-    /// 製品明細
+    /// Product line
     ProductLine(PricedOrderProductLineDto),
-    /// コメント行
+    /// Comment line
     CommentLine(String),
 }
 
 impl PricedOrderLineDto {
-    /// ドメインの `PricedOrderLine` から `PricedOrderLineDto` を生成する
+    /// Creates a `PricedOrderLineDto` from the domain `PricedOrderLine`
     #[must_use]
     pub fn from_domain(line: &PricedOrderLine) -> Self {
         match line {
@@ -206,23 +206,23 @@ impl PricedOrderLineDto {
 // PlaceOrderEventDto (REQ-085)
 // =============================================================================
 
-/// `PlaceOrder` ワークフローの出力イベント DTO
+/// `PlaceOrder` workflow output event DTO
 ///
-/// ワークフロー完了時のイベントをシリアライズするための型。
-/// `type` フィールドで判別する隣接タグ形式。
+/// A type for serializing events upon workflow completion.
+/// Adjacently tagged format discriminated by the `type` field.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum PlaceOrderEventDto {
-    /// 配送可能注文確定イベント
+    /// Shippable order placed event
     ShippableOrderPlaced(ShippableOrderPlacedDto),
-    /// 請求可能注文確定イベント
+    /// Billable order placed event
     BillableOrderPlaced(BillableOrderPlacedDto),
-    /// 確認メール送信イベント
+    /// acknowledgment sent event
     AcknowledgmentSent(OrderAcknowledgmentSentDto),
 }
 
 impl PlaceOrderEventDto {
-    /// ドメインの `PlaceOrderEvent` から `PlaceOrderEventDto` を生成する
+    /// Creates a `PlaceOrderEventDto` from the domain `PlaceOrderEvent`
     #[must_use]
     pub fn from_domain(event: &PlaceOrderEvent) -> Self {
         match event {
@@ -238,7 +238,7 @@ impl PlaceOrderEventDto {
         }
     }
 
-    /// ドメインイベントのリストから DTO リストを生成する
+    /// Creates a DTO list from a list of domain events
     #[must_use]
     pub fn from_domain_list(events: &[PlaceOrderEvent]) -> Vec<Self> {
         events.iter().map(Self::from_domain).collect()

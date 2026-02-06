@@ -1,6 +1,6 @@
-//! 金額型の定義
+//! Price type definitions
 //!
-//! `Price`, `BillingAmount` を定義する。
+//! Defines `Price` and `BillingAmount`.
 
 use lambars::typeclass::Foldable;
 use rust_decimal::Decimal;
@@ -13,9 +13,9 @@ use super::error::ValidationError;
 // Price
 // =============================================================================
 
-/// 単価を表す小数型
+/// Decimal type representing a unit price
 ///
-/// 0.0から1000.00の範囲に制約される。
+/// Constrained to the range 0.0 to 1000.00.
 ///
 /// # Examples
 ///
@@ -27,7 +27,7 @@ use super::error::ValidationError;
 /// let price = Price::create(Decimal::from_str("99.99").unwrap()).unwrap();
 /// assert_eq!(price.value(), Decimal::from_str("99.99").unwrap());
 ///
-/// // 範囲外はエラー
+/// // Out of range causes an error
 /// assert!(Price::create(Decimal::from_str("-1.0").unwrap()).is_err());
 /// assert!(Price::create(Decimal::from_str("1000.01").unwrap()).is_err());
 /// ```
@@ -35,33 +35,33 @@ use super::error::ValidationError;
 pub struct Price(Decimal);
 
 impl Price {
-    /// Price のフィールド名
+    /// Field name for Price
     const FIELD_NAME: &'static str = "Price";
 
-    /// Price の最小値を取得する
+    /// Returns the minimum value of Price
     fn min_value() -> Decimal {
         Decimal::from_str("0.0").expect("Valid decimal literal")
     }
 
-    /// Price の最大値を取得する
+    /// Returns the maximum value of Price
     fn max_value() -> Decimal {
         Decimal::from_str("1000.00").expect("Valid decimal literal")
     }
 
-    /// 小数から Price を生成する
+    /// Creates a Price from a decimal
     ///
     /// # Arguments
     ///
-    /// * `value` - 入力小数
+    /// * `value` - Input decimal
     ///
     /// # Returns
     ///
-    /// * `Ok(Price)` - バリデーション成功時
-    /// * `Err(ValidationError)` - 範囲外の場合
+    /// * `Ok(Price)` - On successful validation
+    /// * `Err(ValidationError)` - If out of range
     ///
     /// # Errors
     ///
-    /// 値が 0.0 未満または 1000.00 を超える場合に `ValidationError` を返す。
+    /// Returns `ValidationError` if the value is less than 0.0 or exceeds 1000.00.
     pub fn create(value: Decimal) -> Result<Self, ValidationError> {
         constrained_type::create_decimal(
             Self::FIELD_NAME,
@@ -72,38 +72,38 @@ impl Price {
         )
     }
 
-    /// バリデーションなしで Price を生成する
+    /// Creates a Price without validation
     ///
-    /// 値が有効であることが確実な場合のみ使用する。
+    /// Use only when the value is guaranteed to be valid.
     ///
     /// # Panics
     ///
-    /// 範囲外の値が渡された場合に panic する。
+    /// Panics if a value outside the valid range is passed.
     #[must_use]
     pub fn unsafe_create(value: Decimal) -> Self {
         Self::create(value)
             .unwrap_or_else(|error| panic!("Not expecting Price to be out of bounds: {error}"))
     }
 
-    /// 数量を掛けて新しい Price を生成する
+    /// Creates a new Price by multiplying with a quantity
     ///
     /// # Arguments
     ///
-    /// * `quantity` - 数量
+    /// * `quantity` - quantity
     ///
     /// # Returns
     ///
-    /// * `Ok(Price)` - 新しい価格が範囲内の場合
-    /// * `Err(ValidationError)` - 新しい価格が範囲外の場合
+    /// * `Ok(Price)` - If the new price is within range
+    /// * `Err(ValidationError)` - If the new price is out of range
     ///
     /// # Errors
     ///
-    /// 乗算結果が 1000.00 を超える場合に `ValidationError` を返す。
+    /// Returns `ValidationError` if the multiplication result exceeds 1000.00.
     pub fn multiply(&self, quantity: Decimal) -> Result<Self, ValidationError> {
         Self::create(quantity * self.0)
     }
 
-    /// 内部の小数値を返す
+    /// Returns the inner decimal value
     #[must_use]
     pub const fn value(&self) -> Decimal {
         self.0
@@ -114,10 +114,10 @@ impl Price {
 // BillingAmount
 // =============================================================================
 
-/// 請求金額を表す小数型
+/// Decimal type representing a billing amount
 ///
-/// 0.0から10000.00の範囲に制約される。
-/// 複数の Price の合計として使用される。
+/// Constrained to the range 0.0 to 10000.00.
+/// Used as the sum of multiple `Price` values.
 ///
 /// # Examples
 ///
@@ -129,7 +129,7 @@ impl Price {
 /// let amount = BillingAmount::create(Decimal::from_str("5000.0").unwrap()).unwrap();
 /// assert_eq!(amount.value(), Decimal::from_str("5000.0").unwrap());
 ///
-/// // 範囲外はエラー
+/// // Out of range causes an error
 /// assert!(BillingAmount::create(Decimal::from_str("-1.0").unwrap()).is_err());
 /// assert!(BillingAmount::create(Decimal::from_str("10000.01").unwrap()).is_err());
 /// ```
@@ -137,33 +137,33 @@ impl Price {
 pub struct BillingAmount(Decimal);
 
 impl BillingAmount {
-    /// `BillingAmount` のフィールド名
+    /// Field name for `BillingAmount`
     const FIELD_NAME: &'static str = "BillingAmount";
 
-    /// `BillingAmount` の最小値を取得する
+    /// Returns the minimum value of `BillingAmount`
     fn min_value() -> Decimal {
         Decimal::from_str("0.0").expect("Valid decimal literal")
     }
 
-    /// `BillingAmount` の最大値を取得する
+    /// Returns the maximum value of `BillingAmount`
     fn max_value() -> Decimal {
         Decimal::from_str("10000.00").expect("Valid decimal literal")
     }
 
-    /// 小数から `BillingAmount` を生成する
+    /// Creates a `BillingAmount` from a decimal
     ///
     /// # Arguments
     ///
-    /// * `value` - 入力小数
+    /// * `value` - Input decimal
     ///
     /// # Returns
     ///
-    /// * `Ok(BillingAmount)` - バリデーション成功時
-    /// * `Err(ValidationError)` - 範囲外の場合
+    /// * `Ok(BillingAmount)` - On successful validation
+    /// * `Err(ValidationError)` - If out of range
     ///
     /// # Errors
     ///
-    /// 値が 0.0 未満または 10000.00 を超える場合に `ValidationError` を返す。
+    /// Returns `ValidationError` if the value is less than 0.0 or exceeds 10000.00.
     pub fn create(value: Decimal) -> Result<Self, ValidationError> {
         constrained_type::create_decimal(
             Self::FIELD_NAME,
@@ -174,22 +174,22 @@ impl BillingAmount {
         )
     }
 
-    /// `Price` のスライスを合計して `BillingAmount` を生成する
+    /// Creates a `BillingAmount` by summing a slice of `Price` values
     ///
-    /// lambars の `Foldable` トレイトを使用して畳み込みを行う。
+    /// Performs a fold using the lambars `Foldable` trait.
     ///
     /// # Arguments
     ///
-    /// * `prices` - Price のスライス
+    /// * `prices` - A slice of Price values
     ///
     /// # Returns
     ///
-    /// * `Ok(BillingAmount)` - 合計が範囲内の場合
-    /// * `Err(ValidationError)` - 合計が範囲外の場合
+    /// * `Ok(BillingAmount)` - If the sum is within range
+    /// * `Err(ValidationError)` - If the sum is out of range
     ///
     /// # Errors
     ///
-    /// 合計が 10000.00 を超える場合に `ValidationError` を返す。
+    /// Returns `ValidationError` if the sum exceeds 10000.00.
     ///
     /// # Examples
     ///
@@ -216,7 +216,7 @@ impl BillingAmount {
         Self::create(total)
     }
 
-    /// 内部の小数値を返す
+    /// Returns the inner decimal value
     #[must_use]
     pub const fn value(&self) -> Decimal {
         self.0
@@ -435,7 +435,7 @@ mod tests {
 
     #[rstest]
     fn test_billing_amount_sum_prices_max() {
-        // 10個の1000円で10000円（最大値）
+        // 10 items at 1000 = 10000 (maximum value)
         let prices: Vec<Price> = (0..10)
             .map(|_| Price::create(Decimal::from_str("1000.0").unwrap()).unwrap())
             .collect();
@@ -450,7 +450,7 @@ mod tests {
 
     #[rstest]
     fn test_billing_amount_sum_prices_overflow() {
-        // 11個の1000円で11000円（最大値超過）
+        // 11 items at 1000 = 11000 (exceeds maximum)
         let prices: Vec<Price> = (0..11)
             .map(|_| Price::create(Decimal::from_str("1000.0").unwrap()).unwrap())
             .collect();

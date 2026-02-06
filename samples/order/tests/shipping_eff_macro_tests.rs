@@ -1,7 +1,7 @@
-//! eff! マクロ使用テスト
+//! Tests for eff! macro usage
 //!
-//! acknowledge_order_with_logging 関数のテストを実装する。
-//! eff! マクロの動作と IO 操作のチェーンを検証する。
+//! Implements tests for the acknowledge_order_with_logging function.
+//! Verifies eff! macro behavior and IO operation chaining.
 
 use lambars::effect::IO;
 use order_taking_sample::compound_types::{Address, CustomerInfo};
@@ -18,10 +18,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 // =============================================================================
-// テストヘルパー
+// Test helpers
 // =============================================================================
 
-/// テスト用の配送情報付き注文を作成する
+/// Creates an order with shipping information for testing
 fn create_test_order_with_shipping() -> PricedOrderWithShippingMethod {
     let order_id = OrderId::create("OrderId", "order-001").unwrap();
     let customer_info = CustomerInfo::create("John", "Doe", "john@example.com", "Normal").unwrap();
@@ -48,7 +48,7 @@ fn create_test_order_with_shipping() -> PricedOrderWithShippingMethod {
 }
 
 // =============================================================================
-// acknowledge_order_with_logging テスト
+// acknowledge_order_with_logging Test
 // =============================================================================
 
 #[rstest]
@@ -80,7 +80,7 @@ fn test_acknowledge_order_with_logging_sent() {
     assert_eq!(event.order_id().value(), "order-001");
     assert_eq!(event.email_address().value(), "john@example.com");
 
-    // ログ順序を検証
+    // Verify log order
     let messages = log_messages.borrow();
     assert_eq!(messages.len(), 3);
     assert_eq!(messages[0], "Creating acknowledgment letter");
@@ -112,10 +112,10 @@ fn test_acknowledge_order_with_logging_not_sent() {
 
     let result = io_result.run_unsafe();
 
-    // 送信失敗時は None
+    // None on send failure
     assert!(result.is_none());
 
-    // ログは全て出力される
+    // All logs are output
     let messages = log_messages.borrow();
     assert_eq!(messages.len(), 3);
 }
@@ -141,10 +141,10 @@ fn test_acknowledge_order_with_logging_deferred_execution() {
     let io_result =
         acknowledge_order_with_logging(&create_letter, &send_acknowledgment, &log_action, &order);
 
-    // IO が生成されただけでは実行されない
+    // Creating an IO does not execute it
     assert!(!executed.load(Ordering::SeqCst));
 
-    // run_unsafe() で実行される
+    // Executed by run_unsafe()
     let _ = io_result.run_unsafe();
     assert!(executed.load(Ordering::SeqCst));
 }
@@ -179,7 +179,7 @@ fn test_acknowledge_order_with_logging_log_order() {
 
     let _ = io_result.run_unsafe();
 
-    // ログが正しい順序で出力されていることを確認
+    // Verify logs are output in correct order
     let order_vec = log_order.borrow();
     assert_eq!(*order_vec, vec![1, 2, 3]);
 }
@@ -214,7 +214,7 @@ fn test_acknowledge_order_with_logging_custom_letter() {
 
     let _ = io_result.run_unsafe();
 
-    // 確認メール本文が正しく生成されていることを確認
+    // Verify the acknowledgment email body is generated correctly
     let content = letter_content.borrow();
     assert!(content.is_some());
     assert!(content.as_ref().unwrap().contains("order-001"));

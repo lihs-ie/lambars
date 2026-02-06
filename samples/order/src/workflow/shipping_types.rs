@@ -1,12 +1,12 @@
-//! 配送関連型
+//! Shipping-related types
 //!
-//! 配送方法と配送情報を表す型を定義する。
+//! Defines types representing shipping methods and shipping information.
 //!
-//! # 型一覧
+//! # Type List
 //!
-//! - [`ShippingMethod`] - 配送方法
-//! - [`ShippingInfo`] - 配送情報
-//! - [`PricedOrderWithShippingMethod`] - 配送情報付き価格計算済み注文
+//! - [`ShippingMethod`] - Shipping method
+//! - [`ShippingInfo`] - Shipping information
+//! - [`PricedOrderWithShippingMethod`] - Priced order with shipping info
 
 use crate::simple_types::Price;
 use crate::workflow::priced_types::PricedOrder;
@@ -16,9 +16,9 @@ use lambars_derive::Lenses;
 // ShippingMethod
 // =============================================================================
 
-/// 配送方法
+/// Shipping method
 ///
-/// 郵便または各種宅配サービスのいずれかを表す。
+/// Represents either postal service or various courier services.
 ///
 /// # Examples
 ///
@@ -33,21 +33,21 @@ use lambars_derive::Lenses;
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShippingMethod {
-    /// 郵便サービス
+    /// Postal service
     PostalService,
 
-    /// `FedEx` 24時間配送
+    /// FedEx 24-hour delivery
     Fedex24,
 
-    /// `FedEx` 48時間配送
+    /// FedEx 48-hour delivery
     Fedex48,
 
-    /// UPS 48時間配送
+    /// UPS 48-hour delivery
     Ups48,
 }
 
 impl ShippingMethod {
-    /// `PostalService` バリアントかどうかを返す
+    /// Returns whether this is the `PostalService` variant
     ///
     /// # Examples
     ///
@@ -62,7 +62,7 @@ impl ShippingMethod {
         matches!(self, Self::PostalService)
     }
 
-    /// `Fedex24` バリアントかどうかを返す
+    /// Returns whether this is the `Fedex24` variant
     ///
     /// # Examples
     ///
@@ -77,7 +77,7 @@ impl ShippingMethod {
         matches!(self, Self::Fedex24)
     }
 
-    /// `Fedex48` バリアントかどうかを返す
+    /// Returns whether this is the `Fedex48` variant
     ///
     /// # Examples
     ///
@@ -92,7 +92,7 @@ impl ShippingMethod {
         matches!(self, Self::Fedex48)
     }
 
-    /// `Ups48` バリアントかどうかを返す
+    /// Returns whether this is the `Ups48` variant
     ///
     /// # Examples
     ///
@@ -112,9 +112,9 @@ impl ShippingMethod {
 // ShippingInfo
 // =============================================================================
 
-/// 配送情報
+/// Shipping information
 ///
-/// 配送方法と配送コストを保持する。
+/// Holds the shipping method and shipping cost.
 ///
 /// # Examples
 ///
@@ -136,12 +136,12 @@ pub struct ShippingInfo {
 }
 
 impl ShippingInfo {
-    /// 新しい `ShippingInfo` を生成する
+    /// Creates a new `ShippingInfo`
     ///
     /// # Arguments
     ///
-    /// * `shipping_method` - 配送方法
-    /// * `shipping_cost` - 配送コスト
+    /// * `shipping_method` - Shipping method
+    /// * `shipping_cost` - Shipping cost
     ///
     /// # Examples
     ///
@@ -161,9 +161,9 @@ impl ShippingInfo {
         }
     }
 
-    /// 配送方法を返す
+    /// Returns the shipping method
     ///
-    /// `ShippingMethod` は `Copy` なのでコピーを返す。
+    /// Returns a copy since `ShippingMethod` implements `Copy`.
     ///
     /// # Examples
     ///
@@ -181,7 +181,7 @@ impl ShippingInfo {
         self.shipping_method
     }
 
-    /// 配送コストへの参照を返す
+    /// Returns a reference to Shipping cost
     ///
     /// # Examples
     ///
@@ -204,9 +204,9 @@ impl ShippingInfo {
 // PricedOrderWithShippingMethod
 // =============================================================================
 
-/// 配送情報付き価格計算済み注文
+/// Priced order with shipping information
 ///
-/// [`PricedOrder`] に配送情報を追加した型。
+/// A type that adds shipping information to [`PricedOrder`].
 ///
 /// # Examples
 ///
@@ -247,12 +247,12 @@ pub struct PricedOrderWithShippingMethod {
 }
 
 impl PricedOrderWithShippingMethod {
-    /// 新しい `PricedOrderWithShippingMethod` を生成する
+    /// Creates a new `PricedOrderWithShippingMethod`
     ///
     /// # Arguments
     ///
-    /// * `shipping_info` - 配送情報
-    /// * `priced_order` - 価格計算済み注文
+    /// * `shipping_info` - Shipping information
+    /// * `priced_order` - Priced order
     ///
     /// # Examples
     ///
@@ -289,13 +289,13 @@ impl PricedOrderWithShippingMethod {
         }
     }
 
-    /// 配送情報への参照を返す
+    /// Returns a reference to Shipping information
     #[must_use]
     pub const fn shipping_info(&self) -> &ShippingInfo {
         &self.shipping_info
     }
 
-    /// 価格計算済み注文への参照を返す
+    /// Returns a reference to Priced order
     #[must_use]
     pub const fn priced_order(&self) -> &PricedOrder {
         &self.priced_order

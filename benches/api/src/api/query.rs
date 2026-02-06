@@ -45,8 +45,6 @@ use lambars::persistent::{
     PersistentVector, TransientHashMap, TransientTreeMap,
 };
 
-const DEFAULT_LARGE_LIST_THRESHOLD: usize = 50_000;
-
 type TaskIdCollection = OrderedUniqueSet<TaskId>;
 use lambars::typeclass::{Semigroup, Traversable};
 
@@ -1036,7 +1034,7 @@ pub struct SearchIndexConfig {
     /// When enabled and all changes are `TaskChange::Add`, the optimized
     /// `apply_bulk` method is used instead of `apply_changes`.
     ///
-    /// Default: `true` (Phase 3: enabled for Add-only optimization in `tasks_bulk`)
+    /// Default: `false` (existing behavior maintained)
     pub use_apply_bulk: bool,
 }
 
@@ -1050,13 +1048,9 @@ impl Default for SearchIndexConfig {
             max_tokens_per_task: 100,
             max_search_candidates: 1000,
             use_bulk_builder: true,
-            // Phase 3: Lower threshold from 100 to 10 to ensure all batch sizes
-            // (10/50/100) in tasks_bulk benchmark use the bulk path
-            bulk_threshold: 10,
+            bulk_threshold: 100,
             use_merge_ngram_delta_bulk_insert: true,
-            // Phase 3: Enable use_apply_bulk by default to ensure Add-only changes
-            // automatically use the optimized apply_bulk path
-            use_apply_bulk: true,
+            use_apply_bulk: false,
         }
     }
 }
@@ -1205,322 +1199,6 @@ pub type PrefixIndex = PersistentTreeMap<NgramKey, TaskIdCollection>;
 // =============================================================================
 // Phase 3: merge_ngram_delta Result Types
 // =============================================================================
-
-/// Reusable buffer for merge operations (TB-003).
-///
-/// This structure reduces allocation overhead during merge operations by:
-/// 1. Pre-allocating capacity based on input sizes via `prepare()` (adaptive)
-/// 2. Writing merge results directly to the buffer
-/// 3. Extracting results via `take_with_capacity()` while preserving buffer capacity
-///
-/// # Buffer Lifecycle
-///
-/// Each merge iteration:
-/// 1. `prepare(capacity_hint)` - reserves capacity if needed (clamped to controller.max)
-/// 2. `merge_posting_lists_3way_into()` or `merge_add_only_into()` - writes to buffer
-/// 3. `take_with_capacity()` - returns results while preserving buffer capacity (swap reuse)
-///
-/// # Usage
-///
-/// ```ignore
-/// let mut buffer = MergeBuffer::new();
-/// for key in keys {
-///     buffer.prepare(capacity_hint);
-///     merge_into(&mut buffer.result);
-///     let merged = buffer.take_with_capacity();
-///     // buffer.result.capacity() is still >= capacity_hint
-/// }
-/// ```
-/// Minimumデフォルト容量（環境変数で上書き可能）。
-const DEFAULT_BUFFER_CAPACITY_MIN: usize = 10_000;
-/// 最大デフォルト容量（環境変数で上書き可能）。
-const DEFAULT_BUFFER_CAPACITY_MAX: usize = 200_000;
-
-/// ランタイムの容量推奨値を管理する軽量コントローラ。
-#[derive(Debug)]
-pub struct AdaptiveCapacityController {
-    recommended: std::sync::atomic::AtomicUsize,
-    min_capacity: usize,
-    max_capacity: usize,
-}
-
-impl AdaptiveCapacityController {
-    /// 推奨容量を再計算する間隔（マージ回数ベース）。
-    pub const UPDATE_INTERVAL: usize = 1_000;
-
-    #[must_use]
-    pub fn new() -> Self {
-        let min_capacity = std::env::var("LAMBARS_MERGE_BUFFER_CAPACITY_MIN")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(DEFAULT_BUFFER_CAPACITY_MIN)
-            .max(1);
-
-        let max_capacity = std::env::var("LAMBARS_MERGE_BUFFER_CAPACITY_MAX")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(DEFAULT_BUFFER_CAPACITY_MAX)
-            .max(min_capacity);
-
-        Self {
-            recommended: std::sync::atomic::AtomicUsize::new(min_capacity),
-            min_capacity,
-            max_capacity,
-        }
-    }
-
-    /// 現在の推奨容量を返す（Relaxed 読み取り）。
-    #[must_use]
-    pub fn recommended_capacity(&self) -> usize {
-        self.recommended
-            .load(std::sync::atomic::Ordering::Relaxed)
-            .clamp(self.min_capacity, self.max_capacity)
-    }
-
-    /// 最大許容容量を返す。
-    #[must_use]
-    pub const fn max_capacity(&self) -> usize {
-        self.max_capacity
-    }
-
-    /// 観測値の95パーセンタイルから推奨容量を更新する。
-    pub fn update_from_percentile(&self, percentile_95: usize) {
-        let clamped = percentile_95.clamp(self.min_capacity, self.max_capacity);
-        self.recommended
-            .store(clamped, std::sync::atomic::Ordering::Relaxed);
-    }
-}
-
-/// マージ時に収集するメトリクス（純粋関数の出力）。
-#[derive(Debug, Default, Clone)]
-pub struct MergeStats {
-    pub requested_capacity: usize,
-    pub reused_capacity: usize,
-    pub is_large_list: bool,
-    pub used_fast_path: bool,
-}
-
-/// メトリクス送信インタフェース（副作用は呼び出し側に分離）。
-pub trait MetricsSink {
-    fn record(&self, stats: &MergeStats);
-}
-
-/// デフォルトのノーオペ実装（オーバーヘッドゼロ）。
-pub struct NoOpMetricsSink;
-
-impl MetricsSink for NoOpMetricsSink {
-    fn record(&self, _stats: &MergeStats) {}
-}
-
-/// 固定長リングバッファでオンラインP95を推定し、
-/// AdaptiveCapacityController を更新するメトリクスシンク。
-pub struct RingBufferMetricsSink {
-    controller: std::sync::Arc<AdaptiveCapacityController>,
-    ring: std::sync::Mutex<RingBuffer<usize, 1_024>>, // 固定メモリ
-    count: std::sync::atomic::AtomicUsize,
-}
-
-impl RingBufferMetricsSink {
-    #[must_use]
-    pub fn new(controller: std::sync::Arc<AdaptiveCapacityController>) -> Self {
-        Self {
-            controller,
-            ring: std::sync::Mutex::new(RingBuffer::new()),
-            count: std::sync::atomic::AtomicUsize::new(0),
-        }
-    }
-}
-
-impl MetricsSink for RingBufferMetricsSink {
-    fn record(&self, stats: &MergeStats) {
-        let count = self
-            .count
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            .saturating_add(1);
-
-        {
-            let mut ring = self.ring.lock().expect("ring buffer mutex poisoned");
-            ring.push(stats.requested_capacity);
-        }
-
-        if count % AdaptiveCapacityController::UPDATE_INTERVAL == 0 {
-            let ring = self.ring.lock().expect("ring buffer mutex poisoned");
-            let p95 = ring.percentile(0.95);
-            self.controller.update_from_percentile(p95);
-        }
-    }
-}
-
-/// 固定長リングバッファ（上書き方式）。
-#[derive(Debug)]
-struct RingBuffer<T, const N: usize> {
-    data: [T; N],
-    head: usize,
-    len: usize,
-}
-
-impl<T: Copy + Default, const N: usize> RingBuffer<T, N> {
-    #[must_use]
-    fn new() -> Self {
-        Self {
-            data: [T::default(); N],
-            head: 0,
-            len: 0,
-        }
-    }
-
-    fn push(&mut self, value: T) {
-        self.data[self.head] = value;
-        self.head = (self.head + 1) % N;
-        if self.len < N {
-            self.len += 1;
-        }
-    }
-
-    #[must_use]
-    fn percentile(&self, p: f64) -> T
-    where
-        T: Ord,
-    {
-        if self.len == 0 {
-            return T::default();
-        }
-        let mut sorted: Vec<T> = self.data[..self.len].to_vec();
-        let idx = ((self.len as f64 * p) as usize).min(self.len - 1);
-        sorted.select_nth_unstable(idx);
-        sorted[idx]
-    }
-}
-
-#[must_use]
-fn large_list_threshold() -> usize {
-    std::env::var("LAMBARS_LARGE_LIST_THRESHOLD")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(DEFAULT_LARGE_LIST_THRESHOLD)
-        .max(1)
-}
-
-#[must_use]
-fn large_list_fast_path_enabled() -> bool {
-    std::env::var("LAMBARS_ENABLE_LARGE_LIST_FAST_PATH")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
-}
-
-#[derive(Debug, Default)]
-pub struct MergeBuffer {
-    /// Internal buffer for storing merge results.
-    result: Vec<TaskId>,
-    /// 再利用用のスペアバッファ。
-    spare: Vec<TaskId>,
-}
-
-impl MergeBuffer {
-    /// Creates a new empty `MergeBuffer`.
-    #[must_use]
-    pub const fn new() -> Self {
-        Self {
-            result: Vec::new(),
-            spare: Vec::new(),
-        }
-    }
-
-    /// Creates a new `MergeBuffer` with the specified capacity.
-    ///
-    /// The capacity is clamped to `DEFAULT_BUFFER_CAPACITY_MAX` to prevent
-    /// excessive memory usage at construction time.
-    #[must_use]
-    pub fn with_capacity(capacity: usize) -> Self {
-        let clamped_capacity = capacity.min(DEFAULT_BUFFER_CAPACITY_MAX);
-        Self {
-            result: Vec::with_capacity(clamped_capacity),
-            spare: Vec::new(),
-        }
-    }
-
-    /// Clears and prepares the buffer for reuse with the given capacity hint.
-    ///
-    /// This method:
-    /// 1. Clears existing contents (O(1) for POD types like `TaskId`)
-    /// 2. Reserves additional capacity if needed (clamped to controller.max_capacity())
-    ///
-    /// The buffer's existing capacity is preserved, enabling reuse.
-    fn prepare(&mut self, capacity_hint: usize, controller: &AdaptiveCapacityController) {
-        let target = capacity_hint
-            .max(controller.recommended_capacity())
-            .min(controller.max_capacity());
-        self.result.clear();
-        if self.result.capacity() < target {
-            self.result
-                .reserve_exact(target.saturating_sub(self.result.capacity()));
-        }
-    }
-
-    /// Returns a clone of the buffer contents and clears the buffer.
-    ///
-    /// This method preserves the buffer's capacity for reuse while providing
-    /// a fresh `Vec` for storage in `TaskIdCollection::from_sorted_vec()`.
-    ///
-    /// # Performance
-    ///
-    /// - Clone cost: O(n) where n is the number of elements
-    /// - Buffer capacity is preserved for next iteration
-    #[allow(dead_code)]
-    fn take_clone(&mut self) -> Vec<TaskId> {
-        let result = self.result.clone();
-        self.result.clear();
-        result
-    }
-
-    /// Returns the buffer contents by move, avoiding O(n) clone overhead.
-    ///
-    /// This method moves the result Vec out without allocating a new buffer.
-    /// The next buffer allocation is deferred to `prepare()`, avoiding
-    /// unnecessary allocation on the final iteration of a loop.
-    ///
-    /// # Performance
-    ///
-    /// - No clone cost: O(1) for the move
-    /// - No allocation: Buffer allocation deferred to next `prepare()` call
-    ///
-    /// # Note
-    ///
-    /// This method is retained for cases where capacity preservation is not needed
-    /// (e.g., final iteration of a loop). Use `take_with_capacity()` for tight loops
-    /// where reallocation should be avoided.
-    #[allow(dead_code)]
-    fn take_owned(&mut self) -> Vec<TaskId> {
-        std::mem::take(&mut self.result)
-    }
-
-    /// swap 方式で容量を維持しつつ Vec を返す。
-    ///
-    /// - result と spare を入れ替え、旧 result を返却する
-    /// - result を返却 Vec と同じ capacity で再確保し、次回以降の再利用を保証
-    fn take_with_capacity(&mut self) -> Vec<TaskId> {
-        std::mem::swap(&mut self.result, &mut self.spare);
-        let output = std::mem::take(&mut self.spare);
-        self.result = Vec::with_capacity(output.capacity());
-        output
-    }
-
-    /// 使用済み Vec をプールに戻す（容量は上限でクリップ）。
-    fn return_buffer(
-        &mut self,
-        mut returned: Vec<TaskId>,
-        controller: &AdaptiveCapacityController,
-    ) {
-        let capped = returned.capacity().min(controller.max_capacity());
-        if capped < returned.capacity() {
-            returned.shrink_to(capped);
-        }
-        returned.clear();
-        if returned.capacity() > self.spare.capacity() {
-            self.spare = returned;
-        }
-    }
-}
 
 /// Result of the `merge_ngram_delta` operation.
 ///
@@ -2042,8 +1720,8 @@ impl std::error::Error for SearchIndexError {}
 /// # Algorithm
 ///
 /// 1. Collect all entries with their original insertion order
-/// 2. Sort entries by (token, `task_id`, order) for deterministic duplicate handling
-/// 3. Deduplicate (token, `task_id`) pairs - same token with different `TaskId`s are preserved
+/// 2. Sort entries by key, then by order (for deterministic duplicate handling)
+/// 3. Deduplicate keys (last value wins, preserving insertion order semantics)
 /// 4. Generate n-grams for all entries in a single pass
 /// 5. Build the final immutable index
 ///
@@ -2150,20 +1828,16 @@ impl SearchIndexBulkBuilder {
     ///
     /// # Duplicate Handling
     ///
-    /// Duplicates are handled at the `(token, task_id)` pair level:
-    /// - Same `(token, task_id)` pair: Only one entry is kept (deduplicated)
-    /// - Same token with different `task_id`s: All entries are preserved
-    ///
-    /// This allows multiple tasks to be indexed under the same token while
-    /// avoiding duplicate entries for the same task.
+    /// When the same token appears multiple times:
+    /// - **Last value wins**: The task ID from the last occurrence is kept
+    /// - Original insertion order is preserved for deterministic behavior
     ///
     /// # Example
     ///
     /// ```rust,ignore
     /// let builder = SearchIndexBulkBuilder::new(config)
     ///     .add_entry("callback".to_string(), task_id1)
-    ///     .add_entry("callback".to_string(), task_id2) // both task_id1 and task_id2 are kept
-    ///     .add_entry("callback".to_string(), task_id1); // duplicate (token, task_id1) is removed
+    ///     .add_entry("callback".to_string(), task_id2); // task_id2 wins
     /// ```
     #[must_use]
     pub fn add_entry(mut self, normalized_token: String, task_id: TaskId) -> Self {
@@ -2177,8 +1851,8 @@ impl SearchIndexBulkBuilder {
     /// This method consumes the builder and produces an immutable [`NgramIndex`].
     /// The build process:
     /// 1. Validates entry count against [`MAX_BULK_ENTRIES`]
-    /// 2. Sorts entries by (token, `task_id`, order) for deterministic deduplication
-    /// 3. Deduplicates `(token, task_id)` pairs - same token with different `TaskId`s are preserved
+    /// 2. Sorts entries by (token, `insertion_order`) for deterministic deduplication
+    /// 3. Deduplicates tokens (last value wins for duplicate tokens)
     /// 4. Generates n-grams and validates against [`MAX_TOTAL_NGRAMS`]
     /// 5. Estimates memory usage and validates against [`MAX_ESTIMATED_MEMORY`]
     /// 6. Builds the final immutable index with sorted keys for determinism
@@ -2205,28 +1879,20 @@ impl SearchIndexBulkBuilder {
         }
 
         let mut sorted = self.entries;
-        // Sort by (token, task_id, order) to group same (token, task_id) pairs together
-        let comparator = |(t1, id1, o1): &(String, TaskId, usize),
-                          (t2, id2, o2): &(String, TaskId, usize)|
-         -> std::cmp::Ordering {
-            t1.cmp(t2).then_with(|| id1.cmp(id2)).then(o1.cmp(o2))
-        };
+        let comparator = |(t1, _, o1): &(String, TaskId, usize),
+                          (t2, _, o2): &(String, TaskId, usize)|
+         -> std::cmp::Ordering { t1.cmp(t2).then(o1.cmp(o2)) };
         if !sorted.is_sorted_by(|a, b| comparator(a, b).is_le()) {
             sorted.sort_unstable_by(comparator);
         }
 
-        // After sorting, deduplicate (token, task_id) pairs while keeping all unique TaskIds per token.
-        // This ensures that multiple tasks with the same token are all indexed correctly.
-        // Example: "New Task 1" and "New Task 2" both have token "task" -> both TaskIds are kept.
+        // After sorting by (token, order), last occurrence wins
         let deduped = sorted.into_iter().fold(
             Vec::new(),
             |mut accumulator: Vec<(String, TaskId)>, (token, task_id, _)| {
-                match accumulator.last() {
-                    // Only skip if both token AND task_id match (exact duplicate)
-                    Some((last_token, last_task_id))
-                        if last_token == &token && last_task_id == &task_id =>
-                    {
-                        // Skip duplicate (same token, same task_id)
+                match accumulator.last_mut() {
+                    Some((last_token, last_task_id)) if last_token == &token => {
+                        *last_task_id = task_id;
                     }
                     _ => {
                         accumulator.push((token, task_id));
@@ -2291,12 +1957,43 @@ impl SearchIndexBulkBuilder {
 }
 
 /// Merges two sorted posting lists into a single sorted, deduplicated list.
-/// Both inputs must be sorted. Uses two-pointer merge in O(N+M) time.
+///
+/// This function performs a merge-sort style operation on two `TaskIdCollection`s,
+/// combining them efficiently without redundant intermediate allocations.
+///
+/// # Preconditions
+///
+/// - Both `existing` and `new_entries` must be sorted in ascending order.
+/// - No duplicate elements within each collection (deduplication is still performed
+///   for elements appearing in both collections).
+///
+/// # Algorithm
+///
+/// Uses a two-pointer merge algorithm (O(N+M) time complexity) to combine the lists:
+/// 1. Initialize iterators for both collections
+/// 2. Compare current elements from each iterator
+/// 3. Emit the smaller element (or skip duplicates if equal)
+/// 4. Construct the result using `from_sorted_vec` (O(n) construction)
+///
+/// # Complexity
+///
+/// - Time: O(N + M) where N and M are the sizes of the input collections
+/// - Space: O(N + M) for the result vector
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let existing = TaskIdCollection::from_sorted_vec(vec![task_id_1, task_id_3, task_id_5]);
+/// let new_entries = TaskIdCollection::from_sorted_vec(vec![task_id_2, task_id_4, task_id_6]);
+/// let merged = merge_sorted_posting_lists(&existing, &new_entries);
+/// // merged contains: [task_id_1, task_id_2, task_id_3, task_id_4, task_id_5, task_id_6]
+/// ```
 #[must_use]
 fn merge_sorted_posting_lists(
     existing: &TaskIdCollection,
     new_entries: &TaskIdCollection,
 ) -> TaskIdCollection {
+    // Fast paths for empty collections
     if existing.is_empty() {
         return new_entries.clone();
     }
@@ -2304,30 +2001,38 @@ fn merge_sorted_posting_lists(
         return existing.clone();
     }
 
-    let mut existing_iter = existing.iter_sorted().peekable();
-    let mut new_iter = new_entries.iter_sorted().peekable();
-    let mut result = Vec::with_capacity(existing.len() + new_entries.len());
+    // Get sorted vectors for merge
+    let existing_sorted = existing.to_sorted_vec();
+    let new_sorted = new_entries.to_sorted_vec();
+
+    // Pre-allocate result with exact capacity
+    let mut result = Vec::with_capacity(existing_sorted.len() + new_sorted.len());
+
+    // Two-pointer merge
+    let mut existing_iterator = existing_sorted.into_iter().peekable();
+    let mut new_iterator = new_sorted.into_iter().peekable();
 
     loop {
-        match (existing_iter.peek(), new_iter.peek()) {
-            (Some(&existing_id), Some(&new_id)) => match existing_id.cmp(new_id) {
+        match (existing_iterator.peek(), new_iterator.peek()) {
+            (Some(existing_id), Some(new_id)) => match existing_id.cmp(new_id) {
                 std::cmp::Ordering::Less => {
-                    result.push(existing_iter.next().unwrap().clone());
+                    result.push(existing_iterator.next().unwrap());
                 }
                 std::cmp::Ordering::Greater => {
-                    result.push(new_iter.next().unwrap().clone());
+                    result.push(new_iterator.next().unwrap());
                 }
                 std::cmp::Ordering::Equal => {
-                    result.push(existing_iter.next().unwrap().clone());
-                    new_iter.next();
+                    // Skip duplicate - take from existing, advance both
+                    result.push(existing_iterator.next().unwrap());
+                    new_iterator.next();
                 }
             },
             (Some(_), None) => {
-                result.extend(existing_iter.cloned());
+                result.extend(existing_iterator);
                 break;
             }
             (None, Some(_)) => {
-                result.extend(new_iter.cloned());
+                result.extend(new_iterator);
                 break;
             }
             (None, None) => break,
@@ -5939,13 +5644,13 @@ impl SearchIndex {
 
     /// Computes `(existing ∪ add) - remove` for a `PrefixIndex`.
     ///
-    /// # TB-001/TB-002/TB-003 Optimization
+    /// # TB-001 Optimization
     ///
-    /// - Uses transient structure for batch updates, converting to persistent only
-    ///   at the end. This avoids repeated COW operations during individual inserts.
-    /// - Uses `iter_sorted()` instead of `to_sorted_vec()` to avoid intermediate
-    ///   vector allocation (TB-002).
-    /// - Reuses a single `MergeBuffer` across all key iterations (TB-003).
+    /// Uses transient structure for batch updates, converting to persistent only
+    /// at the end. This avoids repeated COW operations during individual inserts.
+    ///
+    /// Uses `TaskIdCollection::from_sorted_vec` for O(n) bulk construction,
+    /// avoiding per-element COW overhead.
     fn merge_index_delta(
         index: &PrefixIndex,
         add: &MutableIndex,
@@ -5959,32 +5664,24 @@ impl SearchIndex {
 
         // TB-001: Use transient for bulk updates to reduce COW overhead
         let mut transient = index.clone().transient();
-        // TB-003: Reuse buffer across iterations
-        let mut buffer = MergeBuffer::new();
-        let controller = std::sync::Arc::new(AdaptiveCapacityController::new());
-        let metrics_sink = RingBufferMetricsSink::new(controller.clone());
 
         for key in all_keys {
             let key_str = key.as_str();
-            let add_slice = add.get(key).map_or(&[] as &[TaskId], Vec::as_slice);
-            let remove_slice = remove.get(key).map_or(&[] as &[TaskId], Vec::as_slice);
-            let mut stats = MergeStats::default();
-            // TB-002: Use iter_sorted() instead of to_sorted_vec()
-            let merged = Self::merge_single_posting_list_with_buffer(
-                transient.get(key_str),
-                add_slice,
-                remove_slice,
-                &mut buffer,
-                controller.as_ref(),
-                &mut stats,
+            let existing: Vec<TaskId> = transient
+                .get(key_str)
+                .map(TaskIdCollection::to_sorted_vec)
+                .unwrap_or_default();
+            let merged = Self::compute_merged_posting_list_sorted(
+                &existing,
+                add.get(key).map_or(&[], Vec::as_slice),
+                remove.get(key).map_or(&[], Vec::as_slice),
             );
-            metrics_sink.record(&stats);
 
             if merged.is_empty() {
-                buffer.return_buffer(merged, controller.as_ref());
                 transient.remove(key_str);
             } else {
-                transient.insert(key.clone(), TaskIdCollection::from_sorted_vec(merged));
+                let collection = TaskIdCollection::from_sorted_vec(merged);
+                transient.insert(key.clone(), collection);
             }
         }
 
@@ -5992,7 +5689,32 @@ impl SearchIndex {
     }
 
     /// Computes `(existing ∪ add) - remove` for a `NgramIndex`.
-    /// Uses bulk insert when `config.use_merge_ngram_delta_bulk_insert` is enabled.
+    ///
+    /// # Phase 3 Optimization
+    ///
+    /// When `config.use_merge_ngram_delta_bulk_insert` is `true`, this method
+    /// collects all merged entries first, then uses `insert_bulk_owned` to
+    /// reduce COW overhead during bulk updates.
+    ///
+    /// # Fallback Behavior
+    ///
+    /// If the number of entries exceeds `MAX_BULK_INSERT` (100,000):
+    /// - Falls back to individual inserts (slower but guarantees completion)
+    /// - Returns `MergeNgramDeltaResult::Fallback` with `TooManyEntries` reason
+    ///
+    /// The operation always completes successfully (no errors returned), but
+    /// the result variant indicates whether a fallback was triggered.
+    ///
+    /// # Arguments
+    ///
+    /// * `index` - The existing n-gram index
+    /// * `add` - Entries to add
+    /// * `remove` - Entries to remove
+    /// * `config` - Configuration with optimization flags
+    ///
+    /// # Returns
+    ///
+    /// `MergeNgramDeltaResult` with the updated index and optional fallback info.
     fn merge_ngram_delta(
         index: &NgramIndex,
         add: &MutableIndex,
@@ -6000,231 +5722,88 @@ impl SearchIndex {
         config: &SearchIndexConfig,
     ) -> MergeNgramDeltaResult {
         let all_keys: std::collections::HashSet<_> = add.keys().chain(remove.keys()).collect();
-        let controller = std::sync::Arc::new(AdaptiveCapacityController::new());
-        let metrics_sink = RingBufferMetricsSink::new(controller.clone());
 
+        // Phase 3 optimization: use bulk insert when flag is enabled
         if config.use_merge_ngram_delta_bulk_insert {
-            Self::merge_ngram_delta_bulk(
-                index,
-                add,
-                remove,
-                &all_keys,
-                controller.as_ref(),
-                &metrics_sink,
-            )
+            Self::merge_ngram_delta_bulk(index, add, remove, &all_keys)
         } else {
-            Self::merge_ngram_delta_individual(
-                index,
-                add,
-                remove,
-                &all_keys,
-                controller.as_ref(),
-                &metrics_sink,
-            )
+            // Original implementation: individual inserts
+            Self::merge_ngram_delta_individual(index, add, remove, &all_keys)
         }
     }
 
-    /// Merges a single posting list for the given key using a reusable buffer (TB-003).
-    ///
-    /// # Arguments
-    ///
-    /// * `existing` - Optional existing posting list
-    /// * `add_slice` - Elements to add (must be sorted)
-    /// * `remove_slice` - Elements to remove (must be sorted)
-    /// * `buffer` - Reusable buffer to reduce allocations
-    ///
-    /// # Returns
-    ///
-    /// The merged result is stored in `buffer.result` and returned via `buffer.take_with_capacity()`.
-    /// The buffer's capacity is preserved for the next iteration, avoiding reallocation.
-    fn merge_single_posting_list_with_buffer<'a>(
-        existing: Option<&'a TaskIdCollection>,
-        add_slice: &'a [TaskId],
-        remove_slice: &'a [TaskId],
-        buffer: &mut MergeBuffer,
-        controller: &AdaptiveCapacityController,
-        stats: &mut MergeStats,
-    ) -> Vec<TaskId> {
-        #[cfg(debug_assertions)]
-        {
-            Self::assert_strictly_sorted(add_slice, "add_slice");
-            Self::assert_strictly_sorted(remove_slice, "remove_slice");
-            // Verify existing collection's sortedness (iter_sorted is trusted but check anyway)
-            if let Some(collection) = existing {
-                Self::assert_strictly_sorted_iter(collection.iter_sorted(), "existing");
-            }
-        }
-
-        let existing_len = existing.map_or(0, TaskIdCollection::len);
-        let total_len = existing_len + add_slice.len();
-        stats.requested_capacity = total_len;
-        stats.reused_capacity = buffer.result.capacity();
-
-        let threshold = large_list_threshold();
-        stats.is_large_list = total_len >= threshold;
-
-        if stats.is_large_list && large_list_fast_path_enabled() {
-            stats.used_fast_path = true;
-            let existing_iter = existing.into_iter().flat_map(|c| c.iter_sorted());
-            return Self::merge_large_posting_list_sorted(
-                existing_iter,
-                existing_len,
-                add_slice.iter(),
-                add_slice.len(),
-                remove_slice,
-            );
-        }
-
-        buffer.prepare(total_len, controller);
-
-        // Use static dispatch via flat_map instead of Box<dyn Iterator>
-        let existing_iter = existing.into_iter().flat_map(|c| c.iter_sorted());
-
-        // Add-only fast path: skip remove checks when remove is empty
-        if remove_slice.is_empty() {
-            Self::merge_add_only_into(existing_iter, add_slice.iter(), &mut buffer.result);
-        } else {
-            Self::merge_posting_lists_3way_into(
-                existing_iter,
-                add_slice.iter(),
-                remove_slice.iter(),
-                &mut buffer.result,
-            );
-        }
-
-        // Use take_with_capacity to avoid O(n) clone overhead while preserving capacity
-        // This avoids reallocation on subsequent iterations in tight loops
-        buffer.take_with_capacity()
-    }
-
-    /// 大規模ポスティングリスト専用のソート済み差分マージ。
-    ///
-    /// 事前条件: existing / add / remove はすべてソート済みかつ重複なし。
-    /// 計算量: O(n + m + k)
-    fn merge_large_posting_list_sorted<'a>(
-        existing: impl Iterator<Item = &'a TaskId>,
-        existing_len: usize,
-        add: impl Iterator<Item = &'a TaskId>,
-        add_len: usize,
-        remove: &'a [TaskId],
-    ) -> Vec<TaskId> {
-        let mut out = Vec::with_capacity(existing_len + add_len);
-        let mut existing = existing.peekable();
-        let mut add = add.peekable();
-        let mut k = 0;
-
-        loop {
-            let next_ref = match (existing.peek(), add.peek()) {
-                (None, None) => break,
-                (Some(&e), None) => {
-                    existing.next();
-                    e
-                }
-                (None, Some(&a)) => {
-                    add.next();
-                    a
-                }
-                (Some(&e), Some(&a)) => {
-                    if e <= a {
-                        existing.next();
-                        e
-                    } else {
-                        add.next();
-                        a
-                    }
-                }
-            };
-
-            while k < remove.len() && remove[k] < *next_ref {
-                k += 1;
-            }
-
-            let is_removed = remove.get(k).is_some_and(|r| r == next_ref);
-            let is_duplicate = out.last().is_some_and(|last| last == next_ref);
-
-            if !is_removed && !is_duplicate {
-                out.push(next_ref.clone());
-            }
-        }
-
-        out
-    }
-
-    /// Original merge implementation using individual inserts with buffer reuse (TB-003).
+    /// Original merge implementation using individual inserts.
     fn merge_ngram_delta_individual(
         index: &NgramIndex,
         add: &MutableIndex,
         remove: &MutableIndex,
         all_keys: &std::collections::HashSet<&NgramKey>,
-        controller: &AdaptiveCapacityController,
-        metrics_sink: &impl MetricsSink,
     ) -> MergeNgramDeltaResult {
         let mut result = index.clone().transient();
-        let mut buffer = MergeBuffer::new();
 
         for key in all_keys {
             let key_str = key.as_str();
-            let add_slice = add.get(*key).map_or(&[] as &[TaskId], Vec::as_slice);
-            let remove_slice = remove.get(*key).map_or(&[] as &[TaskId], Vec::as_slice);
-            let mut stats = MergeStats::default();
-            let merged = Self::merge_single_posting_list_with_buffer(
-                result.get(key_str),
-                add_slice,
-                remove_slice,
-                &mut buffer,
-                controller,
-                &mut stats,
+            let existing: Vec<TaskId> = result
+                .get(key_str)
+                .map(TaskIdCollection::to_sorted_vec)
+                .unwrap_or_default();
+            let merged = Self::compute_merged_posting_list_sorted(
+                &existing,
+                add.get(*key).map_or(&[], Vec::as_slice),
+                remove.get(*key).map_or(&[], Vec::as_slice),
             );
-            metrics_sink.record(&stats);
 
             if merged.is_empty() {
-                buffer.return_buffer(merged, controller);
                 result.remove(key_str);
             } else {
-                result.insert((*key).clone(), TaskIdCollection::from_sorted_vec(merged));
+                let collection = TaskIdCollection::from_sorted_vec(merged);
+                result.insert((*key).clone(), collection);
             }
         }
 
         MergeNgramDeltaResult::Ok(result.persistent())
     }
 
-    /// Optimized merge implementation using bulk insert with chunking and buffer reuse (TB-003).
-    /// Falls back to individual inserts if bulk insert fails.
+    /// Optimized merge implementation using bulk insert.
+    ///
+    /// Collects all merged entries first, then uses `insert_bulk_owned` with chunking.
+    ///
+    /// # Fallback Behavior
+    ///
+    /// If bulk insert fails (which should not happen due to chunk size constraints),
+    /// falls back to `merge_ngram_delta_individual` to ensure the operation completes
+    /// successfully with correct `(existing ∪ add) - remove` semantics.
     fn merge_ngram_delta_bulk(
         index: &NgramIndex,
         add: &MutableIndex,
         remove: &MutableIndex,
         all_keys: &std::collections::HashSet<&NgramKey>,
-        controller: &AdaptiveCapacityController,
-        metrics_sink: &impl MetricsSink,
     ) -> MergeNgramDeltaResult {
+        // Chunk size limited to MAX_BULK_INSERT - 1 to avoid errors.
+        // The const assert in hashmap.rs guarantees MAX_BULK_INSERT >= 2.
         const CHUNK_SIZE: usize = MAX_BULK_INSERT - 1;
 
         let mut result = index.clone().transient();
         let mut entries_to_insert: Vec<(NgramKey, TaskIdCollection)> = Vec::new();
         let mut keys_to_remove: Vec<&str> = Vec::new();
-        let mut buffer = MergeBuffer::new();
 
         for key in all_keys {
             let key_str = key.as_str();
-            let add_slice = add.get(*key).map_or(&[] as &[TaskId], Vec::as_slice);
-            let remove_slice = remove.get(*key).map_or(&[] as &[TaskId], Vec::as_slice);
-            let mut stats = MergeStats::default();
-            let merged = Self::merge_single_posting_list_with_buffer(
-                result.get(key_str),
-                add_slice,
-                remove_slice,
-                &mut buffer,
-                controller,
-                &mut stats,
+            let existing: Vec<TaskId> = result
+                .get(key_str)
+                .map(TaskIdCollection::to_sorted_vec)
+                .unwrap_or_default();
+            let merged = Self::compute_merged_posting_list_sorted(
+                &existing,
+                add.get(*key).map_or(&[], Vec::as_slice),
+                remove.get(*key).map_or(&[], Vec::as_slice),
             );
-            metrics_sink.record(&stats);
 
             if merged.is_empty() {
-                buffer.return_buffer(merged, controller);
                 keys_to_remove.push(key_str);
             } else {
-                entries_to_insert.push(((*key).clone(), TaskIdCollection::from_sorted_vec(merged)));
+                let collection = TaskIdCollection::from_sorted_vec(merged);
+                entries_to_insert.push(((*key).clone(), collection));
             }
         }
 
@@ -6232,29 +5811,29 @@ impl SearchIndex {
             result.remove(*key_str);
         }
 
-        while !entries_to_insert.is_empty() {
-            let chunk_size = entries_to_insert.len().min(CHUNK_SIZE);
-            let chunk_vec: Vec<_> = entries_to_insert.drain(..chunk_size).collect();
-            let insert_count = chunk_vec.len();
-            if let Ok(updated) = result.insert_bulk_owned(chunk_vec) {
-                result = updated;
-            } else {
-                let fallback = Self::merge_ngram_delta_individual(
-                    index,
-                    add,
-                    remove,
-                    all_keys,
-                    controller,
-                    metrics_sink,
-                )
-                .into_index();
-                return MergeNgramDeltaResult::Fallback {
-                    index: fallback,
-                    reason: MergeNgramDeltaFallbackReason::TooManyEntries {
-                        count: insert_count,
-                        limit: CHUNK_SIZE,
-                    },
-                };
+        if !entries_to_insert.is_empty() {
+            while !entries_to_insert.is_empty() {
+                let chunk_size = entries_to_insert.len().min(CHUNK_SIZE);
+                let chunk_vec: Vec<_> = entries_to_insert.drain(..chunk_size).collect();
+                let insert_count = chunk_vec.len();
+                match result.insert_bulk_owned(chunk_vec) {
+                    Ok(updated) => {
+                        result = updated;
+                    }
+                    Err(_) => {
+                        // TB-003: Fallback to individual merge to ensure correct semantics.
+                        // This guarantees `(existing ∪ add) - remove` is preserved.
+                        let fallback = Self::merge_ngram_delta_individual(index, add, remove, all_keys)
+                            .into_index();
+                        return MergeNgramDeltaResult::Fallback {
+                            index: fallback,
+                            reason: MergeNgramDeltaFallbackReason::TooManyEntries {
+                                count: insert_count,
+                                limit: CHUNK_SIZE,
+                            },
+                        };
+                    }
+                }
             }
         }
 
@@ -6283,162 +5862,133 @@ impl SearchIndex {
         merged
     }
 
-    /// Computes `(existing ∪ add) - remove` via 3-way merge.
-    ///
-    /// All inputs must be sorted and deduplicated. Time complexity: O(N).
-    ///
-    /// # Note
-    /// This function mutates the passed-in `result` buffer for performance.
-    /// The buffer is cleared at the start to ensure deterministic output
-    /// regardless of its prior state. While this provides predictable behavior
-    /// given the same inputs, the function is not pure in the FP sense due to
-    /// the mutation. For a pure variant, use a wrapper that creates a new Vec.
-    fn merge_posting_lists_3way_into<'a>(
-        existing: impl Iterator<Item = &'a TaskId>,
-        add: impl Iterator<Item = &'a TaskId>,
-        remove: impl Iterator<Item = &'a TaskId>,
-        result: &mut Vec<TaskId>,
-    ) {
-        result.clear();
-
-        let mut existing = existing.peekable();
-        let mut add = add.peekable();
-        let mut remove = remove.peekable();
-
-        loop {
-            let val: &TaskId = match (existing.peek(), add.peek()) {
-                (None, None) => break,
-                (Some(&e), None) => e,
-                (None, Some(&a)) => a,
-                (Some(&e), Some(&a)) => std::cmp::min(e, a),
-            };
-
-            while remove.peek().is_some_and(|&r| r < val) {
-                remove.next();
-            }
-
-            let should_remove = remove.peek().is_some_and(|&r| r == val);
-
-            if existing.peek().is_some_and(|&e| e == val) {
-                existing.next();
-            }
-            if add.peek().is_some_and(|&a| a == val) {
-                add.next();
-            }
-
-            if should_remove {
-                remove.next();
-            } else {
-                result.push(val.clone());
-            }
-        }
-    }
-
-    /// Computes `existing ∪ add` via 2-way merge (Add-only case).
-    ///
-    /// This is a specialized fast path for cases where there are no removals.
-    /// Avoids the overhead of checking the remove iterator.
-    ///
-    /// All inputs must be sorted and deduplicated. Time complexity: O(N).
-    ///
-    /// # Note
-    /// This function mutates the passed-in `result` buffer for performance.
-    /// The buffer is cleared at the start to ensure deterministic output
-    /// regardless of its prior state.
-    fn merge_add_only_into<'a>(
-        existing: impl Iterator<Item = &'a TaskId>,
-        add: impl Iterator<Item = &'a TaskId>,
-        result: &mut Vec<TaskId>,
-    ) {
-        result.clear();
-
-        let mut existing = existing.peekable();
-        let mut add = add.peekable();
-
-        loop {
-            match (existing.peek(), add.peek()) {
-                (None, None) => break,
-                (Some(&e), None) => {
-                    result.push(e.clone());
-                    existing.next();
-                }
-                (None, Some(&a)) => {
-                    result.push(a.clone());
-                    add.next();
-                }
-                (Some(&e), Some(&a)) => match e.cmp(a) {
-                    std::cmp::Ordering::Less => {
-                        result.push(e.clone());
-                        existing.next();
-                    }
-                    std::cmp::Ordering::Equal => {
-                        result.push(e.clone());
-                        existing.next();
-                        add.next();
-                    }
-                    std::cmp::Ordering::Greater => {
-                        result.push(a.clone());
-                        add.next();
-                    }
-                },
-            }
-        }
-    }
-
     /// Computes `(existing ∪ add) - remove` in a single pass.
-    /// All inputs must be sorted and deduplicated.
-    #[allow(dead_code)]
+    ///
+    /// # Early Return Optimizations
+    ///
+    /// When `remove` is empty, applies early return to avoid unnecessary merging:
+    /// - If `existing` is empty: returns `add.to_vec()` directly
+    /// - If `add` is empty: returns `existing.to_vec()` directly
+    ///
+    /// # Preconditions
+    ///
+    /// All input slices must be sorted in ascending order and deduplicated.
+    /// Debug builds validate with `debug_assert!`; release builds produce
+    /// incorrect results for invalid input.
     fn compute_merged_posting_list_sorted(
         existing: &[TaskId],
         add: &[TaskId],
         remove: &[TaskId],
     ) -> Vec<TaskId> {
+        // Helper function for debug assertions (only in debug builds)
         #[cfg(debug_assertions)]
-        Self::assert_strictly_sorted(existing, "existing");
+        fn is_strictly_sorted(slice: &[TaskId]) -> bool {
+            slice.windows(2).all(|window| window[0] < window[1])
+        }
+
+        // Helper function for remove check (defined before statements)
+        fn should_remove(
+            candidate: &TaskId,
+            remove_iterator: &mut std::iter::Peekable<std::slice::Iter<'_, TaskId>>,
+        ) -> bool {
+            while let Some(remove_element) = remove_iterator.peek() {
+                match (*remove_element).cmp(candidate) {
+                    std::cmp::Ordering::Less => {
+                        remove_iterator.next();
+                    }
+                    std::cmp::Ordering::Equal => {
+                        remove_iterator.next();
+                        return true;
+                    }
+                    std::cmp::Ordering::Greater => {
+                        return false;
+                    }
+                }
+            }
+            false
+        }
+
         #[cfg(debug_assertions)]
-        Self::assert_strictly_sorted(add, "add");
-        #[cfg(debug_assertions)]
-        Self::assert_strictly_sorted(remove, "remove");
+        {
+            debug_assert!(
+                existing.is_empty() || is_strictly_sorted(existing),
+                "existing slice must be sorted and deduplicated"
+            );
+            debug_assert!(
+                add.is_empty() || is_strictly_sorted(add),
+                "add slice must be sorted and deduplicated"
+            );
+            debug_assert!(
+                remove.is_empty() || is_strictly_sorted(remove),
+                "remove slice must be sorted and deduplicated"
+            );
+        }
+
+        // =====================================================================
+        // Phase 2: Early return optimizations
+        // =====================================================================
+        // When remove is empty, we can avoid the full merge loop in common cases.
+        // These optimizations preserve referential transparency (same input → same output).
 
         if remove.is_empty() {
+            // Fast path 1: No remove, no existing → just clone add
             if existing.is_empty() {
                 return add.to_vec();
             }
+            // Fast path 2: No remove, no add → just clone existing
             if add.is_empty() {
                 return existing.to_vec();
             }
         }
 
         let mut result = Vec::with_capacity(existing.len() + add.len());
-        Self::merge_posting_lists_3way_into(
-            existing.iter(),
-            add.iter(),
-            remove.iter(),
-            &mut result,
-        );
-        result
-    }
 
-    #[cfg(debug_assertions)]
-    fn assert_strictly_sorted(slice: &[TaskId], name: &str) {
-        debug_assert!(
-            slice.windows(2).all(|w| w[0] < w[1]),
-            "{name} slice must be sorted and deduplicated"
-        );
-    }
+        let mut existing_iterator = existing.iter().peekable();
+        let mut add_iterator = add.iter().peekable();
+        let mut remove_iterator = remove.iter().peekable();
 
-    #[cfg(debug_assertions)]
-    fn assert_strictly_sorted_iter<'a>(iter: impl Iterator<Item = &'a TaskId>, name: &str) {
-        let mut prev: Option<&TaskId> = None;
-        for current in iter {
-            if let Some(p) = prev {
-                debug_assert!(
-                    p < current,
-                    "{name} iterator must be sorted and deduplicated"
-                );
+        loop {
+            match (existing_iterator.peek(), add_iterator.peek()) {
+                (None, None) => break,
+                (Some(&existing_element), None) => {
+                    existing_iterator.next();
+                    if !should_remove(existing_element, &mut remove_iterator) {
+                        result.push(existing_element.clone());
+                    }
+                }
+                (None, Some(&add_element)) => {
+                    add_iterator.next();
+                    if !should_remove(add_element, &mut remove_iterator) {
+                        result.push(add_element.clone());
+                    }
+                }
+                (Some(&existing_element), Some(&add_element)) => {
+                    match existing_element.cmp(add_element) {
+                        std::cmp::Ordering::Less => {
+                            existing_iterator.next();
+                            if !should_remove(existing_element, &mut remove_iterator) {
+                                result.push(existing_element.clone());
+                            }
+                        }
+                        std::cmp::Ordering::Greater => {
+                            add_iterator.next();
+                            if !should_remove(add_element, &mut remove_iterator) {
+                                result.push(add_element.clone());
+                            }
+                        }
+                        std::cmp::Ordering::Equal => {
+                            existing_iterator.next();
+                            add_iterator.next();
+                            if !should_remove(existing_element, &mut remove_iterator) {
+                                result.push(existing_element.clone());
+                            }
+                        }
+                    }
+                }
             }
-            prev = Some(current);
         }
+
+        result
     }
 
     /// Computes `(existing ∪ add) - remove` with sorted, deduplicated output.
@@ -6515,23 +6065,6 @@ impl SearchIndex {
         remove: &[TaskId],
     ) -> Vec<TaskId> {
         Self::compute_merged_posting_list_iter(existing.iter(), add, remove)
-    }
-
-    /// Test wrapper for `merge_posting_lists_iter_sorted`.
-    #[cfg(test)]
-    #[must_use]
-    pub fn merge_posting_lists_iter_sorted<'a, E, A>(
-        existing: E,
-        add: A,
-        remove: &'a [TaskId],
-    ) -> Vec<TaskId>
-    where
-        E: Iterator<Item = &'a TaskId>,
-        A: Iterator<Item = &'a TaskId>,
-    {
-        let mut result = Vec::new();
-        Self::merge_posting_lists_3way_into(existing, add, remove.iter(), &mut result);
-        result
     }
 }
 
@@ -6924,12 +6457,7 @@ pub async fn search_tasks(
     // Security: Skip cache operations for excessively long queries to prevent
     // memory exhaustion. The search itself still proceeds but results won't be cached.
     let cache_key = if normalized_q.len() <= MAX_CACHE_QUERY_LENGTH {
-        Some(SearchCacheKey::from_raw(
-            normalized_q,
-            query.scope,
-            query.limit,
-            query.offset,
-        ))
+        Some(SearchCacheKey::from_raw(normalized_q, query.scope, query.limit, query.offset))
     } else {
         tracing::debug!(
             query_length = normalized_q.len(),
@@ -6941,22 +6469,22 @@ pub async fn search_tasks(
 
     // Check cache first (optional optimization for repeated queries)
     // Cache stores page-specific results (with limit/offset applied), so no re-pagination needed.
-    if let Some(ref key) = cache_key
-        && let Some(cached_result) = state.search_cache.get(key)
-    {
-        tracing::debug!(
-            cache_hit = true,
-            hit_rate = %state.search_cache.stats().hit_rate(),
-            "Search cache hit"
-        );
-        // Convert cached SearchResult to response (no re-pagination needed as cache
-        // key includes limit/offset and results are already paginated)
-        let response: Vec<TaskResponse> = cached_result
-            .into_tasks()
-            .iter()
-            .map(TaskResponse::from)
-            .collect();
-        return Ok(JsonResponse(response));
+    if let Some(ref key) = cache_key {
+        if let Some(cached_result) = state.search_cache.get(key) {
+            tracing::debug!(
+                cache_hit = true,
+                hit_rate = %state.search_cache.stats().hit_rate(),
+                "Search cache hit"
+            );
+            // Convert cached SearchResult to response (no re-pagination needed as cache
+            // key includes limit/offset and results are already paginated)
+            let response: Vec<TaskResponse> = cached_result
+                .into_tasks()
+                .iter()
+                .map(TaskResponse::from)
+                .collect();
+            return Ok(JsonResponse(response));
+        }
     }
 
     // Cache miss - log metrics
@@ -6974,12 +6502,7 @@ pub async fn search_tasks(
     // for consistent behavior with cache key generation
     let tasks = state
         .task_repository
-        .search(
-            normalized_q,
-            query.scope.to_repository_scope(),
-            limit,
-            offset,
-        )
+        .search(normalized_q, query.scope.to_repository_scope(), limit, offset)
         .await
         .map_err(ApiErrorResponse::from)?;
 
@@ -8109,11 +7632,11 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // Phase 1.1c: BMP外文字（絵文字）検索テスト (Codex Review #225)
+    // Phase 1.1c: Supplementary (non-BMP) character (emoji) search tests (Codex Review #225)
     // -------------------------------------------------------------------------
 
-    /// BMP外文字テスト: 絵文字を含むタイトルで "call" を検索すると "call😀back" がヒットする。
-    /// UTF-8 の `char_indices` で正しくバイト境界を処理することを確認。
+    /// Non-BMP character test: searching "call" in a title containing an emoji matches "call😀back".
+    /// Verifies correct byte boundary handling via UTF-8 `char_indices`.
     #[rstest]
     fn test_search_title_with_emoji_call_in_callback_emoji() {
         let tasks: PersistentVector<Task> = vec![
@@ -8136,7 +7659,7 @@ mod tests {
         );
     }
 
-    /// BMP外文字テスト: 絵文字を含むタイトルで "task" を検索すると "task🎉done" がヒットする。
+    /// Non-BMP character test: searching "task" in a title containing an emoji matches "task🎉done".
     #[rstest]
     fn test_search_title_with_emoji_task_in_task_emoji_done() {
         let tasks: PersistentVector<Task> = vec![
@@ -8159,7 +7682,7 @@ mod tests {
         );
     }
 
-    /// BMP外文字テスト: 絵文字を含むタグで "emoji" を検索すると "emoji😀tag" がヒットする。
+    /// Non-BMP character test: searching "emoji" in a tag containing an emoji matches "emoji😀tag".
     #[rstest]
     fn test_search_tag_with_emoji_emoji_in_emoji_tag() {
         let tasks: PersistentVector<Task> = vec![
@@ -8182,7 +7705,7 @@ mod tests {
         );
     }
 
-    /// BMP外文字テスト: 絵文字の後ろの文字列 "back" で "call😀back" を検索できる。
+    /// Non-BMP character test: searching "back" (suffix after emoji) finds "call😀back".
     #[rstest]
     fn test_search_title_with_emoji_suffix_back_in_callback_emoji() {
         let tasks: PersistentVector<Task> = vec![
@@ -8205,7 +7728,7 @@ mod tests {
         assert!(result.tasks.iter().any(|t| t.title.contains("call😀back")));
     }
 
-    /// BMP外文字テスト: 絵文字の後ろの文字列 "tag" で "emoji😀tag" タグを検索できる。
+    /// Non-BMP character test: searching "tag" (suffix after emoji) finds the "emoji😀tag" tag.
     #[rstest]
     fn test_search_tag_with_emoji_suffix_tag_in_emoji_tag() {
         let tasks: PersistentVector<Task> = vec![
@@ -8227,7 +7750,7 @@ mod tests {
         assert_eq!(result.tasks.len(), 1);
     }
 
-    /// BMP外文字テスト: 複数の絵文字を含むタイトルでも正しく検索できる。
+    /// Non-BMP character test: search works correctly even with multiple emojis in a title.
     #[rstest]
     fn test_search_title_with_multiple_emojis() {
         let tasks: PersistentVector<Task> = vec![
@@ -9657,7 +9180,7 @@ mod tests {
     /// Test: `SearchCacheKey::from_raw` normalizes pagination parameters.
     ///
     /// This ensures that cache keys with `None` values are equivalent to
-    /// cache keys with explicit default values (`limit=DEFAULT_SEARCH_LIMIT=20`, offset=0).
+    /// cache keys with explicit default values (limit=DEFAULT_SEARCH_LIMIT=20, offset=0).
     #[rstest]
     fn test_search_cache_key_from_raw_normalizes_pagination() {
         // None values should be normalized to defaults
@@ -10514,7 +10037,7 @@ mod search_index_differential_update_tests {
 
     /// Tests that original index is unchanged after `apply_bulk` (immutability).
     ///
-    /// This test verifies TB-001's `ImmutabilityPreserved` law for bulk updates:
+    /// This test verifies TB-001's ImmutabilityPreserved law for bulk updates:
     /// `apply_bulk(x, changes) != mutate(x)` - the original index is never mutated.
     #[rstest]
     fn test_apply_bulk_immutability_preserved() {
@@ -10528,9 +10051,7 @@ mod search_index_differential_update_tests {
         // Apply bulk Add (which returns a new index via Result)
         let new_task = create_test_task("Added via bulk", Priority::High);
         let changes = vec![TaskChange::Add(new_task)];
-        let _new_index = original_index
-            .apply_bulk(&changes)
-            .expect("apply_bulk should succeed");
+        let _new_index = original_index.apply_bulk(&changes).expect("apply_bulk should succeed");
 
         // Original index should be unchanged
         let count_after = original_index.all_tasks().len();
@@ -10548,8 +10069,7 @@ mod search_index_differential_update_tests {
         );
 
         // Verify new task is NOT in original index (immutability)
-        let result_new =
-            search_with_scope_indexed(&original_index, "added via bulk", SearchScope::All);
+        let result_new = search_with_scope_indexed(&original_index, "added via bulk", SearchScope::All);
         assert_eq!(
             result_new.tasks.len(),
             0,
@@ -11350,17 +10870,15 @@ mod search_index_config_tests {
     ///
     /// Verifies:
     /// - `use_bulk_builder`: true (enabled by default for Phase 1)
-    /// - `bulk_threshold`: 10 (Phase 3: lowered from 100 for `tasks_bulk` optimization)
+    /// - `bulk_threshold`: 100 (minimum changes to use `BulkBuilder`)
     /// - `use_merge_ngram_delta_bulk_insert`: true (enabled by default for Phase 3)
-    /// - `use_apply_bulk`: true (Phase 3: enabled by default for Add-only optimization)
     #[rstest]
     fn config_default_optimization_flags() {
         let config = SearchIndexConfig::default();
 
         assert!(config.use_bulk_builder);
-        assert_eq!(config.bulk_threshold, 10);
+        assert_eq!(config.bulk_threshold, 100);
         assert!(config.use_merge_ngram_delta_bulk_insert);
-        assert!(config.use_apply_bulk);
     }
 
     /// Tests that optimization flags can be disabled via explicit construction.
@@ -11383,8 +10901,6 @@ mod search_index_config_tests {
     // -------------------------------------------------------------------------
 
     /// Tests that `SearchIndexConfigBuilder` creates config with default values.
-    ///
-    /// Phase 3: Updated to reflect new defaults (`bulk_threshold`=10, `use_apply_bulk`=true)
     #[rstest]
     fn config_builder_default() {
         let config = SearchIndexConfigBuilder::new().build();
@@ -11397,9 +10913,8 @@ mod search_index_config_tests {
         assert_eq!(config.max_tokens_per_task, 100);
         assert_eq!(config.max_search_candidates, 1000);
         assert!(config.use_bulk_builder);
-        assert_eq!(config.bulk_threshold, 10); // Phase 3: lowered from 100
+        assert_eq!(config.bulk_threshold, 100);
         assert!(config.use_merge_ngram_delta_bulk_insert);
-        assert!(config.use_apply_bulk); // Phase 3: enabled by default
     }
 
     /// Tests that `SearchIndexConfigBuilder` can set optimization flags.
@@ -11456,16 +10971,21 @@ mod search_index_config_tests {
     // BENCH-001: use_apply_bulk Flag Tests
     // -------------------------------------------------------------------------
 
-    /// Tests that `use_apply_bulk` flag can be disabled via explicit construction.
-    ///
-    /// Phase 3: `use_apply_bulk` now defaults to true, so we test that it can be disabled.
+    /// Tests that `use_apply_bulk` flag is present in config and defaults to false.
     #[rstest]
-    fn config_use_apply_bulk_can_be_disabled() {
+    fn config_use_apply_bulk_default_is_false() {
+        let config = SearchIndexConfig::default();
+        assert!(!config.use_apply_bulk);
+    }
+
+    /// Tests that `use_apply_bulk` flag can be set via explicit construction.
+    #[rstest]
+    fn config_use_apply_bulk_can_be_enabled() {
         let config = SearchIndexConfig {
-            use_apply_bulk: false,
+            use_apply_bulk: true,
             ..Default::default()
         };
-        assert!(!config.use_apply_bulk);
+        assert!(config.use_apply_bulk);
     }
 
     /// Tests that `SearchIndexConfigBuilder` can set `use_apply_bulk` flag.
@@ -11478,50 +10998,6 @@ mod search_index_config_tests {
             .use_apply_bulk(false)
             .build();
         assert!(!config2.use_apply_bulk);
-    }
-
-    // -------------------------------------------------------------------------
-    // Phase 3: BULK_THRESHOLD Optimization Tests (REQ-PERF-MERGE-BUFFER-001)
-    // -------------------------------------------------------------------------
-
-    /// Tests that `bulk_threshold` defaults to 10 for Phase 3 optimization.
-    ///
-    /// Phase 3 requirement: Lower `bulk_threshold` from 100 to 10 to ensure
-    /// all batch sizes (10/50/100) in `tasks_bulk` benchmark use the bulk path.
-    #[rstest]
-    fn config_bulk_threshold_default_is_10_for_phase3() {
-        let config = SearchIndexConfig::default();
-        assert_eq!(
-            config.bulk_threshold, 10,
-            "Phase 3: bulk_threshold should default to 10 for tasks_bulk optimization"
-        );
-    }
-
-    /// Tests that `use_apply_bulk` defaults to true for Phase 3 optimization.
-    ///
-    /// Phase 3 requirement: Enable `use_apply_bulk` by default to ensure
-    /// Add-only changes automatically use the optimized `apply_bulk` path.
-    #[rstest]
-    fn config_use_apply_bulk_default_is_true_for_phase3() {
-        let config = SearchIndexConfig::default();
-        assert!(
-            config.use_apply_bulk,
-            "Phase 3: use_apply_bulk should default to true for Add-only optimization"
-        );
-    }
-
-    /// Tests that `SearchIndexConfigBuilder` preserves Phase 3 defaults.
-    #[rstest]
-    fn config_builder_preserves_phase3_defaults() {
-        let config = SearchIndexConfigBuilder::new().build();
-        assert_eq!(
-            config.bulk_threshold, 10,
-            "Builder should preserve Phase 3 bulk_threshold default"
-        );
-        assert!(
-            config.use_apply_bulk,
-            "Builder should preserve Phase 3 use_apply_bulk default"
-        );
     }
 }
 
@@ -11551,7 +11027,7 @@ mod ngram_tests {
 
     /// Tests n-gram generation from multibyte (UTF-8) string.
     ///
-    /// - Input: "日本語テスト", `ngram_size`=3, `max_ngrams`=64
+    /// - Input: a 6-character Japanese string, `ngram_size`=3, `max_ngrams`=64
     /// - Expected: 4 n-grams (6 chars - 3 + 1 = 4)
     #[rstest]
     fn generate_ngrams_multibyte() {
@@ -11773,7 +11249,7 @@ mod ngram_tests {
 
     /// Tests Unicode (Japanese) n-gram generation with `NgramWindow`.
     ///
-    /// - Input: "こんにちは", `ngram_size`=2, `max_ngrams`=100
+    /// - Input: a 5-character Japanese string, `ngram_size`=2, `max_ngrams`=100
     /// - Expected: 4 n-grams
     #[rstest]
     fn ngram_window_unicode_basic() {
@@ -15137,7 +14613,7 @@ mod apply_changes_tests {
     /// Asserts that two SearchIndex instances have identical content.
     /// Requirements: apply_changes must equal sequential apply_change
     fn assert_search_index_equals(batch: &SearchIndex, sequential: &SearchIndex) {
-        // 1. tasks_by_id の一致
+        // 1. tasks_by_id equality
         assert_eq!(
             batch.tasks_by_id.len(),
             sequential.tasks_by_id.len(),
@@ -15157,7 +14633,7 @@ mod apply_changes_tests {
             );
         }
 
-        // 2. title_full_index の一致
+        // 2. title_full_index equality
         assert_eq!(
             batch.title_full_index.len(),
             sequential.title_full_index.len(),
@@ -15181,7 +14657,7 @@ mod apply_changes_tests {
             );
         }
 
-        // 3. title_word_index の一致
+        // 3. title_word_index equality
         assert_eq!(
             batch.title_word_index.len(),
             sequential.title_word_index.len(),
@@ -15205,7 +14681,7 @@ mod apply_changes_tests {
             );
         }
 
-        // 4. tag_index の一致
+        // 4. tag_index equality
         assert_eq!(
             batch.tag_index.len(),
             sequential.tag_index.len(),
@@ -15231,7 +14707,7 @@ mod apply_changes_tests {
             );
         }
 
-        // 5. title_full_ngram_index の一致
+        // 5. title_full_ngram_index equality
         assert_eq!(
             batch.title_full_ngram_index.len(),
             sequential.title_full_ngram_index.len(),
@@ -15255,7 +14731,7 @@ mod apply_changes_tests {
             );
         }
 
-        // 6. title_word_ngram_index の一致
+        // 6. title_word_ngram_index equality
         assert_eq!(
             batch.title_word_ngram_index.len(),
             sequential.title_word_ngram_index.len(),
@@ -15279,7 +14755,7 @@ mod apply_changes_tests {
             );
         }
 
-        // 7. tag_ngram_index の一致
+        // 7. tag_ngram_index equality
         assert_eq!(
             batch.tag_ngram_index.len(),
             sequential.tag_ngram_index.len(),
@@ -15303,7 +14779,7 @@ mod apply_changes_tests {
             );
         }
 
-        // 8. title_full_all_suffix_index の一致
+        // 8. title_full_all_suffix_index equality
         assert_eq!(
             batch.title_full_all_suffix_index.len(),
             sequential.title_full_all_suffix_index.len(),
@@ -15327,7 +14803,7 @@ mod apply_changes_tests {
             );
         }
 
-        // 9. title_word_all_suffix_index の一致
+        // 9. title_word_all_suffix_index equality
         assert_eq!(
             batch.title_word_all_suffix_index.len(),
             sequential.title_word_all_suffix_index.len(),
@@ -15351,7 +14827,7 @@ mod apply_changes_tests {
             );
         }
 
-        // 10. tag_all_suffix_index の一致
+        // 10. tag_all_suffix_index equality
         assert_eq!(
             batch.tag_all_suffix_index.len(),
             sequential.tag_all_suffix_index.len(),
@@ -15435,19 +14911,19 @@ mod apply_changes_tests {
             .map(|t| TaskChange::Add(t.clone()))
             .collect();
 
-        // バッチ適用
+        // Batch apply
         let batch_result = index.apply_changes(&changes);
 
-        // 逐次適用
+        // Sequential apply
         let mut sequential_result = index.clone();
         for change in &changes {
             sequential_result = sequential_result.apply_change(change.clone());
         }
 
-        // インデックス全体の一致を検証
+        // Verify entire index equality
         assert_search_index_equals(&batch_result, &sequential_result);
 
-        // 検索結果の一致を検証
+        // Verify search results match
         assert_search_results_equal(&batch_result, &sequential_result, "New");
         assert_search_results_equal(&batch_result, &sequential_result, "Task");
     }
@@ -15471,10 +14947,10 @@ mod apply_changes_tests {
         let batch_result = index.apply_changes(&changes);
         let sequential_result = index.apply_change(changes[0].clone());
 
-        // インデックス全体の一致を検証
+        // Verify entire index equality
         assert_search_index_equals(&batch_result, &sequential_result);
 
-        // 検索結果の一致を検証（old が消え、new が見つかる）
+        // Verify search results match (old disappears, new is found)
         assert_search_results_equal(&batch_result, &sequential_result, "Updated");
         assert_search_results_equal(&batch_result, &sequential_result, &old_task.title);
     }
@@ -15491,10 +14967,10 @@ mod apply_changes_tests {
         let batch_result = index.apply_changes(&changes);
         let sequential_result = index.apply_change(changes[0].clone());
 
-        // インデックス全体の一致を検証
+        // Verify entire index equality
         assert_search_index_equals(&batch_result, &sequential_result);
 
-        // 検索結果の一致を検証（削除されたタスクが見つからない）
+        // Verify search results match (removed task is no longer found)
         assert_search_results_equal(&batch_result, &sequential_result, &task_to_remove.title);
     }
 
@@ -15528,10 +15004,10 @@ mod apply_changes_tests {
             sequential_result = sequential_result.apply_change(change.clone());
         }
 
-        // インデックス全体の一致を検証
+        // Verify entire index equality
         assert_search_index_equals(&batch_result, &sequential_result);
 
-        // 検索結果の一致を検証
+        // Verify search results match
         assert_search_results_equal(&batch_result, &sequential_result, "New");
         assert_search_results_equal(&batch_result, &sequential_result, "Updated");
         assert_search_results_equal(&batch_result, &sequential_result, &task_to_remove.title);
@@ -15567,7 +15043,7 @@ mod apply_changes_tests {
         let changes = vec![TaskChange::Remove(task.task_id.clone())];
         let result = index.apply_changes(&changes);
 
-        // title_full_index から空のエントリが除去される
+        // Empty entries should be removed from title_full_index
         let normalized = normalize_query(&task.title);
         assert!(
             result
@@ -15587,7 +15063,7 @@ mod apply_changes_tests {
         let task = create_test_task("Test Task");
         let index = create_empty_index();
 
-        // Add してから Remove（同一バッチ内）
+        // Add then Remove (within the same batch)
         let changes = vec![
             TaskChange::Add(task.clone()),
             TaskChange::Remove(task.task_id.clone()),
@@ -15595,10 +15071,10 @@ mod apply_changes_tests {
 
         let result = index.apply_changes(&changes);
 
-        // tasks_by_id にタスクが存在しない（打ち消された）
+        // Task should not exist in tasks_by_id (cancelled out)
         assert!(!result.tasks_by_id.contains_key(&task.task_id));
 
-        // インデックスにもエントリが残らない
+        // No entries should remain in the index
         let normalized = normalize_query(&task.title);
         assert!(
             result
@@ -15615,11 +15091,11 @@ mod apply_changes_tests {
         let old_task = create_test_task_with_id("Old Title", task_id.clone());
         let new_task = create_test_task_with_id("New Title", task_id.clone());
 
-        // 初期状態: old_task が存在
+        // Initial state: old_task exists
         let tasks: PersistentVector<Task> = vec![old_task.clone()].into_iter().collect();
         let index = SearchIndex::build_with_config(&tasks, SearchIndexConfig::default());
 
-        // Update してから Remove（同一バッチ内）
+        // Update then Remove (within the same batch)
         let changes = vec![
             TaskChange::Update {
                 old: old_task.clone(),
@@ -15630,10 +15106,10 @@ mod apply_changes_tests {
 
         let result = index.apply_changes(&changes);
 
-        // tasks_by_id にタスクが存在しない
+        // Task should not exist in tasks_by_id
         assert!(!result.tasks_by_id.contains_key(&old_task.task_id));
 
-        // old と new のどちらのインデックスも存在しない
+        // Neither old nor new index entries should exist
         let old_normalized = normalize_query(&old_task.title);
         let new_normalized = normalize_query(&new_task.title);
         assert!(
@@ -15665,16 +15141,16 @@ mod apply_changes_tests {
             TaskChange::Remove(task.task_id.clone()),
         ];
 
-        // バッチ適用
+        // Batch apply
         let batch_result = index.apply_changes(&changes);
 
-        // 逐次適用
+        // Sequential apply
         let mut sequential_result = index.clone();
         for change in &changes {
             sequential_result = sequential_result.apply_change(change.clone());
         }
 
-        // 結果が一致
+        // Results should match
         assert_eq!(
             batch_result.tasks_by_id.len(),
             sequential_result.tasks_by_id.len()
@@ -15690,7 +15166,7 @@ mod apply_changes_tests {
         let old_task = create_test_task_with_id("Old Title", task_id.clone());
         let new_task = create_test_task_with_id("New Title", task_id.clone());
 
-        // 初期状態: old_task が存在
+        // Initial state: old_task exists
         let tasks: PersistentVector<Task> = vec![old_task.clone()].into_iter().collect();
         let index = SearchIndex::build_with_config(&tasks, SearchIndexConfig::default());
 
@@ -15702,19 +15178,19 @@ mod apply_changes_tests {
             TaskChange::Remove(new_task.task_id.clone()),
         ];
 
-        // バッチ適用
+        // Batch apply
         let batch_result = index.apply_changes(&changes);
 
-        // 逐次適用
+        // Sequential apply
         let mut sequential_result = index.clone();
         for change in &changes {
             sequential_result = sequential_result.apply_change(change.clone());
         }
 
-        // インデックス全体の一致を検証
+        // Verify entire index equality
         assert_search_index_equals(&batch_result, &sequential_result);
 
-        // タスクが存在しないことを検証
+        // Verify that the task no longer exists
         assert!(!batch_result.tasks_by_id.contains_key(&old_task.task_id));
         assert!(
             !sequential_result
@@ -15755,16 +15231,16 @@ mod apply_changes_tests {
             new: new_task.clone(),
         }];
 
-        // バッチ適用
+        // Batch apply
         let batch_result = index.apply_changes(&changes);
 
-        // 逐次適用
+        // Sequential apply
         let mut sequential_result = index.clone();
         for change in &changes {
             sequential_result = sequential_result.apply_change(change.clone());
         }
 
-        // インデックス全体の一致を検証
+        // Verify entire index equality
         assert_search_index_equals(&batch_result, &sequential_result);
     }
 
@@ -15780,11 +15256,11 @@ mod apply_changes_tests {
         let task_id = task_id_from_u128(1);
         let task = create_test_task_with_id("Test Task", task_id.clone());
 
-        // 初期状態: task が存在
+        // Initial state: task exists
         let tasks: PersistentVector<Task> = vec![task.clone()].into_iter().collect();
         let index = SearchIndex::build_with_config(&tasks, SearchIndexConfig::default());
 
-        // Remove してから Add（同一 TaskId）- Add が勝つ
+        // Remove then Add (same TaskId) - Add wins
         let changes = vec![
             TaskChange::Remove(task.task_id.clone()),
             TaskChange::Add(task.clone()),
@@ -15792,14 +15268,14 @@ mod apply_changes_tests {
 
         let batch_result = index.apply_changes(&changes);
 
-        // 逐次適用と同じ結果になるはず
+        // Should produce the same result as sequential apply
         let mut sequential_result = index.clone();
         for change in &changes {
             sequential_result = sequential_result.apply_change(change.clone());
         }
 
         assert_search_index_equals(&batch_result, &sequential_result);
-        // タスクは存在するはず
+        // Task should still exist
         assert!(batch_result.tasks_by_id.contains_key(&task_id));
     }
 
@@ -15812,11 +15288,11 @@ mod apply_changes_tests {
         let old_task = create_test_task_with_id("Old Title", task_id.clone());
         let new_task = create_test_task_with_id("New Title", task_id);
 
-        // 初期状態: old_task が存在
+        // Initial state: old_task exists
         let tasks: PersistentVector<Task> = vec![old_task.clone()].into_iter().collect();
         let index = SearchIndex::build_with_config(&tasks, SearchIndexConfig::default());
 
-        // Remove してから Update（同一 TaskId）- Add として扱われる
+        // Remove then Update (same TaskId) - treated as Add
         let changes = vec![
             TaskChange::Remove(old_task.task_id.clone()),
             TaskChange::Update {
@@ -15827,14 +15303,14 @@ mod apply_changes_tests {
 
         let batch_result = index.apply_changes(&changes);
 
-        // 逐次適用と同じ結果になるはず
+        // Should produce the same result as sequential apply
         let mut sequential_result = index.clone();
         for change in &changes {
             sequential_result = sequential_result.apply_change(change.clone());
         }
 
         assert_search_index_equals(&batch_result, &sequential_result);
-        // タスクは存在するはず（新しいタイトルで）
+        // Task should exist (with the new title)
         assert!(batch_result.tasks_by_id.contains_key(&new_task.task_id));
     }
 
@@ -15861,19 +15337,19 @@ mod apply_changes_tests {
             .map(|task| TaskChange::Add(task.clone()))
             .collect();
 
-        // バッチ適用
+        // Batch apply
         let batch_result = index.apply_changes(&changes);
 
-        // 逐次適用
+        // Sequential apply
         let mut sequential_result = index.clone();
         for change in &changes {
             sequential_result = sequential_result.apply_change(change.clone());
         }
 
-        // インデックス全体の一致を検証
+        // Verify entire index equality
         assert_search_index_equals(&batch_result, &sequential_result);
 
-        // 検索結果の一致を検証
+        // Verify search results match
         assert_search_results_equal(&batch_result, &sequential_result, "New");
         assert_search_results_equal(&batch_result, &sequential_result, "Task");
         // infix search ("ew" is a suffix of "New")
@@ -15903,10 +15379,10 @@ mod apply_changes_tests {
         let batch_result = index.apply_changes(&changes);
         let sequential_result = index.apply_change(changes[0].clone());
 
-        // インデックス全体の一致を検証
+        // Verify entire index equality
         assert_search_index_equals(&batch_result, &sequential_result);
 
-        // 検索結果の一致を検証（old が消え、new が見つかる）
+        // Verify search results match (old disappears, new is found)
         assert_search_results_equal(&batch_result, &sequential_result, "Updated");
         assert_search_results_equal(&batch_result, &sequential_result, &old_task.title);
         // infix search ("pdated" is a suffix of "Updated")
@@ -15929,10 +15405,10 @@ mod apply_changes_tests {
         let batch_result = index.apply_changes(&changes);
         let sequential_result = index.apply_change(changes[0].clone());
 
-        // インデックス全体の一致を検証
+        // Verify entire index equality
         assert_search_index_equals(&batch_result, &sequential_result);
 
-        // 検索結果の一致を検証（削除されたタスクが見つからない）
+        // Verify search results match (removed task is no longer found)
         assert_search_results_equal(&batch_result, &sequential_result, &task_to_remove.title);
     }
 
@@ -15963,19 +15439,19 @@ mod apply_changes_tests {
             TaskChange::Remove(task_to_remove.task_id.clone()),
         ];
 
-        // バッチ適用
+        // Batch apply
         let batch_result = index.apply_changes(&changes);
 
-        // 逐次適用
+        // Sequential apply
         let mut sequential_result = index.clone();
         for change in &changes {
             sequential_result = sequential_result.apply_change(change.clone());
         }
 
-        // インデックス全体の一致を検証
+        // Verify entire index equality
         assert_search_index_equals(&batch_result, &sequential_result);
 
-        // 検索結果の一致を検証
+        // Verify search results match
         assert_search_results_equal(&batch_result, &sequential_result, "New");
         assert_search_results_equal(&batch_result, &sequential_result, "Updated");
         assert_search_results_equal(&batch_result, &sequential_result, &task_to_remove.title);
@@ -15997,19 +15473,19 @@ mod apply_changes_tests {
             TaskChange::Remove(new_task.task_id.clone()),
         ];
 
-        // バッチ適用
+        // Batch apply
         let batch_result = index.apply_changes(&changes);
 
-        // 逐次適用
+        // Sequential apply
         let mut sequential_result = index.clone();
         for change in &changes {
             sequential_result = sequential_result.apply_change(change.clone());
         }
 
-        // インデックス全体の一致を検証
+        // Verify entire index equality
         assert_search_index_equals(&batch_result, &sequential_result);
 
-        // 追加して削除したタスクは見つからないはず
+        // Task that was added then removed should not be found
         assert_search_results_equal(&batch_result, &sequential_result, "Temporary");
     }
 
@@ -19119,67 +18595,25 @@ mod search_index_bulk_builder_tests {
     }
 
     #[rstest]
-    /// Tests that when the same token is added with different TaskIds, all TaskIds are preserved.
-    ///
-    /// This is the correct behavior because different tasks may share the same token
-    /// (e.g., "New Task 1" and "New Task 2" both have token "task").
-    fn test_builder_same_token_different_task_ids_all_preserved() {
+    fn test_builder_duplicate_keys_last_wins() {
         let config = SearchIndexConfig::default();
         let task_id_1 = make_task_id(1);
         let task_id_2 = make_task_id(2);
         let task_id_3 = make_task_id(3);
 
         let index = SearchIndexBulkBuilder::new(config)
-            .add_entry("callback".to_string(), task_id_1.clone())
-            .add_entry("callback".to_string(), task_id_2.clone())
+            .add_entry("callback".to_string(), task_id_1)
+            .add_entry("callback".to_string(), task_id_2)
             .add_entry("callback".to_string(), task_id_3.clone())
             .build()
             .expect("build should succeed");
 
-        // All TaskIds should be preserved since they are different
-        // Check that all n-grams for "callback" contain all three task_ids
+        // The n-grams should only contain task_id_3 (last wins)
+        // Check that all n-grams for "callback" have task_id_3
         for (_key, collection) in &index {
-            let ids: std::collections::HashSet<_> = collection.iter().cloned().collect();
-            assert!(
-                ids.contains(&task_id_1),
-                "task_id_1 should be in collection"
-            );
-            assert!(
-                ids.contains(&task_id_2),
-                "task_id_2 should be in collection"
-            );
-            assert!(
-                ids.contains(&task_id_3),
-                "task_id_3 should be in collection"
-            );
-        }
-    }
-
-    /// Tests that when the same (token, task_id) pair is added multiple times, it's deduplicated.
-    #[rstest]
-    fn test_builder_duplicate_token_task_id_pair_deduplicated() {
-        let config = SearchIndexConfig::default();
-        let task_id = make_task_id(1);
-
-        let index = SearchIndexBulkBuilder::new(config)
-            .add_entry("callback".to_string(), task_id.clone())
-            .add_entry("callback".to_string(), task_id.clone())
-            .add_entry("callback".to_string(), task_id.clone())
-            .build()
-            .expect("build should succeed");
-
-        // The n-grams should contain task_id only once (deduplicated)
-        for (_key, collection) in &index {
-            assert_eq!(
-                collection.len(),
-                1,
-                "Collection should have exactly 1 entry"
-            );
-            assert_eq!(
-                collection.iter().next().unwrap(),
-                &task_id,
-                "The single entry should be task_id"
-            );
+            for id in collection {
+                assert_eq!(id, &task_id_3);
+            }
         }
     }
 
@@ -19932,11 +19366,10 @@ mod search_index_error_tests {
     #[rstest]
     fn test_apply_bulk_remove_change_returns_error() {
         let task = create_test_task("Test task");
-        let task_id = task.task_id.clone();
-        let tasks: PersistentVector<Task> = vec![task].into_iter().collect();
+        let tasks: PersistentVector<Task> = vec![task.clone()].into_iter().collect();
         let index = SearchIndex::build_with_config(&tasks, SearchIndexConfig::default());
 
-        let changes = vec![TaskChange::Remove(task_id)];
+        let changes = vec![TaskChange::Remove(task.task_id.clone())];
 
         let result = index.apply_bulk(&changes);
 
@@ -19993,10 +19426,10 @@ mod search_index_error_tests {
         let empty_tasks: PersistentVector<Task> = PersistentVector::new();
         let index = SearchIndex::build_with_config(&empty_tasks, SearchIndexConfig::default());
 
-        let changes: Vec<TaskChange> = (0..5)
+        let tasks: Vec<Task> = (0..5)
             .map(|i| create_test_task(&format!("Task {i}")))
-            .map(TaskChange::Add)
             .collect();
+        let changes: Vec<TaskChange> = tasks.into_iter().map(TaskChange::Add).collect();
 
         // Via apply_bulk
         let via_bulk = index
@@ -20030,733 +19463,5 @@ mod search_index_error_tests {
         assert!(result.is_ok());
         let new_index = result.unwrap();
         assert_eq!(new_index.tasks_by_id.len(), 1000);
-    }
-}
-
-// =============================================================================
-// RUST-001: merge_posting_lists_iter_sorted Tests
-// =============================================================================
-
-#[cfg(test)]
-mod merge_posting_lists_iter_sorted_tests {
-    use super::*;
-    use rstest::rstest;
-    use uuid::Uuid;
-
-    /// Helper: Creates `TaskId` from u128 values for deterministic testing.
-    fn task_id(n: u128) -> TaskId {
-        TaskId::from_uuid(Uuid::from_u128(n))
-    }
-
-    /// Helper: Creates a `Vec<TaskId>` from u128 values.
-    fn task_ids(values: &[u128]) -> Vec<TaskId> {
-        values.iter().map(|&v| task_id(v)).collect()
-    }
-
-    // -------------------------------------------------------------------------
-    // Boundary condition tests
-    // -------------------------------------------------------------------------
-
-    #[rstest]
-    #[case::all_empty(vec![], vec![], vec![], vec![])]
-    #[case::existing_only(vec![1, 2, 3], vec![], vec![], vec![1, 2, 3])]
-    #[case::add_only(vec![], vec![1, 2, 3], vec![], vec![1, 2, 3])]
-    #[case::merge_disjoint(vec![1, 3, 5], vec![2, 4, 6], vec![], vec![1, 2, 3, 4, 5, 6])]
-    #[case::merge_overlapping(vec![1, 2, 3], vec![2, 3, 4], vec![], vec![1, 2, 3, 4])]
-    #[case::with_remove(vec![1, 2, 3], vec![4, 5], vec![2, 4], vec![1, 3, 5])]
-    #[case::remove_all(vec![1, 2, 3], vec![], vec![1, 2, 3], vec![])]
-    #[case::remove_from_add_only(vec![], vec![1, 2, 3], vec![2], vec![1, 3])]
-    fn merge_posting_lists_iter_sorted_parametrized(
-        #[case] existing: Vec<u128>,
-        #[case] add: Vec<u128>,
-        #[case] remove: Vec<u128>,
-        #[case] expected: Vec<u128>,
-    ) {
-        let existing_ids = task_ids(&existing);
-        let add_ids = task_ids(&add);
-        let remove_ids = task_ids(&remove);
-        let expected_ids = task_ids(&expected);
-
-        let result = SearchIndex::merge_posting_lists_iter_sorted(
-            existing_ids.iter(),
-            add_ids.iter(),
-            &remove_ids,
-        );
-
-        assert_eq!(result, expected_ids);
-    }
-
-    // -------------------------------------------------------------------------
-    // Equivalence tests with existing implementation
-    // -------------------------------------------------------------------------
-
-    #[rstest]
-    #[case(0, 0, 0)]
-    #[case(1, 0, 0)]
-    #[case(0, 1, 0)]
-    #[case(1, 1, 0)]
-    #[case(10, 10, 0)]
-    #[case(10, 10, 5)]
-    #[case(100, 100, 50)]
-    fn merge_posting_lists_iter_sorted_matches_existing_version(
-        #[case] existing_count: usize,
-        #[case] add_count: usize,
-        #[case] remove_count: usize,
-    ) {
-        // Generate sorted, deduplicated test data (even numbers for existing, odd for add)
-        let existing: Vec<TaskId> = (0..existing_count as u128 * 2)
-            .step_by(2)
-            .map(task_id)
-            .collect();
-        let add: Vec<TaskId> = (1..add_count as u128 * 2).step_by(2).map(task_id).collect();
-        let remove: Vec<TaskId> = (0..remove_count as u128).map(task_id).collect();
-
-        let iter_result =
-            SearchIndex::merge_posting_lists_iter_sorted(existing.iter(), add.iter(), &remove);
-
-        let sorted_result =
-            SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &add, &remove);
-
-        assert_eq!(iter_result, sorted_result);
-    }
-
-    // -------------------------------------------------------------------------
-    // Edge case tests
-    // -------------------------------------------------------------------------
-
-    #[rstest]
-    fn merge_posting_lists_iter_sorted_single_element_each() {
-        let existing = task_ids(&[1]);
-        let add = task_ids(&[2]);
-        let remove = task_ids(&[]);
-
-        let result =
-            SearchIndex::merge_posting_lists_iter_sorted(existing.iter(), add.iter(), &remove);
-
-        assert_eq!(result, task_ids(&[1, 2]));
-    }
-
-    #[rstest]
-    fn merge_posting_lists_iter_sorted_remove_nonexistent() {
-        // Remove element that doesn't exist in either list
-        let existing = task_ids(&[1, 3, 5]);
-        let add = task_ids(&[2, 4, 6]);
-        let remove = task_ids(&[100, 200]); // Not in existing or add
-
-        let result =
-            SearchIndex::merge_posting_lists_iter_sorted(existing.iter(), add.iter(), &remove);
-
-        assert_eq!(result, task_ids(&[1, 2, 3, 4, 5, 6]));
-    }
-}
-
-// =============================================================================
-// merge_posting_lists_3way_into Tests (REQ-SEARCH-PL-002)
-// =============================================================================
-
-#[cfg(test)]
-mod merge_posting_lists_3way_into_tests {
-    use super::*;
-    use rstest::rstest;
-    use uuid::Uuid;
-
-    fn task_ids(values: &[u128]) -> Vec<TaskId> {
-        values
-            .iter()
-            .map(|&v| TaskId::from_uuid(Uuid::from_u128(v)))
-            .collect()
-    }
-
-    fn merge(existing: &[u128], add: &[u128], remove: &[u128]) -> Vec<TaskId> {
-        let existing = task_ids(existing);
-        let add = task_ids(add);
-        let remove = task_ids(remove);
-        let mut result = Vec::new();
-        SearchIndex::merge_posting_lists_3way_into(
-            existing.iter(),
-            add.iter(),
-            remove.iter(),
-            &mut result,
-        );
-        result
-    }
-
-    #[rstest]
-    fn empty_all_inputs() {
-        assert!(merge(&[], &[], &[]).is_empty());
-    }
-
-    #[rstest]
-    fn existing_only() {
-        assert_eq!(
-            merge(&[1, 3, 5, 7, 9], &[], &[]),
-            task_ids(&[1, 3, 5, 7, 9])
-        );
-    }
-
-    #[rstest]
-    fn add_only() {
-        assert_eq!(
-            merge(&[], &[2, 4, 6, 8, 10], &[]),
-            task_ids(&[2, 4, 6, 8, 10])
-        );
-    }
-
-    #[rstest]
-    fn remove_only_returns_empty() {
-        assert!(merge(&[], &[], &[1, 2, 3]).is_empty());
-    }
-
-    #[rstest]
-    fn union_without_overlap() {
-        assert_eq!(
-            merge(&[1, 3, 5], &[2, 4, 6], &[]),
-            task_ids(&[1, 2, 3, 4, 5, 6])
-        );
-    }
-
-    #[rstest]
-    fn union_with_overlap_deduplicates() {
-        assert_eq!(
-            merge(&[1, 2, 3, 5], &[2, 3, 4, 6], &[]),
-            task_ids(&[1, 2, 3, 4, 5, 6])
-        );
-    }
-
-    #[rstest]
-    fn remove_from_existing() {
-        assert_eq!(merge(&[1, 2, 3, 4, 5], &[], &[2, 4]), task_ids(&[1, 3, 5]));
-    }
-
-    #[rstest]
-    fn remove_from_add() {
-        assert_eq!(merge(&[], &[1, 2, 3, 4, 5], &[2, 4]), task_ids(&[1, 3, 5]));
-    }
-
-    #[rstest]
-    fn remove_from_both() {
-        assert_eq!(
-            merge(&[1, 2, 3], &[4, 5, 6], &[2, 5]),
-            task_ids(&[1, 3, 4, 6])
-        );
-    }
-
-    #[rstest]
-    fn remove_overlapping_element() {
-        assert_eq!(merge(&[1, 2, 3], &[2, 3, 4], &[2]), task_ids(&[1, 3, 4]));
-    }
-
-    #[rstest]
-    fn remove_all() {
-        assert!(merge(&[1, 2, 3], &[4, 5, 6], &[1, 2, 3, 4, 5, 6]).is_empty());
-    }
-
-    #[rstest]
-    fn remove_nonexistent() {
-        assert_eq!(
-            merge(&[1, 3, 5], &[2, 4, 6], &[100, 200]),
-            task_ids(&[1, 2, 3, 4, 5, 6])
-        );
-    }
-
-    #[rstest]
-    fn remove_longer_than_union() {
-        assert_eq!(
-            merge(&[1, 2, 3], &[4, 5], &[2, 4, 100, 200, 300, 400, 500]),
-            task_ids(&[1, 3, 5])
-        );
-    }
-
-    #[rstest]
-    fn interleaved_elements() {
-        assert_eq!(
-            merge(&[1, 4, 7, 10], &[2, 5, 8, 11], &[4, 5]),
-            task_ids(&[1, 2, 7, 8, 10, 11])
-        );
-    }
-
-    #[rstest]
-    fn single_element_each() {
-        assert_eq!(merge(&[1], &[2], &[3]), task_ids(&[1, 2]));
-    }
-
-    #[rstest]
-    fn single_element_removed() {
-        assert!(merge(&[1], &[], &[1]).is_empty());
-    }
-
-    #[rstest]
-    fn large_gap_in_ids() {
-        assert_eq!(
-            merge(&[1, 1_000_000], &[500_000, 2_000_000], &[500_000]),
-            task_ids(&[1, 1_000_000, 2_000_000])
-        );
-    }
-
-    #[rstest]
-    fn buffer_reuse() {
-        let mut result = Vec::with_capacity(100);
-
-        let existing1 = task_ids(&[1, 2, 3]);
-        let add1 = task_ids(&[4, 5]);
-        let remove1: Vec<TaskId> = vec![];
-        SearchIndex::merge_posting_lists_3way_into(
-            existing1.iter(),
-            add1.iter(),
-            remove1.iter(),
-            &mut result,
-        );
-        assert_eq!(result, task_ids(&[1, 2, 3, 4, 5]));
-
-        result.clear();
-
-        let existing2 = task_ids(&[10, 20]);
-        let add2 = task_ids(&[15, 25]);
-        let remove2 = task_ids(&[15]);
-        SearchIndex::merge_posting_lists_3way_into(
-            existing2.iter(),
-            add2.iter(),
-            remove2.iter(),
-            &mut result,
-        );
-        assert_eq!(result, task_ids(&[10, 20, 25]));
-    }
-
-    // -------------------------------------------------------------------------
-    // Precondition Violation Tests (debug_assertions only)
-    // -------------------------------------------------------------------------
-
-    #[cfg(debug_assertions)]
-    #[rstest]
-    #[should_panic(expected = "add_slice slice must be sorted and deduplicated")]
-    fn panics_on_unsorted_add_slice() {
-        let _existing = task_ids(&[1, 3]);
-        let add = task_ids(&[2, 1]); // unsorted
-        let remove: Vec<TaskId> = vec![];
-        let mut buffer = crate::api::query::MergeBuffer::new();
-        let controller = AdaptiveCapacityController::new();
-        let mut stats = MergeStats::default();
-        SearchIndex::merge_single_posting_list_with_buffer(
-            None,
-            &add,
-            &remove,
-            &mut buffer,
-            &controller,
-            &mut stats,
-        );
-    }
-
-    #[cfg(debug_assertions)]
-    #[rstest]
-    #[should_panic(expected = "remove_slice slice must be sorted and deduplicated")]
-    fn panics_on_unsorted_remove_slice() {
-        let _existing = task_ids(&[1, 3]);
-        let add: Vec<TaskId> = vec![];
-        let remove = task_ids(&[3, 1]); // unsorted
-        let mut buffer = crate::api::query::MergeBuffer::new();
-        let controller = AdaptiveCapacityController::new();
-        let mut stats = MergeStats::default();
-        SearchIndex::merge_single_posting_list_with_buffer(
-            None,
-            &add,
-            &remove,
-            &mut buffer,
-            &controller,
-            &mut stats,
-        );
-    }
-
-    #[cfg(debug_assertions)]
-    #[rstest]
-    #[should_panic(expected = "add_slice slice must be sorted and deduplicated")]
-    fn panics_on_duplicate_add_slice() {
-        let _existing = task_ids(&[1, 3]);
-        let add = task_ids(&[2, 2, 4]); // duplicate
-        let remove: Vec<TaskId> = vec![];
-        let mut buffer = crate::api::query::MergeBuffer::new();
-        let controller = AdaptiveCapacityController::new();
-        let mut stats = MergeStats::default();
-        SearchIndex::merge_single_posting_list_with_buffer(
-            None,
-            &add,
-            &remove,
-            &mut buffer,
-            &controller,
-            &mut stats,
-        );
-    }
-
-    #[cfg(debug_assertions)]
-    #[rstest]
-    #[should_panic(expected = "remove_slice slice must be sorted and deduplicated")]
-    fn panics_on_duplicate_remove_slice() {
-        let _existing = task_ids(&[1, 3]);
-        let add: Vec<TaskId> = vec![];
-        let remove = task_ids(&[3, 3]); // duplicate
-        let mut buffer = crate::api::query::MergeBuffer::new();
-        let controller = AdaptiveCapacityController::new();
-        let mut stats = MergeStats::default();
-        SearchIndex::merge_single_posting_list_with_buffer(
-            None,
-            &add,
-            &remove,
-            &mut buffer,
-            &controller,
-            &mut stats,
-        );
-    }
-
-    #[rstest]
-    fn clears_result_buffer_before_merge() {
-        let existing = task_ids(&[1]);
-        let add = task_ids(&[2]);
-        let remove: Vec<TaskId> = vec![];
-        // Pre-fill result with garbage data
-        let mut result = task_ids(&[999, 888, 777]);
-        SearchIndex::merge_posting_lists_3way_into(
-            existing.iter(),
-            add.iter(),
-            remove.iter(),
-            &mut result,
-        );
-        // Result should be cleared and contain only merged elements
-        assert_eq!(result, task_ids(&[1, 2]));
-    }
-
-    #[rstest]
-    fn remove_smaller_than_min_is_ignored() {
-        // Tests the `while remove.peek() < val` branch
-        // Remove elements [1, 2, 3] are all smaller than min(existing=5, add=6)
-        assert_eq!(merge(&[5, 7], &[6, 8], &[1, 2, 3]), task_ids(&[5, 6, 7, 8]));
-    }
-}
-
-// =============================================================================
-// MergeBuffer Capacity Retention Tests (REQ-PERF-MERGE-BUFFER-001)
-// =============================================================================
-
-#[cfg(test)]
-mod merge_buffer_capacity_tests {
-    use super::*;
-    use rstest::rstest;
-    use std::sync::{Mutex, OnceLock};
-    use uuid::Uuid;
-
-    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-
-    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
-        ENV_LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .expect("ENV_LOCK poisoned")
-    }
-
-    #[allow(unsafe_code)]
-    fn set_env(key: &str, value: &str) {
-        let _guard = env_guard();
-        unsafe { std::env::set_var(key, value) };
-    }
-
-    fn task_id(value: u128) -> TaskId {
-        TaskId::from_uuid(Uuid::from_u128(value))
-    }
-
-    #[rstest]
-    fn take_with_capacity_preserves_capacity() {
-        let mut buffer = MergeBuffer::with_capacity(100);
-        buffer.result.push(task_id(1));
-        buffer.result.push(task_id(2));
-
-        let result = buffer.take_with_capacity();
-
-        assert_eq!(result.len(), 2);
-        assert!(buffer.result.is_empty());
-        assert!(buffer.result.capacity() >= 100);
-    }
-
-    #[rstest]
-    fn take_with_capacity_multiple_iterations() {
-        let mut buffer = MergeBuffer::with_capacity(100);
-
-        for i in 0..5 {
-            buffer.result.push(task_id(i));
-            let result = buffer.take_with_capacity();
-            assert_eq!(result.len(), 1);
-            assert!(
-                buffer.result.capacity() >= 100,
-                "Iteration {i}: capacity should be preserved, but was {}",
-                buffer.result.capacity()
-            );
-        }
-    }
-
-    #[rstest]
-    fn take_with_capacity_returns_correct_content() {
-        let mut buffer = MergeBuffer::with_capacity(50);
-        buffer.result.push(task_id(10));
-        buffer.result.push(task_id(20));
-        buffer.result.push(task_id(30));
-
-        let result = buffer.take_with_capacity();
-
-        assert_eq!(result.len(), 3);
-        assert_eq!(result[0], task_id(10));
-        assert_eq!(result[1], task_id(20));
-        assert_eq!(result[2], task_id(30));
-    }
-
-    #[rstest]
-    fn take_with_capacity_on_empty_buffer_preserves_capacity() {
-        let mut buffer = MergeBuffer::with_capacity(200);
-
-        let result = buffer.take_with_capacity();
-
-        assert!(result.is_empty());
-        assert!(buffer.result.capacity() >= 200);
-    }
-
-    #[rstest]
-    fn take_with_capacity_preserves_capacity_within_limit() {
-        let mut buffer = MergeBuffer::with_capacity(5_000);
-        // Push elements within limit
-        for i in 0..5_000_u128 {
-            buffer.result.push(task_id(i));
-        }
-
-        let result = buffer.take_with_capacity();
-
-        assert_eq!(result.len(), 5_000);
-        // Capacity should be preserved (not reset) since it's within limit
-        assert!(
-            buffer.result.capacity() >= 5_000,
-            "Buffer capacity should be preserved, but was {}",
-            buffer.result.capacity()
-        );
-    }
-
-    #[rstest]
-    fn return_buffer_clips_to_max_capacity() {
-        set_env("LAMBARS_MERGE_BUFFER_CAPACITY_MIN", "1");
-        set_env("LAMBARS_MERGE_BUFFER_CAPACITY_MAX", "500");
-        let controller = AdaptiveCapacityController::new();
-        let mut buffer = MergeBuffer::new();
-        let returned: Vec<TaskId> = Vec::with_capacity(2_000);
-        buffer.return_buffer(returned, &controller);
-        assert_eq!(buffer.spare.capacity(), 500);
-    }
-
-    #[rstest]
-    fn adaptive_controller_clamps_to_bounds() {
-        set_env("LAMBARS_MERGE_BUFFER_CAPACITY_MIN", "1000");
-        set_env("LAMBARS_MERGE_BUFFER_CAPACITY_MAX", "2000");
-        let controller = AdaptiveCapacityController::new();
-        controller.update_from_percentile(10_000);
-        assert_eq!(controller.recommended_capacity(), 2_000);
-    }
-
-    #[rstest]
-    fn fast_path_triggers_when_enabled() {
-        set_env("LAMBARS_ENABLE_LARGE_LIST_FAST_PATH", "1");
-        set_env("LAMBARS_LARGE_LIST_THRESHOLD", "4");
-        let controller = AdaptiveCapacityController::new();
-        let mut buffer = MergeBuffer::new();
-        let existing = vec![task_id(1), task_id(3), task_id(5), task_id(7)];
-        let add = vec![task_id(2), task_id(4)];
-        let remove = vec![task_id(3)];
-        let mut stats = MergeStats::default();
-
-        let merged = SearchIndex::merge_single_posting_list_with_buffer(
-            Some(&OrderedUniqueSet::from_sorted_vec(existing.clone())),
-            &add,
-            &remove,
-            &mut buffer,
-            &controller,
-            &mut stats,
-        );
-
-        assert!(stats.used_fast_path);
-        assert_eq!(
-            merged,
-            vec![task_id(1), task_id(2), task_id(4), task_id(5), task_id(7)]
-        );
-    }
-
-    #[rstest]
-    fn fast_path_disabled_uses_legacy() {
-        set_env("LAMBARS_ENABLE_LARGE_LIST_FAST_PATH", "0");
-        set_env("LAMBARS_LARGE_LIST_THRESHOLD", "4");
-        let controller = AdaptiveCapacityController::new();
-        let mut buffer = MergeBuffer::new();
-        let existing = vec![task_id(1), task_id(3), task_id(5), task_id(7)];
-        let add = vec![task_id(2), task_id(4)];
-        let remove = vec![task_id(3)];
-        let mut stats = MergeStats::default();
-
-        let merged = SearchIndex::merge_single_posting_list_with_buffer(
-            Some(&OrderedUniqueSet::from_sorted_vec(existing.clone())),
-            &add,
-            &remove,
-            &mut buffer,
-            &controller,
-            &mut stats,
-        );
-
-        assert!(!stats.used_fast_path);
-        assert_eq!(
-            merged,
-            vec![task_id(1), task_id(2), task_id(4), task_id(5), task_id(7)]
-        );
-    }
-}
-
-// =============================================================================
-// merge_add_only_into Tests (REQ-PERF-MERGE-BUFFER-001 Phase 2)
-// =============================================================================
-
-#[cfg(test)]
-mod merge_add_only_into_tests {
-    use super::*;
-    use rstest::rstest;
-    use uuid::Uuid;
-
-    fn task_id(value: u128) -> TaskId {
-        TaskId::from_uuid(Uuid::from_u128(value))
-    }
-
-    fn task_ids(values: &[u128]) -> Vec<TaskId> {
-        values.iter().map(|&v| task_id(v)).collect()
-    }
-
-    fn merge(existing: &[u128], add: &[u128]) -> Vec<TaskId> {
-        let existing: Vec<TaskId> = existing.iter().map(|&v| task_id(v)).collect();
-        let add: Vec<TaskId> = add.iter().map(|&v| task_id(v)).collect();
-        let mut result = Vec::new();
-        SearchIndex::merge_add_only_into(existing.iter(), add.iter(), &mut result);
-        result
-    }
-
-    #[rstest]
-    fn empty_both() {
-        assert_eq!(merge(&[], &[]), vec![]);
-    }
-
-    #[rstest]
-    fn existing_only() {
-        assert_eq!(
-            merge(&[1, 2, 3], &[]),
-            vec![task_id(1), task_id(2), task_id(3)]
-        );
-    }
-
-    #[rstest]
-    fn add_only() {
-        assert_eq!(
-            merge(&[], &[1, 2, 3]),
-            vec![task_id(1), task_id(2), task_id(3)]
-        );
-    }
-
-    #[rstest]
-    fn union_without_overlap() {
-        assert_eq!(
-            merge(&[1, 3], &[2, 4]),
-            vec![task_id(1), task_id(2), task_id(3), task_id(4)]
-        );
-    }
-
-    #[rstest]
-    fn union_with_overlap_deduplicates() {
-        assert_eq!(
-            merge(&[1, 2, 3], &[2, 3, 4]),
-            vec![task_id(1), task_id(2), task_id(3), task_id(4)]
-        );
-    }
-
-    #[rstest]
-    fn interleaved() {
-        assert_eq!(
-            merge(&[1, 3, 5, 7], &[2, 4, 6, 8]),
-            vec![
-                task_id(1),
-                task_id(2),
-                task_id(3),
-                task_id(4),
-                task_id(5),
-                task_id(6),
-                task_id(7),
-                task_id(8)
-            ]
-        );
-    }
-
-    #[rstest]
-    fn single_element_existing() {
-        assert_eq!(merge(&[5], &[]), vec![task_id(5)]);
-    }
-
-    #[rstest]
-    fn single_element_add() {
-        assert_eq!(merge(&[], &[5]), vec![task_id(5)]);
-    }
-
-    #[rstest]
-    fn single_element_both_same() {
-        assert_eq!(merge(&[5], &[5]), vec![task_id(5)]);
-    }
-
-    #[rstest]
-    fn single_element_both_different() {
-        assert_eq!(merge(&[3], &[7]), vec![task_id(3), task_id(7)]);
-    }
-
-    #[rstest]
-    fn large_existing_small_add() {
-        assert_eq!(
-            merge(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10], &[15]),
-            vec![
-                task_id(1),
-                task_id(2),
-                task_id(3),
-                task_id(4),
-                task_id(5),
-                task_id(6),
-                task_id(7),
-                task_id(8),
-                task_id(9),
-                task_id(10),
-                task_id(15)
-            ]
-        );
-    }
-
-    #[rstest]
-    fn small_existing_large_add() {
-        assert_eq!(
-            merge(&[5], &[1, 2, 3, 4, 6, 7, 8, 9, 10]),
-            vec![
-                task_id(1),
-                task_id(2),
-                task_id(3),
-                task_id(4),
-                task_id(5),
-                task_id(6),
-                task_id(7),
-                task_id(8),
-                task_id(9),
-                task_id(10)
-            ]
-        );
-    }
-
-    #[rstest]
-    fn result_buffer_reuse() {
-        // Test that result buffer is properly cleared and reused
-        let mut result = task_ids(&[999, 888, 777]); // Pre-fill with garbage
-        let existing = task_ids(&[1, 2]);
-        let add = task_ids(&[3, 4]);
-
-        SearchIndex::merge_add_only_into(existing.iter(), add.iter(), &mut result);
-
-        assert_eq!(result, task_ids(&[1, 2, 3, 4]));
     }
 }

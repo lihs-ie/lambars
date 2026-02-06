@@ -1,8 +1,8 @@
-//! Phase 11: pipe! マクロ統合テスト
+//! Phase 11: pipe! macro integration tests
 //!
-//! pipe! マクロを使用した関数の動作を検証する。
-//! 既存のテストは events_tests.rs にあるため、
-//! ここでは pipe! マクロ固有のパターンを検証する。
+//! Verifies the behavior of functions using the pipe! macro.
+//! Since existing tests are in events_tests.rs,
+//! This file verifies pipe! macro-specific patterns.
 
 use order_taking_sample::compound_types::{Address, CustomerInfo};
 use order_taking_sample::simple_types::{
@@ -16,7 +16,7 @@ use rstest::rstest;
 use rust_decimal::Decimal;
 
 // =============================================================================
-// テストヘルパー
+// Test helpers
 // =============================================================================
 
 fn create_test_priced_order(
@@ -56,12 +56,12 @@ fn create_test_product_line(line_id: &str, product_code: &str, price: Decimal) -
 }
 
 // =============================================================================
-// create_events のテスト（REQ-111）
+// Tests for create_events (REQ-111)
 // =============================================================================
 
 #[rstest]
 fn test_create_events_with_pipe_macro_generates_correct_order() {
-    // pipe! マクロを使用した実装が正しいイベント順序を生成することを確認
+    // Verify the pipe! macro implementation generates events in correct order
     let priced_order = create_test_priced_order("order-001", Decimal::from(1000), vec![]);
     let order_id = OrderId::create("OrderId", "order-001").unwrap();
     let email = EmailAddress::create("EmailAddress", "test@example.com").unwrap();
@@ -69,7 +69,7 @@ fn test_create_events_with_pipe_macro_generates_correct_order() {
 
     let events = create_events(&priced_order, Some(acknowledgment));
 
-    // イベント順序の検証: Acknowledgment -> Shippable -> Billable
+    // Verify event order: Acknowledgment -> Shippable -> Billable
     assert_eq!(events.len(), 3);
     assert!(events[0].is_acknowledgment());
     assert!(events[1].is_shippable());
@@ -78,12 +78,12 @@ fn test_create_events_with_pipe_macro_generates_correct_order() {
 
 #[rstest]
 fn test_create_events_with_pipe_macro_handles_none_acknowledgment() {
-    // acknowledgment が None の場合のテスト
+    // Test when acknowledgment is None
     let priced_order = create_test_priced_order("order-002", Decimal::from(500), vec![]);
 
     let events = create_events(&priced_order, None);
 
-    // Acknowledgment なし: Shippable -> Billable
+    // No Acknowledgment: Shippable -> Billable
     assert_eq!(events.len(), 2);
     assert!(events[0].is_shippable());
     assert!(events[1].is_billable());
@@ -91,7 +91,7 @@ fn test_create_events_with_pipe_macro_handles_none_acknowledgment() {
 
 #[rstest]
 fn test_create_events_with_pipe_macro_handles_zero_billing() {
-    // 請求金額が 0 の場合のテスト
+    // Test when billing amount is 0
     let priced_order = create_test_priced_order("order-003", Decimal::ZERO, vec![]);
     let order_id = OrderId::create("OrderId", "order-003").unwrap();
     let email = EmailAddress::create("EmailAddress", "test@example.com").unwrap();
@@ -99,30 +99,30 @@ fn test_create_events_with_pipe_macro_handles_zero_billing() {
 
     let events = create_events(&priced_order, Some(acknowledgment));
 
-    // Billable なし: Acknowledgment -> Shippable
+    // No Billable: Acknowledgment -> Shippable
     assert_eq!(events.len(), 2);
     assert!(events[0].is_acknowledgment());
     assert!(events[1].is_shippable());
 }
 
 // =============================================================================
-// create_shipping_event のテスト（REQ-112）
+// Tests for create_shipping_event (REQ-112)
 // =============================================================================
 
 #[rstest]
 fn test_create_shipping_event_with_pipe_macro_generates_pdf_name() {
-    // pipe! マクロを使用した PDF 名生成の検証
+    // Verify PDF name generation using pipe! macro
     let priced_order = create_test_priced_order("order-001", Decimal::from(100), vec![]);
 
     let event = create_shipping_event(&priced_order);
 
-    // PDF 名が正しく生成されていることを確認
+    // Verify the PDF name is generated correctly
     assert_eq!(event.pdf().name(), "Orderorder-001.pdf");
 }
 
 #[rstest]
 fn test_create_shipping_event_with_pipe_macro_includes_order_id() {
-    // pipe! マクロを使用したイベント生成で order_id が正しく設定されることを確認
+    // Verify order_id is set correctly in event generation using pipe! macro
     let priced_order = create_test_priced_order("order-xyz", Decimal::from(100), vec![]);
 
     let event = create_shipping_event(&priced_order);
@@ -132,7 +132,7 @@ fn test_create_shipping_event_with_pipe_macro_includes_order_id() {
 
 #[rstest]
 fn test_create_shipping_event_with_pipe_macro_filters_comment_lines() {
-    // pipe! マクロを使用した実装が CommentLine を正しくフィルタすることを確認
+    // Verify the pipe! macro implementation correctly filters CommentLine
     let lines = vec![
         create_test_product_line("line-001", "W1234", Decimal::from(100)),
         PricedOrderLine::CommentLine("Gift wrapping".to_string()),
@@ -142,17 +142,17 @@ fn test_create_shipping_event_with_pipe_macro_filters_comment_lines() {
 
     let event = create_shipping_event(&priced_order);
 
-    // CommentLine はフィルタされ、ProductLine のみが含まれる
+    // CommentLine is filtered out, only ProductLine is included
     assert_eq!(event.shipment_lines().len(), 2);
 }
 
 // =============================================================================
-// create_billing_event のテスト（REQ-113）
+// Tests for create_billing_event (REQ-113)
 // =============================================================================
 
 #[rstest]
 fn test_create_billing_event_with_pipe_macro_returns_some_for_positive_amount() {
-    // pipe! マクロを使用した実装が正の金額で Some を返すことを確認
+    // Verify the pipe! macro implementation returns Some for positive amounts
     let priced_order = create_test_priced_order("order-001", Decimal::from(1000), vec![]);
 
     let result = create_billing_event(&priced_order);
@@ -164,7 +164,7 @@ fn test_create_billing_event_with_pipe_macro_returns_some_for_positive_amount() 
 
 #[rstest]
 fn test_create_billing_event_with_pipe_macro_returns_none_for_zero_amount() {
-    // pipe! マクロを使用した実装が 0 金額で None を返すことを確認
+    // Verify the pipe! macro implementation returns None for 0 amount
     let priced_order = create_test_priced_order("order-002", Decimal::ZERO, vec![]);
 
     let result = create_billing_event(&priced_order);
@@ -174,7 +174,7 @@ fn test_create_billing_event_with_pipe_macro_returns_none_for_zero_amount() {
 
 #[rstest]
 fn test_create_billing_event_with_pipe_macro_includes_correct_order_id() {
-    // pipe! マクロを使用した実装が正しい order_id を含むことを確認
+    // Verify the pipe! macro implementation includes correct order_id
     let priced_order = create_test_priced_order("order-billing", Decimal::from(500), vec![]);
 
     let result = create_billing_event(&priced_order);
@@ -185,13 +185,13 @@ fn test_create_billing_event_with_pipe_macro_includes_correct_order_id() {
 }
 
 // =============================================================================
-// pipe! マクロ合成テスト（REQ-117）
+// pipe! macro composition tests (REQ-117)
 // =============================================================================
 
 #[rstest]
 fn test_pipe_macro_composition_in_event_pipeline() {
-    // pipe! マクロによる関数合成が正しく動作することを検証
-    // shipping_event -> PlaceOrderEvent::ShippableOrderPlaced の変換
+    // Verify function composition via pipe! macro works correctly
+    // shipping_event -> PlaceOrderEvent::ShippableOrderPlaced conversion
     let lines = vec![create_test_product_line(
         "line-001",
         "W1234",
@@ -201,12 +201,12 @@ fn test_pipe_macro_composition_in_event_pipeline() {
 
     let events = create_events(&priced_order, None);
 
-    // Shippable イベントが正しく生成されていることを確認
+    // Verify the Shippable event is generated correctly
     assert!(events.len() >= 1);
     let shippable_event = &events[0];
     assert!(shippable_event.is_shippable());
 
-    // ShippableOrderPlaced の内容を検証
+    // Verify ShippableOrderPlaced contents
     if let order_taking_sample::workflow::PlaceOrderEvent::ShippableOrderPlaced(event) =
         shippable_event
     {
@@ -219,7 +219,7 @@ fn test_pipe_macro_composition_in_event_pipeline() {
 
 #[rstest]
 fn test_pipe_macro_preserves_data_integrity() {
-    // pipe! マクロを使用してもデータの整合性が保たれることを確認
+    // Verify data integrity is maintained even with pipe! macro
     let order_id_str = "order-integrity-test";
     let billing_amount = Decimal::new(12345, 2); // 123.45
     let lines = vec![create_test_product_line(
@@ -234,21 +234,21 @@ fn test_pipe_macro_preserves_data_integrity() {
 
     let events = create_events(&priced_order, Some(acknowledgment));
 
-    // 全イベントのデータ整合性を検証
+    // Verify data integrity of all events
     assert_eq!(events.len(), 3);
 
-    // Acknowledgment イベント
+    // Acknowledgment event
     if let order_taking_sample::workflow::PlaceOrderEvent::AcknowledgmentSent(ack) = &events[0] {
         assert_eq!(ack.order_id().value(), order_id_str);
     }
 
-    // Shippable イベント
+    // Shippable event
     if let order_taking_sample::workflow::PlaceOrderEvent::ShippableOrderPlaced(ship) = &events[1] {
         assert_eq!(ship.order_id().value(), order_id_str);
         assert_eq!(ship.pdf().name(), format!("Order{}.pdf", order_id_str));
     }
 
-    // Billable イベント
+    // Billable event
     if let order_taking_sample::workflow::PlaceOrderEvent::BillableOrderPlaced(bill) = &events[2] {
         assert_eq!(bill.order_id().value(), order_id_str);
         assert_eq!(bill.amount_to_bill().value(), billing_amount);

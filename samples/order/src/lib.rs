@@ -1,17 +1,17 @@
 //! # Order Taking Sample Application
 //!
-//! lambars を使用した注文処理サンプルアプリケーション。
+//! A sample order processing application using lambars.
 //!
-//! ## 概要
+//! ## Overview
 //!
-//! F# の「Domain Modeling Made Functional」を参考に、
-//! Rust で関数型ドメインモデリングを実現するサンプルです。
+//! Based on the F# book "Domain Modeling Made Functional",
+//! this sample demonstrates functional domain modeling in Rust.
 //!
-//! ## モジュール構成
+//! ## Module Structure
 //!
-//! - `simple_types`: 制約付き基本型（`String50`, `EmailAddress`, `OrderId` 等）
-//! - `compound_types`: 複合型（`PersonalName`, `CustomerInfo`, `Address` 等）
-//! - `workflow`: ワークフロー型定義（状態遷移を型で表現）
+//! - `simple_types`: Constrained primitive types (`String50`, `EmailAddress`, `OrderId`, etc.)
+//! - `compound_types`: Compound types (`PersonalName`, `CustomerInfo`, `Address`, etc.)
+//! - `workflow`: Workflow type definitions (state transitions expressed via types)
 
 #![forbid(unsafe_code)]
 

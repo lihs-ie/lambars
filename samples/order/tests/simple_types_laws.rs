@@ -1,9 +1,9 @@
-//! Smart Constructor 法則の proptest による検証
+//! Proptest verification of Smart Constructor laws
 //!
-//! Smart Constructor パターンで構築された型が以下の性質を満たすことを検証する:
-//! 1. 等価性法則: value() で取得した値は生成時の値と等しい
-//! 2. 不変条件: Ok で生成された値は常に制約を満たす
-//! 3. べき等性: 同じ入力からは同じ結果が得られる
+//! Verifies that types built with the Smart Constructor pattern satisfy the following properties:
+//! 1. Equality law: the value obtained by value() equals the value at creation
+//! 2. Invariant: values produced by Ok always satisfy constraints
+//! 3. Idempotency: the same input produces the same result
 
 use order_taking_sample::simple_types::{
     BillingAmount, EmailAddress, KilogramQuantity, OrderId, OrderLineId, Price, ProductCode,
@@ -14,17 +14,17 @@ use rust_decimal::Decimal;
 use std::str::FromStr;
 
 // =============================================================================
-// 戦略（Strategy）定義
+// Strategy definitions
 // =============================================================================
 
-/// 有効な String50 用の文字列戦略
+/// String strategy for valid String50
 fn valid_string50_strategy() -> impl Strategy<Value = String> {
     proptest::string::string_regex("[a-zA-Z0-9 ]{1,50}")
         .unwrap()
         .prop_filter("non-empty", |s| !s.is_empty())
 }
 
-/// 無効な String50 用の文字列戦略（空または51文字以上）
+/// String strategy for invalid String50 (empty or 51+ characters)
 fn invalid_string50_strategy() -> impl Strategy<Value = String> {
     prop_oneof![
         Just(String::new()),
@@ -32,7 +32,7 @@ fn invalid_string50_strategy() -> impl Strategy<Value = String> {
     ]
 }
 
-/// 有効な EmailAddress 用の文字列戦略
+/// String strategy for valid EmailAddress
 fn valid_email_strategy() -> impl Strategy<Value = String> {
     (
         proptest::string::string_regex("[a-zA-Z0-9._%+-]{1,20}").unwrap(),
@@ -42,17 +42,17 @@ fn valid_email_strategy() -> impl Strategy<Value = String> {
         .prop_map(|(local, domain, tld)| format!("{local}@{domain}.{tld}"))
 }
 
-/// 無効な EmailAddress 用の文字列戦略（@ なし）
+/// String strategy for invalid EmailAddress (no @)
 fn invalid_email_strategy() -> impl Strategy<Value = String> {
     proptest::string::string_regex("[a-zA-Z0-9]{1,30}").unwrap()
 }
 
-/// 有効な ZipCode 用の文字列戦略（5桁の数字）
+/// String strategy for valid ZipCode (5-digit number)
 fn valid_zip_code_strategy() -> impl Strategy<Value = String> {
     proptest::string::string_regex("[0-9]{5}").unwrap()
 }
 
-/// 無効な ZipCode 用の文字列戦略
+/// String strategy for invalid ZipCode
 fn invalid_zip_code_strategy() -> impl Strategy<Value = String> {
     prop_oneof![
         proptest::string::string_regex("[0-9]{1,4}").unwrap(),
@@ -61,7 +61,7 @@ fn invalid_zip_code_strategy() -> impl Strategy<Value = String> {
     ]
 }
 
-/// 有効な UsStateCode 用の戦略
+/// Strategy for valid UsStateCode
 fn valid_state_code_strategy() -> impl Strategy<Value = String> {
     prop_oneof![
         Just("AL".to_string()),
@@ -75,7 +75,7 @@ fn valid_state_code_strategy() -> impl Strategy<Value = String> {
     ]
 }
 
-/// 無効な UsStateCode 用の戦略
+/// Strategy for invalid UsStateCode
 fn invalid_state_code_strategy() -> impl Strategy<Value = String> {
     prop_oneof![
         Just("XX".to_string()),
@@ -84,12 +84,12 @@ fn invalid_state_code_strategy() -> impl Strategy<Value = String> {
     ]
 }
 
-/// 有効な Price 用の Decimal 戦略（0-1000）
+/// Decimal strategy for valid Price (0-1000)
 fn valid_price_strategy() -> impl Strategy<Value = Decimal> {
     (0u32..=1000u32).prop_map(Decimal::from)
 }
 
-/// 無効な Price 用の Decimal 戦略（負または1000超）
+/// Decimal strategy for invalid Price (negative or >1000)
 fn invalid_price_strategy() -> impl Strategy<Value = Decimal> {
     prop_oneof![
         (1i32..100i32).prop_map(|v| Decimal::from(-v)),
@@ -97,12 +97,12 @@ fn invalid_price_strategy() -> impl Strategy<Value = Decimal> {
     ]
 }
 
-/// 有効な BillingAmount 用の Decimal 戦略（0-10000）
+/// Decimal strategy for valid BillingAmount (0-10000)
 fn valid_billing_amount_strategy() -> impl Strategy<Value = Decimal> {
     (0u32..=10000u32).prop_map(Decimal::from)
 }
 
-/// 無効な BillingAmount 用の Decimal 戦略
+/// Decimal strategy for invalid BillingAmount
 fn invalid_billing_amount_strategy() -> impl Strategy<Value = Decimal> {
     prop_oneof![
         (1i32..100i32).prop_map(|v| Decimal::from(-v)),
@@ -110,22 +110,22 @@ fn invalid_billing_amount_strategy() -> impl Strategy<Value = Decimal> {
     ]
 }
 
-/// 有効な UnitQuantity 用の u32 戦略（1-1000）
+/// u32 strategy for valid UnitQuantity (1-1000)
 fn valid_unit_quantity_strategy() -> impl Strategy<Value = u32> {
     1u32..=1000u32
 }
 
-/// 無効な UnitQuantity 用の u32 戦略
+/// u32 strategy for invalid UnitQuantity
 fn invalid_unit_quantity_strategy() -> impl Strategy<Value = u32> {
     prop_oneof![Just(0u32), (1001u32..10000u32)]
 }
 
-/// 有効な KilogramQuantity 用の Decimal 戦略（0.05-100）
+/// Decimal strategy for valid KilogramQuantity (0.05-100)
 fn valid_kilogram_quantity_strategy() -> impl Strategy<Value = Decimal> {
     (5u32..=10000u32).prop_map(|v| Decimal::from(v) / Decimal::from(100))
 }
 
-/// 無効な KilogramQuantity 用の Decimal 戦略
+/// Decimal strategy for invalid KilogramQuantity
 fn invalid_kilogram_quantity_strategy() -> impl Strategy<Value = Decimal> {
     prop_oneof![
         (0u32..4u32).prop_map(|v| Decimal::from(v) / Decimal::from(100)), // 0.00-0.04
@@ -133,39 +133,39 @@ fn invalid_kilogram_quantity_strategy() -> impl Strategy<Value = Decimal> {
     ]
 }
 
-/// 有効な Widget ProductCode 用の戦略（W + 4桁）
+/// Strategy for valid Widget ProductCode (W + 4 digits)
 fn valid_widget_code_strategy() -> impl Strategy<Value = String> {
     (0u32..10000u32).prop_map(|v| format!("W{v:04}"))
 }
 
-/// 有効な Gizmo ProductCode 用の戦略（G + 3桁）
+/// Strategy for valid Gizmo ProductCode (G + 3 digits)
 fn valid_gizmo_code_strategy() -> impl Strategy<Value = String> {
     (0u32..1000u32).prop_map(|v| format!("G{v:03}"))
 }
 
-/// 無効な ProductCode 用の戦略
+/// Strategy for invalid ProductCode
 fn invalid_product_code_strategy() -> impl Strategy<Value = String> {
     prop_oneof![
-        // W/G 以外の大文字 + 4桁（[A-FH-VX-Z] は W, G を除外）
+        // Uppercase letter other than W/G + 4 digits ([A-FH-VX-Z] excludes W, G)
         proptest::string::string_regex("[A-FH-VX-Z][0-9]{4}").unwrap(),
-        Just("W123".to_string()),  // Widget コードだが3桁（4桁が必要）
-        Just("G1234".to_string()), // Gizmo コードだが4桁（3桁が必要）
-        Just("W".to_string()),     // 数字がない
-        Just("G".to_string()),     // 数字がない
-        Just("12345".to_string()), // プレフィックスがない
-        Just("w0001".to_string()), // 小文字の w（大文字が必要）
-        Just("g001".to_string())   // 小文字の g（大文字が必要）
+        Just("W123".to_string()),  // Widget code but 3 digits (4 digits required)
+        Just("G1234".to_string()), // Gizmo code but 4 digits (3 digits required)
+        Just("W".to_string()),     // No digits
+        Just("G".to_string()),     // No digits
+        Just("12345".to_string()), // No prefix
+        Just("w0001".to_string()), // Lowercase w (uppercase required)
+        Just("g001".to_string())   // Lowercase g (uppercase required)
     ]
 }
 
 // =============================================================================
-// String50 法則テスト
+// String50 lawTest
 // =============================================================================
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
 
-    /// String50: 有効な入力で Ok が返り、value() は入力と等しい
+    /// String50: Ok is returned for valid input, and value() equals input
     #[test]
     fn test_string50_valid_roundtrip(input in valid_string50_strategy()) {
         let result = String50::create("TestField", &input);
@@ -174,14 +174,14 @@ proptest! {
         prop_assert_eq!(value.value(), input.as_str());
     }
 
-    /// String50: 無効な入力で Err が返る
+    /// String50: Err is returned for invalid input
     #[test]
     fn test_string50_invalid_fails(input in invalid_string50_strategy()) {
         let result = String50::create("TestField", &input);
         prop_assert!(result.is_err());
     }
 
-    /// String50: べき等性 - 同じ入力から同じ結果
+    /// String50: Idempotency - same input produces same result
     #[test]
     fn test_string50_idempotent(input in valid_string50_strategy()) {
         let result1 = String50::create("TestField", &input);
@@ -194,13 +194,13 @@ proptest! {
 }
 
 // =============================================================================
-// EmailAddress 法則テスト
+// EmailAddress lawTest
 // =============================================================================
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
 
-    /// EmailAddress: 有効な入力で Ok が返り、value() は入力と等しい
+    /// EmailAddress: Ok is returned for valid input, and value() equals input
     #[test]
     fn test_email_valid_roundtrip(input in valid_email_strategy()) {
         let result = EmailAddress::create("Email", &input);
@@ -209,7 +209,7 @@ proptest! {
         prop_assert_eq!(value.value(), input.as_str());
     }
 
-    /// EmailAddress: 無効な入力で Err が返る
+    /// EmailAddress: Err is returned for invalid input
     #[test]
     fn test_email_invalid_fails(input in invalid_email_strategy()) {
         let result = EmailAddress::create("Email", &input);
@@ -218,13 +218,13 @@ proptest! {
 }
 
 // =============================================================================
-// ZipCode 法則テスト
+// ZipCode lawTest
 // =============================================================================
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
 
-    /// ZipCode: 有効な入力で Ok が返り、value() は入力と等しい
+    /// ZipCode: Ok is returned for valid input, and value() equals input
     #[test]
     fn test_zip_code_valid_roundtrip(input in valid_zip_code_strategy()) {
         let result = ZipCode::create("ZipCode", &input);
@@ -233,7 +233,7 @@ proptest! {
         prop_assert_eq!(value.value(), input.as_str());
     }
 
-    /// ZipCode: 無効な入力で Err が返る
+    /// ZipCode: Err is returned for invalid input
     #[test]
     fn test_zip_code_invalid_fails(input in invalid_zip_code_strategy()) {
         let result = ZipCode::create("ZipCode", &input);
@@ -242,13 +242,13 @@ proptest! {
 }
 
 // =============================================================================
-// UsStateCode 法則テスト
+// UsStateCode lawTest
 // =============================================================================
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
 
-    /// UsStateCode: 有効な入力で Ok が返り、value() は入力と等しい
+    /// UsStateCode: Ok is returned for valid input, and value() equals input
     #[test]
     fn test_state_code_valid_roundtrip(input in valid_state_code_strategy()) {
         let result = UsStateCode::create("State", &input);
@@ -257,7 +257,7 @@ proptest! {
         prop_assert_eq!(value.value(), input.as_str());
     }
 
-    /// UsStateCode: 無効な入力で Err が返る
+    /// UsStateCode: Err is returned for invalid input
     #[test]
     fn test_state_code_invalid_fails(input in invalid_state_code_strategy()) {
         let result = UsStateCode::create("State", &input);
@@ -266,13 +266,13 @@ proptest! {
 }
 
 // =============================================================================
-// Price 法則テスト
+// Price lawTest
 // =============================================================================
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
 
-    /// Price: 有効な入力で Ok が返り、value() は入力と等しい
+    /// Price: Ok is returned for valid input, and value() equals input
     #[test]
     fn test_price_valid_roundtrip(input in valid_price_strategy()) {
         let result = Price::create(input);
@@ -281,14 +281,14 @@ proptest! {
         prop_assert_eq!(value.value(), input);
     }
 
-    /// Price: 無効な入力で Err が返る
+    /// Price: Err is returned for invalid input
     #[test]
     fn test_price_invalid_fails(input in invalid_price_strategy()) {
         let result = Price::create(input);
         prop_assert!(result.is_err());
     }
 
-    /// Price: 不変条件 - Ok で返された値は常に [0, 1000] の範囲内
+    /// Price: Invariant - Ok value is always in range [0, 1000]
     #[test]
     fn test_price_invariant(input in valid_price_strategy()) {
         let result = Price::create(input);
@@ -300,13 +300,13 @@ proptest! {
 }
 
 // =============================================================================
-// BillingAmount 法則テスト
+// BillingAmount lawTest
 // =============================================================================
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
 
-    /// BillingAmount: 有効な入力で Ok が返り、value() は入力と等しい
+    /// BillingAmount: Ok is returned for valid input, and value() equals input
     #[test]
     fn test_billing_amount_valid_roundtrip(input in valid_billing_amount_strategy()) {
         let result = BillingAmount::create(input);
@@ -315,14 +315,14 @@ proptest! {
         prop_assert_eq!(value.value(), input);
     }
 
-    /// BillingAmount: 無効な入力で Err が返る
+    /// BillingAmount: Err is returned for invalid input
     #[test]
     fn test_billing_amount_invalid_fails(input in invalid_billing_amount_strategy()) {
         let result = BillingAmount::create(input);
         prop_assert!(result.is_err());
     }
 
-    /// BillingAmount: 不変条件 - Ok で返された値は常に [0, 10000] の範囲内
+    /// BillingAmount: Invariant - Ok value is always in range [0, 10000]
     #[test]
     fn test_billing_amount_invariant(input in valid_billing_amount_strategy()) {
         let result = BillingAmount::create(input);
@@ -334,13 +334,13 @@ proptest! {
 }
 
 // =============================================================================
-// UnitQuantity 法則テスト
+// UnitQuantity lawTest
 // =============================================================================
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
 
-    /// UnitQuantity: 有効な入力で Ok が返り、value() は入力と等しい
+    /// UnitQuantity: Ok is returned for valid input, and value() equals input
     #[test]
     fn test_unit_quantity_valid_roundtrip(input in valid_unit_quantity_strategy()) {
         let result = UnitQuantity::create("Quantity", input);
@@ -349,14 +349,14 @@ proptest! {
         prop_assert_eq!(value.value(), input);
     }
 
-    /// UnitQuantity: 無効な入力で Err が返る
+    /// UnitQuantity: Err is returned for invalid input
     #[test]
     fn test_unit_quantity_invalid_fails(input in invalid_unit_quantity_strategy()) {
         let result = UnitQuantity::create("Quantity", input);
         prop_assert!(result.is_err());
     }
 
-    /// UnitQuantity: 不変条件 - Ok で返された値は常に [1, 1000] の範囲内
+    /// UnitQuantity: Invariant - Ok value is always in range [1, 1000]
     #[test]
     fn test_unit_quantity_invariant(input in valid_unit_quantity_strategy()) {
         let result = UnitQuantity::create("Quantity", input);
@@ -368,13 +368,13 @@ proptest! {
 }
 
 // =============================================================================
-// KilogramQuantity 法則テスト
+// KilogramQuantity lawTest
 // =============================================================================
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
 
-    /// KilogramQuantity: 有効な入力で Ok が返り、value() は入力と等しい
+    /// KilogramQuantity: Ok is returned for valid input, and value() equals input
     #[test]
     fn test_kilogram_quantity_valid_roundtrip(input in valid_kilogram_quantity_strategy()) {
         let result = KilogramQuantity::create("Weight", input);
@@ -383,14 +383,14 @@ proptest! {
         prop_assert_eq!(value.value(), input);
     }
 
-    /// KilogramQuantity: 無効な入力で Err が返る
+    /// KilogramQuantity: Err is returned for invalid input
     #[test]
     fn test_kilogram_quantity_invalid_fails(input in invalid_kilogram_quantity_strategy()) {
         let result = KilogramQuantity::create("Weight", input);
         prop_assert!(result.is_err());
     }
 
-    /// KilogramQuantity: 不変条件 - Ok で返された値は常に [0.05, 100] の範囲内
+    /// KilogramQuantity: Invariant - Ok value is always in range [0.05, 100]
     #[test]
     fn test_kilogram_quantity_invariant(input in valid_kilogram_quantity_strategy()) {
         let result = KilogramQuantity::create("Weight", input);
@@ -402,13 +402,13 @@ proptest! {
 }
 
 // =============================================================================
-// ProductCode 法則テスト
+// ProductCode lawTest
 // =============================================================================
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
 
-    /// ProductCode (Widget): 有効な入力で Ok が返り、value() は入力と等しい
+    /// ProductCode (Widget): Ok is returned for valid input, and value() equals input
     #[test]
     fn test_widget_code_valid_roundtrip(input in valid_widget_code_strategy()) {
         let result = ProductCode::create("ProductCode", &input);
@@ -418,7 +418,7 @@ proptest! {
         prop_assert!(matches!(value, ProductCode::Widget(_)));
     }
 
-    /// ProductCode (Gizmo): 有効な入力で Ok が返り、value() は入力と等しい
+    /// ProductCode (Gizmo): Ok is returned for valid input, and value() equals input
     #[test]
     fn test_gizmo_code_valid_roundtrip(input in valid_gizmo_code_strategy()) {
         let result = ProductCode::create("ProductCode", &input);
@@ -428,7 +428,7 @@ proptest! {
         prop_assert!(matches!(value, ProductCode::Gizmo(_)));
     }
 
-    /// ProductCode: 無効な入力で Err が返る
+    /// ProductCode: Err is returned for invalid input
     #[test]
     fn test_product_code_invalid_fails(input in invalid_product_code_strategy()) {
         let result = ProductCode::create("ProductCode", &input);
@@ -437,13 +437,13 @@ proptest! {
 }
 
 // =============================================================================
-// OrderId/OrderLineId 法則テスト
+// OrderId/OrderLineId lawTest
 // =============================================================================
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
 
-    /// OrderId: 有効な入力で Ok が返り、value() は入力と等しい
+    /// OrderId: Ok is returned for valid input, and value() equals input
     #[test]
     fn test_order_id_valid_roundtrip(input in valid_string50_strategy()) {
         let result = OrderId::create("OrderId", &input);
@@ -452,7 +452,7 @@ proptest! {
         prop_assert_eq!(value.value(), input.as_str());
     }
 
-    /// OrderLineId: 有効な入力で Ok が返り、value() は入力と等しい
+    /// OrderLineId: Ok is returned for valid input, and value() equals input
     #[test]
     fn test_order_line_id_valid_roundtrip(input in valid_string50_strategy()) {
         let result = OrderLineId::create("OrderLineId", &input);

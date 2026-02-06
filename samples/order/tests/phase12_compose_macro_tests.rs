@@ -1,9 +1,9 @@
-//! Phase 12: compose! マクロ統合テスト
+//! Phase 12: compose! macro integration tests
 //!
-//! compose! マクロを使用した関数の動作を検証する。
-//! - 法則検証（結合法則、恒等元）
-//! - ドメイン関数の合成テスト
-//! - 部分適用との組み合わせテスト
+//! Verifies the behavior of functions using the compose! macro.
+//! - Law verification (associativity, identity)
+//! - Domain function composition tests
+//! - Tests combining with partial application
 
 use lambars::compose;
 use lambars::compose::identity;
@@ -20,7 +20,7 @@ use rstest::rstest;
 use rust_decimal::Decimal;
 
 // =============================================================================
-// テストヘルパー
+// Test helpers
 // =============================================================================
 
 fn create_test_priced_order(
@@ -62,12 +62,12 @@ fn create_test_product_line(line_id: &str, product_code: &str, price: Decimal) -
 }
 
 // =============================================================================
-// compose! マクロ法則検証テスト（REQ-124）
+// compose! macro law verification tests (REQ-124)
 // =============================================================================
 
 #[rstest]
 fn test_compose_associativity() {
-    // 結合法則: compose!(f, compose!(g, h)) == compose!(compose!(f, g), h)
+    // Associativity law: compose!(f, compose!(g, h)) == compose!(compose!(f, g), h)
     fn f(x: i32) -> i32 {
         x + 1
     }
@@ -81,7 +81,7 @@ fn test_compose_associativity() {
     let left = compose!(f, compose!(g, h));
     let right = compose!(compose!(f, g), h);
 
-    // 複数の入力値でテスト
+    // Test with multiple input values
     for x in [0, 1, 5, 10, 100] {
         assert_eq!(left(x), right(x), "Associativity failed for x = {}", x);
     }
@@ -89,7 +89,7 @@ fn test_compose_associativity() {
 
 #[rstest]
 fn test_compose_left_identity() {
-    // 左恒等元: compose!(identity, f) == f
+    // Left identity: compose!(identity, f) == f
     fn f(x: i32) -> i32 {
         x * 2
     }
@@ -103,7 +103,7 @@ fn test_compose_left_identity() {
 
 #[rstest]
 fn test_compose_right_identity() {
-    // 右恒等元: compose!(f, identity) == f
+    // Right identity: compose!(f, identity) == f
     fn f(x: i32) -> i32 {
         x * 2
     }
@@ -116,12 +116,12 @@ fn test_compose_right_identity() {
 }
 
 // =============================================================================
-// ドメイン関数の合成テスト（REQ-124, REQ-125）
+// Domain function composition tests (REQ-124, REQ-125)
 // =============================================================================
 
 #[rstest]
 fn test_compose_shipping_event_creation() {
-    // compose! を使用した配送イベント作成関数の合成
+    // Composition of shipping event creation function using compose!
     let to_shipping_event = compose!(PlaceOrderEvent::ShippableOrderPlaced, create_shipping_event);
 
     let priced_order =
@@ -129,10 +129,10 @@ fn test_compose_shipping_event_creation() {
 
     let event = to_shipping_event(&priced_order);
 
-    // ShippableOrderPlaced イベントであることを確認
+    // Verify it is a ShippableOrderPlaced event
     assert!(event.is_shippable());
 
-    // イベントの内容を確認
+    // Verify event contents
     if let PlaceOrderEvent::ShippableOrderPlaced(shipping_event) = event {
         assert_eq!(shipping_event.order_id().value(), "order-compose-001");
         assert_eq!(shipping_event.pdf().name(), "Orderorder-compose-001.pdf");
@@ -143,20 +143,20 @@ fn test_compose_shipping_event_creation() {
 
 #[rstest]
 fn test_compose_pipeline_with_partial_application_normal_customer() {
-    // 部分適用と compose! の組み合わせテスト（通常顧客）
+    // Test combining partial application and compose! (regular customer)
     let priced_order =
         create_test_priced_order("order-normal", Decimal::from(100), vec![], "Normal");
 
-    // add_shipping_info_to_order を部分適用
+    // Partially apply add_shipping_info_to_order
     let add_shipping =
         |order: &PricedOrder| add_shipping_info_to_order(&calculate_shipping_cost, order);
 
-    // free_vip_shipping と add_shipping を合成
+    // Compose free_vip_shipping and add_shipping
     let process_shipping = compose!(free_vip_shipping, add_shipping);
 
     let result = process_shipping(&priced_order);
 
-    // 通常顧客は配送料が発生する（NY は遠方州なので $10）
+    // Regular customers incur shipping charges (NY is a remote state, so $10)
     assert_eq!(
         result.shipping_info().shipping_cost().value(),
         Decimal::from(10)
@@ -165,19 +165,19 @@ fn test_compose_pipeline_with_partial_application_normal_customer() {
 
 #[rstest]
 fn test_compose_pipeline_with_partial_application_vip_customer() {
-    // 部分適用と compose! の組み合わせテスト（VIP 顧客）
+    // Test combining partial application and compose! (VIP customer)
     let priced_order = create_test_priced_order("order-vip", Decimal::from(100), vec![], "VIP");
 
-    // add_shipping_info_to_order を部分適用
+    // Partially apply add_shipping_info_to_order
     let add_shipping =
         |order: &PricedOrder| add_shipping_info_to_order(&calculate_shipping_cost, order);
 
-    // free_vip_shipping と add_shipping を合成
+    // Compose free_vip_shipping and add_shipping
     let process_shipping = compose!(free_vip_shipping, add_shipping);
 
     let result = process_shipping(&priced_order);
 
-    // VIP 顧客は配送料無料
+    // VIP customer has free shipping
     assert_eq!(
         result.shipping_info().shipping_cost().value(),
         Decimal::ZERO
@@ -186,12 +186,12 @@ fn test_compose_pipeline_with_partial_application_vip_customer() {
 }
 
 // =============================================================================
-// create_events 統合テスト（REQ-125）
+// create_events integration tests (REQ-125)
 // =============================================================================
 
 #[rstest]
 fn test_create_events_with_compose_macro_generates_correct_order() {
-    // compose! マクロを使用した実装が正しいイベント順序を生成することを確認
+    // Verify compose! macro implementation generates correct event order
     let priced_order = create_test_priced_order("order-001", Decimal::from(1000), vec![], "Normal");
     let order_id = OrderId::create("OrderId", "order-001").unwrap();
     let email = EmailAddress::create("EmailAddress", "test@example.com").unwrap();
@@ -199,7 +199,7 @@ fn test_create_events_with_compose_macro_generates_correct_order() {
 
     let events = create_events(&priced_order, Some(acknowledgment));
 
-    // イベント順序の検証: Acknowledgment -> Shippable -> Billable
+    // Verify event order: Acknowledgment -> Shippable -> Billable
     assert_eq!(events.len(), 3);
     assert!(events[0].is_acknowledgment());
     assert!(events[1].is_shippable());
@@ -208,7 +208,7 @@ fn test_create_events_with_compose_macro_generates_correct_order() {
 
 #[rstest]
 fn test_create_events_shipping_event_content_with_compose() {
-    // compose! マクロで生成された ShippableOrderPlaced の内容を検証
+    // Verify ShippableOrderPlaced content generated by compose! macro
     let lines = vec![
         create_test_product_line("line-001", "W1234", Decimal::from(100)),
         create_test_product_line("line-002", "G567", Decimal::from(200)),
@@ -220,7 +220,7 @@ fn test_create_events_shipping_event_content_with_compose() {
 
     assert_eq!(events.len(), 2);
 
-    // ShippableOrderPlaced イベントの内容を検証
+    // Verify ShippableOrderPlaced event contents
     if let PlaceOrderEvent::ShippableOrderPlaced(shipping_event) = &events[0] {
         assert_eq!(shipping_event.order_id().value(), "order-compose-test");
         assert_eq!(shipping_event.shipment_lines().len(), 2);
@@ -231,12 +231,12 @@ fn test_create_events_shipping_event_content_with_compose() {
 }
 
 // =============================================================================
-// 配送処理パイプライン統合テスト（REQ-125）
+// Shipping processing pipeline integration tests (REQ-125)
 // =============================================================================
 
 #[rstest]
 fn test_shipping_pipeline_preserves_order_data() {
-    // compose! で合成した配送処理パイプラインが注文データを保持することを確認
+    // Verify shipping processing pipeline composed with compose! preserves order data
     let lines = vec![create_test_product_line(
         "line-001",
         "W1234",
@@ -251,7 +251,7 @@ fn test_shipping_pipeline_preserves_order_data() {
 
     let result = process_shipping(&priced_order);
 
-    // 元の注文データが保持されていることを確認
+    // Verify original order data is preserved
     assert_eq!(
         result.priced_order().order_id().value(),
         "order-preserve-data"
@@ -265,10 +265,10 @@ fn test_shipping_pipeline_preserves_order_data() {
 
 #[rstest]
 fn test_shipping_pipeline_with_international_address() {
-    // 国際配送のテスト
+    // Test for international shipping
     let order_id = OrderId::create("OrderId", "order-intl").unwrap();
     let customer_info = CustomerInfo::create("John", "Doe", "john@example.com", "Normal").unwrap();
-    // 国際配送テスト用に有効な州コードを使用し、国を変更
+    // Uses valid state code for international shipping tests and changes the country
     let address =
         Address::create("123 Main St", "", "", "", "Tokyo", "10000", "NY", "Japan").unwrap();
     let amount = BillingAmount::create(Decimal::from(100)).unwrap();
@@ -289,7 +289,7 @@ fn test_shipping_pipeline_with_international_address() {
 
     let result = process_shipping(&priced_order);
 
-    // 国際配送は $20
+    // International shipping is $20
     assert_eq!(
         result.shipping_info().shipping_cost().value(),
         Decimal::from(20)
@@ -297,26 +297,26 @@ fn test_shipping_pipeline_with_international_address() {
 }
 
 // =============================================================================
-// compose! vs pipe! 比較テスト
+// compose! vs pipe! comparison tests
 // =============================================================================
 
 #[rstest]
 fn test_compose_produces_reusable_function() {
-    // compose! で生成した関数が再利用可能であることを確認
+    // Verify function generated by compose! is reusable
     let to_shipping_event = compose!(PlaceOrderEvent::ShippableOrderPlaced, create_shipping_event);
 
-    // 複数の注文に対して同じ合成関数を適用
+    // Apply same composition function to multiple orders
     let order1 = create_test_priced_order("order-reuse-1", Decimal::from(100), vec![], "Normal");
     let order2 = create_test_priced_order("order-reuse-2", Decimal::from(200), vec![], "Normal");
 
     let event1 = to_shipping_event(&order1);
     let event2 = to_shipping_event(&order2);
 
-    // 両方とも ShippableOrderPlaced イベント
+    // Both are ShippableOrderPlaced events
     assert!(event1.is_shippable());
     assert!(event2.is_shippable());
 
-    // それぞれ正しい order_id を持つ
+    // Each has the correct order_id
     if let PlaceOrderEvent::ShippableOrderPlaced(e1) = &event1 {
         assert_eq!(e1.order_id().value(), "order-reuse-1");
     }

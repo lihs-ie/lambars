@@ -1,6 +1,6 @@
-//! 入力 DTO のテスト
+//! Tests for Input DTOs
 //!
-//! CustomerInfoDto, AddressDto, OrderFormLineDto, OrderFormDto のテスト
+//! Tests for CustomerInfoDto, AddressDto, OrderFormLineDto, and OrderFormDto
 
 use order_taking_sample::compound_types::Address;
 use order_taking_sample::dto::{AddressDto, CustomerInfoDto, OrderFormDto, OrderFormLineDto};
@@ -9,7 +9,7 @@ use rust_decimal::Decimal;
 use std::str::FromStr;
 
 // =============================================================================
-// CustomerInfoDto のテスト
+// Tests for CustomerInfoDto
 // =============================================================================
 
 mod customer_info_dto_tests {
@@ -81,7 +81,7 @@ mod customer_info_dto_tests {
 }
 
 // =============================================================================
-// AddressDto のテスト
+// Tests for AddressDto
 // =============================================================================
 
 mod address_dto_tests {
@@ -182,7 +182,7 @@ mod address_dto_tests {
 
     #[rstest]
     fn test_from_address_with_optional_lines() {
-        // 全てのオプショナル行が None の場合
+        // When all optional lines are None
         let address = Address::create(
             "456 Oak Ave",
             "",
@@ -222,7 +222,7 @@ mod address_dto_tests {
 }
 
 // =============================================================================
-// OrderFormLineDto のテスト
+// Tests for OrderFormLineDto
 // =============================================================================
 
 mod order_form_line_dto_tests {
@@ -275,7 +275,7 @@ mod order_form_line_dto_tests {
 
     #[rstest]
     fn test_quantity_decimal_handling() {
-        // 小数点を含む数量
+        // Quantity including decimal point
         let json = r#"{
             "order_line_id": "line-003",
             "product_code": "G456",
@@ -301,7 +301,7 @@ mod order_form_line_dto_tests {
 }
 
 // =============================================================================
-// OrderFormDto のテスト
+// Tests for OrderFormDto
 // =============================================================================
 
 mod order_form_dto_tests {
@@ -500,7 +500,7 @@ mod order_form_dto_tests {
 
         let unvalidated = dto.to_unvalidated_order();
 
-        // 複数の明細が正しく変換されていることを確認
+        // Verify multiple lines are converted correctly
         assert_eq!(unvalidated.lines().len(), 2);
         assert_eq!(unvalidated.lines()[0].product_code(), "W1234");
         assert_eq!(unvalidated.lines()[1].product_code(), "G123");

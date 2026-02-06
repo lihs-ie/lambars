@@ -1,6 +1,6 @@
-//! 製品コード型の定義
+//! Product code type definitions
 //!
-//! `WidgetCode`, `GizmoCode`, `ProductCode` を定義する。
+//! Defines `WidgetCode`, `GizmoCode`, and `ProductCode`.
 
 use regex::Regex;
 use std::sync::LazyLock;
@@ -12,9 +12,9 @@ use super::error::ValidationError;
 // WidgetCode
 // =============================================================================
 
-/// Widget 製品のコードを表す型
+/// Type representing a Widget product code
 ///
-/// "W" で始まり、続いて4桁の数字（W\d{4} パターン）。
+/// "W" followed by 4 digits (W\d{4} pattern).
 ///
 /// # Examples
 ///
@@ -24,38 +24,38 @@ use super::error::ValidationError;
 /// let code = WidgetCode::create("ProductCode", "W1234").unwrap();
 /// assert_eq!(code.value(), "W1234");
 ///
-/// // 形式が不正な場合はエラー
+/// // Invalid format causes an error
 /// assert!(WidgetCode::create("ProductCode", "G123").is_err());
 /// assert!(WidgetCode::create("ProductCode", "W123").is_err());
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct WidgetCode(String);
 
-/// `WidgetCode` の正規表現パターン
+/// Regex pattern for `WidgetCode`
 static WIDGET_CODE_PATTERN: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^W\d{4}$").expect("Invalid widget code regex pattern"));
 
 impl WidgetCode {
-    /// W + 4桁の形式の文字列から `WidgetCode` を生成する
+    /// Creates a `WidgetCode` from a string in W + 4 digits format
     ///
     /// # Arguments
     ///
-    /// * `field_name` - エラーメッセージに使用するフィールド名
-    /// * `value` - 入力文字列
+    /// * `field_name` - Field name used in error messages
+    /// * `value` - Input string
     ///
     /// # Returns
     ///
-    /// * `Ok(WidgetCode)` - バリデーション成功時
-    /// * `Err(ValidationError)` - パターン不一致時
+    /// * `Ok(WidgetCode)` - On successful validation
+    /// * `Err(ValidationError)` - On pattern mismatch
     ///
     /// # Errors
     ///
-    /// 空文字列またはパターン不一致の場合に `ValidationError` を返す。
+    /// Returns `ValidationError` for an empty string or pattern mismatch.
     pub fn create(field_name: &str, value: &str) -> Result<Self, ValidationError> {
         constrained_type::create_like(field_name, Self, &WIDGET_CODE_PATTERN, value)
     }
 
-    /// 内部のコード文字列への参照を返す
+    /// Returns a reference to the inner code string
     #[must_use]
     pub fn value(&self) -> &str {
         &self.0
@@ -66,9 +66,9 @@ impl WidgetCode {
 // GizmoCode
 // =============================================================================
 
-/// Gizmo 製品のコードを表す型
+/// Type representing a Gizmo product code
 ///
-/// "G" で始まり、続いて3桁の数字（G\d{3} パターン）。
+/// "G" followed by 3 digits (G\d{3} pattern).
 ///
 /// # Examples
 ///
@@ -78,38 +78,38 @@ impl WidgetCode {
 /// let code = GizmoCode::create("ProductCode", "G123").unwrap();
 /// assert_eq!(code.value(), "G123");
 ///
-/// // 形式が不正な場合はエラー
+/// // Invalid format causes an error
 /// assert!(GizmoCode::create("ProductCode", "W1234").is_err());
 /// assert!(GizmoCode::create("ProductCode", "G12").is_err());
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct GizmoCode(String);
 
-/// `GizmoCode` の正規表現パターン
+/// Regex pattern for `GizmoCode`
 static GIZMO_CODE_PATTERN: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^G\d{3}$").expect("Invalid gizmo code regex pattern"));
 
 impl GizmoCode {
-    /// G + 3桁の形式の文字列から `GizmoCode` を生成する
+    /// Creates a `GizmoCode` from a string in G + 3 digits format
     ///
     /// # Arguments
     ///
-    /// * `field_name` - エラーメッセージに使用するフィールド名
-    /// * `value` - 入力文字列
+    /// * `field_name` - Field name used in error messages
+    /// * `value` - Input string
     ///
     /// # Returns
     ///
-    /// * `Ok(GizmoCode)` - バリデーション成功時
-    /// * `Err(ValidationError)` - パターン不一致時
+    /// * `Ok(GizmoCode)` - On successful validation
+    /// * `Err(ValidationError)` - On pattern mismatch
     ///
     /// # Errors
     ///
-    /// 空文字列またはパターン不一致の場合に `ValidationError` を返す。
+    /// Returns `ValidationError` for an empty string or pattern mismatch.
     pub fn create(field_name: &str, value: &str) -> Result<Self, ValidationError> {
         constrained_type::create_like(field_name, Self, &GIZMO_CODE_PATTERN, value)
     }
 
-    /// 内部のコード文字列への参照を返す
+    /// Returns a reference to the inner code string
     #[must_use]
     pub fn value(&self) -> &str {
         &self.0
@@ -120,57 +120,57 @@ impl GizmoCode {
 // ProductCode
 // =============================================================================
 
-/// 製品コードを表す直和型
+/// Sum type representing a product code
 ///
-/// Widget コードまたは Gizmo コードのいずれかを保持する。
+/// Holds either a Widget code or a Gizmo code.
 ///
 /// # Examples
 ///
 /// ```
 /// use order_taking_sample::simple_types::ProductCode;
 ///
-/// // Widget コード
+/// // Widget code
 /// let widget = ProductCode::create("ProductCode", "W1234").unwrap();
 /// assert!(matches!(widget, ProductCode::Widget(_)));
 /// assert_eq!(widget.value(), "W1234");
 ///
-/// // Gizmo コード
+/// // Gizmo code
 /// let gizmo = ProductCode::create("ProductCode", "G123").unwrap();
 /// assert!(matches!(gizmo, ProductCode::Gizmo(_)));
 /// assert_eq!(gizmo.value(), "G123");
 ///
-/// // 不明な形式はエラー
+/// // Unknown format causes an error
 /// assert!(ProductCode::create("ProductCode", "X999").is_err());
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum ProductCode {
-    /// Widget 製品のコード
+    /// Widget product code
     Widget(WidgetCode),
-    /// Gizmo 製品のコード
+    /// Gizmo product code
     Gizmo(GizmoCode),
 }
 
 impl ProductCode {
-    /// 文字列から `ProductCode` を生成する
+    /// Creates a `ProductCode` from a string
     ///
-    /// 先頭文字で Widget か Gizmo かを判定する。
-    /// - "W" で始まる場合: `WidgetCode` として解釈
-    /// - "G" で始まる場合: `GizmoCode` として解釈
-    /// - それ以外: エラー
+    /// Determines Widget or Gizmo based on the first character.
+    /// - Starting with "W": interpreted as `WidgetCode`
+    /// - Starting with "G": interpreted as `GizmoCode`
+    /// - Otherwise: error
     ///
     /// # Arguments
     ///
-    /// * `field_name` - エラーメッセージに使用するフィールド名
-    /// * `code` - 入力文字列
+    /// * `field_name` - Field name used in error messages
+    /// * `code` - Input string
     ///
     /// # Returns
     ///
-    /// * `Ok(ProductCode)` - バリデーション成功時
-    /// * `Err(ValidationError)` - パターン不一致時
+    /// * `Ok(ProductCode)` - On successful validation
+    /// * `Err(ValidationError)` - On pattern mismatch
     ///
     /// # Errors
     ///
-    /// 空文字列または認識できない形式の場合に `ValidationError` を返す。
+    /// Returns `ValidationError` for an empty string or unrecognized format.
     pub fn create(field_name: &str, code: &str) -> Result<Self, ValidationError> {
         if code.is_empty() {
             return Err(ValidationError::new(field_name, "Must not be empty"));
@@ -188,7 +188,7 @@ impl ProductCode {
         }
     }
 
-    /// 内部のコード文字列への参照を返す
+    /// Returns a reference to the inner code string
     #[must_use]
     pub fn value(&self) -> &str {
         match self {
@@ -396,7 +396,7 @@ mod tests {
 
     #[rstest]
     fn test_product_code_create_invalid_widget() {
-        // W で始まるが形式が不正
+        // Starts with "W" but invalid format
         let result = ProductCode::create("ProductCode", "W12");
 
         assert!(result.is_err());
@@ -404,7 +404,7 @@ mod tests {
 
     #[rstest]
     fn test_product_code_create_invalid_gizmo() {
-        // G で始まるが形式が不正
+        // Starts with "G" but invalid format
         let result = ProductCode::create("ProductCode", "G12");
 
         assert!(result.is_err());
@@ -472,7 +472,7 @@ mod tests {
 
     #[rstest]
     fn test_widget_and_gizmo_with_similar_numbers() {
-        // 同じ数字でも型が違う
+        // Same digits but different types
         let widget = ProductCode::create("ProductCode", "W0123").unwrap();
         let gizmo = ProductCode::create("ProductCode", "G012").unwrap();
 

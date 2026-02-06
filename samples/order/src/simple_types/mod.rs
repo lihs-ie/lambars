@@ -1,23 +1,23 @@
-//! 注文ドメインで使用する基本型（Simple Types）
+//! Basic types used in the order domain (Simple Types)
 //!
-//! F# の Single Case Discriminated Union パターンを Rust の newtype パターンで実現し、
-//! 不正な状態を型レベルで防ぐ「Make Illegal States Unrepresentable」の原則に従う。
+//! Implements the F# Single Case Discriminated Union pattern using Rust's newtype pattern,
+//! following the "Make Illegal States Unrepresentable" principle.
 //!
-//! # 概要
+//! # Overview
 //!
-//! このモジュールは、注文処理ドメインで使用する基本型を提供する。
-//! 各型は Smart Constructor パターンを使用し、バリデーション済みの値のみを保持することを保証する。
+//! This module provides basic types used in the order processing domain.
+//! Each type uses the Smart Constructor pattern to guarantee that only validated values are held.
 //!
-//! # 型カテゴリ
+//! # Type Categories
 //!
-//! - **文字列制約型**: `String50`, `EmailAddress`, `ZipCode`, `UsStateCode`
-//! - **ID 型**: `OrderId`, `OrderLineId`
-//! - **製品コード型**: `WidgetCode`, `GizmoCode`, `ProductCode`
-//! - **数量型**: `UnitQuantity`, `KilogramQuantity`, `OrderQuantity`
-//! - **金額型**: `Price`, `BillingAmount`
-//! - **その他**: `VipStatus`, `PromotionCode`, `PdfAttachment`
+//! - **Constrained string types**: `String50`, `EmailAddress`, `ZipCode`, `UsStateCode`
+//! - **ID types**: `OrderId`, `OrderLineId`
+//! - **Product code types**: `WidgetCode`, `GizmoCode`, `ProductCode`
+//! - **Quantity types**: `UnitQuantity`, `KilogramQuantity`, `OrderQuantity`
+//! - **Price types**: `Price`, `BillingAmount`
+//! - **Others**: `VipStatus`, `PromotionCode`, `PdfAttachment`
 //!
-//! # 使用例
+//! # Usage Examples
 //!
 //! ```
 //! use order_taking_sample::simple_types::{
@@ -26,27 +26,27 @@
 //! use rust_decimal::Decimal;
 //! use std::str::FromStr;
 //!
-//! // OrderId の生成（バリデーション付き）
+//! // Create an OrderId (with validation)
 //! let order_id = OrderId::create("OrderId", "ORD-2024-001").unwrap();
 //! assert_eq!(order_id.value(), "ORD-2024-001");
 //!
-//! // ProductCode の生成（Widget または Gizmo を自動判定）
+//! // Create a ProductCode (auto-detects Widget or Gizmo)
 //! let widget = ProductCode::create("ProductCode", "W1234").unwrap();
 //! let gizmo = ProductCode::create("ProductCode", "G123").unwrap();
 //!
-//! // Price の生成と合計計算
+//! // Create Price and calculate the sum
 //! let price1 = Price::create(Decimal::from_str("100.00").unwrap()).unwrap();
 //! let price2 = Price::create(Decimal::from_str("200.00").unwrap()).unwrap();
 //! let total = BillingAmount::sum_prices(&[price1, price2]).unwrap();
 //! assert_eq!(total.value(), Decimal::from_str("300.00").unwrap());
 //! ```
 //!
-//! # lambars との統合
+//! # Integration with lambars
 //!
-//! このモジュールは lambars ライブラリの機能を活用している:
+//! This module leverages the following lambars library features:
 //!
-//! - `Result<T, ValidationError>` による Monad 的なエラーハンドリング
-//! - `Foldable` トレイトを使用した `BillingAmount::sum_prices` の畳み込み操作
+//! - Monadic error handling with `Result<T, ValidationError>`
+//! - Fold operation in `BillingAmount::sum_prices` using the `Foldable` trait
 
 pub mod constrained_type;
 mod error;
@@ -58,26 +58,26 @@ mod quantity_types;
 mod string_types;
 
 // =============================================================================
-// 型の再エクスポート
+// Type re-exports
 // =============================================================================
 
-// エラー型
+// Error types
 pub use error::ValidationError;
 
-// 文字列型
+// String types
 pub use string_types::{EmailAddress, String50, UsStateCode, ZipCode};
 
-// ID 型
+// ID types
 pub use identifier_types::{OrderId, OrderLineId};
 
-// 製品コード型
+// Product code types
 pub use product_types::{GizmoCode, ProductCode, WidgetCode};
 
-// 数量型
+// Quantity types
 pub use quantity_types::{KilogramQuantity, OrderQuantity, UnitQuantity};
 
-// 金額型
+// Price types
 pub use price_types::{BillingAmount, Price};
 
-// その他の型
+// Other types
 pub use misc_types::{PdfAttachment, PromotionCode, VipStatus};

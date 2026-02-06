@@ -1,6 +1,6 @@
-//! PricingCatalog テスト
+//! PricingCatalog tests
 //!
-//! PricingCatalog 型と create_catalog_pricing_function 関数のテストを実装する。
+//! Implements tests for the PricingCatalog type and create_catalog_pricing_function function.
 
 use order_taking_sample::simple_types::{Price, ProductCode};
 use order_taking_sample::workflow::{PricingCatalog, create_catalog_pricing_function};
@@ -8,21 +8,21 @@ use rstest::rstest;
 use rust_decimal::Decimal;
 
 // =============================================================================
-// テストヘルパー
+// Test helpers
 // =============================================================================
 
-/// テスト用の ProductCode を作成する
+/// Creates a ProductCode for testing
 fn create_test_product_code(code: &str) -> ProductCode {
     ProductCode::create("field", code).unwrap()
 }
 
-/// テスト用の Price を作成する
+/// Creates a Price for testing
 fn create_test_price(value: u32) -> Price {
     Price::create(Decimal::from(value)).unwrap()
 }
 
 // =============================================================================
-// 基本操作テスト
+// Basic operation tests
 // =============================================================================
 
 #[rstest]
@@ -57,7 +57,7 @@ fn test_pricing_catalog_set_price() {
 
     let new_catalog = catalog.set_price(&code, price);
 
-    assert!(catalog.is_empty()); // 元は変更されない
+    assert!(catalog.is_empty()); // The original is not modified
     assert_eq!(new_catalog.len(), 1);
     assert_eq!(new_catalog.get_price(&code), Some(&price));
 }
@@ -88,7 +88,7 @@ fn test_pricing_catalog_remove_price() {
 
     let new_catalog = catalog.remove_price(&code);
 
-    assert_eq!(catalog.len(), 1); // 元は変更されない
+    assert_eq!(catalog.len(), 1); // Original is not modified
     assert!(new_catalog.is_empty());
 }
 
@@ -104,7 +104,7 @@ fn test_pricing_catalog_contains() {
 }
 
 // =============================================================================
-// from_entries と iter テスト
+// from_entries and iter tests
 // =============================================================================
 
 #[rstest]
@@ -132,14 +132,14 @@ fn test_pricing_catalog_iter() {
     let entries: Vec<_> = catalog.iter().collect();
     assert_eq!(entries.len(), 2);
 
-    // キーが含まれていることを確認
+    // Verify the key is contained
     let keys: Vec<&String> = entries.iter().map(|(key, _)| *key).collect();
     assert!(keys.contains(&&"W1234".to_string()));
     assert!(keys.contains(&&"G123".to_string()));
 }
 
 // =============================================================================
-// マージ操作テスト
+// Merge operation tests
 // =============================================================================
 
 #[rstest]
@@ -168,7 +168,7 @@ fn test_pricing_catalog_merge_overlapping() {
     let catalog1 = PricingCatalog::singleton(&code, price1);
     let catalog2 = PricingCatalog::singleton(&code, price2);
 
-    // other の値が優先される
+    // Other's value takes priority
     let merged = catalog1.merge(&catalog2);
 
     assert_eq!(merged.len(), 1);
@@ -182,19 +182,19 @@ fn test_pricing_catalog_merge_empty() {
     let catalog = PricingCatalog::singleton(&code, price);
     let empty = PricingCatalog::new();
 
-    // 空とのマージは元と同じ
+    // Merging with empty is same as original
     let merged_with_empty = catalog.merge(&empty);
     assert_eq!(merged_with_empty.len(), 1);
     assert_eq!(merged_with_empty.get_price(&code), Some(&price));
 
-    // 空に対するマージ
+    // Merging empty with non-empty
     let empty_merged_with_catalog = empty.merge(&catalog);
     assert_eq!(empty_merged_with_catalog.len(), 1);
     assert_eq!(empty_merged_with_catalog.get_price(&code), Some(&price));
 }
 
 // =============================================================================
-// 不変性テスト
+// Immutability tests
 // =============================================================================
 
 #[rstest]
@@ -205,7 +205,7 @@ fn test_pricing_catalog_immutability_set_price() {
 
     let _updated = original.set_price(&code, price);
 
-    // 元のカタログは変更されていない
+    // Original catalog is unchanged
     assert!(original.is_empty());
     assert_eq!(original.len(), 0);
     assert_eq!(original.get_price(&code), None);
@@ -219,7 +219,7 @@ fn test_pricing_catalog_immutability_remove_price() {
 
     let _updated = original.remove_price(&code);
 
-    // 元のカタログは変更されていない
+    // Original catalog is unchanged
     assert_eq!(original.len(), 1);
     assert!(original.contains(&code));
     assert_eq!(original.get_price(&code), Some(&price));
@@ -237,7 +237,7 @@ fn test_pricing_catalog_immutability_merge() {
 
     let _merged = catalog1.merge(&catalog2);
 
-    // 両方のカタログは変更されていない
+    // Both catalogs are unchanged
     assert_eq!(catalog1.len(), 1);
     assert_eq!(catalog1.get_price(&code1), Some(&price1));
     assert!(!catalog1.contains(&code2));
@@ -248,7 +248,7 @@ fn test_pricing_catalog_immutability_merge() {
 }
 
 // =============================================================================
-// 価格取得関数テスト
+// Pricing function tests
 // =============================================================================
 
 #[rstest]
@@ -260,7 +260,7 @@ fn test_create_catalog_pricing_function_found() {
 
     let get_price = create_catalog_pricing_function(catalog, default_price);
 
-    // カタログにある商品はカタログの価格を返す
+    // Products in the catalog return the catalog price
     assert_eq!(get_price(&code).value(), Decimal::from(100));
 }
 
@@ -274,7 +274,7 @@ fn test_create_catalog_pricing_function_not_found() {
 
     let get_price = create_catalog_pricing_function(catalog, default_price);
 
-    // カタログにない商品はデフォルト価格を返す
+    // Products not in the catalog return the default price
     assert_eq!(get_price(&unknown_code).value(), Decimal::from(10));
 }
 
@@ -288,7 +288,7 @@ fn test_create_catalog_pricing_function_clone() {
     let get_price = create_catalog_pricing_function(catalog, default_price);
     let cloned_get_price = get_price.clone();
 
-    // 両方とも同じ結果を返す
+    // Both return the same result
     assert_eq!(get_price(&code).value(), Decimal::from(100));
     assert_eq!(cloned_get_price(&code).value(), Decimal::from(100));
 }

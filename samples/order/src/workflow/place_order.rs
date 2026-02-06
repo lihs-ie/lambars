@@ -1,18 +1,18 @@
-//! `PlaceOrder` ワークフロー
+//! `PlaceOrder` workflow
 //!
-//! Phase 7 の実装。ワークフロー全体を統合する。
+//! Phase 7 implementation. Integrates the entire workflow.
 //!
-//! # 設計原則
+//! # Design Principles
 //!
-//! - 依存性注入: 全ての外部依存を関数引数として受け取る
-//! - エラーハンドリング: Result と IO モナドによる関数型エラー処理
-//! - 合成可能性: 各フェーズの関数を順次合成
+//! - Dependency injection: receives all external dependencies as function arguments
+//! - Error handling: functional error handling via Result and IO monad
+//! - Composability: sequentially composes functions from each phase
 //!
-//! # 機能一覧
+//! # Feature List
 //!
-//! - [`place_order`] - `PlaceOrder` ワークフローの実行
+//! - [`place_order`] - Executes the `PlaceOrder` workflow
 //!
-//! # 使用例
+//! # Usage Examples
 //!
 //! ```ignore
 //! use order_taking_sample::workflow::place_order;
@@ -42,44 +42,44 @@ use crate::workflow::validation::validate_order;
 // place_order (REQ-074)
 // =============================================================================
 
-/// `PlaceOrder` ワークフロー全体を統合する関数
+/// Function that integrates the entire `PlaceOrder` workflow
 ///
-/// 未検証注文を受け取り、全ての処理を順次実行して
-/// イベントリストまたはエラーを返す。
+/// Receives an unvalidated order, sequentially executes all processing steps,
+/// and returns either an event list or an error.
 ///
-/// # 処理フロー
+/// # Processing Flow
 ///
-/// 1. `validate_order` - 未検証注文を検証（エラー: Validation）
-/// 2. `price_order` - 価格計算（エラー: Pricing）
-/// 3. `add_shipping_info_to_order` - 配送情報追加
-/// 4. `free_vip_shipping` - VIP 無料配送適用
-/// 5. `acknowledge_order` - 確認メール送信（IO モナド）
-/// 6. `create_events` - イベント生成
+/// 1. `validate_order` - Validates the unvalidated order (error: Validation)
+/// 2. `price_order` - Calculates prices (error: Pricing)
+/// 3. `add_shipping_info_to_order` - Shipping informationaddition
+/// 4. `free_vip_shipping` - VIP freeshippingapplication
+/// 5. `acknowledge_order` - Sends acknowledgment email (IO monad)
+/// 6. `create_events` - Event generation
 ///
 /// # Type Parameters
 ///
-/// * `CheckProduct` - 製品存在確認関数型
-/// * `CheckAddress` - 住所検証関数型
-/// * `GetPricingFn` - 価格取得関数を返す関数型
-/// * `CalculateShipping` - 配送コスト計算関数型
-/// * `CreateLetter` - 確認メール生成関数型
-/// * `SendAcknowledgment` - 確認メール送信関数型（IO を返す）
+/// * `CheckProduct` - Function type for checking product existence
+/// * `CheckAddress` - addressverificationfunctiontype
+/// * `GetPricingFn` - Function type that returns a price retrieval function
+/// * `CalculateShipping` - Function type for calculating shipping cost
+/// * `CreateLetter` - Function type for creating acknowledgment emails
+/// * `SendAcknowledgment` - Function type for sending acknowledgment email (returns IO)
 ///
 /// # Arguments
 ///
-/// * `check_product_exists` - 製品存在確認関数
-/// * `check_address_exists` - 住所検証関数
-/// * `get_pricing_function` - 価格取得関数を返す関数
-/// * `calculate_shipping_cost` - 配送コスト計算関数
-/// * `create_acknowledgment_letter` - 確認メール生成関数
-/// * `send_acknowledgment` - 確認メール送信関数
-/// * `unvalidated_order` - 未検証注文
+/// * `check_product_exists` - Function to check product existence
+/// * `check_address_exists` - addressverificationfunction
+/// * `get_pricing_function` - Function that returns a price retrieval function
+/// * `calculate_shipping_cost` - Function to calculate shipping cost
+/// * `create_acknowledgment_letter` - Function to create an acknowledgment email
+/// * `send_acknowledgment` - verificationEmail sending function
+/// * `unvalidated_order` - unvalidatedorder
 ///
 /// # Returns
 ///
 /// `IO<Result<Vec<PlaceOrderEvent>, PlaceOrderError>>`
-/// - 成功時: `Ok(Vec<PlaceOrderEvent>)`（1-3イベント）
-/// - 失敗時: `Err(PlaceOrderError)`（Validation または Pricing）
+/// - On success: `Ok(Vec<PlaceOrderEvent>)` (1-3 events)
+/// - On failure: `Err(PlaceOrderError)` (Validation or Pricing)
 ///
 /// # Examples
 ///
@@ -97,7 +97,7 @@ use crate::workflow::validation::validate_order;
 ///     unvalidated_order,
 /// );
 ///
-/// // IO モナドを実行
+/// // Execute the IO monad
 /// let result = io_result.run_unsafe();
 /// match result {
 ///     Ok(events) => println!("Events: {:?}", events),
@@ -128,7 +128,7 @@ where
     CreateLetter: Fn(&PricedOrderWithShippingMethod) -> HtmlString,
     SendAcknowledgment: Fn(&OrderAcknowledgment) -> IO<SendResult>,
 {
-    // Step 1: バリデーション
+    // Step 1: Validation
     let validated_order = match validate_order(
         check_product_exists,
         check_address_exists,
@@ -138,32 +138,32 @@ where
         Err(error) => return IO::pure(Err(error)),
     };
 
-    // Step 2: 価格計算
+    // Step 2: Calculate prices
     let priced_order = match price_order(get_pricing_function, &validated_order) {
         Ok(order) => order,
         Err(error) => return IO::pure(Err(error)),
     };
 
-    // Step 3-4: 配送処理パイプラインを合成関数として定義
-    // add_shipping_info_to_order を部分適用
+    // Step 3-4: Define the shipping processing pipeline as a composition function
+    // Partially apply add_shipping_info_to_order
     let add_shipping =
         |order: &PricedOrder| add_shipping_info_to_order(calculate_shipping_cost, order);
 
-    // free_vip_shipping と add_shipping を合成
-    // compose! は右から左: free_vip_shipping(add_shipping(order))
+    // Compose free_vip_shipping and add_shipping
+    // compose! composes right to left: free_vip_shipping(add_shipping(order))
     let process_shipping = compose!(free_vip_shipping, add_shipping);
 
-    // 合成関数を適用
+    // Apply the composed function
     let priced_order_with_shipping = process_shipping(&priced_order);
 
-    // Step 5: 確認メール送信（IO モナド）
+    // Step 5: Send acknowledgment email (IO monad)
     let acknowledgment_io = acknowledge_order(
         create_acknowledgment_letter,
         send_acknowledgment,
         &priced_order_with_shipping,
     );
 
-    // Step 6: イベント生成（IO 内で実行）
+    // Step 6: Event generation (executed within IO)
     acknowledgment_io
         .fmap(move |acknowledgment_option| Ok(create_events(&priced_order, acknowledgment_option)))
 }
@@ -180,7 +180,7 @@ mod tests {
     use rust_decimal::Decimal;
 
     // =========================================================================
-    // テストヘルパー
+    // Test helpers
     // =========================================================================
 
     fn create_valid_customer_info() -> UnvalidatedCustomerInfo {
@@ -259,7 +259,7 @@ mod tests {
     }
 
     // =========================================================================
-    // place_order のテスト
+    // Tests for place_order
     // =========================================================================
 
     #[rstest]
@@ -291,7 +291,7 @@ mod tests {
     #[rstest]
     fn test_place_order_validation_error() {
         let order = UnvalidatedOrder::new(
-            "".to_string(), // 無効な注文ID
+            "".to_string(), // Invalid order ID
             create_valid_customer_info(),
             create_valid_address(),
             create_valid_address(),
@@ -343,7 +343,7 @@ mod tests {
         let result = io_result.run_unsafe();
         assert!(result.is_ok());
         let events = result.unwrap();
-        // メール送信失敗でも成功、AcknowledgmentSent なし
+        // Succeeds even on email send failure, no AcknowledgmentSent
         assert_eq!(events.len(), 2);
     }
 }

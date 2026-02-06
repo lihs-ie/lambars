@@ -1,14 +1,14 @@
-//! 出力イベント型
+//! Output event types
 //!
-//! `PlaceOrder` ワークフローの出力イベントを表す型を定義する。
+//! Defines types representing output events of the `PlaceOrder` workflow.
 //!
-//! # 型一覧
+//! # Type List
 //!
-//! - [`OrderAcknowledgmentSent`] - 注文確認メール送信イベント
-//! - [`ShippableOrderLine`] - 配送対象の注文明細
-//! - [`ShippableOrderPlaced`] - 配送可能注文確定イベント
-//! - [`BillableOrderPlaced`] - 請求可能注文確定イベント
-//! - [`PlaceOrderEvent`] - ワークフロー出力イベント
+//! - [`OrderAcknowledgmentSent`] - Order acknowledgment sent event
+//! - [`ShippableOrderLine`] - Shippable order line
+//! - [`ShippableOrderPlaced`] - Shippable order placed event
+//! - [`BillableOrderPlaced`] - Billable order placed event
+//! - [`PlaceOrderEvent`] - Workflow output event
 
 use crate::compound_types::Address;
 use crate::simple_types::{
@@ -19,9 +19,9 @@ use crate::simple_types::{
 // OrderAcknowledgmentSent
 // =============================================================================
 
-/// 注文確認メール送信イベント
+/// Order acknowledgment sent event
 ///
-/// 注文確認メールが送信されたことを表すイベント型。
+/// An event type representing that an order acknowledgment email has been sent.
 ///
 /// # Examples
 ///
@@ -42,12 +42,12 @@ pub struct OrderAcknowledgmentSent {
 }
 
 impl OrderAcknowledgmentSent {
-    /// 新しい `OrderAcknowledgmentSent` を生成する
+    /// Creates a new `OrderAcknowledgmentSent`
     ///
     /// # Arguments
     ///
-    /// * `order_id` - 確認メールが送信された注文のID
-    /// * `email_address` - 確認メールの送信先アドレス
+    /// * `order_id` - ID of the order for which the acknowledgment email was sent
+    /// * `email_address` - Recipient address of the acknowledgment email
     ///
     /// # Examples
     ///
@@ -67,13 +67,13 @@ impl OrderAcknowledgmentSent {
         }
     }
 
-    /// 注文IDへの参照を返す
+    /// Returns a reference to Order ID
     #[must_use]
     pub const fn order_id(&self) -> &OrderId {
         &self.order_id
     }
 
-    /// メールアドレスへの参照を返す
+    /// Returns a reference to the email address
     #[must_use]
     pub const fn email_address(&self) -> &EmailAddress {
         &self.email_address
@@ -84,9 +84,9 @@ impl OrderAcknowledgmentSent {
 // ShippableOrderLine
 // =============================================================================
 
-/// 配送対象の注文明細
+/// Shippable order line
 ///
-/// 製品コードと数量のみを保持し、配送システムへの入力として使用される。
+/// Holds only the product code and quantity, used as input to the shipping system.
 ///
 /// # Examples
 ///
@@ -108,12 +108,12 @@ pub struct ShippableOrderLine {
 }
 
 impl ShippableOrderLine {
-    /// 新しい `ShippableOrderLine` を生成する
+    /// Creates a new `ShippableOrderLine`
     ///
     /// # Arguments
     ///
-    /// * `product_code` - 配送対象の製品コード
-    /// * `quantity` - 配送数量
+    /// * `product_code` - Product code for shipment
+    /// * `quantity` - Shipment quantity
     ///
     /// # Examples
     ///
@@ -134,13 +134,13 @@ impl ShippableOrderLine {
         }
     }
 
-    /// 製品コードへの参照を返す
+    /// Returns a reference to Product code
     #[must_use]
     pub const fn product_code(&self) -> &ProductCode {
         &self.product_code
     }
 
-    /// 数量への参照を返す
+    /// Returns a reference to quantity
     #[must_use]
     pub const fn quantity(&self) -> &OrderQuantity {
         &self.quantity
@@ -151,10 +151,10 @@ impl ShippableOrderLine {
 // ShippableOrderPlaced
 // =============================================================================
 
-/// 配送可能注文確定イベント
+/// Shippable order placed event
 ///
-/// 配送可能な注文が確定したことを表すイベント型。
-/// 配送に必要な情報（注文ID、配送先住所、明細、PDF）を保持する。
+/// An event type representing that a shippable order has been placed.
+/// Holds information required for shipping (order ID, shipping address, lines, PDF).
 ///
 /// # Examples
 ///
@@ -187,14 +187,14 @@ pub struct ShippableOrderPlaced {
 }
 
 impl ShippableOrderPlaced {
-    /// 新しい `ShippableOrderPlaced` を生成する
+    /// Creates a new `ShippableOrderPlaced`
     ///
     /// # Arguments
     ///
-    /// * `order_id` - 配送対象の注文ID
-    /// * `shipping_address` - 配送先住所
-    /// * `shipment_lines` - 配送対象の明細リスト
-    /// * `pdf` - 配送ラベル等の PDF 添付ファイル
+    /// * `order_id` - Order ID of the shippable order
+    /// * `shipping_address` - Shipping address
+    /// * `shipment_lines` - List of shippable lines
+    /// * `pdf` - PDF attachment such as a shipping label
     #[must_use]
     pub const fn new(
         order_id: OrderId,
@@ -210,25 +210,25 @@ impl ShippableOrderPlaced {
         }
     }
 
-    /// 注文IDへの参照を返す
+    /// Returns a reference to Order ID
     #[must_use]
     pub const fn order_id(&self) -> &OrderId {
         &self.order_id
     }
 
-    /// 配送先住所への参照を返す
+    /// Returns a reference to Shipping address
     #[must_use]
     pub const fn shipping_address(&self) -> &Address {
         &self.shipping_address
     }
 
-    /// 配送明細リストへの参照を返す
+    /// Returns a reference to shipment lineslist
     #[must_use]
     pub fn shipment_lines(&self) -> &[ShippableOrderLine] {
         &self.shipment_lines
     }
 
-    /// PDF 添付ファイルへの参照を返す
+    /// Returns a reference to the PDF attachment
     #[must_use]
     pub const fn pdf(&self) -> &PdfAttachment {
         &self.pdf
@@ -239,10 +239,10 @@ impl ShippableOrderPlaced {
 // BillableOrderPlaced
 // =============================================================================
 
-/// 請求可能注文確定イベント
+/// Billable order placed event
 ///
-/// 請求可能な注文が確定したことを表すイベント型。
-/// 請求に必要な情報（注文ID、請求先住所、請求金額）を保持する。
+/// An event type representing that a billable order has been placed.
+/// Holds information required for billing (order ID, billing address, billing amount).
 ///
 /// # Examples
 ///
@@ -267,13 +267,13 @@ pub struct BillableOrderPlaced {
 }
 
 impl BillableOrderPlaced {
-    /// 新しい `BillableOrderPlaced` を生成する
+    /// Creates a new `BillableOrderPlaced`
     ///
     /// # Arguments
     ///
-    /// * `order_id` - 請求対象の注文ID
-    /// * `billing_address` - 請求先住所
-    /// * `amount_to_bill` - 請求金額
+    /// * `order_id` - Order ID of the billing target
+    /// * `billing_address` - Billing address
+    /// * `amount_to_bill` - Billing amount
     #[must_use]
     pub const fn new(
         order_id: OrderId,
@@ -287,19 +287,19 @@ impl BillableOrderPlaced {
         }
     }
 
-    /// 注文IDへの参照を返す
+    /// Returns a reference to Order ID
     #[must_use]
     pub const fn order_id(&self) -> &OrderId {
         &self.order_id
     }
 
-    /// 請求先住所への参照を返す
+    /// Returns a reference to Billing address
     #[must_use]
     pub const fn billing_address(&self) -> &Address {
         &self.billing_address
     }
 
-    /// 請求金額への参照を返す
+    /// Returns a reference to Billing amount
     #[must_use]
     pub const fn amount_to_bill(&self) -> &BillingAmount {
         &self.amount_to_bill
@@ -310,10 +310,10 @@ impl BillableOrderPlaced {
 // PlaceOrderEvent
 // =============================================================================
 
-/// `PlaceOrder` ワークフローの出力イベント
+/// Output event for the `PlaceOrder` workflow
 ///
-/// 配送イベント、請求イベント、確認メール送信イベントのいずれかを表す直和型。
-/// ワークフロー完了時に `Vec<PlaceOrderEvent>` として返される。
+/// A sum type representing one of: shipping event, billing event, or acknowledgment sent event.
+/// Returned as `Vec<PlaceOrderEvent>` upon workflow completion.
 ///
 /// # Examples
 ///
@@ -330,18 +330,18 @@ impl BillableOrderPlaced {
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PlaceOrderEvent {
-    /// 配送可能な注文が確定したイベント
+    /// Event for a shippable order being placed
     ShippableOrderPlaced(ShippableOrderPlaced),
 
-    /// 請求可能な注文が確定したイベント
+    /// Event for a billable order being placed
     BillableOrderPlaced(BillableOrderPlaced),
 
-    /// 確認メールが送信されたイベント
+    /// Event for an acknowledgment email being sent
     AcknowledgmentSent(OrderAcknowledgmentSent),
 }
 
 impl PlaceOrderEvent {
-    /// `ShippableOrderPlaced` バリアントかどうかを返す
+    /// Returns whether this is the `ShippableOrderPlaced` variant
     ///
     /// # Examples
     ///
@@ -362,7 +362,7 @@ impl PlaceOrderEvent {
         matches!(self, Self::ShippableOrderPlaced(_))
     }
 
-    /// `BillableOrderPlaced` バリアントかどうかを返す
+    /// Returns whether this is the `BillableOrderPlaced` variant
     ///
     /// # Examples
     ///
@@ -384,7 +384,7 @@ impl PlaceOrderEvent {
         matches!(self, Self::BillableOrderPlaced(_))
     }
 
-    /// `AcknowledgmentSent` バリアントかどうかを返す
+    /// Returns whether this is the `AcknowledgmentSent` variant
     ///
     /// # Examples
     ///

@@ -1,7 +1,7 @@
-//! validation モジュールの補完テスト
+//! Supplementary tests for the validation module
 //!
-//! バリデーションロジックのエッジケース、エラー伝播、
-//! バリデーション失敗時の早期リターン動作を検証する。
+//! Edge cases in validation logic, error propagation,
+//! and verification of early-return behavior on validation failure.
 
 use order_taking_sample::simple_types::ProductCode;
 use order_taking_sample::workflow::validation::{
@@ -17,7 +17,7 @@ use rust_decimal::Decimal;
 use std::str::FromStr;
 
 // =============================================================================
-// テストデータファクトリ
+// Test data factory
 // =============================================================================
 
 fn valid_customer_info() -> UnvalidatedCustomerInfo {
@@ -70,7 +70,7 @@ fn mock_address_invalid_format()
 }
 
 // =============================================================================
-// to_order_id 境界値テスト
+// to_order_id Boundary value tests
 // =============================================================================
 
 mod to_order_id_edge_cases {
@@ -112,7 +112,7 @@ mod to_order_id_edge_cases {
 }
 
 // =============================================================================
-// to_order_line_id 境界値テスト
+// to_order_line_id Boundary value tests
 // =============================================================================
 
 mod to_order_line_id_edge_cases {
@@ -139,7 +139,7 @@ mod to_order_line_id_edge_cases {
 }
 
 // =============================================================================
-// to_customer_info エッジケーステスト
+// to_customer_info Edge case tests
 // =============================================================================
 
 mod to_customer_info_edge_cases {
@@ -160,7 +160,7 @@ mod to_customer_info_edge_cases {
 
     #[rstest]
     fn test_customer_info_vip_lowercase_accepted() {
-        // 小文字の "vip" も受け入れられる
+        // Lowercase "vip" is also accepted
         let unvalidated = UnvalidatedCustomerInfo::new(
             "John".to_string(),
             "Doe".to_string(),
@@ -173,12 +173,12 @@ mod to_customer_info_edge_cases {
 
     #[rstest]
     fn test_customer_info_invalid_vip_status_rejected() {
-        // "Vip" や "NORMAL" などの混在ケースは無効
+        // Mixed-case like "Vip" and "NORMAL" are invalid
         let unvalidated = UnvalidatedCustomerInfo::new(
             "John".to_string(),
             "Doe".to_string(),
             "john@example.com".to_string(),
-            "Vip".to_string(), // "Vip" は無効（"vip" か "VIP" のみ）
+            "Vip".to_string(), // "Vip" is invalid (only "vip" or "VIP")
         );
         let result = to_customer_info(&unvalidated);
         assert!(result.is_err());
@@ -199,7 +199,7 @@ mod to_customer_info_edge_cases {
 
     #[rstest]
     fn test_customer_info_error_field_priority() {
-        // first_name が空の場合、first_name のエラーが最初に返される
+        // When first_name is empty, the first_name error is returned first
         let unvalidated = UnvalidatedCustomerInfo::new(
             "".to_string(),
             "".to_string(),
@@ -213,7 +213,7 @@ mod to_customer_info_edge_cases {
 }
 
 // =============================================================================
-// to_address エッジケーステスト
+// to_address Edge case tests
 // =============================================================================
 
 mod to_address_edge_cases {
@@ -277,7 +277,7 @@ mod to_address_edge_cases {
 }
 
 // =============================================================================
-// to_checked_address エラーマッピングテスト
+// Tests for to_checked_address error mapping
 // =============================================================================
 
 mod to_checked_address_error_mapping {
@@ -305,7 +305,7 @@ mod to_checked_address_error_mapping {
 }
 
 // =============================================================================
-// to_product_code 境界値テスト
+// to_product_code Boundary value tests
 // =============================================================================
 
 mod to_product_code_edge_cases {
@@ -362,7 +362,7 @@ mod to_product_code_edge_cases {
 }
 
 // =============================================================================
-// to_order_quantity 境界値テスト
+// to_order_quantity Boundary value tests
 // =============================================================================
 
 mod to_order_quantity_boundary_tests {
@@ -399,7 +399,7 @@ mod to_order_quantity_boundary_tests {
     #[rstest]
     fn test_unit_quantity_decimal_truncated() {
         let widget_code = ProductCode::create("ProductCode", "W1234").unwrap();
-        // Widget の場合、小数は切り捨てられる（u32 に変換）
+        // For Widget, decimals are truncated (converted to u32)
         let result = to_order_quantity(&widget_code, Decimal::from_str("10.5").unwrap());
         assert!(result.is_ok());
     }
@@ -434,7 +434,7 @@ mod to_order_quantity_boundary_tests {
 }
 
 // =============================================================================
-// create_pricing_method テスト
+// create_pricing_method Test
 // =============================================================================
 
 mod create_pricing_method_tests {
@@ -449,7 +449,7 @@ mod create_pricing_method_tests {
 
     #[rstest]
     fn test_whitespace_is_promotion() {
-        // 空白のみでも Promotion として扱われる
+        // Whitespace-only is also treated as a Promotion
         let result = create_pricing_method("   ");
         assert!(result.is_promotion());
     }
@@ -470,7 +470,7 @@ mod create_pricing_method_tests {
 }
 
 // =============================================================================
-// to_validated_order_line エラー順序テスト
+// Tests for to_validated_order_line error order
 // =============================================================================
 
 mod to_validated_order_line_error_order {
@@ -478,25 +478,25 @@ mod to_validated_order_line_error_order {
 
     #[rstest]
     fn test_error_order_line_id_first() {
-        // order_line_id が空で、product_code も無効な場合
+        // When order_line_id is empty and product_code is also invalid
         let unvalidated = UnvalidatedOrderLine::new(
             "".to_string(),
-            "X999".to_string(), // 無効な形式
-            Decimal::from(0),   // 無効な数量
+            "X999".to_string(), // Invalid format
+            Decimal::from(0),   // invalidquantity
         );
         let check_product = mock_product_exists();
         let result = to_validated_order_line(&check_product, &unvalidated);
         assert!(result.is_err());
-        // OrderLineId のエラーが最初に返される
+        // OrderLineId error is returned first
         assert_eq!(result.unwrap_err().field_name, "OrderLineId");
     }
 
     #[rstest]
     fn test_error_product_code_second() {
-        // order_line_id は有効、product_code が無効
+        // order_line_id is valid, product_code is invalid
         let unvalidated = UnvalidatedOrderLine::new(
             "line-001".to_string(),
-            "X999".to_string(), // 無効な形式
+            "X999".to_string(), // Invalid format
             Decimal::from(10),
         );
         let check_product = mock_product_exists();
@@ -507,11 +507,11 @@ mod to_validated_order_line_error_order {
 
     #[rstest]
     fn test_error_quantity_third() {
-        // order_line_id, product_code は有効、quantity が無効
+        // order_line_id and product_code are valid, quantity is invalid
         let unvalidated = UnvalidatedOrderLine::new(
             "line-001".to_string(),
             "W1234".to_string(),
-            Decimal::from(0), // 無効な数量
+            Decimal::from(0), // invalidquantity
         );
         let check_product = mock_product_exists();
         let result = to_validated_order_line(&check_product, &unvalidated);
@@ -521,7 +521,7 @@ mod to_validated_order_line_error_order {
 }
 
 // =============================================================================
-// validate_order 複合エラーテスト
+// validate_order compound error tests
 // =============================================================================
 
 mod validate_order_complex_scenarios {
@@ -641,7 +641,7 @@ mod validate_order_complex_scenarios {
                 "W1234".to_string(),
                 Decimal::from(10),
             ),
-            UnvalidatedOrderLine::new("".to_string(), "W5678".to_string(), Decimal::from(20)), // 無効
+            UnvalidatedOrderLine::new("".to_string(), "W5678".to_string(), Decimal::from(20)), // Invalid
             UnvalidatedOrderLine::new("line-003".to_string(), "G123".to_string(), Decimal::from(5)),
         ];
         let order = UnvalidatedOrder::new(
@@ -660,7 +660,7 @@ mod validate_order_complex_scenarios {
 }
 
 // =============================================================================
-// PlaceOrderError 変換テスト
+// PlaceOrderError conversion tests
 // =============================================================================
 
 mod place_order_error_conversion {
@@ -669,7 +669,7 @@ mod place_order_error_conversion {
     #[rstest]
     fn test_validation_error_to_place_order_error() {
         let order = UnvalidatedOrder::new(
-            "".to_string(), // 無効
+            "".to_string(), // Invalid
             valid_customer_info(),
             valid_address(),
             valid_address(),
@@ -682,7 +682,7 @@ mod place_order_error_conversion {
         assert!(result.is_err());
         let error = result.unwrap_err();
         assert!(error.is_validation());
-        // PlaceOrderError::Validation(_) のパターンマッチ
+        // Pattern match on PlaceOrderError::Validation(_)
         if let PlaceOrderError::Validation(validation_error) = error {
             assert_eq!(validation_error.field_name, "OrderId");
         } else {
