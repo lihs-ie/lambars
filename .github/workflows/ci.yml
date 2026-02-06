@@ -6,6 +6,11 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # All features except `loom`. The `loom` feature enables the loom crate as a
+  # real (non-dev) dependency for specialized model-checking tests. Combining it
+  # with parking_lot-based concurrency tests causes hangs, so it must be
+  # excluded from normal CI runs.
+  ALL_FEATURES: "typeclass,compose,control,persistent,optics,derive,effect,async,serde,arc,rayon,fxhash,ahash"
 
 jobs:
   check:
@@ -35,13 +40,13 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Run clippy
-        run: cargo clippy --all-features --all-targets -- -D warnings
+        run: cargo clippy --features "${{ env.ALL_FEATURES }}" --all-targets -- -D warnings
 
       - name: Check (no features)
         run: cargo check --no-default-features
 
-      - name: Check (all features)
-        run: cargo check --all-features
+      - name: Check (all features except loom)
+        run: cargo check --features "${{ env.ALL_FEATURES }}"
 
   test:
     name: Test
@@ -68,8 +73,8 @@ jobs:
       - name: Run tests (no features)
         run: cargo test --no-default-features
 
-      - name: Run tests (all features)
-        run: cargo test --all-features
+      - name: Run tests (all features except loom)
+        run: cargo test --features "${{ env.ALL_FEATURES }}"
 
   coverage:
     name: Code Coverage
@@ -87,7 +92,7 @@ jobs:
         uses: taiki-e/install-action@cargo-llvm-cov
 
       - name: Generate code coverage
-        run: cargo llvm-cov --all-features --lcov --output-path lcov.info
+        run: cargo llvm-cov --features "${{ env.ALL_FEATURES }}" --lcov --output-path lcov.info
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
@@ -107,7 +112,7 @@ jobs:
           toolchain: nightly-2025-12-15
 
       - name: Build documentation
-        run: cargo doc --all-features --no-deps
+        run: cargo doc --features "${{ env.ALL_FEATURES }}" --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
 
@@ -123,4 +128,4 @@ jobs:
           toolchain: nightly-2025-12-15
 
       - name: Check MSRV
-        run: cargo check --all-features
+        run: cargo check --features "${{ env.ALL_FEATURES }}"
