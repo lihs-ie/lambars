@@ -131,6 +131,33 @@ thread_local! {
     static IN_CONCURRENT_LAZY_INIT: Cell<bool> = const { Cell::new(false) };
 }
 
+/// RAII guard for panic safety during initialization (bracket pattern).
+///
+/// On panic, sets `STATE_POISONED` under mutex and wakes all waiters.
+/// Always resets `IN_CONCURRENT_LAZY_INIT` regardless of outcome.
+struct InitializationDropGuard<'a, T, F> {
+    concurrent_lazy: &'a ConcurrentLazy<T, F>,
+    completed: bool,
+}
+
+impl<T, F> Drop for InitializationDropGuard<'_, T, F> {
+    fn drop(&mut self) {
+        IN_CONCURRENT_LAZY_INIT.with(|flag| flag.set(false));
+
+        if self.completed {
+            return;
+        }
+
+        {
+            let _lock = self.concurrent_lazy.wait_sync.0.mutex.lock();
+            self.concurrent_lazy
+                .state
+                .store(STATE_POISONED, Ordering::Release);
+        }
+        self.concurrent_lazy.wait_sync.0.condvar.notify_all();
+    }
+}
+
 /// Error returned when a `ConcurrentLazy` value cannot be initialized.
 ///
 /// This error is returned by [`ConcurrentLazy::into_inner`] when:
@@ -361,12 +388,6 @@ impl<T, F: FnOnce() -> T> ConcurrentLazy<T, F> {
     /// # Safety
     ///
     /// Must only be called after successfully transitioning to `STATE_COMPUTING`.
-    ///
-    /// # Re-entry Detection
-    ///
-    /// Uses `IN_CONCURRENT_LAZY_INIT` thread-local flag to detect re-entrant calls.
-    /// If `force()` is called from within the initializer on the same thread,
-    /// this method panics immediately instead of blocking forever on the Condvar.
     fn do_init(&self) -> &T {
         IN_CONCURRENT_LAZY_INIT.with(|flag| {
             assert!(
@@ -376,6 +397,11 @@ impl<T, F: FnOnce() -> T> ConcurrentLazy<T, F> {
                  This would cause a deadlock."
             );
         });
+
+        let mut guard = InitializationDropGuard {
+            concurrent_lazy: self,
+            completed: false,
+        };
 
         // SAFETY: compare_exchange succeeded, so only this thread is in STATE_COMPUTING.
         let initializer = unsafe { (*self.initializer.get()).take() }
@@ -389,17 +415,22 @@ impl<T, F: FnOnce() -> T> ConcurrentLazy<T, F> {
             true
         });
 
-        // Common cleanup: publish state, wake waiters, clear re-entry flag
-        self.state.store(
-            if succeeded {
-                STATE_READY
-            } else {
-                STATE_POISONED
-            },
-            Ordering::Release,
-        );
+        // State change under mutex prevents lost wakeup: a waiter that checked
+        // state but hasn't entered condvar.wait() yet is blocked on mutex.lock(),
+        // so it will see the updated state when it resumes.
+        {
+            let _lock = self.wait_sync.0.mutex.lock();
+            self.state.store(
+                if succeeded {
+                    STATE_READY
+                } else {
+                    STATE_POISONED
+                },
+                Ordering::Release,
+            );
+            guard.completed = true;
+        }
         self.wait_sync.0.condvar.notify_all();
-        IN_CONCURRENT_LAZY_INIT.with(|flag| flag.set(false));
 
         assert!(
             succeeded,

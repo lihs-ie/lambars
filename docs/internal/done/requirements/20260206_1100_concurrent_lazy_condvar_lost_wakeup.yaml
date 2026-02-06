@@ -1,0 +1,452 @@
+---
+id: REQ-20260206-1100
+title: ConcurrentLazy Condvar Lost Wakeup バグ修正
+created_at: 2026-02-06T11:00:00+09:00
+status: draft
+priority: critical
+category: bugfix
+tags:
+  - concurrent_lazy
+  - concurrency
+  - condvar
+  - lost_wakeup
+  - deadlock
+  - coverage
+branch: perf/tasks-bulk-search-index-merge
+
+# 概要
+
+ConcurrentLazy の `do_init()` メソッドにおいて、Condvar の「Lost Wakeup」パターンによる
+デッドロックバグを修正する。CI の Code Coverage ジョブで `test_poison_propagation_concurrent`
+テストが coverage instrumentation 下でハングする問題の根本原因を解消する。
+
+# 背景
+
+## 問題の発生状況
+
+CI の `cargo llvm-cov` によるコードカバレッジ計測時に、
+`test_poison_propagation_concurrent` テストがデッドロックし、ジョブがタイムアウトする。
+
+通常の `cargo test` では再現頻度が低いが、coverage instrumentation がアトミック操作間に
+追加命令を挿入することで、race window が拡大し、バグが顕在化する。
+
+## 根本原因分析
+
+`do_init()` メソッドの状態遷移（`STATE_COMPUTING` -> `STATE_POISONED` / `STATE_READY`）と
+`condvar.notify_all()` の呼び出しが、**mutex を取得せずに**行われている。
+
+これは Condvar の「Lost Wakeup」パターンの古典的なバグである。
+
+### 再現シーケンス
+
+```
+時刻  Waiter スレッド                           Notifier スレッド
+----  ----------------------------------------  ----------------------------------------
+T1    mutex.lock() 取得
+T2    state.load() == STATE_COMPUTING -> true
+T3    (まだ condvar.wait() に入っていない)
+T4                                               state.store(STATE_POISONED)  [mutex なし]
+T5                                               condvar.notify_all()         [mutex なし]
+      　　　　　　　　　　　　　　　　　　　　　　 -> waiter は wait 前なので通知消失
+T6    condvar.wait() に入る
+      -> 永久にブロック（通知は既に消失済み）
+```
+
+Coverage instrumentation が T2 と T6 の間に命令を挿入し、この window を拡大している。
+
+### 現在の実装（問題箇所）
+
+#### Notifier 側（do_init メソッド 393-401行目）
+
+```rust
+// catch_unwind の後...
+self.state.store(
+    if succeeded { STATE_READY } else { STATE_POISONED },
+    Ordering::Release,
+);
+self.wait_sync.0.condvar.notify_all();  // mutex なしで notify
+```
+
+#### Waiter 側（spin_then_wait メソッド 445-448行目）
+
+```rust
+let mut guard = self.wait_sync.0.mutex.lock();
+while self.state.load(Ordering::Acquire) == STATE_COMPUTING {
+    self.wait_sync.0.condvar.wait(&mut guard);
+}
+```
+
+## 正しい Condvar パターン
+
+Condvar の標準的な使用パターンでは、条件変数の変更は mutex 保持下で行う必要がある。
+
+```rust
+// Notifier: 状態変更は mutex 保持下で行う
+{
+    let _lock = mutex.lock();
+    state.store(NEW_STATE, Ordering::Release);
+}  // mutex 解放
+condvar.notify_all();  // mutex 解放後に notify（または mutex 保持中でも可）
+```
+
+このパターンにより、以下の 2 つのケースのいずれかが保証される:
+
+- **Case A**: waiter が先に mutex を取得 -> state チェック -> wait に入る
+  -> notifier が mutex を取得して state 変更 -> mutex 解放 -> notify -> waiter が起きる
+- **Case B**: notifier が先に mutex を取得 -> state 変更 -> mutex 解放 -> notify
+  -> waiter が mutex を取得 -> state チェック -> 変更を検出 -> wait に入らない
+
+いずれのケースでも Lost Wakeup は発生しない。
+
+# 要件
+
+## 機能要件
+
+### FR-1: do_init() の状態遷移を mutex 保持下で実行する
+
+- **内容**: `do_init()` メソッドにおいて、`state.store()` を `wait_sync.0.mutex.lock()` の
+  保護下で実行するように修正する
+- **詳細**:
+  - state の変更（STATE_COMPUTING -> STATE_READY / STATE_POISONED）を mutex 保持下で行う
+  - mutex 解放後に `condvar.notify_all()` を呼び出す
+  - これにより Lost Wakeup パターンを完全に排除する
+- **受入基準**:
+  - state 変更が常に mutex 保持下で行われること
+  - notify_all が state 変更後に呼び出されること
+
+### FR-2: Drop Guard パターンによる panic safety の確保
+
+- **内容**: `do_init()` 内で panic（catch_unwind で捕捉した panic の再送や assert! の失敗）が
+  発生した場合でも、確実に state 変更と notify_all が実行されるようにする
+- **詳細**:
+  - RAII ベースの Drop Guard 構造体を使用する
+  - Drop Guard は以下を保証する:
+    1. mutex を取得して state を STATE_POISONED に設定
+    2. mutex を解放
+    3. condvar.notify_all() を呼び出す
+    4. IN_CONCURRENT_LAZY_INIT フラグをリセット
+  - 正常完了時は Drop Guard を defuse（無効化）する
+- **受入基準**:
+  - panic 発生時にも waiter スレッドが確実に起床すること
+  - IN_CONCURRENT_LAZY_INIT フラグが必ずリセットされること
+- **FP 観点**:
+  - Drop Guard は宣言的なリソース管理パターンであり、命令的な try-finally よりも
+    関数型的な設計である
+  - panic safety を型システムの力で保証する
+
+### FR-3: 既存テストの全件パス
+
+- **内容**: 修正後、既存の全テストが通ること
+- **受入基準**:
+  - `cargo test --features "control"` が全て PASS
+  - `cargo test --test concurrent_lazy_tests --features "control"` が全て PASS
+  - `cargo test --test concurrent_lazy_loom_tests --features "control"` が全て PASS
+  - `cargo test --test concurrent_lazy_laws --features "control"` が全て PASS
+
+### FR-4: Coverage 環境下でのデッドロック解消
+
+- **内容**: `cargo llvm-cov` 下での `test_poison_propagation_concurrent` が
+  デッドロックせずに完了すること
+- **受入基準**:
+  - `cargo llvm-cov --test concurrent_lazy_loom_tests --features "control"` が
+    タイムアウトなしで完了
+  - `cargo llvm-cov --features "control"` が全テストタイムアウトなしで完了
+
+## 非機能要件
+
+### NFR-1: パフォーマンスリグレッション 10% 以内
+
+- **内容**: 修正によるパフォーマンス影響を最小限に抑える
+- **根拠**: 状態変更は初期化時の 1 回のみ発生するため、mutex 取得の追加コストは
+  ホットパス（STATE_READY の fast path）には影響しない
+- **受入基準**:
+  - `force()` の STATE_READY fast path に変更がないこと
+  - `spin_then_wait()` の動作に変更がないこと
+  - ベンチマーク全項目でリグレッション +10% 以内
+
+### NFR-2: API 後方互換性
+
+- **内容**: 公開 API のシグネチャを変更しない
+- **受入基準**:
+  - `ConcurrentLazy::new()`, `force()`, `try_force()`, `get()`, `into_inner()` 等の
+    シグネチャが変更されないこと
+  - 内部実装の変更のみで対応すること
+
+### NFR-3: スレッド安全性の維持
+
+- **内容**: Send + Sync の境界とアトミック操作の正確性を維持する
+- **受入基準**:
+  - `unsafe impl Send/Sync` の条件が変更されないこと
+  - Ordering の選択が適切であること
+  - 新たなデータ競合を導入しないこと
+
+### NFR-4: parking_lot の維持
+
+- **内容**: 前回の最適化で導入した parking_lot を維持する
+- **受入基準**:
+  - `parking_lot::Condvar` / `parking_lot::Mutex` を引き続き使用すること
+  - std::sync に戻さないこと
+
+# 関数型プログラミング観点の設計レビュー
+
+## 参照透過性（Referential Transparency）
+
+### 現状の問題
+
+Lost Wakeup バグにより、`force()` が永久にブロックする可能性がある。
+これは「同じ入力に対して同じ出力を返す」という参照透過性を破壊している。
+具体的には、同じ ConcurrentLazy インスタンスに対して force() を呼び出しても:
+- あるスレッドでは値が返る
+- 別のスレッドではデッドロックして値が返らない
+という非決定的な挙動が発生する。
+
+### 修正後の改善
+
+Lost Wakeup が排除されることで、`force()` は以下の決定的な挙動を保証する:
+- 初期化成功時: 全スレッドが同じ値への参照を取得
+- 初期化失敗時: 全スレッドが panic（poisoned 状態）を観測
+
+ConcurrentLazy のドキュメント（19-30行目）に記載の通り、poison 時の参照透過性の
+制限は既知の設計判断であり、本修正はその範囲内の正確性を向上させるものである。
+
+## 不変性（Immutability）
+
+### 影響なし
+
+ConcurrentLazy は内部可変性（UnsafeCell）を使用しているが、これは
+「1回だけ書き込み、以後は不変」というセマンティクスを実現するための必要最小限の可変性である。
+
+本修正は state 変更を mutex 保持下で行うようにするだけであり:
+- value の書き込みパターンは変更しない
+- state の最終的な値は変更しない（STATE_READY / STATE_POISONED）
+- 初期化後の不変性保証に影響しない
+
+むしろ、状態遷移の原子性が mutex により強化され、内部状態の一貫性がより堅牢になる。
+
+## 純粋関数（Pure Function）
+
+### 設計の妥当性
+
+`do_init()` は副作用を含む処理（state 変更、condvar 通知）であるが、
+「計算」（初期化関数の実行）と「実行」（同期プリミティブの操作）が分離されている。
+
+初期化関数自体は純粋であるべきであり（ドキュメント 55-56行目で推奨されている）、
+副作用的な同期処理はインフラストラクチャ層に封じ込められている。
+
+本修正はこのインフラストラクチャ層の正確性を向上させるものであり、
+純粋関数としての設計を損なうものではない。
+
+### Drop Guard の FP 的妥当性
+
+Drop Guard パターンは Rust における「宣言的なリソース管理」であり、
+命令的な try-catch-finally パターンよりも関数型的である。
+
+- リソースの生存期間がスコープに結びつく（RAII）
+- cleanup ロジックが Drop トレイトとして宣言的に定義される
+- panic safety が型システムにより保証される
+
+これは Haskell の `bracket` パターンに相当する安全なリソース管理手法である。
+
+## 高階関数・コレクション操作
+
+### 影響なし
+
+`map`, `flat_map`, `zip`, `zip_with` 等の高階関数 API は本修正の対象外である。
+これらの関数合成チェーンは引き続き正しく動作する。
+
+## エラーハンドリング
+
+### 改善
+
+Lost Wakeup が解消されることで、`try_force()` が返す `Result` の信頼性が向上する。
+現在はデッドロックにより `Result` が返らない可能性があったが、修正後は確実に
+`Ok(&T)` または `Err(ConcurrentLazyPoisonedError)` が返る。
+
+# 実装方針
+
+## 修正対象
+
+- `src/control/concurrent_lazy.rs` の `do_init()` メソッドのみ
+
+## 修正内容
+
+### Step 1: Drop Guard 構造体の定義
+
+```rust
+/// RAII guard that ensures state transition and waiter notification
+/// even if a panic occurs during initialization.
+struct InitializationDropGuard<'a, T, F> {
+    concurrent_lazy: &'a ConcurrentLazy<T, F>,
+    completed: bool,
+}
+
+impl<T, F> Drop for InitializationDropGuard<'_, T, F> {
+    fn drop(&mut self) {
+        if !self.completed {
+            // Panic 発生時: STATE_POISONED に遷移
+            {
+                let _lock = self.concurrent_lazy.wait_sync.0.mutex.lock();
+                self.concurrent_lazy.state.store(STATE_POISONED, Ordering::Release);
+            }
+            self.concurrent_lazy.wait_sync.0.condvar.notify_all();
+        }
+        // 常にリエントランシーフラグをリセット
+        IN_CONCURRENT_LAZY_INIT.with(|flag| flag.set(false));
+    }
+}
+```
+
+### Step 2: do_init() メソッドの修正
+
+```rust
+fn do_init(&self) -> &T {
+    // リエントランシー検出
+    IN_CONCURRENT_LAZY_INIT.with(|flag| {
+        assert!(
+            !flag.replace(true),
+            "ConcurrentLazy::force re-entrant initialization detected"
+        );
+    });
+
+    // Drop Guard を作成（panic 時に自動で state 変更 + notify）
+    let mut guard = InitializationDropGuard {
+        concurrent_lazy: self,
+        completed: false,
+    };
+
+    let initializer = unsafe { (*self.initializer.get()).take() }
+        .expect("ConcurrentLazy: initializer already consumed");
+
+    let result = catch_unwind(AssertUnwindSafe(initializer));
+
+    let succeeded = result.is_ok_and(|value| {
+        unsafe { (*self.value.get()).write(value) };
+        true
+    });
+
+    // 正常パス: mutex 保持下で state 変更
+    {
+        let _lock = self.wait_sync.0.mutex.lock();
+        self.state.store(
+            if succeeded { STATE_READY } else { STATE_POISONED },
+            Ordering::Release,
+        );
+    }
+    self.wait_sync.0.condvar.notify_all();
+
+    // Drop Guard を defuse（Drop で二重に状態変更しないように）
+    guard.completed = true;
+    // guard は drop されるが completed == true なので何もしない
+    // ただし IN_CONCURRENT_LAZY_INIT のリセットは Drop Guard で行われる
+
+    assert!(
+        succeeded,
+        "ConcurrentLazy: initialization function panicked"
+    );
+
+    unsafe { (*self.value.get()).assume_init_ref() }
+}
+```
+
+### Step 3: IN_CONCURRENT_LAZY_INIT リセットの整理
+
+Drop Guard の Drop 実装で IN_CONCURRENT_LAZY_INIT を常にリセットするため、
+do_init() の本体から重複するリセット呼び出しを削除する。
+
+## 影響範囲
+
+### 変更されるもの
+
+- `do_init()` メソッドの内部実装のみ
+
+### 変更されないもの
+
+- `force()` の fast path（STATE_READY チェック + Acquire load）
+- `force_slow()` のステートマシンロジック
+- `spin_then_wait()` のアダプティブスピン + Condvar wait
+- `wait_on_initialization()` の呼び出し構造
+- 全ての公開 API シグネチャ
+- Send + Sync の実装条件
+- キャッシュライン分離のメモリレイアウト
+
+# 制約
+
+- `#[ignore]` 属性でテストをスキップしない（テストの意味がなくなる）
+- parking_lot を維持する（std::sync に戻さない）
+- `force()` の fast path パフォーマンスを変更しない
+- CI での `--test-threads=1` による回避策は不要にする（修正後に削除可能）
+
+# テスト計画
+
+## 既存テストの確認
+
+- [ ] `cargo test --features "control"` 全テスト PASS
+- [ ] `cargo test --test concurrent_lazy_tests --features "control"` PASS
+- [ ] `cargo test --test concurrent_lazy_loom_tests --features "control"` PASS
+- [ ] `cargo test --test concurrent_lazy_laws --features "control"` PASS
+
+## Coverage 環境での確認
+
+- [ ] `cargo llvm-cov --test concurrent_lazy_loom_tests --features "control"` ハングなし
+- [ ] `cargo llvm-cov --features "control"` 全テストハングなし（loom feature 除く）
+
+## ストレステスト
+
+- [ ] `test_poison_propagation_concurrent` を 1000 回繰り返し実行してデッドロックしない
+- [ ] `test_high_contention`（32スレッド）がデッドロックしない
+- [ ] `test_concurrent_lazy_notify_all_wakes_waiting_threads`（16スレッド）がデッドロックしない
+
+## パフォーマンス検証
+
+- [ ] `/perf-gate` スキルでベンチマーク比較を実施
+- [ ] STATE_READY fast path に変更がないことをコード確認
+- [ ] 全ベンチマーク項目でリグレッション +10% 以内
+
+# 検証計画
+
+## ベンチマーク測定項目
+
+### Cached Access（fast path、影響なしを確認）
+- `concurrent_lazy_cached_access/thread_count/1`
+- `concurrent_lazy_cached_access/thread_count/4`
+- `concurrent_lazy_cached_access/thread_count/16`
+
+### Init Contention（cold path、mutex 追加の影響を測定）
+- `concurrent_lazy_init_contention/thread_count/2`
+- `concurrent_lazy_init_contention/thread_count/4`
+- `concurrent_lazy_init_contention/thread_count/16`
+
+### Thread Scalability
+- `concurrent_lazy_thread_scalability/thread_count/16`
+- `concurrent_contention/32_threads`
+
+## 受入基準
+
+- **Cached Access**: リグレッション 0%（fast path に変更なし）
+- **Init Contention**: リグレッション +10% 以内（初期化時の mutex 取得コスト増）
+- **Thread Scalability**: リグレッション +10% 以内
+
+# 参考資料
+
+## 関連ファイル
+
+- `src/control/concurrent_lazy.rs`: ConcurrentLazy 実装
+- `tests/concurrent_lazy_loom_tests.rs`: 問題の test_poison_propagation_concurrent を含む
+- `tests/concurrent_lazy_tests.rs`: 統合テスト
+- `tests/concurrent_lazy_laws.rs`: Functor/Monad 則テスト
+
+## 関連要件定義
+
+- `REQ-20260206-1030`: ConcurrentLazy 高スレッド数リグレッション改善
+- `REQ-20260205-1631`: Lazy/ConcurrentLazy 初期化コスト削減
+
+## 参考文献
+
+- Condvar Lost Wakeup: https://en.wikipedia.org/wiki/Spurious_wakeup
+- parking_lot Condvar: https://docs.rs/parking_lot/latest/parking_lot/struct.Condvar.html
+- Rust std Condvar のドキュメント: mutex 保持下での条件変数変更を推奨
+- Haskell bracket パターン: https://wiki.haskell.org/Bracket_pattern
+
+# 更新履歴
+
+- 2026-02-06T11:00:00+09:00: 初版作成（FP 観点レビュー込み）

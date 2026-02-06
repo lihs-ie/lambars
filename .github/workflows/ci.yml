@@ -92,9 +92,7 @@ jobs:
         uses: taiki-e/install-action@cargo-llvm-cov
 
       - name: Generate code coverage
-        # --test-threads=1: coverage instrumentation がアトミック操作のタイミングを変更し、
-        # concurrent_lazy_loom_tests の並列実行でデッドロックを引き起こすため逐次実行にする
-        run: cargo llvm-cov --features "${{ env.ALL_FEATURES }}" --lcov --output-path lcov.info -- --test-threads=1
+        run: cargo llvm-cov --features "${{ env.ALL_FEATURES }}" --lcov --output-path lcov.info
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
