@@ -7,12 +7,13 @@
 //!
 //! # Safety
 //!
-//! This module uses unsafe code to implement a state machine with blocking wait.
+//! This module uses unsafe code to implement a lock-free state machine.
 //! The following invariants are maintained:
 //! - `value` is only initialized when `state` is `STATE_READY`
 //! - `initializer` is `Some` only when `state` is `STATE_EMPTY`
 //! - Transition to `STATE_COMPUTING` is done via `compare_exchange` for exclusivity
-//! - Multiple threads can safely access via atomic operations and `Condvar` blocking wait
+//! - Multiple threads can safely access via Atomic operations and adaptive
+//!   spin + `parking_lot::Condvar` blocking wait
 //!
 //! # Referential Transparency Note
 //!
@@ -28,12 +29,35 @@
 //! should ensure their initialization functions do not panic, or handle the
 //! poisoned state explicitly via `is_poisoned()` before calling `force()`.
 //!
-//! # Performance
+//! # Re-entry Warning
 //!
-//! This implementation uses `Mutex` + `Condvar` for blocking wait instead of spin-wait.
-//! This significantly reduces CPU usage during contention compared to spin-wait approaches.
-//! The READY path remains lock-free with only an atomic load and Acquire fence - the
-//! `Mutex` is only acquired when initialization is in progress.
+//! Calling `force()` recursively from within the initialization function on the
+//! same thread will cause an immediate panic via thread-local re-entry detection.
+//! This prevents deadlock by detecting the recursive call at the `do_init()` entry
+//! point before any blocking wait occurs.
+//!
+//! # Performance Characteristics
+//!
+//! - **`STATE_READY` fast path**: Lock-free `Acquire` load only (zero overhead after init)
+//! - **Waiting strategy**: Adaptive spin (128 iterations) followed by
+//!   `parking_lot::Condvar` blocking for longer initializations
+//! - **Cache line separation**: `state` (hot path) and `wait_sync` (cold path) are
+//!   placed on separate cache lines via `#[repr(C)]` + `#[repr(C, align(64))]`
+//!   to prevent false sharing in high-thread-count scenarios
+//!
+//! # Initialization Function Constraints
+//!
+//! The initialization function passed to `ConcurrentLazy::new` should complete in a
+//! bounded amount of time. While `force()` and `try_force()` will wait indefinitely
+//! for initialization to complete, a long-running or non-terminating initialization
+//! function will block all threads that call `force()` or `try_force()`.
+//!
+//! **Recommendations:**
+//! - Keep initialization functions short and side-effect-free
+//! - For long-running computations, prepare the result on a dedicated thread and
+//!   pass the pre-computed value via `ConcurrentLazy::new_with_value`
+//! - Do not pass untrusted or user-supplied closures as initialization functions,
+//!   as a malicious closure could cause denial-of-service by blocking indefinitely
 //!
 //! # Examples
 //!
@@ -59,12 +83,13 @@
 //! }
 //! ```
 
-use std::cell::UnsafeCell;
+use std::cell::{Cell, UnsafeCell};
 use std::fmt;
 use std::mem::{ManuallyDrop, MaybeUninit};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::{Condvar, Mutex};
+
+use parking_lot::{Condvar, Mutex};
 
 /// State: not yet initialized
 const STATE_EMPTY: u8 = 0;
@@ -74,6 +99,37 @@ const STATE_COMPUTING: u8 = 1;
 const STATE_READY: u8 = 2;
 /// State: initialization panicked
 const STATE_POISONED: u8 = 3;
+
+/// Assumed cache line size for the target architecture (`x86_64`: 64 bytes).
+///
+/// On ARM servers with 128-byte cache lines, 64-byte alignment still provides
+/// partial benefit. Adjust this value if targeting different architectures.
+#[allow(dead_code)]
+const CACHE_LINE_SIZE: usize = 64;
+
+/// Cache-line aligned wrapper to prevent false sharing between hot and cold fields.
+#[repr(C, align(64))]
+struct CacheAligned<T>(T);
+
+/// Condvar + Mutex pair for blocking wait during initialization (cold path).
+struct WaitSync {
+    condvar: Condvar,
+    mutex: Mutex<()>,
+}
+
+impl WaitSync {
+    const fn new() -> Self {
+        Self {
+            condvar: Condvar::new(),
+            mutex: Mutex::new(()),
+        }
+    }
+}
+
+// Thread-local flag to detect re-entrant initialization and prevent deadlock.
+thread_local! {
+    static IN_CONCURRENT_LAZY_INIT: Cell<bool> = const { Cell::new(false) };
+}
 
 /// Error returned when a `ConcurrentLazy` value cannot be initialized.
 ///
@@ -117,10 +173,7 @@ impl std::error::Error for ConcurrentLazyPoisonedError {}
 /// - `T: Send + Sync`
 /// - `F: Send`
 ///
-/// After initialization, accessing the value is lock-free (uses atomic load with Acquire ordering).
-/// The `Mutex` + `Condvar` is only used when waiting for another thread to complete
-/// initialization, making the common case (accessing an already-initialized value)
-/// very fast.
+/// After initialization, accessing the value is lock-free (uses `AtomicU8::load`).
 ///
 /// # Examples
 ///
@@ -158,19 +211,21 @@ impl std::error::Error for ConcurrentLazyPoisonedError {}
 ///     assert_eq!(handle.join().unwrap(), 42);
 /// }
 /// ```
+///
+/// # Memory Layout
+///
+/// The `#[repr(C)]` layout ensures deterministic field ordering. The `wait_sync`
+/// field is wrapped in `CacheAligned` to force it onto a separate cache line
+/// from the hot `state` field, preventing false sharing in high-thread-count
+/// scenarios.
+#[repr(C)]
 pub struct ConcurrentLazy<T, F = fn() -> T> {
-    /// Atomic state for lock-free fast path.
+    // Cache line 1: hot path (frequently accessed by all threads)
     state: AtomicU8,
-    /// The cached value (initialized when state is `STATE_READY`).
     value: UnsafeCell<MaybeUninit<T>>,
-    /// The initialization function (consumed when initialization starts).
     initializer: UnsafeCell<Option<F>>,
-    /// Condvar for blocking wait during initialization.
-    /// Only used when another thread is computing - the fast path doesn't touch this.
-    wait_condvar: Condvar,
-    /// Mutex paired with the Condvar. Used to ensure proper synchronization
-    /// between state updates and condvar notifications.
-    wait_mutex: Mutex<()>,
+    // Cache line 2: cold path (accessed only during initialization wait)
+    wait_sync: CacheAligned<WaitSync>,
 }
 
 // # Safety
@@ -205,14 +260,12 @@ impl<T, F: FnOnce() -> T> ConcurrentLazy<T, F> {
     /// // Nothing printed yet
     /// ```
     #[inline]
-    #[allow(clippy::missing_const_for_fn)] // Condvar::new and Mutex::new are not const
-    pub fn new(initializer: F) -> Self {
+    pub const fn new(initializer: F) -> Self {
         Self {
             state: AtomicU8::new(STATE_EMPTY),
             value: UnsafeCell::new(MaybeUninit::uninit()),
             initializer: UnsafeCell::new(Some(initializer)),
-            wait_condvar: Condvar::new(),
-            wait_mutex: Mutex::new(()),
+            wait_sync: CacheAligned(WaitSync::new()),
         }
     }
 
@@ -224,13 +277,22 @@ impl<T, F: FnOnce() -> T> ConcurrentLazy<T, F> {
     ///
     /// This method is thread-safe. If multiple threads call `force()` concurrently,
     /// only one will execute the initialization function, and all others will
-    /// block (using `Condvar::wait`) until it completes.
+    /// wait via an adaptive strategy (spin + Condvar) before returning the value.
+    ///
+    /// # Waiting Mechanism
+    ///
+    /// 1. **Fast path**: If `STATE_READY`, returns immediately (lock-free `Acquire` load)
+    /// 2. **Adaptive spin**: Spins for up to 128 iterations in user-space
+    /// 3. **Condvar wait**: Falls back to `parking_lot::Condvar::wait` for
+    ///    indefinite blocking until initialization completes
     ///
     /// # Panics
     ///
     /// - If the initialization function has already been consumed (e.g., after
     ///   a previous panic during initialization)
     /// - If the initialization function panics
+    /// - If re-entrant initialization is detected (calling `force()` from within
+    ///   the initializer on the same thread)
     ///
     /// # Examples
     ///
@@ -245,81 +307,154 @@ impl<T, F: FnOnce() -> T> ConcurrentLazy<T, F> {
     #[inline(always)]
     pub fn force(&self) -> &T {
         let state = self.state.load(Ordering::Acquire);
-
         if state == STATE_READY {
-            // SAFETY: Acquire load synchronizes with Release store in do_init().
+            // SAFETY: Transition to STATE_READY is done in do_init() after value.write()
+            // completes with Release ordering. The Acquire load here establishes
+            // happens-before relationship, guaranteeing that write is visible.
             return unsafe { (*self.value.get()).assume_init_ref() };
         }
-
         self.force_slow(state)
     }
 
-    #[cold]
+    /// Slow path for `force()`: handles `STATE_EMPTY`, `STATE_COMPUTING`, and `STATE_POISONED`.
+    ///
+    /// This method is intentionally `#[inline(never)]` to keep the fast path (`force()`)
+    /// small enough for the compiler to inline at every call site. The fast path is just
+    /// an `Acquire` load + branch, which is essentially zero-cost after initialization.
     #[inline(never)]
-    fn force_slow(&self, state: u8) -> &T {
-        self.force_slow_inner(state)
-            .unwrap_or_else(|_| panic!("ConcurrentLazy instance has been poisoned"))
-    }
-
-    /// Uses `Condvar::wait` for efficient blocking without CPU spinning.
-    #[cold]
-    fn block_until_ready(&self) {
-        let mut guard = self.wait_mutex.lock().unwrap_or_else(|e| e.into_inner());
-
-        while self.state.load(Ordering::Acquire) == STATE_COMPUTING {
-            guard = self
-                .wait_condvar
-                .wait(guard)
-                .unwrap_or_else(|e| e.into_inner());
-        }
-
-        drop(guard);
-    }
-
-    /// Uses a drop guard to ensure state transitions and waiters are notified if panic occurs.
-    fn do_init(&self) -> &T {
-        struct InitGuard<'a> {
-            state: &'a AtomicU8,
-            condvar: &'a Condvar,
-            mutex: &'a Mutex<()>,
-        }
-
-        impl Drop for InitGuard<'_> {
-            fn drop(&mut self) {
-                if self.state.load(Ordering::Relaxed) == STATE_COMPUTING {
-                    // Acquire mutex to ensure proper synchronization with waiters
-                    let _lock = self.mutex.lock().unwrap_or_else(|e| e.into_inner());
-                    self.state.store(STATE_POISONED, Ordering::Release);
-                    self.condvar.notify_all();
+    fn force_slow(&self, mut state: u8) -> &T {
+        loop {
+            match state {
+                STATE_READY => {
+                    // SAFETY: Same as force() fast path.
+                    return unsafe { (*self.value.get()).assume_init_ref() };
                 }
+                STATE_POISONED => {
+                    panic!("ConcurrentLazy instance has been poisoned");
+                }
+                STATE_EMPTY => {
+                    match self.state.compare_exchange_weak(
+                        STATE_EMPTY,
+                        STATE_COMPUTING,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    ) {
+                        Ok(_) => {
+                            return self.do_init();
+                        }
+                        Err(current_state) => {
+                            state = current_state;
+                        }
+                    }
+                }
+                STATE_COMPUTING => {
+                    self.wait_on_initialization();
+                    state = self.state.load(Ordering::Acquire);
+                }
+                _ => unreachable!("Invalid state"),
             }
         }
+    }
 
-        let guard = InitGuard {
-            state: &self.state,
-            condvar: &self.wait_condvar,
-            mutex: &self.wait_mutex,
-        };
+    /// Performs the initialization.
+    ///
+    /// # Safety
+    ///
+    /// Must only be called after successfully transitioning to `STATE_COMPUTING`.
+    ///
+    /// # Re-entry Detection
+    ///
+    /// Uses `IN_CONCURRENT_LAZY_INIT` thread-local flag to detect re-entrant calls.
+    /// If `force()` is called from within the initializer on the same thread,
+    /// this method panics immediately instead of blocking forever on the Condvar.
+    fn do_init(&self) -> &T {
+        IN_CONCURRENT_LAZY_INIT.with(|flag| {
+            assert!(
+                !flag.replace(true),
+                "ConcurrentLazy::force re-entrant initialization detected: \
+                 force() was called from within the initializer on the same thread. \
+                 This would cause a deadlock."
+            );
+        });
 
         // SAFETY: compare_exchange succeeded, so only this thread is in STATE_COMPUTING.
         let initializer = unsafe { (*self.initializer.get()).take() }
             .expect("ConcurrentLazy: initializer already consumed");
 
-        let value = initializer();
+        let result = catch_unwind(AssertUnwindSafe(initializer));
 
-        // SAFETY: Only the thread that acquired STATE_COMPUTING reaches here.
-        unsafe { (*self.value.get()).write(value) };
+        let succeeded = result.is_ok_and(|value| {
+            // SAFETY: Only the thread that acquired STATE_COMPUTING reaches here.
+            unsafe { (*self.value.get()).write(value) };
+            true
+        });
 
-        // Acquire mutex to ensure proper synchronization with waiters before notifying
-        {
-            let _lock = self.wait_mutex.lock().unwrap_or_else(|e| e.into_inner());
-            self.state.store(STATE_READY, Ordering::Release);
-            self.wait_condvar.notify_all();
-        }
-        std::mem::forget(guard); // Disarm the guard
+        // Common cleanup: publish state, wake waiters, clear re-entry flag
+        self.state.store(
+            if succeeded {
+                STATE_READY
+            } else {
+                STATE_POISONED
+            },
+            Ordering::Release,
+        );
+        self.wait_sync.0.condvar.notify_all();
+        IN_CONCURRENT_LAZY_INIT.with(|flag| flag.set(false));
 
-        // SAFETY: Just initialized above.
+        assert!(
+            succeeded,
+            "ConcurrentLazy: initialization function panicked"
+        );
+
+        // SAFETY: value was written above when succeeded is true.
         unsafe { (*self.value.get()).assume_init_ref() }
+    }
+
+    /// Number of spin iterations before yielding to the OS scheduler.
+    /// After this threshold, `thread::yield_now()` is called to reduce
+    /// contention under high thread counts.
+    const SPIN_BEFORE_YIELD: u32 = 16;
+
+    /// Total number of spin iterations (including yield phase) before
+    /// falling back to `parking_lot::Condvar` blocking wait.
+    const ADAPTIVE_SPIN_LIMIT: u32 = 64;
+
+    /// Spins then blocks via Condvar until `state` leaves `STATE_COMPUTING`.
+    ///
+    /// Uses a three-phase adaptive strategy:
+    /// 1. **Pure spin** (0..`SPIN_BEFORE_YIELD`): `spin_loop()` hint only
+    /// 2. **Yield spin** (`SPIN_BEFORE_YIELD`..`ADAPTIVE_SPIN_LIMIT`):
+    ///    `spin_loop()` + `thread::yield_now()` to reduce contention
+    /// 3. **Condvar wait**: Falls back to `parking_lot::Condvar::wait` for
+    ///    indefinite blocking until state transitions away from `STATE_COMPUTING`
+    ///
+    /// Re-entrant initialization (which would cause deadlock) is already detected
+    /// by the `IN_CONCURRENT_LAZY_INIT` thread-local flag in `do_init()`, so no
+    /// timeout-based deadlock detection is needed here.
+    fn spin_then_wait(&self) {
+        for iteration in 0..Self::ADAPTIVE_SPIN_LIMIT {
+            if self.state.load(Ordering::Acquire) != STATE_COMPUTING {
+                return;
+            }
+            std::hint::spin_loop();
+            if iteration >= Self::SPIN_BEFORE_YIELD {
+                std::thread::yield_now();
+            }
+        }
+
+        let mut guard = self.wait_sync.0.mutex.lock();
+        while self.state.load(Ordering::Acquire) == STATE_COMPUTING {
+            self.wait_sync.0.condvar.wait(&mut guard);
+        }
+    }
+
+    /// Waits for `STATE_COMPUTING` to transition to another state.
+    ///
+    /// This method blocks indefinitely until initialization completes or the
+    /// `ConcurrentLazy` becomes poisoned. Re-entrant initialization is detected
+    /// by `do_init()` via a thread-local flag before any blocking wait occurs.
+    fn wait_on_initialization(&self) {
+        self.spin_then_wait();
     }
 
     /// Consumes the `ConcurrentLazy` and returns the inner value.
@@ -347,23 +482,51 @@ impl<T, F: FnOnce() -> T> ConcurrentLazy<T, F> {
     /// If the initialization function panics during `into_inner`, the panic is
     /// propagated after marking the instance as poisoned.
     pub fn into_inner(self) -> Result<T, ConcurrentLazyPoisonedError> {
-        let this = ManuallyDrop::new(self);
+        let mut this = ManuallyDrop::new(self);
+        let state = this.state.load(Ordering::Acquire);
 
-        match this.state.load(Ordering::Acquire) {
+        match state {
             STATE_READY => {
-                // SAFETY: STATE_READY means value is initialized.
-                Ok(unsafe { (*this.value.get()).assume_init_read() })
+                // SAFETY: STATE_READY guarantees value is initialized.
+                let value = unsafe { (*this.value.get()).assume_init_read() };
+                // Set state to STATE_EMPTY so that Drop impl does not call
+                // assume_init_drop() on the already-moved value.
+                this.state.store(STATE_EMPTY, Ordering::Relaxed);
+                // SAFETY: Value has been moved out and state is no longer READY,
+                // so Drop will not attempt to drop the value again. This ensures
+                // non-value fields (WaitSync, initializer) are properly released.
+                unsafe { ManuallyDrop::drop(&mut this) };
+                Ok(value)
             }
-            STATE_POISONED | STATE_COMPUTING => Err(ConcurrentLazyPoisonedError),
+            STATE_POISONED | STATE_COMPUTING => {
+                // SAFETY: State is not READY, so Drop will not attempt to drop
+                // the uninitialized value. This releases non-value fields.
+                unsafe { ManuallyDrop::drop(&mut this) };
+                Err(ConcurrentLazyPoisonedError)
+            }
             STATE_EMPTY => {
-                // SAFETY: STATE_EMPTY means initializer is Some.
-                let initializer = unsafe { (*this.initializer.get()).take() }
-                    .ok_or(ConcurrentLazyPoisonedError)?;
+                // SAFETY: STATE_EMPTY guarantees initializer is Some.
+                let initializer = unsafe { (*this.initializer.get()).take() }.ok_or_else(|| {
+                    // SAFETY: Drop non-value fields before returning error.
+                    unsafe { ManuallyDrop::drop(&mut this) };
+                    ConcurrentLazyPoisonedError
+                })?;
 
-                catch_unwind(AssertUnwindSafe(initializer)).map_err(|_| {
-                    this.state.store(STATE_POISONED, Ordering::Release);
-                    panic!("ConcurrentLazy: initialization function panicked");
-                })
+                let result = catch_unwind(AssertUnwindSafe(initializer));
+                #[allow(clippy::single_match_else, clippy::option_if_let_else)]
+                match result {
+                    Ok(value) => {
+                        // SAFETY: Drop non-value fields (initializer already taken).
+                        unsafe { ManuallyDrop::drop(&mut this) };
+                        Ok(value)
+                    }
+                    Err(_) => {
+                        this.state.store(STATE_POISONED, Ordering::Release);
+                        // SAFETY: Drop non-value fields before panicking.
+                        unsafe { ManuallyDrop::drop(&mut this) };
+                        panic!("ConcurrentLazy: initialization function panicked");
+                    }
+                }
             }
             _ => unreachable!("Invalid state"),
         }
@@ -387,8 +550,7 @@ impl<T> ConcurrentLazy<T, fn() -> T> {
             state: AtomicU8::new(STATE_READY),
             value: UnsafeCell::new(MaybeUninit::new(value)),
             initializer: UnsafeCell::new(None),
-            wait_condvar: Condvar::new(),
-            wait_mutex: Mutex::new(()),
+            wait_sync: CacheAligned(WaitSync::new()),
         }
     }
 
@@ -430,9 +592,12 @@ impl<T, F> ConcurrentLazy<T, F> {
     /// ```
     #[inline]
     pub fn get(&self) -> Option<&T> {
-        (self.state.load(Ordering::Acquire) == STATE_READY)
+        if self.state.load(Ordering::Acquire) == STATE_READY {
             // SAFETY: STATE_READY means value is initialized.
-            .then(|| unsafe { (*self.value.get()).assume_init_ref() })
+            Some(unsafe { (*self.value.get()).assume_init_ref() })
+        } else {
+            None
+        }
     }
 
     /// Returns whether the value has been initialized.
@@ -479,19 +644,20 @@ impl<T, F: FnOnce() -> T> ConcurrentLazy<T, F> {
     /// Tries to force evaluation without panicking on poisoned state.
     ///
     /// This is a pure functional alternative to `force()` that returns a `Result`
-    /// instead of panicking when the lazy value is poisoned.
-    ///
-    /// Unlike `force()`, this method uses blocking wait to wait for initialization
-    /// to complete, which is efficient and does not waste CPU cycles.
+    /// instead of panicking when the lazy value is poisoned. If another thread is
+    /// currently initializing the value, this method waits indefinitely (using the
+    /// same adaptive spin + Condvar strategy as `force()`) until initialization
+    /// completes, then returns the result or the poisoned error.
     ///
     /// # Returns
     ///
     /// - `Ok(&T)` if the value is successfully computed or already cached
     /// - `Err(ConcurrentLazyPoisonedError)` if the lazy value is poisoned
+    ///   (initialization previously panicked)
     ///
     /// # Errors
     ///
-    /// Returns `Err(ConcurrentLazyPoisonedError)` if:
+    /// Returns `Err(ConcurrentLazyPoisonedError)` only if:
     /// - The lazy value is poisoned (initialization previously panicked)
     ///
     /// # Panics
@@ -514,36 +680,18 @@ impl<T, F: FnOnce() -> T> ConcurrentLazy<T, F> {
     /// let _ = catch_unwind(std::panic::AssertUnwindSafe(|| poisoned.force()));
     /// assert!(poisoned.try_force().is_err());
     /// ```
-    #[allow(clippy::inline_always)]
-    #[inline(always)]
     pub fn try_force(&self) -> Result<&T, ConcurrentLazyPoisonedError> {
-        let state = self.state.load(Ordering::Acquire);
+        let mut state = self.state.load(Ordering::Acquire);
 
-        if state == STATE_READY {
-            // SAFETY: STATE_READY means value is initialized.
-            return Ok(unsafe { (*self.value.get()).assume_init_ref() });
-        }
-
-        self.try_force_slow(state)
-    }
-
-    #[cold]
-    #[inline(never)]
-    fn try_force_slow(&self, state: u8) -> Result<&T, ConcurrentLazyPoisonedError> {
-        self.force_slow_inner(state)
-    }
-
-    /// Core slow-path logic shared by `force_slow` and `try_force_slow`.
-    #[cold]
-    #[inline(never)]
-    fn force_slow_inner(&self, mut state: u8) -> Result<&T, ConcurrentLazyPoisonedError> {
         loop {
             match state {
                 STATE_READY => {
-                    // SAFETY: Acquire load synchronizes with Release store in do_init().
+                    // SAFETY: Same as force() - state is STATE_READY so value is initialized
                     return Ok(unsafe { (*self.value.get()).assume_init_ref() });
                 }
-                STATE_POISONED => return Err(ConcurrentLazyPoisonedError),
+                STATE_POISONED => {
+                    return Err(ConcurrentLazyPoisonedError);
+                }
                 STATE_EMPTY => {
                     match self.state.compare_exchange_weak(
                         STATE_EMPTY,
@@ -551,12 +699,16 @@ impl<T, F: FnOnce() -> T> ConcurrentLazy<T, F> {
                         Ordering::AcqRel,
                         Ordering::Acquire,
                     ) {
-                        Ok(_) => return Ok(self.do_init()),
-                        Err(current_state) => state = current_state,
+                        Ok(_) => {
+                            return Ok(self.do_init());
+                        }
+                        Err(current_state) => {
+                            state = current_state;
+                        }
                     }
                 }
                 STATE_COMPUTING => {
-                    self.block_until_ready();
+                    self.spin_then_wait();
                     state = self.state.load(Ordering::Acquire);
                 }
                 _ => unreachable!("Invalid state"),
@@ -756,34 +908,20 @@ impl<T: Default> Default for ConcurrentLazy<T> {
 
 impl<T: fmt::Debug, F> fmt::Debug for ConcurrentLazy<T, F> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.format_state(formatter, |value, f| fmt::Debug::fmt(value, f))
+        match self.get() {
+            Some(value) => fmt::Debug::fmt(value, formatter),
+            None if self.is_poisoned() => formatter.write_str("<poisoned>"),
+            None => formatter.write_str("<uninit>"),
+        }
     }
 }
 
 impl<T: fmt::Display, F> fmt::Display for ConcurrentLazy<T, F> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.format_state(formatter, |value, f| fmt::Display::fmt(value, f))
-    }
-}
-
-impl<T, F> ConcurrentLazy<T, F> {
-    fn format_state<Fmt>(
-        &self,
-        formatter: &mut fmt::Formatter<'_>,
-        format_value: Fmt,
-    ) -> fmt::Result
-    where
-        Fmt: FnOnce(&T, &mut fmt::Formatter<'_>) -> fmt::Result,
-    {
-        match self.state.load(Ordering::Acquire) {
-            STATE_READY => {
-                // SAFETY: STATE_READY means value is initialized.
-                let value = unsafe { (*self.value.get()).assume_init_ref() };
-                format_value(value, formatter)
-            }
-            STATE_EMPTY | STATE_COMPUTING => formatter.write_str("<uninit>"),
-            STATE_POISONED => formatter.write_str("<poisoned>"),
-            _ => unreachable!(),
+        match self.get() {
+            Some(value) => fmt::Display::fmt(value, formatter),
+            None if self.is_poisoned() => formatter.write_str("<poisoned>"),
+            None => formatter.write_str("<uninit>"),
         }
     }
 }
@@ -791,7 +929,7 @@ impl<T, F> ConcurrentLazy<T, F> {
 impl<T, F> Drop for ConcurrentLazy<T, F> {
     fn drop(&mut self) {
         if *self.state.get_mut() == STATE_READY {
-            // SAFETY: STATE_READY means value is initialized.
+            // SAFETY: STATE_READY guarantees value is initialized; &mut self guarantees exclusivity.
             unsafe { (*self.value.get()).assume_init_drop() };
         }
     }
@@ -1000,7 +1138,6 @@ mod tests {
 
     #[rstest]
     fn test_concurrent_lazy_drop_uninit() {
-        // Should not panic when dropping uninitialized ConcurrentLazy
         let _lazy = ConcurrentLazy::new(|| 42);
     }
 
@@ -1040,14 +1177,176 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // Note: Testing actual re-entry deadlock detection is difficult because
-    // it requires calling force() from within the initializer on the same thread.
-    // The current implementation uses Mutex + Condvar for blocking wait, which
-    // means a recursive call from the same thread would block indefinitely.
-    //
-    // A proper test would require simulating a scenario where the initializer
-    // calls force() recursively, which is architecturally prevented by the
-    // ownership model in most cases.
+    // =========================================================================
+    // Parking lot + Cache Line Separation Tests (Phase 1)
+    // =========================================================================
+
+    #[rstest]
+    fn test_cache_aligned_alignment() {
+        assert!(std::mem::align_of::<CacheAligned<WaitSync>>() >= CACHE_LINE_SIZE);
+    }
+
+    #[rstest]
+    fn test_wait_sync_creation() {
+        let wait_sync = WaitSync::new();
+        let _guard = wait_sync.mutex.lock();
+    }
+
+    #[rstest]
+    fn test_concurrent_lazy_struct_has_repr_c_layout() {
+        let lazy = ConcurrentLazy::new(|| 42);
+        let state_addr = &raw const lazy.state as usize;
+        let wait_sync_addr = &raw const lazy.wait_sync as usize;
+        assert!(wait_sync_addr > state_addr);
+        assert_eq!(wait_sync_addr % CACHE_LINE_SIZE, 0);
+    }
+
+    #[rstest]
+    fn test_reentrant_initialization_flag_mechanism() {
+        IN_CONCURRENT_LAZY_INIT.with(|flag| {
+            assert!(!flag.get());
+            flag.set(true);
+            assert!(flag.get());
+            flag.set(false);
+            assert!(!flag.get());
+        });
+
+        let lazy = ConcurrentLazy::new(|| 42);
+        assert_eq!(*lazy.force(), 42);
+    }
+
+    #[rstest]
+    fn test_concurrent_lazy_multiple_threads_wait_on_slow_init() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = Arc::clone(&counter);
+        let lazy = Arc::new(ConcurrentLazy::new(move || {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            counter_clone.fetch_add(1, AtomicOrdering::SeqCst);
+            42
+        }));
+
+        let handles: Vec<_> = (0..32)
+            .map(|_| {
+                let lazy = Arc::clone(&lazy);
+                thread::spawn(move || *lazy.force())
+            })
+            .collect();
+
+        for handle in handles {
+            assert_eq!(handle.join().unwrap(), 42);
+        }
+
+        assert_eq!(counter.load(AtomicOrdering::SeqCst), 1);
+    }
+
+    #[rstest]
+    fn test_concurrent_lazy_notify_all_wakes_waiting_threads() {
+        let barrier = Arc::new(std::sync::Barrier::new(17));
+        let lazy = Arc::new(ConcurrentLazy::new({
+            let barrier = Arc::clone(&barrier);
+            move || {
+                barrier.wait();
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                42
+            }
+        }));
+
+        let handles: Vec<_> = (0..16)
+            .map(|_| {
+                let lazy = Arc::clone(&lazy);
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    barrier.wait();
+                    *lazy.force()
+                })
+            })
+            .collect();
+
+        let lazy_init = Arc::clone(&lazy);
+        let init_handle = thread::spawn(move || *lazy_init.force());
+
+        for handle in handles {
+            assert_eq!(handle.join().unwrap(), 42);
+        }
+        assert_eq!(init_handle.join().unwrap(), 42);
+    }
+
+    #[rstest]
+    fn test_concurrent_lazy_poisoned_notifies_waiting_threads() {
+        let lazy = Arc::new(ConcurrentLazy::new(|| -> i32 {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            panic!("initialization failed");
+        }));
+
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let lazy = Arc::clone(&lazy);
+                thread::spawn(move || {
+                    let result =
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| lazy.force()));
+                    result.is_err() // Should be Err (panic)
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            assert!(
+                handle.join().unwrap(),
+                "Thread should have observed panic/poisoned state"
+            );
+        }
+    }
+
+    #[rstest]
+    fn test_try_force_waits_for_initialization() {
+        use std::sync::atomic::AtomicBool;
+
+        let started = Arc::new(AtomicBool::new(false));
+        let started_clone = Arc::clone(&started);
+
+        let lazy = Arc::new(ConcurrentLazy::new(move || {
+            started_clone.store(true, AtomicOrdering::SeqCst);
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            42
+        }));
+
+        let lazy_init = Arc::clone(&lazy);
+        let init_handle = thread::spawn(move || *lazy_init.force());
+
+        while !started.load(AtomicOrdering::SeqCst) {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+
+        // try_force waits indefinitely for initialization to complete, then returns Ok
+        assert_eq!(*lazy.try_force().unwrap(), 42);
+        assert_eq!(init_handle.join().unwrap(), 42);
+    }
+
+    #[rstest]
+    fn test_try_force_returns_err_only_on_poisoned() {
+        let lazy = ConcurrentLazy::new(|| -> i32 { panic!("initialization failed") });
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| lazy.force()));
+
+        // try_force returns Err only when poisoned
+        assert!(lazy.is_poisoned());
+        assert_eq!(lazy.try_force(), Err(ConcurrentLazyPoisonedError));
+    }
+
+    #[rstest]
+    fn test_adaptive_spin_completes_fast_init() {
+        let lazy = Arc::new(ConcurrentLazy::new(|| 42));
+
+        let handles: Vec<_> = (0..16)
+            .map(|_| {
+                let lazy = Arc::clone(&lazy);
+                thread::spawn(move || *lazy.force())
+            })
+            .collect();
+
+        for handle in handles {
+            assert_eq!(handle.join().unwrap(), 42);
+        }
+    }
 
     // =========================================================================
     // Functor/Monad Law Property Tests

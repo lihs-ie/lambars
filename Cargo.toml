@@ -24,6 +24,7 @@ serde = { version = "1.0", features = ["derive"], optional = true }
 rayon = { version = "1.10", optional = true }
 pin-project-lite = { version = "0.2", optional = true }
 smallvec = { version = "1.13", optional = true, features = ["const_generics"] }
+parking_lot = { version = "0.12", optional = true }
 
 arrayvec = { version = "0.7", optional = true }
 
@@ -52,7 +53,7 @@ default = ["typeclass", "compose", "control", "persistent", "optics", "derive", 
 full = ["typeclass", "compose", "control", "persistent", "optics", "derive", "effect", "async", "serde"]
 typeclass = []
 compose = ["typeclass", "dep:lambars-derive", "dep:smallvec"]
-control = ["typeclass", "dep:smallvec"]
+control = ["typeclass", "dep:smallvec", "dep:parking_lot"]
 persistent = ["typeclass", "control", "dep:smallvec", "dep:arrayvec"]
 optics = ["typeclass", "persistent"]
 derive = ["optics", "dep:lambars-derive"]
