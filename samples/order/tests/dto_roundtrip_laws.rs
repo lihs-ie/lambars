@@ -1,12 +1,12 @@
-//! DTO 往復変換の proptest による検証
+//! Proptest verification of DTO round-trip conversions
 //!
-//! DTO とドメイン型間の往復変換が情報を失わないことを検証する。
+//! Verifies that round-trip conversion between DTOs and domain types does not lose information.
 //!
-//! 検証対象:
-//! 1. Address <-> AddressDto の往復変換
-//! 2. CustomerInfo <-> CustomerInfoDto の往復変換（VipStatus 考慮）
-//! 3. OrderFormDto の JSON シリアライズ/デシリアライズ往復
-//! 4. 出力 DTO の JSON シリアライズ/デシリアライズ往復
+//! verificationtarget:
+//! 1. Address <-> AddressDto round-trip conversion
+//! 2. CustomerInfo <-> CustomerInfoDto round-trip conversion (considering VipStatus)
+//! 3. OrderFormDto JSON serialize/deserialize round-trip
+//! 4. Output DTO JSON serialize/deserialize round-trip
 
 use order_taking_sample::compound_types::Address;
 use order_taking_sample::dto::{
@@ -19,17 +19,17 @@ use proptest::prelude::*;
 use rust_decimal::Decimal;
 
 // =============================================================================
-// 戦略（Strategy）定義
+// Strategy definitions
 // =============================================================================
 
-/// 有効な String50 用の文字列戦略（1-50文字の英数字）
+/// String strategy for valid String50 (1-50 alphanumeric characters)
 fn valid_string50_strategy() -> impl Strategy<Value = String> {
     proptest::string::string_regex("[a-zA-Z0-9 ]{1,50}")
         .unwrap()
         .prop_filter("non-empty", |s| !s.is_empty())
 }
 
-/// 有効なメールアドレス戦略
+/// Strategy for valid email addresses
 fn valid_email_strategy() -> impl Strategy<Value = String> {
     (
         proptest::string::string_regex("[a-zA-Z0-9]{1,10}").unwrap(),
@@ -39,12 +39,12 @@ fn valid_email_strategy() -> impl Strategy<Value = String> {
         .prop_map(|(local, domain, tld)| format!("{local}@{domain}.{tld}"))
 }
 
-/// 有効な郵便番号戦略（5桁）
+/// Strategy for valid zip codes (5 digits)
 fn valid_zip_code_strategy() -> impl Strategy<Value = String> {
     proptest::string::string_regex("[0-9]{5}").unwrap()
 }
 
-/// 有効な州コード戦略
+/// Strategy for valid state codes
 fn valid_state_code_strategy() -> impl Strategy<Value = String> {
     prop_oneof![
         Just("AL".to_string()),
@@ -58,13 +58,13 @@ fn valid_state_code_strategy() -> impl Strategy<Value = String> {
     ]
 }
 
-/// AddressDto 戦略
+/// Strategy for AddressDto
 fn address_dto_strategy() -> impl Strategy<Value = AddressDto> {
     (
         valid_string50_strategy(), // address_line1
         prop_oneof![Just(String::new()), valid_string50_strategy()], // address_line2
-        Just(String::new()),       // address_line3（簡略化）
-        Just(String::new()),       // address_line4（簡略化）
+        Just(String::new()),       // address_line3 (simplified)
+        Just(String::new()),       // address_line4 (simplified)
         valid_string50_strategy(), // city
         valid_zip_code_strategy(), // zip_code
         valid_state_code_strategy(), // state
@@ -84,7 +84,7 @@ fn address_dto_strategy() -> impl Strategy<Value = AddressDto> {
         )
 }
 
-/// CustomerInfoDto 戦略
+/// Strategy for CustomerInfoDto
 fn customer_info_dto_strategy() -> impl Strategy<Value = CustomerInfoDto> {
     (
         valid_string50_strategy(), // first_name
@@ -100,22 +100,22 @@ fn customer_info_dto_strategy() -> impl Strategy<Value = CustomerInfoDto> {
         })
 }
 
-/// Widget 製品コード戦略
+/// Strategy for Widget product codes
 fn widget_code_strategy() -> impl Strategy<Value = String> {
     (0u32..10000u32).prop_map(|v| format!("W{v:04}"))
 }
 
-/// Gizmo 製品コード戦略
+/// Strategy for Gizmo product codes
 fn gizmo_code_strategy() -> impl Strategy<Value = String> {
     (0u32..1000u32).prop_map(|v| format!("G{v:03}"))
 }
 
-/// OrderFormLineDto 戦略
+/// Strategy for OrderFormLineDto
 fn order_form_line_dto_strategy() -> impl Strategy<Value = OrderFormLineDto> {
     (
         valid_string50_strategy(),
         prop_oneof![widget_code_strategy(), gizmo_code_strategy()],
-        // Widget は整数数量、Gizmo は小数数量だが、ここでは簡略化
+        // Widget uses integer quantity, Gizmo uses decimal, but simplified here
         (1u32..100u32).prop_map(Decimal::from),
     )
         .prop_map(|(line_id, product_code, quantity)| OrderFormLineDto {
@@ -125,7 +125,7 @@ fn order_form_line_dto_strategy() -> impl Strategy<Value = OrderFormLineDto> {
         })
 }
 
-/// OrderFormDto 戦略
+/// Strategy for OrderFormDto
 fn order_form_dto_strategy() -> impl Strategy<Value = OrderFormDto> {
     (
         valid_string50_strategy(),    // order_id
@@ -148,14 +148,14 @@ fn order_form_dto_strategy() -> impl Strategy<Value = OrderFormDto> {
 }
 
 // =============================================================================
-// Address 往復変換テスト
+// Address round-trip conversion tests
 // =============================================================================
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
 
     /// AddressDto -> UnvalidatedAddress -> CheckedAddress -> Address -> AddressDto
-    /// の往復で元の DTO と等しいことを検証
+    /// Verifies the round-trip equals the original DTO
     #[test]
     fn test_address_dto_roundtrip(dto in address_dto_strategy()) {
         // DTO -> UnvalidatedAddress
@@ -165,30 +165,30 @@ proptest! {
         let checked = CheckedAddress::new(unvalidated);
         let address_result = to_address(&checked);
 
-        // Address への変換が成功した場合のみ往復を検証
+        // Only verify round-trip when conversion to Address succeeds
         if let Ok(address) = address_result {
             // Address -> AddressDto
             let roundtrip_dto = AddressDto::from_address(&address);
 
-            // 元の DTO と比較
+            // Compare with original DTO
             prop_assert_eq!(dto.address_line1, roundtrip_dto.address_line1);
             prop_assert_eq!(dto.city, roundtrip_dto.city);
             prop_assert_eq!(dto.zip_code, roundtrip_dto.zip_code);
             prop_assert_eq!(dto.state, roundtrip_dto.state);
             prop_assert_eq!(dto.country, roundtrip_dto.country);
 
-            // オプション行は空文字列として往復するので同値性を検証
+            // Optional lines round-trip as empty strings, so verify value equality
             prop_assert_eq!(dto.address_line2, roundtrip_dto.address_line2);
             prop_assert_eq!(dto.address_line3, roundtrip_dto.address_line3);
             prop_assert_eq!(dto.address_line4, roundtrip_dto.address_line4);
         }
     }
 
-    /// Address 生成後の DTO 往復が完全一致することを検証
-    /// (Address::create で生成した有効な Address から開始)
+    /// Verifies the DTO round-trip matches exactly after Address creation
+    /// (Starting from a valid Address created with Address::create)
     #[test]
     fn test_address_domain_to_dto_roundtrip(dto in address_dto_strategy()) {
-        // まず Address を生成
+        // First create an Address
         let address_result = Address::create(
             &dto.address_line1,
             &dto.address_line2,
@@ -210,7 +210,7 @@ proptest! {
             prop_assert!(roundtrip_address.is_ok(), "Roundtrip should succeed for valid address");
             let roundtrip = roundtrip_address.unwrap();
 
-            // ドメイン値の比較
+            // Compare domain values
             prop_assert_eq!(address.address_line1().value(), roundtrip.address_line1().value());
             prop_assert_eq!(address.city().value(), roundtrip.city().value());
             prop_assert_eq!(address.zip_code().value(), roundtrip.zip_code().value());
@@ -220,20 +220,20 @@ proptest! {
 }
 
 // =============================================================================
-// CustomerInfo 往復変換テスト（注意: VipStatus の正規化を考慮）
+// CustomerInfo round-trip conversion tests (note: considering VipStatus normalization)
 // =============================================================================
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
 
-    /// CustomerInfoDto の往復変換テスト
-    /// VipStatus は "Normal" または "VIP" として正規化される
+    /// Round-trip conversion test for CustomerInfoDto
+    /// VipStatus is normalized to "Normal" or "VIP"
     #[test]
     fn test_customer_info_dto_roundtrip(dto in customer_info_dto_strategy()) {
         // DTO -> UnvalidatedCustomerInfo
         let unvalidated = dto.to_unvalidated_customer_info();
 
-        // フィールドの往復確認
+        // Verify field round-trip
         prop_assert_eq!(dto.first_name.as_str(), unvalidated.first_name());
         prop_assert_eq!(dto.last_name.as_str(), unvalidated.last_name());
         prop_assert_eq!(dto.email_address.as_str(), unvalidated.email_address());
@@ -242,13 +242,13 @@ proptest! {
 }
 
 // =============================================================================
-// OrderFormDto JSON 往復テスト
+// OrderFormDto JSON round-trip tests
 // =============================================================================
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
 
-    /// OrderFormDto の JSON シリアライズ/デシリアライズ往復
+    /// JSON serialization/deserialization round-trip for OrderFormDto
     #[test]
     fn test_order_form_dto_json_roundtrip(dto in order_form_dto_strategy()) {
         // DTO -> JSON
@@ -261,11 +261,11 @@ proptest! {
         prop_assert!(deserialized_result.is_ok(), "Deserialization should succeed");
         let deserialized = deserialized_result.unwrap();
 
-        // 元の DTO と比較
+        // Compare with original DTO
         prop_assert_eq!(dto, deserialized, "Roundtrip should preserve all data");
     }
 
-    /// AddressDto の JSON 往復
+    /// JSON round-trip for AddressDto
     #[test]
     fn test_address_dto_json_roundtrip(dto in address_dto_strategy()) {
         let json = serde_json::to_string(&dto).unwrap();
@@ -273,7 +273,7 @@ proptest! {
         prop_assert_eq!(dto, deserialized);
     }
 
-    /// CustomerInfoDto の JSON 往復
+    /// JSON round-trip for CustomerInfoDto
     #[test]
     fn test_customer_info_dto_json_roundtrip(dto in customer_info_dto_strategy()) {
         let json = serde_json::to_string(&dto).unwrap();
@@ -281,7 +281,7 @@ proptest! {
         prop_assert_eq!(dto, deserialized);
     }
 
-    /// OrderFormLineDto の JSON 往復
+    /// JSON round-trip for OrderFormLineDto
     #[test]
     fn test_order_form_line_dto_json_roundtrip(dto in order_form_line_dto_strategy()) {
         let json = serde_json::to_string(&dto).unwrap();
@@ -291,10 +291,10 @@ proptest! {
 }
 
 // =============================================================================
-// 出力 DTO JSON 往復テスト
+// Output DTOs JSON round-trip tests
 // =============================================================================
 
-/// ShippableOrderLineDto 戦略
+/// Strategy for ShippableOrderLineDto
 fn shippable_order_line_dto_strategy() -> impl Strategy<Value = ShippableOrderLineDto> {
     (
         prop_oneof![widget_code_strategy(), gizmo_code_strategy()],
@@ -306,7 +306,7 @@ fn shippable_order_line_dto_strategy() -> impl Strategy<Value = ShippableOrderLi
         })
 }
 
-/// ShippableOrderPlacedDto 戦略
+/// Strategy for ShippableOrderPlacedDto
 fn shippable_order_placed_dto_strategy() -> impl Strategy<Value = ShippableOrderPlacedDto> {
     (
         valid_string50_strategy(),
@@ -325,7 +325,7 @@ fn shippable_order_placed_dto_strategy() -> impl Strategy<Value = ShippableOrder
         })
 }
 
-/// BillableOrderPlacedDto 戦略
+/// Strategy for BillableOrderPlacedDto
 fn billable_order_placed_dto_strategy() -> impl Strategy<Value = BillableOrderPlacedDto> {
     (
         valid_string50_strategy(),
@@ -339,7 +339,7 @@ fn billable_order_placed_dto_strategy() -> impl Strategy<Value = BillableOrderPl
         })
 }
 
-/// OrderAcknowledgmentSentDto 戦略
+/// Strategy for OrderAcknowledgmentSentDto
 fn order_acknowledgment_sent_dto_strategy() -> impl Strategy<Value = OrderAcknowledgmentSentDto> {
     (valid_string50_strategy(), valid_email_strategy()).prop_map(|(id, email)| {
         OrderAcknowledgmentSentDto {
@@ -352,7 +352,7 @@ fn order_acknowledgment_sent_dto_strategy() -> impl Strategy<Value = OrderAcknow
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
 
-    /// ShippableOrderLineDto の JSON 往復
+    /// JSON round-trip for ShippableOrderLineDto
     #[test]
     fn test_shippable_order_line_dto_json_roundtrip(dto in shippable_order_line_dto_strategy()) {
         let json = serde_json::to_string(&dto).unwrap();
@@ -360,7 +360,7 @@ proptest! {
         prop_assert_eq!(dto, deserialized);
     }
 
-    /// ShippableOrderPlacedDto の JSON 往復
+    /// JSON round-trip for ShippableOrderPlacedDto
     #[test]
     fn test_shippable_order_placed_dto_json_roundtrip(dto in shippable_order_placed_dto_strategy()) {
         let json = serde_json::to_string(&dto).unwrap();
@@ -368,7 +368,7 @@ proptest! {
         prop_assert_eq!(dto, deserialized);
     }
 
-    /// BillableOrderPlacedDto の JSON 往復
+    /// JSON round-trip for BillableOrderPlacedDto
     #[test]
     fn test_billable_order_placed_dto_json_roundtrip(dto in billable_order_placed_dto_strategy()) {
         let json = serde_json::to_string(&dto).unwrap();
@@ -376,7 +376,7 @@ proptest! {
         prop_assert_eq!(dto, deserialized);
     }
 
-    /// OrderAcknowledgmentSentDto の JSON 往復
+    /// JSON round-trip for OrderAcknowledgmentSentDto
     #[test]
     fn test_order_acknowledgment_sent_dto_json_roundtrip(dto in order_acknowledgment_sent_dto_strategy()) {
         let json = serde_json::to_string(&dto).unwrap();
@@ -386,25 +386,25 @@ proptest! {
 }
 
 // =============================================================================
-// 変換の純粋性テスト
+// Conversion purity tests
 // =============================================================================
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
 
-    /// 同じ入力に対して同じ出力が返される（参照透過性）
+    /// Same input returns same output (referential transparency)
     #[test]
     fn test_address_dto_conversion_is_pure(dto in address_dto_strategy()) {
         let unvalidated1 = dto.to_unvalidated_address();
         let unvalidated2 = dto.to_unvalidated_address();
 
-        // 同じ入力から同じ出力
+        // Same input produces same output
         prop_assert_eq!(unvalidated1.address_line1(), unvalidated2.address_line1());
         prop_assert_eq!(unvalidated1.city(), unvalidated2.city());
         prop_assert_eq!(unvalidated1.zip_code(), unvalidated2.zip_code());
     }
 
-    /// CustomerInfoDto 変換の純粋性
+    /// Purity of CustomerInfoDto conversion
     #[test]
     fn test_customer_info_dto_conversion_is_pure(dto in customer_info_dto_strategy()) {
         let unvalidated1 = dto.to_unvalidated_customer_info();
@@ -416,7 +416,7 @@ proptest! {
         prop_assert_eq!(unvalidated1.vip_status(), unvalidated2.vip_status());
     }
 
-    /// OrderFormDto 変換の純粋性
+    /// Purity of OrderFormDto conversion
     #[test]
     fn test_order_form_dto_conversion_is_pure(dto in order_form_dto_strategy()) {
         let unvalidated1 = dto.to_unvalidated_order();
@@ -429,18 +429,18 @@ proptest! {
 }
 
 // =============================================================================
-// 境界値での往復テスト
+// Round-trip tests at boundary values
 // =============================================================================
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(64))]
 
-    /// 最大長の文字列を含む DTO の往復
+    /// Round-trip of DTO containing maximum-length strings
     #[test]
     fn test_max_length_string_roundtrip(
         _dummy in any::<u8>()
     ) {
-        // 50文字の最大長文字列
+        // Maximum-length string of 50 characters
         let max_string = "A".repeat(50);
 
         let dto = AddressDto {
@@ -459,7 +459,7 @@ proptest! {
         prop_assert_eq!(dto, deserialized);
     }
 
-    /// 空のオプションフィールドの往復
+    /// Round-trip of empty optional fields
     #[test]
     fn test_empty_optional_fields_roundtrip(_dummy in any::<u8>()) {
         let dto = AddressDto {
@@ -473,7 +473,7 @@ proptest! {
             country: "USA".to_string(),
         };
 
-        // Address への変換
+        // Conversion to Address
         let address_result = Address::create(
             &dto.address_line1,
             &dto.address_line2,
@@ -488,10 +488,10 @@ proptest! {
         prop_assert!(address_result.is_ok());
         let address = address_result.unwrap();
 
-        // 往復
+        // Round-trip
         let roundtrip_dto = AddressDto::from_address(&address);
 
-        // オプションフィールドは空文字列として保持される
+        // Optional fields are preserved as empty strings
         prop_assert_eq!(dto.address_line2, roundtrip_dto.address_line2);
         prop_assert_eq!(dto.address_line3, roundtrip_dto.address_line3);
         prop_assert_eq!(dto.address_line4, roundtrip_dto.address_line4);
@@ -499,19 +499,19 @@ proptest! {
 }
 
 // =============================================================================
-// Decimal 精度保持テスト
+// Decimal precision preservation tests
 // =============================================================================
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
 
-    /// Decimal 値が JSON 往復で精度を保持することを検証
+    /// Verifies Decimal values maintain precision through JSON round-trip
     #[test]
     fn test_decimal_precision_preserved_in_json(
         integer_part in 0u32..1000u32,
         decimal_part in 0u32..100u32
     ) {
-        // 小数点以下2桁の Decimal を作成
+        // Create a Decimal with up to 2 decimal places
         let decimal = Decimal::from(integer_part) + Decimal::from(decimal_part) / Decimal::from(100);
 
         let dto = OrderFormLineDto {
@@ -526,7 +526,7 @@ proptest! {
         prop_assert_eq!(dto.quantity, deserialized.quantity, "Decimal precision should be preserved");
     }
 
-    /// 請求金額の精度保持
+    /// Billing amount precision preservation
     #[test]
     fn test_billing_amount_precision_preserved(
         integer_part in 0u32..10000u32,

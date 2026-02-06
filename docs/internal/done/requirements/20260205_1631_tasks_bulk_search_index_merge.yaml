@@ -1,0 +1,145 @@
+# tasks_bulk 検索インデックス統合ボトルネック解消 要件定義
+#
+# 概要:
+#   tasks_bulk の SearchIndex 結合/ソート処理を最適化し、CPU 消費を削減する。
+#
+# 設計方針:
+#   1. 永続構造の不変性を維持しながら、バルク結合のコストを下げる。
+#   2. 不要なソートと中間ベクタ生成を排除する。
+#   3. Result 型で失敗を表現し、例外的制御フローを排除する。
+#
+# 参照:
+#   - profiling-results/github-21701302389/tasks_bulk/stacks.folded
+#   - profiling-results/github-21701302389/tasks_bulk/flamegraph.svg
+#   - profiling-results/github-21701302389/api-profiling-summary.json
+
+version: "1.0.0"
+name: "tasks_bulk_search_index_merge"
+description: |
+  tasks_bulk のボトルネックである SearchIndex の結合と
+  ソート処理 (compute_merged_posting_list_sorted / merge_bulk_ngram_index / to_sorted_vec) を改善する。
+
+# 背景・動機
+background:
+  problem: |
+    tasks_bulk のプロファイルで以下が支配的である。
+    - compute_merged_posting_list_sorted が高比率
+    - merge_bulk_ngram_index が高比率
+    - OrderedUniqueSet::to_sorted_vec が高比率
+    これによりバルク更新の CPU コストが増大し、スループットが低下する。
+  motivation: |
+    バルク更新における結合/ソートの定数コストを下げ、
+    大量更新でも安定した処理時間を確保する。
+  prior_art:
+    - name: "tasks_bulk stacks.folded"
+      description: "SearchIndex 結合と to_sorted_vec が上位"
+
+# 要件一覧
+requirements:
+  # ======================================================================
+  # 1. 結合処理のアルゴリズム改善
+  # ======================================================================
+  - id: TB-001
+    name: "マージアルゴリズムの改善"
+    description: |
+      問題: compute_merged_posting_list_sorted が支配的で、
+      既存実装が多段ソートと再割り当てを伴っている。
+      原因: 各 posting list を Vec 化してから一括ソートしているため。
+      解決策: 既にソート済みのリストを前提に
+      k-way merge を採用し、ソートを merge に置き換える。
+      計算量を O(n log n) から O(n log k) に改善する (k はリスト数)。
+
+    methods:
+      - name: "merge_sorted_postings"
+        signature: "fn merge_sorted_postings(lists: &[PostingList]) -> PostingList"
+        description: |
+          k-way merge によりソート済みリストを結合する。
+        examples:
+          - description: "マージの正当性"
+            code: |
+              let merged = merge_sorted_postings(&lists);
+              assert!(merged.is_sorted());
+
+    implementations:
+      - type: "SearchIndex"
+        description: |
+          posting list は常にソート済みで保持し、
+          マージは k-way merge に統一する。
+
+  # ======================================================================
+  # 2. 中間ベクタ生成の削減
+  # ======================================================================
+  - id: TB-002
+    name: "to_sorted_vec の削減"
+    description: |
+      問題: OrderedUniqueSet::to_sorted_vec が高比率。
+      原因: 結合のたびに Sorted Vec を生成している。
+      解決策: OrderedUniqueSet を iterator で直接走査し、
+      to_sorted_vec の生成を回避する。
+      計算量は O(n) のまま、割り当てを削減する。
+
+    methods:
+      - name: "iter_sorted"
+        signature: "fn iter_sorted(&self) -> impl Iterator<Item = &TaskId>"
+        description: |
+          ソート済みイテレータを返すことで Vec 化を避ける。
+        examples:
+          - description: "Vec 化しない走査"
+            code: |
+              for id in set.iter_sorted() {
+                  use_id(id);
+              }
+
+    implementations:
+      - type: "OrderedUniqueSet<TaskId>"
+        description: |
+          to_sorted_vec を内部専用にし、
+          バルク処理は iter_sorted を使用する。
+
+  # ======================================================================
+  # 3. 結合のバッファ再利用
+  # ======================================================================
+  - id: TB-003
+    name: "結合バッファの再利用"
+    description: |
+      問題: 結合処理で毎回新しい Vec/Heap を生成し malloc/cfree が発生する。
+      原因: バルク更新のたびにバッファが再生成される。
+      解決策: 再利用可能な MergeBuffer を導入し、
+      バルク更新時に使い回す。
+      計算量は O(n) を維持しつつ割り当て回数を削減する。
+
+    methods:
+      - name: "merge_with_buffer"
+        signature: "fn merge_with_buffer(lists: &[PostingList], buffer: &mut MergeBuffer) -> PostingList"
+        description: |
+          再利用バッファを使って結合を行う。
+        examples:
+          - description: "バッファ再利用"
+            code: |
+              let mut buffer = MergeBuffer::new();
+              let merged = merge_with_buffer(&lists, &mut buffer);
+
+    implementations:
+      - type: "MergeBuffer"
+        description: |
+          一時ベクタ/ヒープを保持し、繰り返し利用できる構造にする。
+
+# 非機能要件
+non_functional_requirements:
+  performance:
+    - "compute_merged_posting_list_sorted の CPU サンプル比率を 30% 以上削減する。"
+    - "to_sorted_vec の CPU サンプル比率を 30% 以上削減する。"
+  compatibility:
+    - "検索結果の順序と重複排除の仕様を変更しない。"
+  testing:
+    - "マージ結果の順序性と重複排除のテストを追加する。"
+    - "tasks_bulk を再計測し改善を確認する。"
+
+# 将来の拡張
+future_extensions:
+  - id: "TB-FUTURE-001"
+    name: "マージ戦略の自動選択"
+    description: |
+      k とリスト長に応じて最適なマージ戦略を選択する。
+    rationale: |
+      まずは k-way merge の効果を検証するため。

@@ -24,13 +24,12 @@ serde = { version = "1.0", features = ["derive"], optional = true }
 rayon = { version = "1.10", optional = true }
 pin-project-lite = { version = "0.2", optional = true }
 smallvec = { version = "1.13", optional = true, features = ["const_generics"] }
+parking_lot = { version = "0.12", optional = true }
 
 arrayvec = { version = "0.7", optional = true }
 
 rustc-hash = { version = "2.1", optional = true }
 ahash = { version = "0.8", optional = true }
-
-loom = { version = "0.7", optional = true }
 
 paste = "1.0"
 static_assertions = "1.1"
@@ -52,7 +51,7 @@ default = ["typeclass", "compose", "control", "persistent", "optics", "derive", 
 full = ["typeclass", "compose", "control", "persistent", "optics", "derive", "effect", "async", "serde"]
 typeclass = []
 compose = ["typeclass", "dep:lambars-derive", "dep:smallvec"]
-control = ["typeclass", "dep:smallvec"]
+control = ["typeclass", "dep:smallvec", "dep:parking_lot"]
 persistent = ["typeclass", "control", "dep:smallvec", "dep:arrayvec"]
 optics = ["typeclass", "persistent"]
 derive = ["optics", "dep:lambars-derive"]
@@ -63,7 +62,6 @@ rayon = ["arc", "dep:rayon"]
 serde = ["dep:serde"]
 fxhash = ["dep:rustc-hash"]
 ahash = ["dep:ahash"]
-loom = ["dep:loom"]
 
 [lints.rust]
 unsafe_code = "deny"

@@ -1,71 +1,71 @@
-//! ワークフロー型定義モジュール
+//! Workflow type definition module
 //!
-//! `PlaceOrder` ワークフローで使用する型を定義する。
-//! 型による状態遷移を表現し、不正な状態を型レベルで防ぐ。
+//! Defines types used in the `PlaceOrder` workflow.
+//! Expresses state transitions via types, preventing invalid states at the type level.
 //!
-//! # 状態遷移図
+//! # State Transition Diagram
 //!
 //! ```text
 //! UnvalidatedOrder -> ValidatedOrder -> PricedOrder -> PricedOrderWithShippingMethod -> PlaceOrderEvent[]
 //! ```
 //!
-//! # 関数合成マクロの使い分け
+//! # Choosing Between Function Composition Macros
 //!
-//! lambars は2つの関数合成マクロを提供する。
+//! lambars provides two function composition macros.
 //!
-//! ## pipe! マクロ
+//! ## pipe! macro
 //!
-//! 値を即座に変換する場合に使用（データフロースタイル）。
+//! Used for immediate value transformation (data flow style).
 //!
 //! ```ignore
-//! // 左から右へ値が流れる
+//! // Values flow from left to right
 //! let result = pipe!(value, f, g, h); // h(g(f(value)))
 //! ```
 //!
-//! **適用場面**:
-//! - 一度きりの変換チェーン
-//! - 中間変数を省略したい場合
-//! - データの流れを左から右で表現したい場合
+//! **Use cases**:
+//! - One-time transformation chain
+//! - When you want to omit intermediate variables
+//! - When you want to express data flow from left to right
 //!
-//! ## compose! マクロ
+//! ## compose! macro
 //!
-//! 再利用可能な合成関数を生成する場合に使用（関数合成スタイル）。
+//! Used to generate reusable composed functions (function composition style).
 //!
 //! ```ignore
-//! // 右から左への関数合成（数学的合成）
+//! // Right-to-left function composition (mathematical composition)
 //! let composed = compose!(h, g, f);
 //! let result = composed(value); // h(g(f(value)))
 //! ```
 //!
-//! **適用場面**:
-//! - 合成関数を複数箇所で再利用する場合
-//! - 合成関数に名前を付けて意図を明確化したい場合
-//! - 高階関数（`map`, `filter_map` 等）に関数を渡す場合
-//! - Point-free スタイルを適用したい場合
+//! **Use cases**:
+//! - When reusing a composed function in multiple places
+//! - When you want to name a composed function to clarify intent
+//! - When passing a function to higher-order functions (`map`, `filter_map`, etc.)
+//! - When you want to apply point-free style
 //!
-//! ## 使い分けの判断基準
+//! ## Criteria for choosing between them
 //!
-//! | 状況 | 推奨マクロ |
+//! | Situation | Recommended Macro |
 //! |------|-----------|
-//! | 一度きりの変換 | pipe! |
-//! | 複数箇所で再利用 | compose! |
-//! | 合成関数に名前を付けたい | compose! |
-//! | `map`/`filter_map` に渡す | compose!（複数関数の場合） |
-//! | データフローを明示したい | pipe! |
+//! | One-time transformation | pipe! |
+//! | Reuse in multiple places | compose! |
+//! | Want to name the composed function | compose! |
+//! | Pass to `map`/`filter_map` | compose! (for multiple functions) |
+//! | Want to make data flow explicit | pipe! |
 //!
-//! ## 例: イベント作成での使い分け
+//! ## Example: Choosing macros for event creation
 //!
 //! ```ignore
-//! // compose! で再利用可能な合成関数を定義
+//! // Define a reusable composed function with compose!
 //! let to_shipping_event = compose!(
 //!     PlaceOrderEvent::ShippableOrderPlaced,
 //!     create_shipping_event
 //! );
 //!
-//! // 合成関数を適用
+//! // Apply the composed function
 //! let shipping_events = vec![to_shipping_event(priced_order)];
 //!
-//! // pipe! で一度きりの変換（compose! を使わない場合）
+//! // One-time transformation with pipe! (without compose!)
 //! let shipping_events = vec![pipe!(
 //!     priced_order,
 //!     create_shipping_event,
@@ -73,17 +73,17 @@
 //! )];
 //! ```
 //!
-//! # モジュール構成
+//! # Module Structure
 //!
-//! - [`error_types`] - エラー型（バリデーション、価格計算、リモートサービス）
-//! - [`unvalidated_types`] - 未検証の入力型
-//! - [`validated_types`] - 検証済み型
-//! - [`priced_types`] - 価格付き型
-//! - [`shipping_types`] - 配送関連型
-//! - [`acknowledgment_types`] - 確認メール関連型
-//! - [`output_types`] - 出力イベント型
-//! - [`events`] - イベント生成関数
-//! - [`place_order`] - ワークフロー統合関数
+//! - [`error_types`] - Error types (validation, pricing, remote service)
+//! - [`unvalidated_types`] - Unvalidated input types
+//! - [`validated_types`] - Validated types
+//! - [`priced_types`] - Priced types
+//! - [`shipping_types`] - Shipping-related types
+//! - [`acknowledgment_types`] - Acknowledgment email types
+//! - [`output_types`] - Output event types
+//! - [`events`] - Event generation functions
+//! - [`place_order`] - Workflow integration function
 
 pub mod acknowledgment_types;
 pub mod error_types;
@@ -100,7 +100,7 @@ pub mod validated_types;
 pub mod validation;
 
 // =============================================================================
-// 型の再エクスポート
+// Type re-exports
 // =============================================================================
 
 pub use acknowledgment_types::{HtmlString, OrderAcknowledgment, SendResult};

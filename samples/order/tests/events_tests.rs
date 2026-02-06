@@ -1,6 +1,6 @@
-//! イベント生成関数のテスト
+//! Tests for event generation functions
 //!
-//! Phase 7 の events モジュールに対するユニットテスト。
+//! Unit tests for the Phase 7 events module.
 
 use order_taking_sample::compound_types::{Address, CustomerInfo};
 use order_taking_sample::simple_types::{
@@ -13,7 +13,7 @@ use rstest::rstest;
 use rust_decimal::Decimal;
 
 // =============================================================================
-// テストヘルパー関数
+// Test helper functions
 // =============================================================================
 
 fn create_test_product_line(
@@ -83,7 +83,7 @@ fn create_test_acknowledgment_event(order_id: &str) -> OrderAcknowledgmentSent {
 }
 
 // =============================================================================
-// make_shipment_line テスト (REQ-070)
+// make_shipment_line Test (REQ-070)
 // =============================================================================
 
 mod make_shipment_line_tests {
@@ -137,7 +137,7 @@ mod make_shipment_line_tests {
 }
 
 // =============================================================================
-// create_shipping_event テスト (REQ-071)
+// create_shipping_event Test (REQ-071)
 // =============================================================================
 
 mod create_shipping_event_tests {
@@ -204,7 +204,7 @@ mod create_shipping_event_tests {
         let event = create_shipping_event(&priced_order);
 
         // Assert
-        // CommentLine は除外される
+        // CommentLine is excluded
         assert_eq!(event.shipment_lines().len(), 2);
     }
 
@@ -220,7 +220,7 @@ mod create_shipping_event_tests {
         let event = create_shipping_event(&priced_order);
 
         // Assert
-        // 空の shipment_lines でも ShippableOrderPlaced は生成される
+        // ShippableOrderPlaced is generated even with empty shipment_lines
         assert_eq!(event.shipment_lines().len(), 0);
         assert_eq!(event.order_id().value(), "order-004");
     }
@@ -239,7 +239,7 @@ mod create_shipping_event_tests {
 }
 
 // =============================================================================
-// create_billing_event テスト (REQ-072)
+// create_billing_event Test (REQ-072)
 // =============================================================================
 
 mod create_billing_event_tests {
@@ -270,7 +270,7 @@ mod create_billing_event_tests {
         let result = create_billing_event(&priced_order);
 
         // Assert
-        // プロモーションで全額割引の場合など
+        // e.g., full discount with Promotion
         assert!(result.is_none());
     }
 
@@ -290,7 +290,7 @@ mod create_billing_event_tests {
 }
 
 // =============================================================================
-// create_events テスト (REQ-073)
+// create_events Test (REQ-073)
 // =============================================================================
 
 mod create_events_tests {
@@ -299,7 +299,7 @@ mod create_events_tests {
 
     #[rstest]
     fn test_all_events() {
-        // Arrange: 確認メール + 配送 + 請求
+        // Arrange: Acknowledgment email + shipping + billing
         let priced_order = create_test_priced_order("order-001", Decimal::from(1000), vec![]);
         let acknowledgment_event = Some(create_test_acknowledgment_event("order-001"));
 
@@ -315,7 +315,7 @@ mod create_events_tests {
 
     #[rstest]
     fn test_no_acknowledgment() {
-        // Arrange: 確認メールなし、請求あり
+        // Arrange: No acknowledgment email, with billing
         let priced_order = create_test_priced_order("order-002", Decimal::from(500), vec![]);
         let acknowledgment_event = None;
 
@@ -330,7 +330,7 @@ mod create_events_tests {
 
     #[rstest]
     fn test_no_billing() {
-        // Arrange: 確認メールあり、請求なし
+        // Arrange: With acknowledgment email, no billing
         let priced_order = create_test_priced_order("order-003", Decimal::ZERO, vec![]);
         let acknowledgment_event = Some(create_test_acknowledgment_event("order-003"));
 
@@ -345,7 +345,7 @@ mod create_events_tests {
 
     #[rstest]
     fn test_minimal_events() {
-        // Arrange: 確認メールなし、請求なし（最小ケース）
+        // Arrange: No acknowledgment email, no billing (minimum case)
         let priced_order = create_test_priced_order("order-004", Decimal::ZERO, vec![]);
         let acknowledgment_event = None;
 
@@ -353,7 +353,7 @@ mod create_events_tests {
         let events = create_events(&priced_order, acknowledgment_event);
 
         // Assert
-        // 最小ケース - ShippableOrderPlaced のみ
+        // Minimum case - ShippableOrderPlaced only
         assert_eq!(events.len(), 1);
         assert!(events[0].is_shippable());
     }
@@ -367,7 +367,7 @@ mod create_events_tests {
         // Act
         let events = create_events(&priced_order, acknowledgment_event);
 
-        // Assert: イベントの順序確認
+        // Assert: Verify event order
         // 1. AcknowledgmentSent
         // 2. ShippableOrderPlaced
         // 3. BillableOrderPlaced

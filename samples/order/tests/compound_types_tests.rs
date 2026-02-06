@@ -1,8 +1,8 @@
-//! compound_types モジュールの補完テスト
+//! Supplementary tests for the compound_types module
 //!
-//! Phase 2 で実装された PersonalName, CustomerInfo, Address の
-//! Lens 操作テスト、Clone/Eq テスト、およびネスト構造へのアクセステストを行う。
-//! src 内の基本テストを補完する形で設計。
+//! Tests for PersonalName, CustomerInfo, and Address implemented in Phase 2:
+//! Lens operation tests, Clone/Eq tests, and nested structure access tests.
+//! Designed to complement the basic tests in src.
 
 use lambars::optics::Lens;
 use order_taking_sample::compound_types::{Address, CustomerInfo, PersonalName};
@@ -12,15 +12,15 @@ use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 
 // =============================================================================
-// ヘルパー関数
+// Helper functions
 // =============================================================================
 
-/// テスト用の PersonalName を生成する
+/// Creates a PersonalName for testing
 fn create_test_personal_name(first: &str, last: &str) -> PersonalName {
     PersonalName::create(first, last).unwrap()
 }
 
-/// テスト用の CustomerInfo を生成する
+/// Creates a CustomerInfo for testing
 fn create_test_customer_info(
     first: &str,
     last: &str,
@@ -30,7 +30,7 @@ fn create_test_customer_info(
     CustomerInfo::create(first, last, email, vip_status).unwrap()
 }
 
-/// テスト用の Address を生成する
+/// Creates an Address for testing
 fn create_test_address(
     line1: &str,
     line2: &str,
@@ -42,7 +42,7 @@ fn create_test_address(
     Address::create(line1, line2, "", "", city, zip, state, country).unwrap()
 }
 
-/// 値のハッシュを計算するヘルパー関数
+/// Helper function to compute a value's hash
 fn calculate_hash<T: Hash>(value: &T) -> u64 {
     let mut hasher = DefaultHasher::new();
     value.hash(&mut hasher);
@@ -50,7 +50,7 @@ fn calculate_hash<T: Hash>(value: &T) -> u64 {
 }
 
 // =============================================================================
-// PersonalName Lens 合成テスト
+// PersonalName Lens composition tests
 // =============================================================================
 
 mod personal_name_lens_tests {
@@ -81,7 +81,7 @@ mod personal_name_lens_tests {
         let updated = lens.set(name, new_first);
 
         assert_eq!(updated.first_name().value(), "Jane");
-        assert_eq!(updated.last_name().value(), "Doe"); // 変更されていない
+        assert_eq!(updated.last_name().value(), "Doe"); // Unchanged
     }
 
     #[rstest]
@@ -92,7 +92,7 @@ mod personal_name_lens_tests {
 
         let updated = lens.set(name, new_last);
 
-        assert_eq!(updated.first_name().value(), "John"); // 変更されていない
+        assert_eq!(updated.first_name().value(), "John"); // Unchanged
         assert_eq!(updated.last_name().value(), "Smith");
     }
 
@@ -102,7 +102,7 @@ mod personal_name_lens_tests {
         let lens = PersonalName::first_name_lens();
 
         let updated = lens.modify(name, |old| {
-            // 最初の文字を大文字に
+            // Capitalize the first character
             let capitalized = old
                 .value()
                 .chars()
@@ -125,14 +125,14 @@ mod personal_name_lens_tests {
 
         let updated = lens.set(original.clone(), new_first);
 
-        // 元のオブジェクトは変更されていない
+        // The original object has not been modified
         assert_eq!(original.first_name().value(), "John");
         assert_eq!(updated.first_name().value(), "Jane");
     }
 }
 
 // =============================================================================
-// CustomerInfo ネスト Lens 合成テスト
+// CustomerInfo nested Lens composition tests
 // =============================================================================
 
 mod customer_info_nested_lens_tests {
@@ -142,7 +142,7 @@ mod customer_info_nested_lens_tests {
     fn test_customer_info_nested_lens_get_first_name() {
         let customer = create_test_customer_info("John", "Doe", "john@example.com", "Normal");
 
-        // Lens 合成: CustomerInfo -> PersonalName -> String50 (first_name)
+        // Lens composition: CustomerInfo -> PersonalName -> String50 (first_name)
         let name_lens = CustomerInfo::name_lens();
         let first_name_lens = PersonalName::first_name_lens();
         let composed = name_lens.compose(first_name_lens);
@@ -161,9 +161,9 @@ mod customer_info_nested_lens_tests {
         let new_first = String50::create("FirstName", "Jonathan").unwrap();
         let updated = composed.set(customer, new_first);
 
-        // first_name が更新されている
+        // first_name has been updated
         assert_eq!(updated.name().first_name().value(), "Jonathan");
-        // 他のフィールドは変更されていない
+        // Other fields are unchanged
         assert_eq!(updated.name().last_name().value(), "Doe");
         assert_eq!(updated.email_address().value(), "john@example.com");
     }
@@ -192,7 +192,7 @@ mod customer_info_nested_lens_tests {
         });
 
         assert_eq!(updated.name().last_name().value(), "DOE");
-        assert_eq!(updated.name().first_name().value(), "John"); // 変更なし
+        assert_eq!(updated.name().first_name().value(), "John"); // Not modified
     }
 
     #[rstest]
@@ -219,7 +219,7 @@ mod customer_info_nested_lens_tests {
     fn test_multiple_lens_updates_in_sequence() {
         let customer = create_test_customer_info("John", "Doe", "john@example.com", "Normal");
 
-        // 複数の Lens 更新を連続して適用
+        // Apply multiple Lens updates consecutively
         let name_lens = CustomerInfo::name_lens();
         let first_name_lens = PersonalName::first_name_lens();
         let last_name_lens = PersonalName::last_name_lens();
@@ -239,7 +239,7 @@ mod customer_info_nested_lens_tests {
 }
 
 // =============================================================================
-// Address Lens 操作テスト（Option フィールド含む）
+// Address Lens operation tests (including Option fields)
 // =============================================================================
 
 mod address_lens_tests {
@@ -342,7 +342,7 @@ mod address_lens_tests {
         let updated = lens.set(address, new_zip);
 
         assert_eq!(updated.zip_code().value(), "90210");
-        assert_eq!(updated.city().value(), "New York"); // 変更なし
+        assert_eq!(updated.city().value(), "New York"); // Not modified
     }
 
     #[rstest]
@@ -359,7 +359,7 @@ mod address_lens_tests {
 }
 
 // =============================================================================
-// Clone/Eq テスト
+// Clone/Eq tests
 // =============================================================================
 
 mod clone_eq_tests {
@@ -371,7 +371,7 @@ mod clone_eq_tests {
         let cloned = original.clone();
 
         assert_eq!(original, cloned);
-        // 独立したインスタンスである（同じ値を持つ）
+        // Independent instances (with the same values)
         assert_eq!(original.first_name().value(), cloned.first_name().value());
     }
 
@@ -403,9 +403,9 @@ mod clone_eq_tests {
         let name2 = create_test_personal_name("Jane", "Doe");
         let name3 = create_test_personal_name("John", "Smith");
 
-        // 異なる first_name
+        // Different first_name
         assert_ne!(name1, name2);
-        // 異なる last_name
+        // Different last_name
         assert_ne!(name1, name3);
     }
 
@@ -416,9 +416,9 @@ mod clone_eq_tests {
         let customer3 = create_test_customer_info("John", "Doe", "jane@example.com", "Normal");
         let customer4 = create_test_customer_info("John", "Doe", "john@example.com", "VIP");
 
-        assert_ne!(customer1, customer2); // 異なる名前
-        assert_ne!(customer1, customer3); // 異なるメール
-        assert_ne!(customer1, customer4); // 異なる VIP ステータス
+        assert_ne!(customer1, customer2); // Different names
+        assert_ne!(customer1, customer3); // Different email
+        assert_ne!(customer1, customer4); // Different VIP status
     }
 
     #[rstest]
@@ -427,13 +427,13 @@ mod clone_eq_tests {
         let address2 = create_test_address("456 Oak Ave", "", "New York", "10001", "NY", "USA");
         let address3 = create_test_address("123 Main St", "", "Los Angeles", "90001", "CA", "USA");
 
-        assert_ne!(address1, address2); // 異なる address_line1
-        assert_ne!(address1, address3); // 異なる city, zip, state
+        assert_ne!(address1, address2); // Different address_line1
+        assert_ne!(address1, address3); // Different city, zip, state
     }
 }
 
 // =============================================================================
-// Hash 一貫性テスト
+// Hash consistency tests
 // =============================================================================
 
 mod hash_consistency_tests {
@@ -457,7 +457,7 @@ mod hash_consistency_tests {
         let mut map: HashMap<PersonalName, String> = HashMap::new();
         map.insert(name1.clone(), "Employee".to_string());
 
-        // 同じ値の別インスタンスでキーとして機能する
+        // A different instance with the same value works as a key
         assert_eq!(map.get(&name2), Some(&"Employee".to_string()));
     }
 
@@ -483,7 +483,7 @@ mod hash_consistency_tests {
 }
 
 // =============================================================================
-// 境界値テスト
+// Boundary value tests
 // =============================================================================
 
 mod boundary_tests {
@@ -540,7 +540,7 @@ mod boundary_tests {
 }
 
 // =============================================================================
-// エラーハンドリングテスト
+// Error handling tests
 // =============================================================================
 
 mod error_handling_tests {
@@ -548,12 +548,12 @@ mod error_handling_tests {
 
     #[rstest]
     fn test_personal_name_error_propagation() {
-        // first_name が空
+        // first_name is empty
         let result = PersonalName::create("", "Doe");
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().field_name, "FirstName");
 
-        // last_name が空
+        // last_name is empty
         let result = PersonalName::create("John", "");
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().field_name, "LastName");
@@ -561,7 +561,7 @@ mod error_handling_tests {
 
     #[rstest]
     fn test_customer_info_error_propagation() {
-        // 各フィールドのエラーが適切に伝播することを確認
+        // Verify errors for each field propagate correctly
         let test_cases = vec![
             (("", "Doe", "john@example.com", "Normal"), "FirstName"),
             (("John", "", "john@example.com", "Normal"), "LastName"),
@@ -582,27 +582,27 @@ mod error_handling_tests {
 
     #[rstest]
     fn test_address_error_propagation() {
-        // address_line1 が空
+        // address_line1 is empty
         let result = Address::create("", "", "", "", "New York", "10001", "NY", "USA");
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().field_name, "AddressLine1");
 
-        // city が空
+        // city is empty
         let result = Address::create("123 Main St", "", "", "", "", "10001", "NY", "USA");
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().field_name, "City");
 
-        // 無効な zip_code
+        // invalid zip_code
         let result = Address::create("123 Main St", "", "", "", "New York", "1234", "NY", "USA");
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().field_name, "ZipCode");
 
-        // 無効な state
+        // invalid state
         let result = Address::create("123 Main St", "", "", "", "New York", "10001", "XX", "USA");
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().field_name, "State");
 
-        // country が空
+        // country is empty
         let result = Address::create("123 Main St", "", "", "", "New York", "10001", "NY", "");
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().field_name, "Country");

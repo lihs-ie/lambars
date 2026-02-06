@@ -1,6 +1,6 @@
-//! PricingCatalog proptest 法則検証
+//! PricingCatalog proptest law verification
 //!
-//! PricingCatalog の不変条件と法則を proptest で検証する。
+//! Verifies PricingCatalog invariants and laws using proptest.
 
 use order_taking_sample::simple_types::{Price, ProductCode};
 use order_taking_sample::workflow::PricingCatalog;
@@ -8,10 +8,10 @@ use proptest::prelude::*;
 use rust_decimal::Decimal;
 
 // =============================================================================
-// Arbitrary 実装
+// Arbitrary implementations
 // =============================================================================
 
-/// ProductCode の Arbitrary 生成
+/// Arbitrary generation for ProductCode
 fn arb_product_code() -> impl Strategy<Value = ProductCode> {
     prop_oneof![
         (1000u32..10000u32).prop_map(|n| ProductCode::create("field", &format!("W{n}")).unwrap()),
@@ -19,23 +19,23 @@ fn arb_product_code() -> impl Strategy<Value = ProductCode> {
     ]
 }
 
-/// Price の Arbitrary 生成
+/// Arbitrary generation for Price
 fn arb_price() -> impl Strategy<Value = Price> {
     (0u32..1000u32).prop_map(|n| Price::create(Decimal::from(n)).unwrap())
 }
 
-/// PricingCatalog の Arbitrary 生成
+/// Arbitrary generation for PricingCatalog
 fn arb_pricing_catalog() -> impl Strategy<Value = PricingCatalog> {
     prop::collection::vec((arb_product_code(), arb_price()), 0..10)
         .prop_map(PricingCatalog::from_entries)
 }
 
 // =============================================================================
-// 法則検証
+// lawverification
 // =============================================================================
 
 proptest! {
-    /// set_price した価格を get_price で取得できることを検証
+    /// Verify a price set with set_price can be retrieved with get_price
     #[test]
     fn test_set_get_roundtrip(
         code in arb_product_code(),
@@ -45,7 +45,7 @@ proptest! {
         prop_assert_eq!(catalog.get_price(&code), Some(&price));
     }
 
-    /// 同じ商品コードに同じ価格を設定しても結果が同じことを検証
+    /// Verify setting the same price for the same product code yields the same result
     #[test]
     fn test_set_idempotent(
         code in arb_product_code(),
@@ -57,7 +57,7 @@ proptest! {
         prop_assert_eq!(catalog1.get_price(&code), catalog2.get_price(&code));
     }
 
-    /// set_price した後に remove_price すると None になることを検証
+    /// Verify remove_price after set_price results in None
     #[test]
     fn test_remove_after_set(
         code in arb_product_code(),
@@ -70,8 +70,8 @@ proptest! {
         prop_assert!(catalog.get_price(&code).is_none());
     }
 
-    /// merge の結合法則を検証
-    /// (a.merge(b)).merge(c) と a.merge(b.merge(c)) は同じ結果を持つ
+    /// Verify the associativity law of merge
+    /// (a.merge(b)).merge(c) and a.merge(b.merge(c)) yield the same result
     #[test]
     fn test_merge_associativity(
         catalog_a in arb_pricing_catalog(),
@@ -81,7 +81,7 @@ proptest! {
         let left = catalog_a.merge(&catalog_b).merge(&catalog_c);
         let right = catalog_a.merge(&catalog_b.merge(&catalog_c));
 
-        // 両方のカタログが同じキーと値を持つことを確認
+        // Verify both catalogs have the same keys and values
         prop_assert_eq!(left.len(), right.len());
 
         for (key, left_value) in left.iter() {
@@ -91,7 +91,7 @@ proptest! {
         }
     }
 
-    /// 空のカタログとのマージは恒等写像であることを検証
+    /// Verify merging with an empty catalog is an identity operation
     #[test]
     fn test_merge_identity(catalog in arb_pricing_catalog()) {
         let empty = PricingCatalog::new();
@@ -105,7 +105,7 @@ proptest! {
         }
     }
 
-    /// 空カタログを左から merge しても同じ結果であることを検証
+    /// Verify merging an empty catalog from the left yields the same result
     #[test]
     fn test_merge_identity_left(catalog in arb_pricing_catalog()) {
         let empty = PricingCatalog::new();
@@ -119,7 +119,7 @@ proptest! {
         }
     }
 
-    /// set_price で上書きした値が取得できることを検証
+    /// Verify a value overwritten with set_price can be retrieved
     #[test]
     fn test_set_overwrites_previous(
         code in arb_product_code(),
@@ -133,7 +133,7 @@ proptest! {
         prop_assert_eq!(catalog.get_price(&code), Some(&price2));
     }
 
-    /// contains は set_price 後に true になることを検証
+    /// Verify contains returns true after set_price
     #[test]
     fn test_contains_after_set(
         code in arb_product_code(),
@@ -143,7 +143,7 @@ proptest! {
         prop_assert!(catalog.contains(&code));
     }
 
-    /// contains は remove_price 後に false になることを検証
+    /// Verify contains returns false after remove_price
     #[test]
     fn test_not_contains_after_remove(
         code in arb_product_code(),
@@ -156,7 +156,7 @@ proptest! {
         prop_assert!(!catalog.contains(&code));
     }
 
-    /// len は set_price で増加することを検証（新規キーの場合）
+    /// Verify len increases with set_price (when the key is new)
     #[test]
     fn test_len_increases_on_new_key(
         code in arb_product_code(),
@@ -169,7 +169,7 @@ proptest! {
         prop_assert_eq!(updated.len(), 1);
     }
 
-    /// is_empty は空のカタログでのみ true
+    /// is_empty is true only for an empty catalog
     #[test]
     fn test_is_empty_consistency(catalog in arb_pricing_catalog()) {
         prop_assert_eq!(catalog.is_empty(), catalog.len() == 0);

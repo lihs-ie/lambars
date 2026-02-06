@@ -1,22 +1,22 @@
-//! イベント生成
+//! Event generation
 //!
-//! Phase 7 の実装。[`PricedOrder`] から [`PlaceOrderEvent`] を生成する。
+//! Phase 7 implementation. Generates [`PlaceOrderEvent`] from [`PricedOrder`].
 //!
-//! # 設計原則
+//! # Design Principles
 //!
-//! - 純粋関数: 全てのイベント生成関数は参照透過
-//! - 不変性: 入力データを変更せず、常に新しいイベントを生成
-//! - 合成可能性: 小さな関数から大きな関数を組み立てる
-//! - パターンマッチ: [`PricedOrderLine`] の `ProductLine`/`CommentLine` 分岐
+//! - Pure functions: all event generation functions are referentially transparent
+//! - Immutability: never modifies input data, always generates new events
+//! - Composability: builds larger functions from smaller ones
+//! - Pattern matching: `ProductLine`/`CommentLine` branches of [`PricedOrderLine`]
 //!
-//! # 機能一覧
+//! # Feature List
 //!
-//! - [`make_shipment_line`] - [`PricedOrderLine`] から [`ShippableOrderLine`] への変換
-//! - [`create_shipping_event`] - 配送イベントの生成
-//! - [`create_billing_event`] - 請求イベントの生成（条件付き）
-//! - [`create_events`] - 全イベントの統合
+//! - [`make_shipment_line`] - Converts [`PricedOrderLine`] to [`ShippableOrderLine`]
+//! - [`create_shipping_event`] - Generates shipping events
+//! - [`create_billing_event`] - Generates billing events (conditional)
+//! - [`create_events`] - Integrates all events
 //!
-//! # 使用例
+//! # Usage Examples
 //!
 //! ```
 //! use order_taking_sample::workflow::{
@@ -58,19 +58,19 @@ use crate::workflow::priced_types::{PricedOrder, PricedOrderLine};
 // make_shipment_line (REQ-070)
 // =============================================================================
 
-/// [`PricedOrderLine`] から [`ShippableOrderLine`] への変換関数
+/// Converts a [`PricedOrderLine`] to a [`ShippableOrderLine`]
 ///
-/// `ProductLine` の場合は製品コードと数量を抽出して [`ShippableOrderLine`] を生成。
-/// `CommentLine` の場合は `None` を返す（配送対象外）。
+/// For `ProductLine`, extracts the product code and quantity to create a [`ShippableOrderLine`].
+/// For `CommentLine`, returns `None` (not shippable).
 ///
 /// # Arguments
 ///
-/// * `line` - 価格付き注文明細
+/// * `line` - Priced order line
 ///
 /// # Returns
 ///
-/// * `Some(ShippableOrderLine)` - `ProductLine` の場合
-/// * `None` - `CommentLine` の場合
+/// * `Some(ShippableOrderLine)` - `ProductLine` when
+/// * `None` - `CommentLine` when
 ///
 /// # Examples
 ///
@@ -81,7 +81,7 @@ use crate::workflow::priced_types::{PricedOrder, PricedOrderLine};
 /// use order_taking_sample::simple_types::{OrderLineId, ProductCode, OrderQuantity, Price};
 /// use rust_decimal::Decimal;
 ///
-/// // ProductLine の場合
+/// // ProductLine when
 /// let product_code = ProductCode::create("ProductCode", "W1234").unwrap();
 /// let product_line = PricedOrderProductLine::new(
 ///     OrderLineId::create("OrderLineId", "line-001").unwrap(),
@@ -93,7 +93,7 @@ use crate::workflow::priced_types::{PricedOrder, PricedOrderLine};
 /// let result = make_shipment_line(&line);
 /// assert!(result.is_some());
 ///
-/// // CommentLine の場合
+/// // CommentLine when
 /// let comment_line = PricedOrderLine::CommentLine("Gift message".to_string());
 /// let result = make_shipment_line(&comment_line);
 /// assert!(result.is_none());
@@ -113,18 +113,18 @@ pub fn make_shipment_line(line: &PricedOrderLine) -> Option<ShippableOrderLine> 
 // create_shipping_event (REQ-071)
 // =============================================================================
 
-/// [`PricedOrder`] から [`ShippableOrderPlaced`] イベントを生成する
+/// Generates a [`ShippableOrderPlaced`] event from a [`PricedOrder`]
 ///
-/// 配送対象の明細（`ProductLine` のみ）を抽出し、
-/// 注文ID、配送先住所、明細リスト、PDF を含むイベントを生成する。
+/// Extracts shippable lines (`ProductLine` only),
+/// and generates an event including Order ID, shipping address, line list, and PDF.
 ///
 /// # Arguments
 ///
-/// * `priced_order` - 価格計算済み注文
+/// * `priced_order` - Priced order
 ///
 /// # Returns
 ///
-/// 配送可能注文確定イベント
+/// Shippable order placed event
 ///
 /// # Examples
 ///
@@ -152,8 +152,8 @@ pub fn make_shipment_line(line: &PricedOrderLine) -> Option<ShippableOrderLine> 
 /// ```
 #[must_use]
 pub fn create_shipping_event(priced_order: &PricedOrder) -> ShippableOrderPlaced {
-    // 現在は make_shipment_line を直接渡している（単一関数のため compose! 不要）
-    // 追加の変換が必要になった場合:
+    // Currently passing make_shipment_line directly (no compose! needed for a single function)
+    // If additional conversion is needed:
     //   let transform = compose!(additional_transform, make_shipment_line);
     //   priced_order.lines().iter().filter_map(transform).collect()
     let shipment_lines: Vec<ShippableOrderLine> = priced_order
@@ -177,18 +177,18 @@ pub fn create_shipping_event(priced_order: &PricedOrder) -> ShippableOrderPlaced
 // create_billing_event (REQ-072)
 // =============================================================================
 
-/// [`PricedOrder`] から [`BillableOrderPlaced`] イベントを条件付きで生成する
+/// Conditionally generates a [`BillableOrderPlaced`] event from a [`PricedOrder`]
 ///
-/// 請求金額が正の場合のみイベントを生成し、0 以下の場合は `None` を返す。
+/// Generates an event only when the billing amount is positive; returns `None` when 0 or less.
 ///
 /// # Arguments
 ///
-/// * `priced_order` - 価格計算済み注文
+/// * `priced_order` - Priced order
 ///
 /// # Returns
 ///
-/// * `Some(BillableOrderPlaced)` - 請求金額が正の場合
-/// * `None` - 請求金額が 0 以下の場合
+/// * `Some(BillableOrderPlaced)` - When the billing amount is positive
+/// * `None` - When the billing amount is 0 or less
 ///
 /// # Examples
 ///
@@ -200,7 +200,7 @@ pub fn create_shipping_event(priced_order: &PricedOrder) -> ShippableOrderPlaced
 /// use order_taking_sample::compound_types::{CustomerInfo, Address};
 /// use rust_decimal::Decimal;
 ///
-/// // 請求金額が正の場合
+/// // When the billing amount is positive
 /// let order_id = OrderId::create("OrderId", "order-001").unwrap();
 /// let customer_info = CustomerInfo::create("John", "Doe", "john@example.com", "Normal").unwrap();
 /// let address = Address::create(
@@ -233,21 +233,21 @@ pub fn create_billing_event(priced_order: &PricedOrder) -> Option<BillableOrderP
 // create_events (REQ-073)
 // =============================================================================
 
-/// [`PricedOrder`] と確認メール送信イベントから全イベントを統合する
+/// Integrates all events from a [`PricedOrder`] and an acknowledgment sent event
 ///
-/// イベントの順序:
-/// 1. `AcknowledgmentSent`（存在する場合）
-/// 2. `ShippableOrderPlaced`（常に生成）
-/// 3. `BillableOrderPlaced`（請求金額が正の場合）
+/// Event order:
+/// 1. `AcknowledgmentSent` (if present)
+/// 2. `ShippableOrderPlaced` (always generated)
+/// 3. `BillableOrderPlaced` (when billing amount is positive)
 ///
 /// # Arguments
 ///
-/// * `priced_order` - 価格計算済み注文
-/// * `acknowledgment_event` - 確認メール送信イベント（Option）
+/// * `priced_order` - Priced order
+/// * `acknowledgment_event` - Acknowledgment sent event (Option)
 ///
 /// # Returns
 ///
-/// 全ての [`PlaceOrderEvent`] を含む Vec
+/// all [`PlaceOrderEvent`] includes Vec
 ///
 /// # Examples
 ///
@@ -270,7 +270,7 @@ pub fn create_billing_event(priced_order: &PricedOrder) -> Option<BillableOrderP
 ///     order_id.clone(), customer_info, address.clone(), address, amount_to_bill, vec![], PricingMethod::Standard,
 /// );
 ///
-/// // 確認メールあり、請求ありの場合: 3イベント
+/// // With acknowledgment email and billing: 3 events
 /// let email = EmailAddress::create("EmailAddress", "john@example.com").unwrap();
 /// let acknowledgment_event = OrderAcknowledgmentSent::new(order_id.clone(), email);
 /// let events = create_events(&priced_order, Some(acknowledgment_event));
@@ -281,26 +281,26 @@ pub fn create_events(
     priced_order: &PricedOrder,
     acknowledgment_event: Option<OrderAcknowledgmentSent>,
 ) -> Vec<PlaceOrderEvent> {
-    // 配送イベント作成の合成関数
-    // compose! は右から左への合成: ShippableOrderPlaced(create_shipping_event(order))
+    // Composition function for creating shipping events
+    // compose! composes right to left: ShippableOrderPlaced(create_shipping_event(order))
     let to_shipping_event = compose!(PlaceOrderEvent::ShippableOrderPlaced, create_shipping_event);
 
-    // 確認メール送信イベント（存在する場合）
+    // Acknowledgment sent event (if present)
     let acknowledgment_events: Vec<PlaceOrderEvent> = acknowledgment_event
         .map(PlaceOrderEvent::AcknowledgmentSent)
         .into_iter()
         .collect();
 
-    // 配送イベント（常に生成）: 合成関数を適用
+    // Shipping event (always generated): apply the composition function
     let shipping_events = vec![to_shipping_event(priced_order)];
 
-    // 請求イベント（請求金額が正の場合のみ）
+    // Billing event (only when billing amount is positive)
     let billing_events: Vec<PlaceOrderEvent> = pipe!(priced_order, create_billing_event)
         .map(PlaceOrderEvent::BillableOrderPlaced)
         .into_iter()
         .collect();
 
-    // イベントを結合
+    // Combine events
     [acknowledgment_events, shipping_events, billing_events].concat()
 }
 
@@ -319,7 +319,7 @@ mod tests {
     use rstest::rstest;
 
     // =========================================================================
-    // テストヘルパー
+    // Test helpers
     // =========================================================================
 
     fn create_test_priced_order(
@@ -360,7 +360,7 @@ mod tests {
     }
 
     // =========================================================================
-    // make_shipment_line のテスト
+    // Tests for make_shipment_line
     // =========================================================================
 
     #[rstest]
@@ -382,7 +382,7 @@ mod tests {
     }
 
     // =========================================================================
-    // create_shipping_event のテスト
+    // Tests for create_shipping_event
     // =========================================================================
 
     #[rstest]
@@ -407,7 +407,7 @@ mod tests {
     }
 
     // =========================================================================
-    // create_billing_event のテスト
+    // Tests for create_billing_event
     // =========================================================================
 
     #[rstest]
@@ -431,7 +431,7 @@ mod tests {
     }
 
     // =========================================================================
-    // create_events のテスト
+    // Tests for create_events
     // =========================================================================
 
     #[rstest]

@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 
-/// force は初回のみ評価し、その後は同一値を返す。
+/// `force` evaluates only on the first call and returns the same value thereafter.
 #[rstest]
 fn force_is_idempotent() {
     let call_count = AtomicUsize::new(0);

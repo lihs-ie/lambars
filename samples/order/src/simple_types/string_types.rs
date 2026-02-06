@@ -1,6 +1,6 @@
-//! 文字列制約型の定義
+//! Constrained string type definitions
 //!
-//! `String50`, `EmailAddress`, `ZipCode`, `UsStateCode` を定義する。
+//! Defines `String50`, `EmailAddress`, `ZipCode`, and `UsStateCode`.
 
 use regex::Regex;
 use std::sync::LazyLock;
@@ -12,10 +12,10 @@ use super::error::ValidationError;
 // String50
 // =============================================================================
 
-/// 50文字以下に制約された文字列型
+/// A string type constrained to 50 characters or fewer
 ///
-/// 名前、住所の一部など、短い文字列フィールドに使用する。
-/// 空文字列は許可しない。
+/// Used for short string fields such as names and parts of addresses.
+/// Empty strings are not allowed.
 ///
 /// # Examples
 ///
@@ -25,62 +25,62 @@ use super::error::ValidationError;
 /// let name = String50::create("CustomerName", "John Doe").unwrap();
 /// assert_eq!(name.value(), "John Doe");
 ///
-/// // 空文字列はエラー
+/// // Empty string causes an error
 /// assert!(String50::create("CustomerName", "").is_err());
 ///
-/// // 51文字以上はエラー
+/// // 51 characters or more causes an error
 /// let long_name = "a".repeat(51);
 /// assert!(String50::create("CustomerName", &long_name).is_err());
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct String50(String);
 
-/// String50 の最大文字数
+/// Maximum character count for String50
 const STRING50_MAX_LENGTH: usize = 50;
 
 impl String50 {
-    /// 文字列から String50 を生成する
+    /// Creates a String50 from a string
     ///
     /// # Arguments
     ///
-    /// * `field_name` - エラーメッセージに使用するフィールド名
-    /// * `value` - 入力文字列
+    /// * `field_name` - Field name used in error messages
+    /// * `value` - Input string
     ///
     /// # Returns
     ///
-    /// * `Ok(String50)` - バリデーション成功時
-    /// * `Err(ValidationError)` - 空文字列または50文字超過時
+    /// * `Ok(String50)` - On successful validation
+    /// * `Err(ValidationError)` - When the string is empty or exceeds 50 characters
     ///
     /// # Errors
     ///
-    /// 空文字列または50文字を超える場合に `ValidationError` を返す。
+    /// Returns `ValidationError` when the string is empty or exceeds 50 characters.
     pub fn create(field_name: &str, value: &str) -> Result<Self, ValidationError> {
         constrained_type::create_string(field_name, String50, STRING50_MAX_LENGTH, value)
     }
 
-    /// 空文字列の場合は None を返し、それ以外はバリデーションを行う
+    /// Returns `None` for an empty string; otherwise, performs validation
     ///
-    /// オプショナルなフィールドに使用する。
+    /// Used for optional fields.
     ///
     /// # Arguments
     ///
-    /// * `field_name` - エラーメッセージに使用するフィールド名
-    /// * `value` - 入力文字列
+    /// * `field_name` - Field name used in error messages
+    /// * `value` - Input string
     ///
     /// # Returns
     ///
-    /// * `Ok(None)` - 空文字列の場合
-    /// * `Ok(Some(String50))` - バリデーション成功時
-    /// * `Err(ValidationError)` - 50文字超過時
+    /// * `Ok(None)` - For an empty string
+    /// * `Ok(Some(String50))` - On successful validation
+    /// * `Err(ValidationError)` - When the string exceeds 50 characters
     ///
     /// # Errors
     ///
-    /// 50文字を超える場合に `ValidationError` を返す。
+    /// Returns `ValidationError` when the string exceeds 50 characters.
     pub fn create_option(field_name: &str, value: &str) -> Result<Option<Self>, ValidationError> {
         constrained_type::create_string_option(field_name, String50, STRING50_MAX_LENGTH, value)
     }
 
-    /// 内部の文字列値への参照を返す
+    /// Returns a reference to the inner stringvalue
     #[must_use]
     pub fn value(&self) -> &str {
         &self.0
@@ -91,9 +91,9 @@ impl String50 {
 // EmailAddress
 // =============================================================================
 
-/// メールアドレス形式に制約された文字列型
+/// A string type constrained to email address format
 ///
-/// 最低限、@ を含む文字列であることを検証する。
+/// Validates that the string contains at least an @ symbol.
 ///
 /// # Examples
 ///
@@ -103,38 +103,38 @@ impl String50 {
 /// let email = EmailAddress::create("Email", "user@example.com").unwrap();
 /// assert_eq!(email.value(), "user@example.com");
 ///
-/// // @ を含まない場合はエラー
+/// // Causes an error if it does not contain @
 /// assert!(EmailAddress::create("Email", "invalid-email").is_err());
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct EmailAddress(String);
 
-/// メールアドレスの正規表現パターン
-/// .+@.+ : 何か@何か の形式
+/// Regex pattern for email addresses
+/// .+@.+ : Matches anything@anything format
 static EMAIL_PATTERN: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^.+@.+$").expect("Invalid email regex pattern"));
 
 impl EmailAddress {
-    /// メールアドレス形式の文字列から `EmailAddress` を生成する
+    /// Creates an `EmailAddress` from an email-formatted string
     ///
     /// # Arguments
     ///
-    /// * `field_name` - エラーメッセージに使用するフィールド名
-    /// * `value` - 入力文字列
+    /// * `field_name` - Field name used in error messages
+    /// * `value` - Input string
     ///
     /// # Returns
     ///
-    /// * `Ok(EmailAddress)` - バリデーション成功時
-    /// * `Err(ValidationError)` - 空文字列または @ を含まない場合
+    /// * `Ok(EmailAddress)` - On successful validation
+    /// * `Err(ValidationError)` - When the string is empty or does not contain @
     ///
     /// # Errors
     ///
-    /// 空文字列または @ を含まない場合に `ValidationError` を返す。
+    /// Returns `ValidationError` when the string is empty or does not contain @.
     pub fn create(field_name: &str, value: &str) -> Result<Self, ValidationError> {
         constrained_type::create_like(field_name, EmailAddress, &EMAIL_PATTERN, value)
     }
 
-    /// 内部のメールアドレス文字列への参照を返す
+    /// Returns a reference to the inner Email addressstring
     #[must_use]
     pub fn value(&self) -> &str {
         &self.0
@@ -145,9 +145,9 @@ impl EmailAddress {
 // ZipCode
 // =============================================================================
 
-/// 5桁の郵便番号を表す型
+/// A type representing a 5-digit zip code
 ///
-/// 米国の ZIP コード形式を想定する。
+/// Assumes US ZIP code format.
 ///
 /// # Examples
 ///
@@ -157,43 +157,43 @@ impl EmailAddress {
 /// let zip = ZipCode::create("ZipCode", "12345").unwrap();
 /// assert_eq!(zip.value(), "12345");
 ///
-/// // 4桁はエラー
+/// // 4 digits causes an error
 /// assert!(ZipCode::create("ZipCode", "1234").is_err());
 ///
-/// // 6桁はエラー
+/// // 6 digits causes an error
 /// assert!(ZipCode::create("ZipCode", "123456").is_err());
 ///
-/// // 文字を含むとエラー
+/// // Including letters causes an error
 /// assert!(ZipCode::create("ZipCode", "1234A").is_err());
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ZipCode(String);
 
-/// `ZipCode` の正規表現パターン（5桁の数字）
+/// Regex pattern for `ZipCode` (5-digit number)
 static ZIP_CODE_PATTERN: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^\d{5}$").expect("Invalid zip code regex pattern"));
 
 impl ZipCode {
-    /// 5桁の数字文字列から `ZipCode` を生成する
+    /// Creates a `ZipCode` from a 5-digit numeric string
     ///
     /// # Arguments
     ///
-    /// * `field_name` - エラーメッセージに使用するフィールド名
-    /// * `value` - 入力文字列
+    /// * `field_name` - Field name used in error messages
+    /// * `value` - Input string
     ///
     /// # Returns
     ///
-    /// * `Ok(ZipCode)` - バリデーション成功時
-    /// * `Err(ValidationError)` - 5桁の数字でない場合
+    /// * `Ok(ZipCode)` - On successful validation
+    /// * `Err(ValidationError)` - When the string is not a 5-digit number
     ///
     /// # Errors
     ///
-    /// 5桁の数字でない場合に `ValidationError` を返す。
+    /// Returns `ValidationError` when the string is not a 5-digit number.
     pub fn create(field_name: &str, value: &str) -> Result<Self, ValidationError> {
         constrained_type::create_like(field_name, ZipCode, &ZIP_CODE_PATTERN, value)
     }
 
-    /// 内部の郵便番号文字列への参照を返す
+    /// Returns a reference to the inner zip code string
     #[must_use]
     pub fn value(&self) -> &str {
         &self.0
@@ -204,9 +204,9 @@ impl ZipCode {
 // UsStateCode
 // =============================================================================
 
-/// 米国の2文字の州コードを表す型
+/// A type representing a 2-character US state code
 ///
-/// 有効な州コードのみを受け入れる。
+/// Only accepts valid state codes.
 ///
 /// # Examples
 ///
@@ -216,16 +216,16 @@ impl ZipCode {
 /// let state = UsStateCode::create("State", "CA").unwrap();
 /// assert_eq!(state.value(), "CA");
 ///
-/// // 無効な州コードはエラー
+/// // Invalid state code causes an error
 /// assert!(UsStateCode::create("State", "XX").is_err());
 ///
-/// // 小文字はエラー
+/// // Lowercase causes an error
 /// assert!(UsStateCode::create("State", "ca").is_err());
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct UsStateCode(String);
 
-/// `UsStateCode` の正規表現パターン（有効な米国州コード）
+/// Regex pattern for `UsStateCode` (valid US state codes)
 /// AL, AK, AZ, AR, CA, CO, CT, DE, DC, FL, GA, HI, ID, IL, IN, IA, KS, KY, LA,
 /// MA, MD, ME, MI, MN, MO, MS, MT, NC, ND, NE, NH, NJ, NM, NV, NY, OH, OK, OR,
 /// PA, RI, SC, SD, TN, TX, UT, VA, VT, WA, WI, WV, WY
@@ -237,26 +237,26 @@ static US_STATE_CODE_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 impl UsStateCode {
-    /// 2文字の州コードから `UsStateCode` を生成する
+    /// Creates a `UsStateCode` from a 2-character state code
     ///
     /// # Arguments
     ///
-    /// * `field_name` - エラーメッセージに使用するフィールド名
-    /// * `value` - 入力文字列
+    /// * `field_name` - Field name used in error messages
+    /// * `value` - Input string
     ///
     /// # Returns
     ///
-    /// * `Ok(UsStateCode)` - バリデーション成功時
-    /// * `Err(ValidationError)` - 無効な州コードの場合
+    /// * `Ok(UsStateCode)` - On successful validation
+    /// * `Err(ValidationError)` - Invalid state codewhen
     ///
     /// # Errors
     ///
-    /// 無効な州コードの場合に `ValidationError` を返す。
+    /// Returns `ValidationError` for an invalid state code.
     pub fn create(field_name: &str, value: &str) -> Result<Self, ValidationError> {
         constrained_type::create_like(field_name, UsStateCode, &US_STATE_CODE_PATTERN, value)
     }
 
-    /// 内部の州コード文字列への参照を返す
+    /// Returns a reference to the inner state code string
     #[must_use]
     pub fn value(&self) -> &str {
         &self.0
@@ -369,7 +369,7 @@ mod tests {
 
     #[rstest]
     fn test_email_address_create_simple_valid() {
-        // 最低限の有効なメールアドレス
+        // Minimal valid email address
         let result = EmailAddress::create("Email", "a@b");
 
         assert!(result.is_ok());
@@ -398,7 +398,7 @@ mod tests {
 
     #[rstest]
     fn test_email_address_create_at_only() {
-        // @ のみでは不十分（.+ パターンにより前後に何か必要）
+        // @ alone is insufficient (.+ pattern requires something before and after)
         let result = EmailAddress::create("Email", "@");
 
         assert!(result.is_err());
@@ -406,7 +406,7 @@ mod tests {
 
     #[rstest]
     fn test_email_address_create_at_start() {
-        // @ が先頭にある場合（前に何もない）
+        // When @ is at the beginning (nothing before it)
         let result = EmailAddress::create("Email", "@example.com");
 
         assert!(result.is_err());
@@ -414,7 +414,7 @@ mod tests {
 
     #[rstest]
     fn test_email_address_create_at_end() {
-        // @ が末尾にある場合（後に何もない）
+        // When @ is at the end (nothing after it)
         let result = EmailAddress::create("Email", "user@");
 
         assert!(result.is_err());
@@ -486,7 +486,7 @@ mod tests {
 
     #[rstest]
     fn test_zip_code_create_with_dash() {
-        // ZIP+4 形式はサポートしない
+        // ZIP+4 format is not supported
         let result = ZipCode::create("ZipCode", "12345-6789");
 
         assert!(result.is_err());
@@ -521,7 +521,7 @@ mod tests {
 
     #[rstest]
     fn test_us_state_code_create_valid_dc() {
-        // DC はワシントン D.C.
+        // DC is Washington D.C.
         let result = UsStateCode::create("State", "DC");
 
         assert!(result.is_ok());
@@ -604,7 +604,7 @@ mod tests {
 
     #[rstest]
     fn test_us_state_code_create_lowercase() {
-        // 小文字は無効
+        // Lowercase is invalid
         let result = UsStateCode::create("State", "ca");
 
         assert!(result.is_err());

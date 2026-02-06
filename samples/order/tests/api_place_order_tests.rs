@@ -1,13 +1,13 @@
-//! place_order_api のテスト
+//! Tests for place_order_api
 //!
-//! place_order_api 関数のテスト
+//! Tests for the place_order_api function
 
 use order_taking_sample::api::{HttpRequest, place_order_api};
 use order_taking_sample::dto::PlaceOrderEventDto;
 use rstest::rstest;
 
 // =============================================================================
-// 正常系テスト
+// Success case tests
 // =============================================================================
 
 mod success_tests {
@@ -71,10 +71,10 @@ mod success_tests {
         let io_response = place_order_api(&request);
         let response = io_response.run_unsafe();
 
-        // レスポンスボディをデシリアライズ
+        // Deserialize the response body
         let events: Vec<PlaceOrderEventDto> = serde_json::from_str(response.body()).unwrap();
 
-        // 3つのイベント（Shippable, Billable, Acknowledgment）が返される
+        // Three events (Shippable, Billable, Acknowledgment) are returned
         assert_eq!(events.len(), 3);
     }
 
@@ -181,7 +181,7 @@ mod success_tests {
 }
 
 // =============================================================================
-// JSON パースエラーテスト
+// JSON parse error tests
 // =============================================================================
 
 mod json_parse_error_tests {
@@ -238,7 +238,7 @@ mod json_parse_error_tests {
 }
 
 // =============================================================================
-// バリデーションエラーテスト
+// Validation error tests
 // =============================================================================
 
 mod validation_error_tests {
@@ -442,7 +442,7 @@ mod validation_error_tests {
 }
 
 // =============================================================================
-// レスポンス形式テスト
+// Response format tests
 // =============================================================================
 
 mod response_format_tests {
@@ -496,7 +496,7 @@ mod response_format_tests {
         let io_response = place_order_api(&request);
         let response = io_response.run_unsafe();
 
-        // レスポンスボディが有効な JSON であることを確認
+        // Verify the response body is valid JSON
         let parse_result: Result<serde_json::Value, _> = serde_json::from_str(response.body());
         assert!(parse_result.is_ok());
     }
@@ -508,7 +508,7 @@ mod response_format_tests {
         let io_response = place_order_api(&request);
         let response = io_response.run_unsafe();
 
-        // エラーレスポンスも有効な JSON であることを確認
+        // Verify the error response is also valid JSON
         let parse_result: Result<serde_json::Value, _> = serde_json::from_str(response.body());
         assert!(parse_result.is_ok());
     }
@@ -520,7 +520,7 @@ mod response_format_tests {
         let io_response = place_order_api(&request);
         let response = io_response.run_unsafe();
 
-        // 各イベントに type フィールドが含まれている
+        // Each event contains a type field
         assert!(response.body().contains("\"type\""));
     }
 
@@ -563,7 +563,7 @@ mod response_format_tests {
         let io_response = place_order_api(&request);
         let response = io_response.run_unsafe();
 
-        // Validation エラーの形式を確認
+        // Verify the format of validation errors
         assert!(response.body().contains("\"type\":\"Validation\""));
         assert!(response.body().contains("\"field_name\""));
         assert!(response.body().contains("\"message\""));

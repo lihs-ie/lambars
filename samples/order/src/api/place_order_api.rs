@@ -1,7 +1,7 @@
 //! `PlaceOrder` API
 //!
-//! `PlaceOrder` ワークフローの HTTP API エンドポイント。
-//! 後続のステップで実装する。
+//! HTTP API endpoint for the `PlaceOrder` workflow.
+//! Implemented in subsequent steps.
 
 use lambars::effect::IO;
 
@@ -19,26 +19,26 @@ use super::dependencies::{
 // place_order_api (REQ-089)
 // =============================================================================
 
-/// `PlaceOrder` ワークフローの HTTP API エンドポイント
+/// HTTP API endpoint for the `PlaceOrder` workflow
 ///
-/// HTTP リクエストを受け取り、`PlaceOrder` ワークフローを実行し、
-/// HTTP レスポンスを返す。
+/// Receives an HTTP request, executes the `PlaceOrder` workflow,
+/// and returns an HTTP response.
 ///
-/// # 処理フロー
+/// # Processing Flow
 ///
-/// 1. リクエストボディを `OrderFormDto` にデシリアライズ
-/// 2. `OrderFormDto` を `UnvalidatedOrder` に変換
-/// 3. `place_order` ワークフローを実行
-/// 4. 成功時: イベントを `PlaceOrderEventDto` にシリアライズして 200 を返す
-/// 5. 失敗時: エラーを `PlaceOrderErrorDto` にシリアライズして 400/500 を返す
+/// 1. Deserialize the request body into `OrderFormDto`
+/// 2. Convert `OrderFormDto` to `UnvalidatedOrder`
+/// 3. Execute the `place_order` workflow
+/// 4. On success: serialize events to `PlaceOrderEventDto` and return 200
+/// 5. On failure: serialize errors to `PlaceOrderErrorDto` and return 400/500
 ///
 /// # Arguments
 ///
-/// * `request` - HTTP リクエスト
+/// * `request` - HTTP request
 ///
 /// # Returns
 ///
-/// `IO<HttpResponse>` - 副作用を含むレスポンス
+/// `IO<HttpResponse>` - Response containing side effects
 ///
 /// # Examples
 ///
@@ -52,7 +52,7 @@ use super::dependencies::{
 /// ```
 #[must_use]
 pub fn place_order_api(request: &HttpRequest) -> IO<HttpResponse> {
-    // Step 1: リクエストボディをデシリアライズ
+    // Step 1: Deserialize the request body
     let order_form_dto: OrderFormDto = match serde_json::from_str(request.body()) {
         Ok(dto) => dto,
         Err(error) => {
@@ -60,10 +60,10 @@ pub fn place_order_api(request: &HttpRequest) -> IO<HttpResponse> {
         }
     };
 
-    // Step 2: DTO をドメイン型に変換
+    // Step 2: Convert DTO to domain type
     let unvalidated_order = order_form_dto.to_unvalidated_order();
 
-    // Step 3: ワークフローを実行
+    // Step 3: Execute the workflow
     let workflow_io = place_order(
         &check_product_exists,
         &check_address_exists,
@@ -74,14 +74,14 @@ pub fn place_order_api(request: &HttpRequest) -> IO<HttpResponse> {
         &unvalidated_order,
     );
 
-    // Step 4-5: 結果を HTTP レスポンスに変換
+    // Step 4-5: Convert the result to an HTTP response
     workflow_io.fmap(|result| match result {
         Ok(events) => create_success_response(&events),
         Err(error) => create_error_response(&error),
     })
 }
 
-/// 成功レスポンスを生成する
+/// Creates a success response
 fn create_success_response(events: &[crate::workflow::PlaceOrderEvent]) -> HttpResponse {
     let event_dtos = PlaceOrderEventDto::from_domain_list(events);
     serde_json::to_string(&event_dtos).map_or_else(
@@ -95,7 +95,7 @@ fn create_success_response(events: &[crate::workflow::PlaceOrderEvent]) -> HttpR
     )
 }
 
-/// エラーレスポンスを生成する
+/// Creates an error response
 fn create_error_response(error: &PlaceOrderError) -> HttpResponse {
     let error_dto = PlaceOrderErrorDto::from_domain(error);
     let status_code = determine_error_status_code(error);
@@ -110,7 +110,7 @@ fn create_error_response(error: &PlaceOrderError) -> HttpResponse {
     )
 }
 
-/// JSON パースエラーレスポンスを生成する
+/// Creates a JSON parse error response
 fn create_json_parse_error_response(error: &serde_json::Error) -> HttpResponse {
     let error_message = format!(
         r#"{{"type":"JsonParseError","message":"{}"}}"#,
@@ -119,7 +119,7 @@ fn create_json_parse_error_response(error: &serde_json::Error) -> HttpResponse {
     HttpResponse::bad_request(error_message)
 }
 
-/// エラーの種類に応じたステータスコードを決定する
+/// Determines the status code based on the error type
 const fn determine_error_status_code(error: &PlaceOrderError) -> u16 {
     match error {
         PlaceOrderError::Validation(_) | PlaceOrderError::Pricing(_) => 400,
@@ -127,7 +127,7 @@ const fn determine_error_status_code(error: &PlaceOrderError) -> u16 {
     }
 }
 
-/// JSON 文字列用のエスケープ処理
+/// Escapes a string for JSON embedding
 fn escape_json_string(input: &str) -> String {
     input
         .replace('\\', "\\\\")

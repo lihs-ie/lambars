@@ -1,6 +1,6 @@
-//! ID 型の定義
+//! ID type definitions
 //!
-//! `OrderId`, `OrderLineId` を定義する。
+//! Defines `OrderId` and `OrderLineId`.
 
 use super::constrained_type;
 use super::error::ValidationError;
@@ -9,10 +9,10 @@ use super::error::ValidationError;
 // OrderId
 // =============================================================================
 
-/// 注文を一意に識別する ID 型
+/// An ID type that uniquely identifies an order
 ///
-/// 空でない50文字以下の文字列。
-/// `HashMap` のキーとして使用可能（`Hash` を derive）。
+/// A non-empty string of 50 characters or fewer.
+/// Can be used as a `HashMap` key (`Hash` is derived).
 ///
 /// # Examples
 ///
@@ -22,36 +22,36 @@ use super::error::ValidationError;
 /// let order_id = OrderId::create("OrderId", "ORD-2024-001").unwrap();
 /// assert_eq!(order_id.value(), "ORD-2024-001");
 ///
-/// // 空文字列はエラー
+/// // Empty string causes an error
 /// assert!(OrderId::create("OrderId", "").is_err());
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct OrderId(String);
 
-/// `OrderId` の最大文字数
+/// Maximum character count for `OrderId`
 const ORDER_ID_MAX_LENGTH: usize = 50;
 
 impl OrderId {
-    /// 文字列から `OrderId` を生成する
+    /// Creates an `OrderId` from a string
     ///
     /// # Arguments
     ///
-    /// * `field_name` - エラーメッセージに使用するフィールド名
-    /// * `value` - 入力文字列
+    /// * `field_name` - Field name used in error messages
+    /// * `value` - Input string
     ///
     /// # Returns
     ///
-    /// * `Ok(OrderId)` - バリデーション成功時
-    /// * `Err(ValidationError)` - 空文字列または50文字超過時
+    /// * `Ok(OrderId)` - On successful validation
+    /// * `Err(ValidationError)` - When the string is empty or exceeds 50 characters
     ///
     /// # Errors
     ///
-    /// 空文字列または50文字を超える場合に `ValidationError` を返す。
+    /// Returns `ValidationError` when the string is empty or exceeds 50 characters.
     pub fn create(field_name: &str, value: &str) -> Result<Self, ValidationError> {
         constrained_type::create_string(field_name, OrderId, ORDER_ID_MAX_LENGTH, value)
     }
 
-    /// 内部の ID 文字列への参照を返す
+    /// Returns a reference to the inner  ID string
     #[must_use]
     pub fn value(&self) -> &str {
         &self.0
@@ -62,10 +62,10 @@ impl OrderId {
 // OrderLineId
 // =============================================================================
 
-/// 注文明細を一意に識別する ID 型
+/// An ID type that uniquely identifies an order line
 ///
-/// 空でない50文字以下の文字列。
-/// `HashMap` のキーとして使用可能（`Hash` を derive）。
+/// A non-empty string of 50 characters or fewer.
+/// Can be used as a `HashMap` key (`Hash` is derived).
 ///
 /// # Examples
 ///
@@ -75,36 +75,36 @@ impl OrderId {
 /// let line_id = OrderLineId::create("OrderLineId", "LINE-001").unwrap();
 /// assert_eq!(line_id.value(), "LINE-001");
 ///
-/// // 空文字列はエラー
+/// // Empty string causes an error
 /// assert!(OrderLineId::create("OrderLineId", "").is_err());
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct OrderLineId(String);
 
-/// `OrderLineId` の最大文字数
+/// Maximum character count for `OrderLineId`
 const ORDER_LINE_ID_MAX_LENGTH: usize = 50;
 
 impl OrderLineId {
-    /// 文字列から `OrderLineId` を生成する
+    /// Creates an `OrderLineId` from a string
     ///
     /// # Arguments
     ///
-    /// * `field_name` - エラーメッセージに使用するフィールド名
-    /// * `value` - 入力文字列
+    /// * `field_name` - Field name used in error messages
+    /// * `value` - Input string
     ///
     /// # Returns
     ///
-    /// * `Ok(OrderLineId)` - バリデーション成功時
-    /// * `Err(ValidationError)` - 空文字列または50文字超過時
+    /// * `Ok(OrderLineId)` - On successful validation
+    /// * `Err(ValidationError)` - When the string is empty or exceeds 50 characters
     ///
     /// # Errors
     ///
-    /// 空文字列または50文字を超える場合に `ValidationError` を返す。
+    /// Returns `ValidationError` when the string is empty or exceeds 50 characters.
     pub fn create(field_name: &str, value: &str) -> Result<Self, ValidationError> {
         constrained_type::create_string(field_name, OrderLineId, ORDER_LINE_ID_MAX_LENGTH, value)
     }
 
-    /// 内部の ID 文字列への参照を返す
+    /// Returns a reference to the inner  ID string
     #[must_use]
     pub fn value(&self) -> &str {
         &self.0
@@ -164,7 +164,7 @@ mod tests {
 
     #[rstest]
     fn test_order_id_hash() {
-        // HashMap のキーとして使用できることを確認
+        // Verify it can be used as a HashMap key
         let order_id = OrderId::create("OrderId", "ORD-001").unwrap();
         let mut map: HashMap<OrderId, String> = HashMap::new();
 
@@ -241,7 +241,7 @@ mod tests {
 
     #[rstest]
     fn test_order_line_id_hash() {
-        // HashMap のキーとして使用できることを確認
+        // Verify it can be used as a HashMap key
         let line_id = OrderLineId::create("OrderLineId", "LINE-001").unwrap();
         let mut map: HashMap<OrderLineId, i32> = HashMap::new();
 

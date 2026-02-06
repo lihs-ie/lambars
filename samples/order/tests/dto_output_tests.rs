@@ -1,8 +1,8 @@
-//! 出力 DTO のテスト
+//! Tests for Output DTOs
 //!
 //! ShippableOrderLineDto, ShippableOrderPlacedDto, BillableOrderPlacedDto,
 //! OrderAcknowledgmentSentDto, PricedOrderProductLineDto, PricedOrderLineDto,
-//! PlaceOrderEventDto のテスト
+//! Tests for PlaceOrderEventDto
 
 use order_taking_sample::compound_types::Address;
 use order_taking_sample::dto::{
@@ -22,7 +22,7 @@ use rust_decimal::Decimal;
 use std::str::FromStr;
 
 // =============================================================================
-// ShippableOrderLineDto のテスト
+// Tests for ShippableOrderLineDto
 // =============================================================================
 
 mod shippable_order_line_dto_tests {
@@ -78,7 +78,7 @@ mod shippable_order_line_dto_tests {
 }
 
 // =============================================================================
-// ShippableOrderPlacedDto のテスト
+// Tests for ShippableOrderPlacedDto
 // =============================================================================
 
 mod shippable_order_placed_dto_tests {
@@ -105,7 +105,7 @@ mod shippable_order_placed_dto_tests {
         assert_eq!(dto.shipping_address.city, "New York");
         assert_eq!(dto.shipment_lines.len(), 1);
         assert_eq!(dto.pdf_name, "label.pdf");
-        // Base64 エンコードされたデータ
+        // Base64-encoded data
         assert_eq!(dto.pdf_data, "AQIDBAU=");
     }
 
@@ -159,7 +159,7 @@ mod shippable_order_placed_dto_tests {
 }
 
 // =============================================================================
-// BillableOrderPlacedDto のテスト
+// Tests for BillableOrderPlacedDto
 // =============================================================================
 
 mod billable_order_placed_dto_tests {
@@ -229,7 +229,7 @@ mod billable_order_placed_dto_tests {
 }
 
 // =============================================================================
-// OrderAcknowledgmentSentDto のテスト
+// Tests for OrderAcknowledgmentSentDto
 // =============================================================================
 
 mod order_acknowledgment_sent_dto_tests {
@@ -286,7 +286,7 @@ mod order_acknowledgment_sent_dto_tests {
 }
 
 // =============================================================================
-// PricedOrderProductLineDto のテスト
+// Tests for PricedOrderProductLineDto
 // =============================================================================
 
 mod priced_order_product_line_dto_tests {
@@ -353,7 +353,7 @@ mod priced_order_product_line_dto_tests {
 }
 
 // =============================================================================
-// PricedOrderLineDto のテスト
+// Tests for PricedOrderLineDto
 // =============================================================================
 
 mod priced_order_line_dto_tests {
@@ -469,7 +469,7 @@ mod priced_order_line_dto_tests {
 }
 
 // =============================================================================
-// PlaceOrderEventDto のテスト
+// Tests for PlaceOrderEventDto
 // =============================================================================
 
 mod place_order_event_dto_tests {

@@ -1,13 +1,13 @@
-//! 個人名を表す複合型
+//! Personal name compound type
 
 use lambars_derive::Lenses;
 
 use crate::simple_types::{String50, ValidationError};
 
-/// 個人名を表す複合型
+/// Personal name compound type
 ///
-/// 姓（LastName）と名（FirstName）の2つのフィールドを持つ。
-/// どちらも必須フィールドで、`String50` 型として制約される。
+/// Has two fields: last name and first name.
+/// Both are required fields constrained to the `String50` type.
 ///
 /// # Examples
 ///
@@ -19,7 +19,7 @@ use crate::simple_types::{String50, ValidationError};
 /// assert_eq!(name.last_name().value(), "Doe");
 /// ```
 ///
-/// # Lens の使用
+/// # Using Lens
 ///
 /// ```
 /// use order_taking_sample::compound_types::PersonalName;
@@ -28,7 +28,7 @@ use crate::simple_types::{String50, ValidationError};
 ///
 /// let name = PersonalName::create("John", "Doe").unwrap();
 ///
-/// // first_name を更新（不変更新）
+/// // Update first_name (immutable update)
 /// let new_first_name = String50::create("FirstName", "Jonathan").unwrap();
 /// let updated = PersonalName::first_name_lens().set(name, new_first_name);
 /// assert_eq!(updated.first_name().value(), "Jonathan");
@@ -40,21 +40,21 @@ pub struct PersonalName {
 }
 
 impl PersonalName {
-    /// 姓と名の文字列から `PersonalName` を生成する
+    /// Creates a `PersonalName` from first and last name strings
     ///
     /// # Arguments
     ///
-    /// * `first_name` - 名（ファーストネーム）の文字列
-    /// * `last_name` - 姓（ラストネーム）の文字列
+    /// * `first_name` - First name string
+    /// * `last_name` - Last name string
     ///
     /// # Returns
     ///
-    /// * `Ok(PersonalName)` - バリデーション成功時
-    /// * `Err(ValidationError)` - いずれかのフィールドが無効な場合
+    /// * `Ok(PersonalName)` - On successful validation
+    /// * `Err(ValidationError)` - If any field is invalid
     ///
     /// # Errors
     ///
-    /// 名または姓が空文字列または50文字を超える場合に `ValidationError` を返す。
+    /// Returns `ValidationError` if the first name or last name is an empty string or exceeds 50 characters.
     ///
     /// # Examples
     ///
@@ -64,7 +64,7 @@ impl PersonalName {
     /// let name = PersonalName::create("John", "Doe").unwrap();
     /// assert_eq!(name.first_name().value(), "John");
     ///
-    /// // 空の名前はエラー
+    /// // Empty names cause an error
     /// assert!(PersonalName::create("", "Doe").is_err());
     /// ```
     pub fn create(first_name: &str, last_name: &str) -> Result<Self, ValidationError> {
@@ -77,18 +77,18 @@ impl PersonalName {
         })
     }
 
-    /// 既にバリデーション済みの構成要素から `PersonalName` を生成する
+    /// Creates a `PersonalName` from pre-validated components
     ///
-    /// バリデーションは不要（既に各型でバリデーション済み）。
+    /// No validation needed (each type is already validated).
     ///
     /// # Arguments
     ///
-    /// * `first_name` - 名
-    /// * `last_name` - 姓
+    /// * `first_name` - First name
+    /// * `last_name` - Last name
     ///
     /// # Returns
     ///
-    /// 新しい `PersonalName` インスタンス
+    /// A new `PersonalName` instance
     ///
     /// # Examples
     ///
@@ -110,21 +110,21 @@ impl PersonalName {
         }
     }
 
-    /// 名への参照を返す
+    /// Returns a reference to the first name
     ///
     /// # Returns
     ///
-    /// `String50` 型の名への参照
+    /// A reference to the `String50` first name
     #[must_use]
     pub const fn first_name(&self) -> &String50 {
         &self.first_name
     }
 
-    /// 姓への参照を返す
+    /// Returns a reference to the last name
     ///
     /// # Returns
     ///
-    /// `String50` 型の姓への参照
+    /// A reference to the `String50` last name
     #[must_use]
     pub const fn last_name(&self) -> &String50 {
         &self.last_name
@@ -138,7 +138,7 @@ mod tests {
     use rstest::rstest;
 
     // =========================================================================
-    // create のテスト
+    // Tests for create
     // =========================================================================
 
     #[rstest]
@@ -205,7 +205,7 @@ mod tests {
     }
 
     // =========================================================================
-    // Getter のテスト
+    // Tests for getters
     // =========================================================================
 
     #[rstest]
@@ -217,7 +217,7 @@ mod tests {
     }
 
     // =========================================================================
-    // Clone/Eq のテスト
+    // Tests for Clone/Eq
     // =========================================================================
 
     #[rstest]
@@ -239,7 +239,7 @@ mod tests {
     }
 
     // =========================================================================
-    // Lens のテスト
+    // Tests for Lens
     // =========================================================================
 
     #[rstest]
@@ -289,7 +289,7 @@ mod tests {
 
         let updated = lens.modify(name, |old| {
             let new_value = format!("{}-modified", old.value());
-            // 新しい String50 を作成（50文字以内に収まる）
+            // Create a new String50 (fits within 50 characters)
             String50::create("FirstName", &new_value).unwrap()
         });
 

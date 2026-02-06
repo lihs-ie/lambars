@@ -1,14 +1,14 @@
-//! HTTP リクエスト/レスポンス型
+//! HTTP request/response types
 //!
-//! API レイヤーで使用する HTTP の抽象型を定義する。
+//! Defines abstract HTTP types used in the API layer.
 
 // =============================================================================
 // HttpRequest (REQ-087)
 // =============================================================================
 
-/// HTTP リクエストの抽象型
+/// Abstract HTTP request type
 ///
-/// リクエストボディを保持するシンプルな構造体。
+/// A simple struct that holds the request body.
 ///
 /// # Examples
 ///
@@ -20,20 +20,20 @@
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HttpRequest {
-    /// リクエストボディ
+    /// Request body
     body: String,
 }
 
 impl HttpRequest {
-    /// 新しい `HttpRequest` を生成する
+    /// Creates a new `HttpRequest`
     ///
     /// # Arguments
     ///
-    /// * `body` - リクエストボディ
+    /// * `body` - Request body
     ///
     /// # Returns
     ///
-    /// `HttpRequest` インスタンス
+    /// An `HttpRequest` instance
     ///
     /// # Examples
     ///
@@ -47,11 +47,11 @@ impl HttpRequest {
         Self { body }
     }
 
-    /// リクエストボディへの参照を返す
+    /// Returns a reference to Request body
     ///
     /// # Returns
     ///
-    /// リクエストボディ文字列への参照
+    /// A reference to the request body string
     ///
     /// # Examples
     ///
@@ -71,9 +71,9 @@ impl HttpRequest {
 // HttpResponse (REQ-088)
 // =============================================================================
 
-/// HTTP レスポンスの抽象型
+/// Abstract HTTP response type
 ///
-/// ステータスコードとレスポンスボディを保持する構造体。
+/// A struct that holds a status code and response body.
 ///
 /// # Examples
 ///
@@ -86,23 +86,23 @@ impl HttpRequest {
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HttpResponse {
-    /// HTTP ステータスコード
+    /// HTTP status code
     status_code: u16,
-    /// レスポンスボディ
+    /// Response body
     body: String,
 }
 
 impl HttpResponse {
-    /// 新しい `HttpResponse` を生成する
+    /// Creates a new `HttpResponse`
     ///
     /// # Arguments
     ///
-    /// * `status_code` - HTTP ステータスコード
-    /// * `body` - レスポンスボディ
+    /// * `status_code` - HTTP status code
+    /// * `body` - Response body
     ///
     /// # Returns
     ///
-    /// `HttpResponse` インスタンス
+    /// An `HttpResponse` instance
     ///
     /// # Examples
     ///
@@ -117,15 +117,15 @@ impl HttpResponse {
         Self { status_code, body }
     }
 
-    /// 200 OK レスポンスを生成する
+    /// Creates a 200 OK response
     ///
     /// # Arguments
     ///
-    /// * `body` - レスポンスボディ
+    /// * `body` - Response body
     ///
     /// # Returns
     ///
-    /// ステータスコード 200 の `HttpResponse`
+    /// An `HttpResponse` with status code 200
     ///
     /// # Examples
     ///
@@ -140,15 +140,15 @@ impl HttpResponse {
         Self::new(200, body)
     }
 
-    /// 400 Bad Request レスポンスを生成する
+    /// Creates a 400 Bad Request response
     ///
     /// # Arguments
     ///
-    /// * `body` - レスポンスボディ（エラーメッセージ）
+    /// * `body` - Response body (error message)
     ///
     /// # Returns
     ///
-    /// ステータスコード 400 の `HttpResponse`
+    /// An `HttpResponse` with status code 400
     ///
     /// # Examples
     ///
@@ -163,15 +163,15 @@ impl HttpResponse {
         Self::new(400, body)
     }
 
-    /// 500 Internal Server Error レスポンスを生成する
+    /// Creates a 500 Internal Server Error response
     ///
     /// # Arguments
     ///
-    /// * `body` - レスポンスボディ（エラーメッセージ）
+    /// * `body` - Response body (error message)
     ///
     /// # Returns
     ///
-    /// ステータスコード 500 の `HttpResponse`
+    /// An `HttpResponse` with status code 500
     ///
     /// # Examples
     ///
@@ -186,11 +186,11 @@ impl HttpResponse {
         Self::new(500, body)
     }
 
-    /// HTTP ステータスコードを返す
+    /// Returns the HTTP status code
     ///
     /// # Returns
     ///
-    /// HTTP ステータスコード
+    /// HTTP status code
     ///
     /// # Examples
     ///
@@ -205,11 +205,11 @@ impl HttpResponse {
         self.status_code
     }
 
-    /// レスポンスボディへの参照を返す
+    /// Returns a reference to Response body
     ///
     /// # Returns
     ///
-    /// レスポンスボディ文字列への参照
+    /// A reference to the response body string
     ///
     /// # Examples
     ///
@@ -224,11 +224,11 @@ impl HttpResponse {
         &self.body
     }
 
-    /// 成功レスポンス（2xx）かどうかを返す
+    /// Returns whether the response is a success (2xx)
     ///
     /// # Returns
     ///
-    /// ステータスコードが 200-299 の場合 `true`
+    /// `true` if the status code is in the range 200-299
     ///
     /// # Examples
     ///

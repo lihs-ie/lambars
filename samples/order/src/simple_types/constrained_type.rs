@@ -1,32 +1,32 @@
-//! 制約付き型を生成するためのヘルパー関数群
+//! Helper functions for generating constrained types
 //!
-//! F# の `ConstrainedType` モジュールに相当する。
-//! 各関数はジェネリックで、任意の newtype に対して使用可能。
+//! Corresponds to the F# `ConstrainedType` module.
+//! Each function is generic and can be used with any newtype.
 
 use regex::Regex;
 use rust_decimal::Decimal;
 
 use super::error::ValidationError;
 
-/// 最大長制約付きの文字列型を生成する
+/// Creates a string type with a maximum length constraint
 ///
 /// # Arguments
 ///
-/// * `field_name` - エラーメッセージに使用するフィールド名
-/// * `constructor` - 文字列を受け取り型 T を生成するコンストラクタ
-/// * `max_length` - 最大文字数
-/// * `value` - 入力文字列
+/// * `field_name` - Field name used in error messages
+/// * `constructor` - Constructor that takes a string and produces type T
+/// * `max_length` - Maximum character count
+/// * `value` - Input string
 ///
 /// # Returns
 ///
-/// * `Ok(T)` - バリデーション成功時
-/// * `Err(ValidationError)` - 空文字列または最大長超過時
+/// * `Ok(T)` - On successful validation
+/// * `Err(ValidationError)` - For an empty string or exceeding maximum length
 ///
 /// # Errors
 ///
-/// 以下の場合に [`ValidationError`] を返す:
-/// - 入力が空文字列の場合
-/// - 入力が最大長を超える場合
+/// Returns [`ValidationError`] in the following cases:
+/// - When the input is an empty string
+/// - When the input exceeds the maximum length
 ///
 /// # Examples
 ///
@@ -69,26 +69,26 @@ where
     }
 }
 
-/// 空文字列の場合は None を返す最大長制約付きの文字列型を生成する
+/// Creates a string type with maximum length constraint that returns None for empty strings
 ///
-/// オプショナルなフィールドに使用する。
+/// Used for optional fields.
 ///
 /// # Arguments
 ///
-/// * `field_name` - エラーメッセージに使用するフィールド名
-/// * `constructor` - 文字列を受け取り型 T を生成するコンストラクタ
-/// * `max_length` - 最大文字数
-/// * `value` - 入力文字列
+/// * `field_name` - Field name used in error messages
+/// * `constructor` - Constructor that takes a string and produces type T
+/// * `max_length` - Maximum character count
+/// * `value` - Input string
 ///
 /// # Returns
 ///
-/// * `Ok(None)` - 空文字列の場合
-/// * `Ok(Some(T))` - バリデーション成功時
-/// * `Err(ValidationError)` - 最大長超過時
+/// * `Ok(None)` - For an empty string
+/// * `Ok(Some(T))` - On successful validation
+/// * `Err(ValidationError)` - When exceeding maximum length
 ///
 /// # Errors
 ///
-/// 入力が最大長を超える場合に [`ValidationError`] を返す。
+/// Returns [`ValidationError`] when the input exceeds the maximum length.
 pub fn create_string_option<T, F>(
     field_name: &str,
     constructor: F,
@@ -110,26 +110,26 @@ where
     }
 }
 
-/// 範囲制約付きの整数型を生成する
+/// Creates an integer type with range constraints
 ///
 /// # Arguments
 ///
-/// * `field_name` - エラーメッセージに使用するフィールド名
-/// * `constructor` - 整数を受け取り型 T を生成するコンストラクタ
-/// * `min_value` - 最小値
-/// * `max_value` - 最大値
-/// * `value` - 入力整数
+/// * `field_name` - Field name used in error messages
+/// * `constructor` - Constructor that takes an integer and produces type T
+/// * `min_value` - Minimum value
+/// * `max_value` - Maximum value
+/// * `value` - Input integer
 ///
 /// # Returns
 ///
-/// * `Ok(T)` - バリデーション成功時
-/// * `Err(ValidationError)` - 範囲外の場合
+/// * `Ok(T)` - On successful validation
+/// * `Err(ValidationError)` - If out of range
 ///
 /// # Errors
 ///
-/// 以下の場合に [`ValidationError`] を返す:
-/// - 入力が最小値未満の場合
-/// - 入力が最大値を超える場合
+/// Returns [`ValidationError`] in the following cases:
+/// - When the input is less than the minimum value
+/// - When the input exceeds the maximum value
 pub fn create_integer<T, F>(
     field_name: &str,
     constructor: F,
@@ -155,26 +155,26 @@ where
     }
 }
 
-/// 範囲制約付きの小数型を生成する
+/// Creates a decimal type with range constraints
 ///
 /// # Arguments
 ///
-/// * `field_name` - エラーメッセージに使用するフィールド名
-/// * `constructor` - 小数を受け取り型 T を生成するコンストラクタ
-/// * `min_value` - 最小値
-/// * `max_value` - 最大値
-/// * `value` - 入力小数
+/// * `field_name` - Field name used in error messages
+/// * `constructor` - Constructor that takes a decimal and produces type T
+/// * `min_value` - Minimum value
+/// * `max_value` - Maximum value
+/// * `value` - Input decimal
 ///
 /// # Returns
 ///
-/// * `Ok(T)` - バリデーション成功時
-/// * `Err(ValidationError)` - 範囲外の場合
+/// * `Ok(T)` - On successful validation
+/// * `Err(ValidationError)` - If out of range
 ///
 /// # Errors
 ///
-/// 以下の場合に [`ValidationError`] を返す:
-/// - 入力が最小値未満の場合
-/// - 入力が最大値を超える場合
+/// Returns [`ValidationError`] in the following cases:
+/// - When the input is less than the minimum value
+/// - When the input exceeds the maximum value
 pub fn create_decimal<T, F>(
     field_name: &str,
     constructor: F,
@@ -200,30 +200,30 @@ where
     }
 }
 
-/// 正規表現パターンに一致する文字列型を生成する
+/// Creates a string type that matches a regular expression pattern
 ///
 /// # Arguments
 ///
-/// * `field_name` - エラーメッセージに使用するフィールド名
-/// * `constructor` - 文字列を受け取り型 T を生成するコンストラクタ
-/// * `pattern` - コンパイル済みの正規表現パターン
-/// * `value` - 入力文字列
+/// * `field_name` - Field name used in error messages
+/// * `constructor` - Constructor that takes a string and produces type T
+/// * `pattern` - Compiled regular expression pattern
+/// * `value` - Input string
 ///
 /// # Returns
 ///
-/// * `Ok(T)` - バリデーション成功時
-/// * `Err(ValidationError)` - 空文字列またはパターン不一致時
+/// * `Ok(T)` - On successful validation
+/// * `Err(ValidationError)` - For an empty string or pattern mismatch
 ///
 /// # Errors
 ///
-/// 以下の場合に [`ValidationError`] を返す:
-/// - 入力が空文字列の場合
-/// - 入力がパターンに一致しない場合
+/// Returns [`ValidationError`] in the following cases:
+/// - When the input is an empty string
+/// - When the input does not match the pattern
 ///
 /// # Note
 ///
-/// 正規表現パターンはアンカー（^$）がない場合、部分一致となる。
-/// 完全一致が必要な場合は、呼び出し側でアンカーを含めること。
+/// Without anchors (^$), the regex pattern performs partial matching.
+/// If exact matching is needed, the caller should include anchors.
 pub fn create_like<T, F>(
     field_name: &str,
     constructor: F,
@@ -252,7 +252,7 @@ mod tests {
     use rstest::rstest;
     use std::str::FromStr;
 
-    // テスト用の単純なラッパー型
+    // Simple wrapper type for testing
     #[derive(Debug, PartialEq)]
     struct TestString(String);
 
@@ -488,7 +488,7 @@ mod tests {
 
     #[rstest]
     fn test_create_like_partial_match_without_anchors() {
-        // アンカーがないパターンは部分一致
+        // Patterns without anchors perform partial matching
         let pattern = Regex::new(r"\d{4}").unwrap();
         let result = create_like("Code", TestString, &pattern, "prefix1234suffix");
 
@@ -497,7 +497,7 @@ mod tests {
 
     #[rstest]
     fn test_create_like_full_match_with_anchors() {
-        // アンカー付きパターンは完全一致が必要
+        // Patterns with anchors require exact matching
         let pattern = Regex::new(r"^\d{4}$").unwrap();
         let result = create_like("Code", TestString, &pattern, "prefix1234suffix");
 

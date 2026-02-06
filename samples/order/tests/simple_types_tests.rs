@@ -1,7 +1,7 @@
-//! simple_types モジュールの補完テスト
+//! Supplementary tests for the simple_types module
 //!
-//! Phase 1 で実装された simple_types の境界値テスト、エラーメッセージ検証、
-//! Hash/Eq 法則の検証を行う。src 内の基本テストを補完する形で設計。
+//! Boundary value tests for simple_types implemented in Phase 1, error message validation,
+//! Verifies Hash/Eq laws. Designed to complement the basic tests in src.
 
 use order_taking_sample::simple_types::{
     BillingAmount, EmailAddress, KilogramQuantity, OrderId, OrderLineId, Price, ProductCode,
@@ -14,10 +14,10 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::str::FromStr;
 
 // =============================================================================
-// ヘルパー関数
+// Helper functions
 // =============================================================================
 
-/// 値のハッシュを計算するヘルパー関数
+/// Helper function to compute a value's hash
 fn calculate_hash<T: Hash>(value: &T) -> u64 {
     let mut hasher = DefaultHasher::new();
     value.hash(&mut hasher);
@@ -25,18 +25,18 @@ fn calculate_hash<T: Hash>(value: &T) -> u64 {
 }
 
 // =============================================================================
-// String50 境界値テスト
+// String50 Boundary value tests
 // =============================================================================
 
 mod string50_boundary_tests {
     use super::*;
 
     #[rstest]
-    #[case("a", true)] // 最小: 1文字
-    #[case("ab", true)] // 2文字
-    #[case(&"a".repeat(49), true)] // 49文字
-    #[case(&"a".repeat(50), true)] // 最大: 50文字
-    #[case(&"a".repeat(51), false)] // 超過: 51文字
+    #[case("a", true)] // minimum: 1character
+    #[case("ab", true)] // 2character
+    #[case(&"a".repeat(49), true)] // 49character
+    #[case(&"a".repeat(50), true)] // maximum: 50character
+    #[case(&"a".repeat(51), false)] // exceeding: 51character
     fn test_string50_boundary_values(#[case] input: &str, #[case] expected_ok: bool) {
         let result = String50::create("TestField", input);
         assert_eq!(result.is_ok(), expected_ok, "Input length: {}", input.len());
@@ -44,8 +44,8 @@ mod string50_boundary_tests {
 
     #[rstest]
     fn test_string50_with_unicode() {
-        // Unicode 文字（日本語）も文字数でカウント
-        let japanese = "あいうえお"; // 5文字
+        // Unicode characters (Japanese) are also counted by character count
+        let japanese = "\u{3042}\u{3044}\u{3046}\u{3048}\u{304A}"; // 5 characters
         let result = String50::create("TestField", japanese);
         assert!(result.is_ok());
         assert_eq!(result.unwrap().value(), japanese);
@@ -53,15 +53,15 @@ mod string50_boundary_tests {
 
     #[rstest]
     fn test_string50_with_emoji() {
-        // 絵文字も文字数でカウント
-        let emoji = "hello world"; // ASCII のみ
+        // Emoji characters are also counted by character count
+        let emoji = "hello world"; // ASCII only
         let result = String50::create("TestField", emoji);
         assert!(result.is_ok());
     }
 
     #[rstest]
     fn test_string50_with_whitespace() {
-        // 空白のみの文字列は許可される（空でない）
+        // Whitespace-only strings are allowed (not empty)
         let whitespace = "   ";
         let result = String50::create("TestField", whitespace);
         assert!(result.is_ok());
@@ -69,7 +69,7 @@ mod string50_boundary_tests {
 }
 
 // =============================================================================
-// EmailAddress エッジケーステスト
+// EmailAddress Edge case tests
 // =============================================================================
 
 mod email_address_edge_cases {
@@ -77,36 +77,36 @@ mod email_address_edge_cases {
 
     #[rstest]
     fn test_email_address_multiple_at_symbols() {
-        // 現在の実装では .+@.+ パターンなので、複数の @ は許可される
+        // In the current implementation, the .+@.+ pattern allows multiple @ symbols
         let result = EmailAddress::create("Email", "user@middle@domain.com");
-        // パターン .+@.+ は最初の @ 以降に何かあればマッチする
+        // Pattern .+@.+ matches as long as there is something after the first @
         assert!(result.is_ok());
     }
 
     #[rstest]
     fn test_email_address_with_unicode_local_part() {
-        // Unicode を含むローカルパート
+        // Local part including Unicode
         let result = EmailAddress::create("Email", "user@domain.com");
         assert!(result.is_ok());
     }
 
     #[rstest]
     fn test_email_address_with_plus_sign() {
-        // + サブアドレッシング
+        // + sub-addressing
         let result = EmailAddress::create("Email", "user+tag@example.com");
         assert!(result.is_ok());
     }
 
     #[rstest]
     fn test_email_address_with_dots() {
-        // ドット付きローカルパート
+        // Dotted local part
         let result = EmailAddress::create("Email", "first.last@example.com");
         assert!(result.is_ok());
     }
 
     #[rstest]
     fn test_email_address_very_long() {
-        // 非常に長いメールアドレス
+        // Very long email address
         let long_local = "a".repeat(100);
         let long_domain = "b".repeat(100);
         let email = format!("{long_local}@{long_domain}.com");
@@ -116,22 +116,22 @@ mod email_address_edge_cases {
 }
 
 // =============================================================================
-// ZipCode 境界値テスト
+// ZipCode Boundary value tests
 // =============================================================================
 
 mod zip_code_boundary_tests {
     use super::*;
 
     #[rstest]
-    #[case("00000", true)] // 最小値
-    #[case("00001", true)] // 最小値+1
-    #[case("12345", true)] // 中間値
-    #[case("99998", true)] // 最大値-1
-    #[case("99999", true)] // 最大値
-    #[case("0000", false)] // 4桁
-    #[case("000000", false)] // 6桁
-    #[case("1234a", false)] // 文字混入
-    #[case("ABCDE", false)] // 全て文字
+    #[case("00000", true)] // Minimum value
+    #[case("00001", true)] // Minimum value+1
+    #[case("12345", true)] // Middle value
+    #[case("99998", true)] // Maximum value-1
+    #[case("99999", true)] // Maximum value
+    #[case("0000", false)] // 4 digits
+    #[case("000000", false)] // 6digit
+    #[case("1234a", false)] // Contains letters
+    #[case("ABCDE", false)] // allcharacter
     fn test_zip_code_boundary_values(#[case] input: &str, #[case] expected_ok: bool) {
         let result = ZipCode::create("ZipCode", input);
         assert_eq!(result.is_ok(), expected_ok, "Input: {input}");
@@ -139,7 +139,7 @@ mod zip_code_boundary_tests {
 
     #[rstest]
     fn test_zip_code_with_leading_zeros() {
-        // 先頭ゼロは保持される
+        // Leading zeros are preserved
         let result = ZipCode::create("ZipCode", "00123");
         assert!(result.is_ok());
         assert_eq!(result.unwrap().value(), "00123");
@@ -147,13 +147,13 @@ mod zip_code_boundary_tests {
 }
 
 // =============================================================================
-// UsStateCode 全州テスト
+// Tests for all UsStateCode states
 // =============================================================================
 
 mod us_state_code_tests {
     use super::*;
 
-    /// 全50州 + DC のコードリスト
+    /// Code list for all 50 states + DC
     const ALL_STATE_CODES: &[&str] = &[
         "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "DC", "FL", "GA", "HI", "ID", "IL", "IN",
         "IA", "KS", "KY", "LA", "MA", "MD", "ME", "MI", "MN", "MO", "MS", "MT", "NC", "ND", "NE",
@@ -171,7 +171,7 @@ mod us_state_code_tests {
 
     #[rstest]
     fn test_state_code_count() {
-        // 50州 + DC = 51 コード
+        // 50 states + DC = 51 codes
         assert_eq!(ALL_STATE_CODES.len(), 51);
     }
 
@@ -187,21 +187,21 @@ mod us_state_code_tests {
 }
 
 // =============================================================================
-// Price 境界値テスト
+// Price Boundary value tests
 // =============================================================================
 
 mod price_boundary_tests {
     use super::*;
 
     #[rstest]
-    #[case("0.00", true)] // 最小値
-    #[case("0.01", true)] // 最小値+0.01
-    #[case("500.00", true)] // 中間値
-    #[case("999.99", true)] // 最大値-0.01
-    #[case("1000.00", true)] // 最大値
-    #[case("-0.01", false)] // 負の値
-    #[case("1000.01", false)] // 超過
-    #[case("1001.00", false)] // 超過（整数）
+    #[case("0.00", true)] // Minimum value
+    #[case("0.01", true)] // Minimum value+0.01
+    #[case("500.00", true)] // Middle value
+    #[case("999.99", true)] // Maximum value-0.01
+    #[case("1000.00", true)] // Maximum value
+    #[case("-0.01", false)] // Negative value
+    #[case("1000.01", false)] // exceeding
+    #[case("1001.00", false)] // Exceeding (integer)
     fn test_price_boundary_values(#[case] input: &str, #[case] expected_ok: bool) {
         let decimal = Decimal::from_str(input).unwrap();
         let result = Price::create(decimal);
@@ -210,7 +210,7 @@ mod price_boundary_tests {
 
     #[rstest]
     fn test_price_multiply_exact_max() {
-        // 100.00 * 10 = 1000.00（ちょうど最大値）
+        // 100.00 * 10 = 1000.00 (exactly at maximum value)
         let price = Price::create(Decimal::from_str("100.00").unwrap()).unwrap();
         let result = price.multiply(Decimal::from(10));
         assert!(result.is_ok());
@@ -219,7 +219,7 @@ mod price_boundary_tests {
 
     #[rstest]
     fn test_price_multiply_just_over_max() {
-        // 100.01 * 10 = 1000.10（超過）
+        // 100.01 * 10 = 1000.10 (exceeding)
         let price = Price::create(Decimal::from_str("100.01").unwrap()).unwrap();
         let result = price.multiply(Decimal::from(10));
         assert!(result.is_err());
@@ -227,20 +227,20 @@ mod price_boundary_tests {
 }
 
 // =============================================================================
-// BillingAmount 境界値テスト
+// BillingAmount Boundary value tests
 // =============================================================================
 
 mod billing_amount_boundary_tests {
     use super::*;
 
     #[rstest]
-    #[case("0.00", true)] // 最小値
-    #[case("0.01", true)] // 最小値+0.01
-    #[case("5000.00", true)] // 中間値
-    #[case("9999.99", true)] // 最大値-0.01
-    #[case("10000.00", true)] // 最大値
-    #[case("-0.01", false)] // 負の値
-    #[case("10000.01", false)] // 超過
+    #[case("0.00", true)] // Minimum value
+    #[case("0.01", true)] // Minimum value+0.01
+    #[case("5000.00", true)] // Middle value
+    #[case("9999.99", true)] // Maximum value-0.01
+    #[case("10000.00", true)] // Maximum value
+    #[case("-0.01", false)] // Negative value
+    #[case("10000.01", false)] // exceeding
     fn test_billing_amount_boundary_values(#[case] input: &str, #[case] expected_ok: bool) {
         let decimal = Decimal::from_str(input).unwrap();
         let result = BillingAmount::create(decimal);
@@ -249,7 +249,7 @@ mod billing_amount_boundary_tests {
 
     #[rstest]
     fn test_billing_amount_sum_to_exact_max() {
-        // 1000.00 * 10 = 10000.00（ちょうど最大値）
+        // 1000.00 * 10 = 10000.00 (exactly at maximum value)
         let prices: Vec<Price> = (0..10)
             .map(|_| Price::create(Decimal::from(1000)).unwrap())
             .collect();
@@ -260,7 +260,7 @@ mod billing_amount_boundary_tests {
 
     #[rstest]
     fn test_billing_amount_sum_just_over_max() {
-        // 1000.00 * 10 + 0.01 = 10000.01（超過）
+        // 1000.00 * 10 + 0.01 = 10000.01 (exceeding)
         let mut prices: Vec<Price> = (0..10)
             .map(|_| Price::create(Decimal::from(1000)).unwrap())
             .collect();
@@ -271,20 +271,20 @@ mod billing_amount_boundary_tests {
 }
 
 // =============================================================================
-// UnitQuantity 境界値テスト
+// UnitQuantity Boundary value tests
 // =============================================================================
 
 mod unit_quantity_boundary_tests {
     use super::*;
 
     #[rstest]
-    #[case(0, false)] // 無効（最小値未満）
-    #[case(1, true)] // 最小値
-    #[case(2, true)] // 最小値+1
-    #[case(500, true)] // 中間値
-    #[case(999, true)] // 最大値-1
-    #[case(1000, true)] // 最大値
-    #[case(1001, false)] // 超過
+    #[case(0, false)] // Invalid (less than minimum value)
+    #[case(1, true)] // Minimum value
+    #[case(2, true)] // Minimum value+1
+    #[case(500, true)] // Middle value
+    #[case(999, true)] // Maximum value-1
+    #[case(1000, true)] // Maximum value
+    #[case(1001, false)] // exceeding
     fn test_unit_quantity_boundary_values(#[case] input: u32, #[case] expected_ok: bool) {
         let result = UnitQuantity::create("Quantity", input);
         assert_eq!(result.is_ok(), expected_ok, "Input: {input}");
@@ -292,20 +292,20 @@ mod unit_quantity_boundary_tests {
 }
 
 // =============================================================================
-// KilogramQuantity 境界値テスト
+// KilogramQuantity Boundary value tests
 // =============================================================================
 
 mod kilogram_quantity_boundary_tests {
     use super::*;
 
     #[rstest]
-    #[case("0.04", false)] // 無効（最小値未満）
-    #[case("0.05", true)] // 最小値
-    #[case("0.06", true)] // 最小値+0.01
-    #[case("50.00", true)] // 中間値
-    #[case("99.99", true)] // 最大値-0.01
-    #[case("100.00", true)] // 最大値
-    #[case("100.01", false)] // 超過
+    #[case("0.04", false)] // Invalid (less than minimum value)
+    #[case("0.05", true)] // Minimum value
+    #[case("0.06", true)] // Minimum value+0.01
+    #[case("50.00", true)] // Middle value
+    #[case("99.99", true)] // Maximum value-0.01
+    #[case("100.00", true)] // Maximum value
+    #[case("100.01", false)] // exceeding
     fn test_kilogram_quantity_boundary_values(#[case] input: &str, #[case] expected_ok: bool) {
         let decimal = Decimal::from_str(input).unwrap();
         let result = KilogramQuantity::create("Weight", decimal);
@@ -314,7 +314,7 @@ mod kilogram_quantity_boundary_tests {
 }
 
 // =============================================================================
-// エラーメッセージ検証
+// error messageverification
 // =============================================================================
 
 mod error_message_tests {
@@ -388,7 +388,7 @@ mod error_message_tests {
 }
 
 // =============================================================================
-// Hash/Eq 一貫性テスト
+// Hash/Eq consistency tests
 // =============================================================================
 
 mod hash_eq_consistency_tests {
@@ -404,7 +404,7 @@ mod hash_eq_consistency_tests {
         assert_eq!(id1, id2);
         assert_eq!(calculate_hash(&id1), calculate_hash(&id2));
 
-        // a != b でもハッシュは同じ可能性がある（衝突）ので、逆は必ずしも成立しない
+        // Even when a != b, hashes can be the same (collision), so the converse doesn't necessarily hold
         assert_ne!(id1, id3);
     }
 
@@ -416,7 +416,7 @@ mod hash_eq_consistency_tests {
         let mut map: HashMap<OrderId, String> = HashMap::new();
         map.insert(id1.clone(), "First Order".to_string());
 
-        // 同じ値を持つ別のインスタンスでもキーとして機能する
+        // A different instance with the same value also works as a key
         assert_eq!(map.get(&id2), Some(&"First Order".to_string()));
     }
 

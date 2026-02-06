@@ -1,15 +1,15 @@
-//! 検証済み型とバリデーション関連型
+//! Validated types and validation-related types
 //!
-//! バリデーション済みのデータを表す型を定義する。
-//! Phase 1 と Phase 2 の型を使用し、型安全な検証済みデータを保持する。
+//! Defines types representing validated data.
+//! Uses types from Phase 1 and Phase 2 to hold type-safe validated data.
 //!
-//! # 型一覧
+//! # Type List
 //!
-//! - [`AddressValidationError`] - 住所検証エラー
-//! - [`CheckedAddress`] - 外部サービスで検証済みの住所
-//! - [`PricingMethod`] - 価格計算方法
-//! - [`ValidatedOrderLine`] - 検証済み注文明細
-//! - [`ValidatedOrder`] - 検証済み注文
+//! - [`AddressValidationError`] - Address validation error
+//! - [`CheckedAddress`] - Address verified by an external service
+//! - [`PricingMethod`] - Pricing method
+//! - [`ValidatedOrderLine`] - Validated order line
+//! - [`ValidatedOrder`] - Validated order
 
 use crate::compound_types::{Address, CustomerInfo};
 use crate::simple_types::{OrderId, OrderLineId, OrderQuantity, ProductCode, PromotionCode};
@@ -21,10 +21,10 @@ use thiserror::Error;
 // AddressValidationError
 // =============================================================================
 
-/// 住所検証エラー
+/// Address validation error
 ///
-/// 住所検証サービスからのエラーを表す列挙型。
-/// 形式エラーまたは住所が見つからないエラーのいずれか。
+/// An enum representing errors from the address verification service.
+/// Either a format error or an address-not-found error.
 ///
 /// # Examples
 ///
@@ -39,17 +39,17 @@ use thiserror::Error;
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
 pub enum AddressValidationError {
-    /// 住所の形式が無効
+    /// Invalid address format
     #[error("Invalid address format")]
     InvalidFormat,
 
-    /// 住所が見つからない
+    /// Address not found
     #[error("Address not found")]
     AddressNotFound,
 }
 
 impl AddressValidationError {
-    /// `InvalidFormat` バリアントかどうかを返す
+    /// Returns whether this is the `InvalidFormat` variant
     ///
     /// # Examples
     ///
@@ -64,7 +64,7 @@ impl AddressValidationError {
         matches!(self, Self::InvalidFormat)
     }
 
-    /// `AddressNotFound` バリアントかどうかを返す
+    /// Returns whether this is the `AddressNotFound` variant
     ///
     /// # Examples
     ///
@@ -84,10 +84,10 @@ impl AddressValidationError {
 // CheckedAddress
 // =============================================================================
 
-/// 外部サービスで検証済みの住所
+/// Address verified by external service
 ///
-/// [`UnvalidatedAddress`] をラップし、住所が検証済みであることを型レベルで保証する。
-/// この型は外部サービスが住所を検証した後にのみ生成される。
+/// Wraps [`UnvalidatedAddress`] and guarantees at the type level that the address is validated.
+/// This type is only produced after an external service has verified the address.
 ///
 /// # Examples
 ///
@@ -105,7 +105,7 @@ impl AddressValidationError {
 ///     "USA".to_string(),
 /// );
 ///
-/// // 外部サービスで検証後にのみ CheckedAddress を生成
+/// // CheckedAddress is only created after external service verification
 /// let checked = CheckedAddress::new(unvalidated.clone());
 /// assert_eq!(checked.value().city(), "New York");
 /// ```
@@ -113,13 +113,13 @@ impl AddressValidationError {
 pub struct CheckedAddress(UnvalidatedAddress);
 
 impl CheckedAddress {
-    /// 検証済み住所として `CheckedAddress` を生成する
+    /// Creates a `CheckedAddress` as a verified address
     ///
-    /// この関数は外部サービスが住所を検証した後にのみ呼び出すべき。
+    /// This function should only be called after the address has been verified by an external service.
     ///
     /// # Arguments
     ///
-    /// * `address` - 検証済みの住所データ
+    /// * `address` - Verified address data
     ///
     /// # Examples
     ///
@@ -143,7 +143,7 @@ impl CheckedAddress {
         Self(address)
     }
 
-    /// 内部の `UnvalidatedAddress` への参照を返す
+    /// Returns a reference to the inner  `UnvalidatedAddress`
     ///
     /// # Examples
     ///
@@ -168,7 +168,7 @@ impl CheckedAddress {
         &self.0
     }
 
-    /// 内部の `UnvalidatedAddress` を消費して返す
+    /// Consumes and returns the internal `UnvalidatedAddress`
     ///
     /// # Examples
     ///
@@ -199,9 +199,9 @@ impl CheckedAddress {
 // PricingMethod
 // =============================================================================
 
-/// 価格計算方法
+/// Pricing method
 ///
-/// 標準価格またはプロモーション価格のいずれかを表す。
+/// Represents either standard pricing or promotional pricing.
 ///
 /// # Examples
 ///
@@ -209,12 +209,12 @@ impl CheckedAddress {
 /// use order_taking_sample::workflow::PricingMethod;
 /// use order_taking_sample::simple_types::PromotionCode;
 ///
-/// // 標準価格
+/// // Standard pricing
 /// let standard = PricingMethod::Standard;
 /// assert!(standard.is_standard());
 /// assert!(standard.promotion_code().is_none());
 ///
-/// // プロモーション価格
+/// // Promotional pricing
 /// let promo_code = PromotionCode::new("SUMMER2024".to_string());
 /// let promotion = PricingMethod::Promotion(promo_code.clone());
 /// assert!(promotion.is_promotion());
@@ -222,15 +222,15 @@ impl CheckedAddress {
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PricingMethod {
-    /// 標準価格を適用
+    /// Apply standard pricing
     Standard,
 
-    /// プロモーション価格を適用
+    /// Apply promotional pricing
     Promotion(PromotionCode),
 }
 
 impl PricingMethod {
-    /// `Standard` バリアントかどうかを返す
+    /// Returns whether this is the `Standard` variant
     ///
     /// # Examples
     ///
@@ -245,7 +245,7 @@ impl PricingMethod {
         matches!(self, Self::Standard)
     }
 
-    /// `Promotion` バリアントかどうかを返す
+    /// Returns whether this is the `Promotion` variant
     ///
     /// # Examples
     ///
@@ -262,9 +262,9 @@ impl PricingMethod {
         matches!(self, Self::Promotion(_))
     }
 
-    /// プロモーションコードを返す
+    /// Returns the promotion code
     ///
-    /// `Standard` の場合は `None` を返す。
+    /// Returns `None` for `Standard`.
     ///
     /// # Examples
     ///
@@ -292,10 +292,10 @@ impl PricingMethod {
 // ValidatedOrderLine
 // =============================================================================
 
-/// 検証済み注文明細
+/// Validated order line
 ///
-/// バリデーション済みの注文明細を表す型。
-/// 全てのフィールドが検証済みの型（Phase 1 で定義）を使用する。
+/// A type representing a validated order line.
+/// All fields use validated types (defined in Phase 1).
 ///
 /// # Examples
 ///
@@ -320,13 +320,13 @@ pub struct ValidatedOrderLine {
 }
 
 impl ValidatedOrderLine {
-    /// 新しい `ValidatedOrderLine` を生成する
+    /// Creates a new `ValidatedOrderLine`
     ///
     /// # Arguments
     ///
-    /// * `order_line_id` - 検証済み注文明細ID
-    /// * `product_code` - 検証済み製品コード
-    /// * `quantity` - 検証済み数量
+    /// * `order_line_id` - Validated order line ID
+    /// * `product_code` - Validated product code
+    /// * `quantity` - Validated quantity
     ///
     /// # Examples
     ///
@@ -354,19 +354,19 @@ impl ValidatedOrderLine {
         }
     }
 
-    /// 注文明細IDへの参照を返す
+    /// Returns a reference to Order line ID
     #[must_use]
     pub const fn order_line_id(&self) -> &OrderLineId {
         &self.order_line_id
     }
 
-    /// 製品コードへの参照を返す
+    /// Returns a reference to Product code
     #[must_use]
     pub const fn product_code(&self) -> &ProductCode {
         &self.product_code
     }
 
-    /// 数量への参照を返す
+    /// Returns a reference to quantity
     #[must_use]
     pub const fn quantity(&self) -> &OrderQuantity {
         &self.quantity
@@ -377,11 +377,11 @@ impl ValidatedOrderLine {
 // ValidatedOrder
 // =============================================================================
 
-/// 検証済み注文
+/// Validated order
 ///
-/// バリデーション済みの注文を表す型。
-/// 全てのフィールドが検証済みの型を使用する。
-/// `UnvalidatedOrder` からの変換後の状態を表す。
+/// A type representing a validated order.
+/// All fields use validated types.
+/// Represents the state after conversion from `UnvalidatedOrder`.
 ///
 /// # Examples
 ///
@@ -417,16 +417,16 @@ pub struct ValidatedOrder {
 }
 
 impl ValidatedOrder {
-    /// 新しい `ValidatedOrder` を生成する
+    /// Creates a new `ValidatedOrder`
     ///
     /// # Arguments
     ///
-    /// * `order_id` - 検証済み注文ID
-    /// * `customer_info` - 検証済み顧客情報
-    /// * `shipping_address` - 検証済み配送先住所
-    /// * `billing_address` - 検証済み請求先住所
-    /// * `lines` - 検証済み注文明細リスト
-    /// * `pricing_method` - 価格計算方法
+    /// * `order_id` - Validated order ID
+    /// * `customer_info` - Validated customer information
+    /// * `shipping_address` - Validated shipping address
+    /// * `billing_address` - Validated billing address
+    /// * `lines` - Validated order lines
+    /// * `pricing_method` - Pricing method
     #[must_use]
     #[allow(clippy::too_many_arguments)]
     pub const fn new(
@@ -447,37 +447,37 @@ impl ValidatedOrder {
         }
     }
 
-    /// 注文IDへの参照を返す
+    /// Returns a reference to Order ID
     #[must_use]
     pub const fn order_id(&self) -> &OrderId {
         &self.order_id
     }
 
-    /// 顧客情報への参照を返す
+    /// Returns a reference to customer information
     #[must_use]
     pub const fn customer_info(&self) -> &CustomerInfo {
         &self.customer_info
     }
 
-    /// 配送先住所への参照を返す
+    /// Returns a reference to Shipping address
     #[must_use]
     pub const fn shipping_address(&self) -> &Address {
         &self.shipping_address
     }
 
-    /// 請求先住所への参照を返す
+    /// Returns a reference to Billing address
     #[must_use]
     pub const fn billing_address(&self) -> &Address {
         &self.billing_address
     }
 
-    /// 注文明細リストへの参照を返す
+    /// Returns a reference to order linelist
     #[must_use]
     pub fn lines(&self) -> &[ValidatedOrderLine] {
         &self.lines
     }
 
-    /// 価格計算方法への参照を返す
+    /// Returns a reference to Pricing method
     #[must_use]
     pub const fn pricing_method(&self) -> &PricingMethod {
         &self.pricing_method

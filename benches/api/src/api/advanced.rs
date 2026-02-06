@@ -254,6 +254,11 @@ pub struct LazyComputeRequest {
     /// Whether to include the result (triggers evaluation).
     #[serde(default)]
     pub include_result: bool,
+    /// Whether to use eager initialization (bypasses lazy evaluation overhead).
+    /// When true, uses `Lazy::new_with_value()` instead of `Lazy::new()`.
+    /// This is useful for performance benchmarks where lazy evaluation overhead is unwanted.
+    #[serde(default)]
+    pub eager_init: bool,
 }
 
 /// Response for lazy computation.
@@ -1086,6 +1091,8 @@ fn compute_batch_validation_scores_async(
 /// This handler demonstrates:
 /// - **Lazy**: Deferred evaluation with memoization
 /// - Computation is only performed if `include_result` is true
+/// - **Eager init**: When `eager_init` is true, uses `Lazy::new_with_value()` to bypass
+///   lazy evaluation overhead (useful for performance benchmarks)
 ///
 /// # Available Computations
 ///
@@ -1099,7 +1106,8 @@ fn compute_batch_validation_scores_async(
 /// {
 ///   "task_id": "uuid",
 ///   "computation": "complexity_score",
-///   "include_result": true
+///   "include_result": true,
+///   "eager_init": false
 /// }
 /// ```
 ///
@@ -1141,40 +1149,82 @@ pub async fn lazy_compute(
 
     // Create lazy computation (synchronous block - Lazy is not Send)
     // Demonstrates deferred evaluation: computation is defined but not executed until force()
+    //
+    // When eager_init is true, we use Lazy::new_with_value() which pre-computes the value,
+    // eliminating the lazy evaluation overhead. This is useful for performance benchmarks
+    // where the initialization cost of Lazy::new() is a bottleneck.
     let (result, was_evaluated) = {
         match request.computation.as_str() {
             "complexity_score" => {
-                // Create lazy computation (not yet evaluated)
-                let lazy = Lazy::new(|| calculate_complexity_score(&task));
-                if request.include_result {
-                    // Force evaluation only when requested
-                    let score = *lazy.force();
-                    (Some(serde_json::json!(score)), true)
+                if request.eager_init {
+                    // Eager init: compute value immediately and wrap in Lazy
+                    // This bypasses the lazy initialization overhead
+                    let value = calculate_complexity_score(&task);
+                    let lazy = Lazy::new_with_value(value);
+                    if request.include_result {
+                        let score = *lazy.force();
+                        (Some(serde_json::json!(score)), true)
+                    } else {
+                        let _ = lazy;
+                        (None, false)
+                    }
                 } else {
-                    // Lazy created but intentionally not evaluated - goes out of scope unused
-                    // This demonstrates that Lazy only computes when force() is called
-                    let _ = lazy;
-                    (None, false)
+                    // Lazy init: computation is deferred until force() is called
+                    let lazy = Lazy::new(|| calculate_complexity_score(&task));
+                    if request.include_result {
+                        // Force evaluation only when requested
+                        let score = *lazy.force();
+                        (Some(serde_json::json!(score)), true)
+                    } else {
+                        // Lazy created but intentionally not evaluated - goes out of scope unused
+                        // This demonstrates that Lazy only computes when force() is called
+                        let _ = lazy;
+                        (None, false)
+                    }
                 }
             }
             "estimated_duration" => {
-                let lazy = Lazy::new(|| calculate_estimated_duration(&task));
-                if request.include_result {
-                    let duration = *lazy.force();
-                    (Some(serde_json::json!(duration)), true)
+                if request.eager_init {
+                    let value = calculate_estimated_duration(&task);
+                    let lazy = Lazy::new_with_value(value);
+                    if request.include_result {
+                        let duration = *lazy.force();
+                        (Some(serde_json::json!(duration)), true)
+                    } else {
+                        let _ = lazy;
+                        (None, false)
+                    }
                 } else {
-                    let _ = lazy;
-                    (None, false)
+                    let lazy = Lazy::new(|| calculate_estimated_duration(&task));
+                    if request.include_result {
+                        let duration = *lazy.force();
+                        (Some(serde_json::json!(duration)), true)
+                    } else {
+                        let _ = lazy;
+                        (None, false)
+                    }
                 }
             }
             "summary" => {
-                let lazy = Lazy::new(|| generate_task_summary(&task));
-                if request.include_result {
-                    let summary = lazy.force().clone();
-                    (Some(serde_json::json!(summary)), true)
+                if request.eager_init {
+                    let value = generate_task_summary(&task);
+                    let lazy = Lazy::new_with_value(value);
+                    if request.include_result {
+                        let summary = lazy.force().clone();
+                        (Some(serde_json::json!(summary)), true)
+                    } else {
+                        let _ = lazy;
+                        (None, false)
+                    }
                 } else {
-                    let _ = lazy;
-                    (None, false)
+                    let lazy = Lazy::new(|| generate_task_summary(&task));
+                    if request.include_result {
+                        let summary = lazy.force().clone();
+                        (Some(serde_json::json!(summary)), true)
+                    } else {
+                        let _ = lazy;
+                        (None, false)
+                    }
                 }
             }
             _ => unreachable!("Validated above"),

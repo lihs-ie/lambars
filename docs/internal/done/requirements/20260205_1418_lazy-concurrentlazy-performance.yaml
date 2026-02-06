@@ -1,0 +1,118 @@
+---
+id: REQ-20260205-01
+title: "Lazy/ConcurrentLazy 性能退行の解消"
+version: 1.0.0
+created_at: 2026-02-05
+updated_at: 2026-02-05
+status: draft
+priority: high
+
+scope:
+  target_components:
+    - ConcurrentLazy
+    - Lazy
+    - tasks_eff
+    - tasks_update
+  related_issues: []
+  related_requirements: []
+
+problem_statement:
+  current_state: |
+    APIレイヤのRPS低下とerror_rate悪化が発生し、Lazy系ベンチマークでも一貫して退行が確認された。
+    プロファイリングでは ConcurrentLazy<T,F>::force_slow がCPU上位を占め、
+    併せてロック競合・スレッド起動コスト・アロケーション負荷が顕著に観測された。
+  bottlenecks:
+    - component: ConcurrentLazy<T,F>::force_slow
+      issue: 初期化ホットパスでのCPU占有
+      root_cause: 競合時にロック取得と重い経路が頻発し、初期化済みでも高コストなパスに入る
+      impact: tasks_eff のRPS低下、lazy系ベンチマークの悪化
+    - component: 同期プリミティブ/スレッド起動
+      issue: futex待機とpthread_createの頻発
+      root_cause: 競合下でのロック待ちと初期化時のスレッド生成が多い
+      impact: tasks_update 系のerror_rate悪化とスループット低下
+    - component: メモリアロケーション
+      issue: malloc/cfree の増加
+      root_cause: 初期化処理での一時確保と不要なクローン/ヒープ化
+      impact: lazy系ベンチマーク悪化とCPU時間増大
+  performance_metrics:
+    current:
+      - metric: tasks_eff RPS
+        value: 782.33 (baseline 999.78)
+      - metric: tasks_update error_rate
+        value: 0.538 (baseline 0.415)
+      - metric: tasks_update_conflict error_rate
+        value: 0.500 (baseline 0.414)
+      - metric: lazy_force/computation_size/100
+        value: +6.32% regression
+      - metric: lazy_cached/direct_access
+        value: +5.10% regression
+      - metric: lazy_force/computation_size/10
+        value: +4.99% regression
+      - metric: lazy_force/computation_size/1000
+        value: +3.01% regression
+    target:
+      - metric: tasks_eff RPS
+        value: ">= 1000"
+      - metric: tasks_update error_rate
+        value: "<= 0.415"
+      - metric: tasks_update_conflict error_rate
+        value: "<= 0.414"
+      - metric: lazy_force/computation_size/100
+        value: "0% or better vs baseline"
+      - metric: lazy_cached/direct_access
+        value: "0% or better vs baseline"
+
+solution_design:
+  approach: |
+    初期化済みの高速経路を明確化し、競合時のロック待ちとスレッド生成を最小化する。
+    計算(純粋関数)と実行(初期化/同期)を分離し、参照透過性を保ったまま実装を最適化する。
+    メモリアロケーションの削減と状態遷移の最適化でCPU・待機時間を削る。
+  implementation_details:
+    - step: 高速パスの確立
+      description: 初期化済み判定を原子的に行い、ロック取得前に早期リターンする
+      algorithm: Double-checked locking + atomic state machine
+    - step: 初期化の一度きり保証
+      description: 競合時に一回だけ計算される構造へ置換し、force_slowの頻度を下げる
+      algorithm: Once/OnceLock/OnceCell を用いた一回初期化
+    - step: スレッド起動の削減
+      description: 初期化時の新規スレッド生成を避け、既存の実行基盤へ委譲する
+      algorithm: 共有スレッドプール/同期実行の選択（条件分岐）
+    - step: アロケーション削減
+      description: 初期化時の一時確保・不要なクローンを排除する
+      algorithm: MaybeUninit + Option<F>のtakeでヒープ化抑制
+  expected_improvements:
+    - metric: ConcurrentLazy::force_slow CPU時間
+      improvement: -30% 以上
+    - metric: ロック待機時間
+      improvement: -40% 以上
+    - metric: malloc/cfree 回数
+      improvement: -25% 以上
+    - metric: tasks_eff RPS
+      improvement: +20% 前後
+    - metric: lazy系ベンチマーク
+      improvement: 退行解消(0%〜+3%)
+
+implementation:
+  priority: 1
+  estimated_effort: M
+  dependencies: []
+  risks:
+    - risk: 競合条件下での初期化順序バグ
+      mitigation: 状態遷移の単体テスト追加とストレスベンチの強化
+    - risk: 実装変更によるAPIの挙動差異
+      mitigation: 既存ベンチ/テストの差分検証と回帰基準の明文化
+
+testing:
+  unit_tests:
+    - ConcurrentLazy 初期化競合の再現テスト
+    - Lazy 初期化済み高速パスの動作検証
+  benchmarks:
+    - lazy_force/computation_size/10
+    - lazy_force/computation_size/100
+    - lazy_force/computation_size/1000
+    - lazy_cached/direct_access
+  acceptance_criteria:
+    - tasks_eff RPS が 1000 以上
+    - tasks_update error_rate が 0.415 以下
+    - tasks_update_conflict error_rate が 0.414 以下
+    - lazy系ベンチマークが baseline 比で悪化しない

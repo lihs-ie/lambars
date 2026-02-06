@@ -1,13 +1,13 @@
-//! 住所を表す複合型
+//! Address compound type
 
 use lambars_derive::Lenses;
 
 use crate::simple_types::{String50, UsStateCode, ValidationError, ZipCode};
 
-/// 住所を表す複合型
+/// Address compound type
 ///
-/// 米国の住所形式を想定し、複数の住所行（一部はオプショナル）、
-/// 市、郵便番号、州、国を持つ。
+/// Assumes US address format with multiple address lines (some optional),
+/// city, ZIP code, state, and country.
 ///
 /// # Examples
 ///
@@ -43,37 +43,37 @@ pub struct Address {
 }
 
 impl Address {
-    /// 文字列から `Address` を生成する
+    /// Creates an `Address` from strings
     ///
-    /// `address_line2` から `address_line4` は空文字列の場合 `None` になる。
+    /// `address_line2` through `address_line4` become `None` for empty strings.
     ///
     /// # Arguments
     ///
-    /// * `address_line1` - 住所行1（必須）
-    /// * `address_line2` - 住所行2（空文字列で `None`）
-    /// * `address_line3` - 住所行3（空文字列で `None`）
-    /// * `address_line4` - 住所行4（空文字列で `None`）
-    /// * `city` - 市（必須）
-    /// * `zip_code` - 郵便番号（5桁、必須）
-    /// * `state` - 州コード（2文字、必須）
-    /// * `country` - 国名（必須）
+    /// * `address_line1` - Address line 1 (required)
+    /// * `address_line2` - Address line 2 (`None` for empty string)
+    /// * `address_line3` - Address line 3 (`None` for empty string)
+    /// * `address_line4` - Address line 4 (`None` for empty string)
+    /// * `city` - City (required)
+    /// * `zip_code` - ZIP code (5 digits, required)
+    /// * `state` - State code (2 characters, required)
+    /// * `country` - Country name (required)
     ///
     /// # Returns
     ///
-    /// * `Ok(Address)` - バリデーション成功時
-    /// * `Err(ValidationError)` - いずれかのフィールドが無効な場合
+    /// * `Ok(Address)` - On successful validation
+    /// * `Err(ValidationError)` - If any field is invalid
     ///
     /// # Errors
     ///
-    /// 必須フィールドが無効な場合、またはオプショナルフィールドが50文字を超える場合に
-    /// `ValidationError` を返す。
+    /// Returns `ValidationError` when a required field is invalid or an optional field exceeds 50 characters.
+    /// returns `ValidationError`.
     ///
     /// # Examples
     ///
     /// ```
     /// use order_taking_sample::compound_types::Address;
     ///
-    /// // 全フィールド指定
+    /// // All fields specified
     /// let address = Address::create(
     ///     "123 Main St",
     ///     "Apt 4B",
@@ -85,7 +85,7 @@ impl Address {
     ///     "USA",
     /// ).unwrap();
     ///
-    /// // オプショナルフィールドを省略
+    /// // Optional fields omitted
     /// let address2 = Address::create(
     ///     "456 Oak Ave",
     ///     "",
@@ -129,24 +129,24 @@ impl Address {
         })
     }
 
-    /// 既にバリデーション済みの構成要素から `Address` を生成する
+    /// Creates an `Address` from pre-validated components
     ///
-    /// バリデーションは不要（既に各型でバリデーション済み）。
+    /// No validation needed (each type is already validated).
     ///
     /// # Arguments
     ///
-    /// * `address_line1` - 住所行1
-    /// * `address_line2` - 住所行2（オプショナル）
-    /// * `address_line3` - 住所行3（オプショナル）
-    /// * `address_line4` - 住所行4（オプショナル）
-    /// * `city` - 市
-    /// * `zip_code` - 郵便番号
-    /// * `state` - 州コード
-    /// * `country` - 国名
+    /// * `address_line1` - address line 1
+    /// * `address_line2` - address line 2 (optional)
+    /// * `address_line3` - address line 3 (optional)
+    /// * `address_line4` - address line 4 (optional)
+    /// * `city` - City
+    /// * `zip_code` - ZIP code
+    /// * `state` - State code
+    /// * `country` - Country name
     ///
     /// # Returns
     ///
-    /// 新しい `Address` インスタンス
+    /// A new `Address` instance
     #[allow(clippy::too_many_arguments)]
     #[must_use]
     pub const fn create_from_parts(
@@ -171,81 +171,81 @@ impl Address {
         }
     }
 
-    /// 住所行1への参照を返す
+    /// Returns a reference to address line 1
     ///
     /// # Returns
     ///
-    /// `String50` 型の住所行1への参照
+    /// A reference to the `String50` address line 1
     #[must_use]
     pub const fn address_line1(&self) -> &String50 {
         &self.address_line1
     }
 
-    /// 住所行2への参照を返す（オプショナル）
+    /// Returns a reference to address line 2 (optional)
     ///
     /// # Returns
     ///
-    /// 住所行2が設定されている場合は `Some(&String50)`、そうでなければ `None`
+    /// Returns `Some(&String50)` if address line 2 is set, otherwise `None`
     #[must_use]
     pub const fn address_line2(&self) -> Option<&String50> {
         self.address_line2.as_ref()
     }
 
-    /// 住所行3への参照を返す（オプショナル）
+    /// Returns a reference to address line 3 (optional)
     ///
     /// # Returns
     ///
-    /// 住所行3が設定されている場合は `Some(&String50)`、そうでなければ `None`
+    /// Returns `Some(&String50)` if address line 3 is set, otherwise `None`
     #[must_use]
     pub const fn address_line3(&self) -> Option<&String50> {
         self.address_line3.as_ref()
     }
 
-    /// 住所行4への参照を返す（オプショナル）
+    /// Returns a reference to address line 4 (optional)
     ///
     /// # Returns
     ///
-    /// 住所行4が設定されている場合は `Some(&String50)`、そうでなければ `None`
+    /// Returns `Some(&String50)` if address line 4 is set, otherwise `None`
     #[must_use]
     pub const fn address_line4(&self) -> Option<&String50> {
         self.address_line4.as_ref()
     }
 
-    /// 市への参照を返す
+    /// Returns a reference to the city
     ///
     /// # Returns
     ///
-    /// `String50` 型の市への参照
+    /// A reference to the `String50` city
     #[must_use]
     pub const fn city(&self) -> &String50 {
         &self.city
     }
 
-    /// 郵便番号への参照を返す
+    /// Returns a reference to the ZIP code
     ///
     /// # Returns
     ///
-    /// `ZipCode` 型の郵便番号への参照
+    /// A reference to the `ZipCode` ZIP code
     #[must_use]
     pub const fn zip_code(&self) -> &ZipCode {
         &self.zip_code
     }
 
-    /// 州コードへの参照を返す
+    /// Returns a reference to the state code
     ///
     /// # Returns
     ///
-    /// `UsStateCode` 型の州コードへの参照
+    /// A reference to the `UsStateCode` state code
     #[must_use]
     pub const fn state(&self) -> &UsStateCode {
         &self.state
     }
 
-    /// 国名への参照を返す
+    /// Returns a reference to the country name
     ///
     /// # Returns
     ///
-    /// `String50` 型の国名への参照
+    /// A reference to the `String50` country name
     #[must_use]
     pub const fn country(&self) -> &String50 {
         &self.country
@@ -259,7 +259,7 @@ mod tests {
     use rstest::rstest;
 
     // =========================================================================
-    // create のテスト
+    // Tests for create
     // =========================================================================
 
     #[rstest]
@@ -362,7 +362,7 @@ mod tests {
             "",
             "",
             "New York",
-            "1234", // 4桁
+            "1234", // 4 digits
             "NY",
             "USA",
         );
@@ -382,7 +382,7 @@ mod tests {
             "",
             "New York",
             "10001",
-            "XX", // 無効な州コード
+            "XX", // Invalid state code
             "USA",
         );
 
@@ -423,7 +423,7 @@ mod tests {
     }
 
     // =========================================================================
-    // create_from_parts のテスト
+    // Tests for create_from_parts
     // =========================================================================
 
     #[rstest]
@@ -451,7 +451,7 @@ mod tests {
     }
 
     // =========================================================================
-    // Getter のテスト
+    // Tests for getters
     // =========================================================================
 
     #[rstest]
@@ -479,7 +479,7 @@ mod tests {
     }
 
     // =========================================================================
-    // Clone/Eq のテスト
+    // Tests for Clone/Eq
     // =========================================================================
 
     #[rstest]
@@ -523,7 +523,7 @@ mod tests {
     }
 
     // =========================================================================
-    // Lens のテスト
+    // Tests for Lens
     // =========================================================================
 
     #[rstest]

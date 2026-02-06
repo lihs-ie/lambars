@@ -495,7 +495,7 @@ mod tests {
 
     #[rstest]
     fn test_serialize_json_bytes_unicode() {
-        let data = TestData::new("日本語テスト");
+        let data = TestData::new("Unicode \u{1F600} test \u{00E9}\u{00F1}");
         let bytes = serialize_json_bytes(&data).expect("Serialization should succeed");
         let reference = reference_serialize(&data);
         assert_eq!(bytes.as_ref(), reference.as_ref());

@@ -1,0 +1,416 @@
+---
+id: REQ-20260206-1030
+title: ConcurrentLazy 高スレッド数リグレッション改善
+created_at: 2026-02-06T10:30:00+09:00
+status: draft
+priority: high
+category: performance
+tags:
+  - concurrent_lazy
+  - performance
+  - thread_scalability
+  - synchronization
+branch: perf/tasks-bulk-search-index-merge
+
+# 概要
+
+perf/tasks-bulk-search-index-merge ブランチで、高スレッド数（16, 32スレッド）の ConcurrentLazy 関連ベンチマークでリグレッションが発生している。spin-wait から Condvar + Mutex によるブロッキング待機への変更が原因で、高スレッド数での競合が顕在化した。
+
+# 背景
+
+## リグレッション詳細
+
+| ベンチマーク | Before | After | リグレッション |
+|------------|--------|-------|---------------|
+| concurrent_lazy_thread_scalability/thread_count/16 | 161.10 us | 214.42 us | +33.10% |
+| concurrent_contention/32_threads | 327.07 us | 418.33 us | +27.90% |
+| concurrent_lazy_init_contention/thread_count/16 | 176.25 us | 217.19 us | +23.23% |
+
+## 低〜中スレッド数での改善
+
+| ベンチマーク | Before | After | 改善率 |
+|------------|--------|-------|--------|
+| concurrent_lazy_init_contention/thread_count/2 | - | - | -24.23% |
+| concurrent_lazy_init_contention/thread_count/4 | - | - | -23.32% |
+| concurrent_lazy_cached_access/thread_count/4 | - | - | -23.26% |
+
+## 実装変更内容
+
+1. **spin-wait → Condvar + Mutex によるブロッキング待機**
+   - 構造体に `wait_condvar: Condvar` と `wait_mutex: Mutex<()>` を追加
+   - `spin_wait()` メソッドを削除
+   - `wait_on_initialization()` メソッドで `Condvar::wait` を使用
+
+2. **force() メソッドの最適化**
+   - `inline(always)` 属性を追加
+   - `STATE_READY` の fast path を最初にチェック（早期リターン）
+
+3. **new() メソッドの変更**
+   - `const fn` から通常の `fn` に変更（Condvar/Mutex は const 初期化不可）
+
+# 問題分析
+
+## 根本原因（Codex 分析結果）
+
+1. **Condvar + Mutex の競合**
+   - `wait_mutex` に全スレッドが集中
+   - futex 系システムコールによるカーネル遷移・キュー管理コストが増大
+   - 高スレッド数でスレッドスケジューラの wakeup 順序とキャッシュラインバウンスが増加
+
+2. **旧 spin-wait との性能特性の違い**
+   - 旧実装のスピン待機は CPU を消費するが、初期化区間が極短の場合はユーザ空間で完結
+   - wake/wait の共有キュー競合がなくスループット有利
+
+3. **wait_mutex のホットスポット化**
+   - 共有 1 本のため「初期化完了通知待ち」と「既に READY かの判定」が同じロック粒度
+   - 高スレッドでロック取得待ちがホットスポット化
+
+4. **キャッシュミスと false sharing**
+   - `const fn` → `fn` による初期化時の差は軽微
+   - Condvar/Mutex オブジェクト自体のキャッシュミスと false sharing が追加された可能性
+
+# 要件
+
+## 機能要件
+
+### FR-1: 高スレッド数でのパフォーマンス改善
+
+- **内容**: 16スレッド以上での競合を削減し、リグレッションを解消する
+- **受入基準**:
+  - concurrent_lazy_thread_scalability/thread_count/16: リグレッション +10% 以内
+  - concurrent_contention/32_threads: リグレッション +10% 以内
+  - concurrent_lazy_init_contention/thread_count/16: リグレッション +10% 以内
+
+### FR-2: 低〜中スレッド数でのパフォーマンス維持
+
+- **内容**: 2〜4スレッドでの改善効果を維持する
+- **受入基準**:
+  - concurrent_lazy_init_contention/thread_count/2: 改善率 -20% 以上を維持
+  - concurrent_lazy_init_contention/thread_count/4: 改善率 -20% 以上を維持
+  - concurrent_lazy_cached_access/thread_count/4: 改善率 -20% 以上を維持
+
+## 非機能要件
+
+### NFR-1: 実装の安全性
+
+- **内容**: メモリ安全性とスレッド安全性を保証する
+- **制約**:
+  - unsafe コードの使用は最小限に抑える
+  - Send + Sync の境界を維持する
+  - データ競合を引き起こさない
+
+### NFR-2: API 後方互換性
+
+- **内容**: 既存の公開 API を変更しない
+- **制約**:
+  - `ConcurrentLazy::new()`, `force()`, `get()` 等のシグネチャを変更しない
+  - 内部実装の変更のみで対応する
+
+### NFR-3: 依存関係の最小化
+
+- **内容**: 外部クレートへの依存を慎重に検討する
+- **制約**:
+  - 新規依存の追加は必要最小限に抑える
+  - `parking_lot` 等の採用は慎重に評価する
+
+# 改善アプローチ（Codex 提案）
+
+## アプローチ1: parking_lot 置換 + キャッシュライン分離【推奨度: 高】
+
+### 概要
+`std::sync::Mutex/Condvar` を `parking_lot::Mutex/Condvar` に置換し、`state` と `wait_mutex` を別キャッシュライン（`#[repr(align(64))]`）に配置して false sharing を避ける。
+
+### 期待される効果
+- **高スレッド数**: ロック競合とキャッシュラインバウンス削減により、リグレッションを +10% 以内に抑制
+- **低スレッド数**: `parking_lot` の軽量実装により影響は最小限（-20% 以上の改善を維持）
+- **READY fast path**: lock-free のまま維持
+
+### リスク
+- **低**: `parking_lot` は広く使われており安定
+- レイアウトがプラットフォーム依存（x86_64 では 64 バイトキャッシュライン）
+- 過度な padding でメモリ消費増（1構造体あたり数十バイト程度）
+
+### 実装の複雑さ
+- **低**: 構造体再配置と依存追加のみ
+
+### 実装例
+```rust
+use parking_lot::{Condvar, Mutex};
+
+#[repr(C)]
+pub struct ConcurrentLazy<T, F = fn() -> T> {
+    // キャッシュライン 1: 高頻度アクセス
+    state: AtomicU8,
+    value: UnsafeCell<MaybeUninit<T>>,
+    initializer: UnsafeCell<Option<F>>,
+
+    // パディングでキャッシュライン分離
+    _pad: [u8; 64 - (size_of::<AtomicU8>() + size_of::<UnsafeCell<MaybeUninit<T>>>() + size_of::<UnsafeCell<Option<F>>>()) % 64],
+
+    // キャッシュライン 2: 低頻度アクセス（待機時のみ）
+    #[repr(align(64))]
+    wait_condvar: Condvar,
+    wait_mutex: Mutex<()>,
+}
+```
+
+## アプローチ2: アダプティブスピン + パーク【推奨度: 中】
+
+### 概要
+`STATE_READY` でないとき、数十〜数百回のスピン後に `Condvar::wait` にフォールバック。
+
+### 期待される効果
+- **高スレッド数**: 短い初期化時間ならカーネル遷移を回避。過度な busy wait を抑制
+- **低スレッド数**: 改善を維持しつつ、短い初期化では改善効果が増大
+
+### リスク
+- **中**: スピン長のチューニングが必要
+- 極端に長い初期化では再び悪化する可能性
+- プラットフォーム依存の挙動
+
+### 実装の複雑さ
+- **低〜中**: 既存 state マシンにスピンカウンタを追加する程度
+
+### 実装例
+```rust
+const ADAPTIVE_SPIN_LIMIT: u32 = 100; // 要チューニング
+
+fn wait_on_initialization(&self) {
+    let mut spin_count = 0;
+
+    loop {
+        // 短期スピン
+        while spin_count < ADAPTIVE_SPIN_LIMIT {
+            for _ in 0..(1 << spin_count.min(6)) {
+                std::hint::spin_loop();
+            }
+            spin_count += 1;
+
+            if self.state.load(Ordering::Acquire) != STATE_COMPUTING {
+                return;
+            }
+        }
+
+        // 長期待機は Condvar にフォールバック
+        let guard = self.wait_mutex.lock().unwrap();
+        if self.state.load(Ordering::Acquire) != STATE_COMPUTING {
+            return;
+        }
+        let _ = self.wait_condvar.wait(guard);
+    }
+}
+```
+
+## アプローチ3: 複数待機キューのシャーディング【推奨度: 低】
+
+### 概要
+スレッド数に応じて N 本の Condvar/Mutex を持ち、スレッド ID ハッシュで割り当て。READY で全 Condvar をブロードキャスト。
+
+### 期待される効果
+- **高スレッド数**: 待機キュー競合を分散し、ロック待ちを低減
+- **低スレッド数**: ややオーバーヘッド（ブロードキャスト回数増加）
+
+### リスク
+- **中**: ブロードキャスト回数が増えるため通知コスト上昇
+- 初期化頻度が低い場合は許容
+
+### 実装の複雑さ
+- **中**: 管理ロジック追加、メモリフットプリント増加
+
+## アプローチ4: 完全ロックフリー（compare_exchange + SpinWait）【推奨度: 低】
+
+### 概要
+`AtomicU8` state を CAS で IN_PROGRESS にし、他スレッドは短スピン＋`std::thread::yield_now`。長期初期化なら `std::thread::park_timeout`。
+
+### 期待される効果
+- **高スレッド数**: ロック/Condvar を排除し wakeup キュー競合ゼロ
+- **低スレッド数**: 改善効果を維持
+
+### リスク
+- **高**: 長時間初期化時に CPU 消費が増える
+- プラットフォームによるスケジューラ挙動差
+- 実装の複雑さが高い
+
+### 実装の複雑さ
+- **中〜高**: スピンバックオフと park 遷移のチューニングが必要
+
+## アプローチ5: parking_lot 置換 + notify 戦略見直し【推奨度: 中】
+
+### 概要
+`std` より軽量な `parking_lot::Condvar/Mutex` を採用し、READY 時に waiters 数を推測して `notify_all`/`notify_one` を分岐。
+
+### 期待される効果
+- **高スレッド数**: ロック競合時のフェアネス改善とシステムコール削減
+- **低スレッド数**: 差分小
+
+### リスク
+- **低**: 依存追加、挙動差による微妙なスケジューリング差
+
+### 実装の複雑さ
+- **低**: 依存追加のみ
+
+## アプローチ6: 初期化時間計測による動的戦略切替【推奨度: 低】
+
+### 概要
+初回初期化時間を計測し、閾値以下ならスピン中心、閾値超なら即座に park/condvar。
+
+### 期待される効果
+- **高スレッド数**: 実測ベースで最適化、ケースバイケースで最良の待機戦略を選択
+- **低スレッド数**: 良好
+
+### リスク
+- **中**: 計測コストと分岐複雑度、計測精度に依存
+
+### 実装の複雑さ
+- **中**: 計測ロジック追加
+
+# ベストプラクティス（Codex 参考）
+
+## 標準ライブラリの実装
+
+- **std::sync::OnceLock / OnceCell**: 「スピン→park」型の自動バックオフを実装
+  - 短期初期化ではユーザ空間で完結
+  - 長期では OS への park を使うハイブリッド方式
+
+## once_cell / lazy_static
+
+- 内部で `std::sync::Once` を利用
+- waiter 数に応じた backoff を行う実績ある実装
+- 高スレッド数での競合が課題の場合、同等の戦略（短スピン＋condvar）を模倣するのが安全
+
+## ロックフリー戦略の注意点
+
+- 初期化処理自体は副作用最小・短時間に抑える
+- 失敗を Result などで表し、例外的パニックに頼らない設計が推奨
+
+# 推奨実装方針（優先度順）
+
+## Phase 1: parking_lot 置換 + キャッシュライン分離【最優先】
+
+- **理由**: 低工数・低リスクで高スレッド数の改善が期待できる
+- **実装手順**:
+  1. `Cargo.toml` に `parking_lot` 依存を追加
+  2. `ConcurrentLazy` 構造体を `#[repr(C)]` で再配置
+  3. `state` と待機用フィールドを別キャッシュラインに分離
+  4. `std::sync` → `parking_lot` に置換
+  5. ベンチマークで高スレッド・低スレッド両方を測定
+
+## Phase 2: アダプティブスピン + パークの導入
+
+- **条件**: Phase 1 でリグレッション +10% 以内に収まらない場合
+- **実装手順**:
+  1. `ADAPTIVE_SPIN_LIMIT` 定数を追加
+  2. `wait_on_initialization()` にスピンループを追加
+  3. スピン回数を調整しながらベンチマーク測定
+  4. 最適なスピン回数を決定
+
+## Phase 3: シャーディング or ロックフリー化（必要に応じて）
+
+- **条件**: Phase 1, 2 でも改善しない場合
+- **実装手順**:
+  1. シャーディング版とロックフリー版の両方をプロトタイプ実装
+  2. ベンチマークで比較評価
+  3. リスクと効果を考慮して最適な方式を選択
+
+# 検証計画
+
+## ベンチマーク測定項目
+
+### 高スレッド数（16, 32スレッド）
+- `concurrent_lazy_thread_scalability/thread_count/16`
+- `concurrent_contention/32_threads`
+- `concurrent_lazy_init_contention/thread_count/16`
+
+### 低〜中スレッド数（2, 4スレッド）
+- `concurrent_lazy_init_contention/thread_count/2`
+- `concurrent_lazy_init_contention/thread_count/4`
+- `concurrent_lazy_cached_access/thread_count/4`
+
+## 受入基準
+
+### Phase 1 完了基準
+- **高スレッド数**: リグレッション +10% 以内
+- **低スレッド数**: 改善率 -20% 以上を維持
+
+### Phase 2 完了基準
+- **高スレッド数**: リグレッション +5% 以内
+- **低スレッド数**: 改善率 -20% 以上を維持
+
+### Phase 3 完了基準
+- **高スレッド数**: リグレッション 0% 以下（改善）
+- **低スレッド数**: 改善率 -20% 以上を維持
+
+## テスト項目
+
+### 機能テスト
+- 既存の単体テスト全てパス
+- 並行アクセステスト（100スレッド）
+- 初期化関数パニック時の poisoned 状態テスト
+
+### プロパティテスト
+- Functor/Monad 則の検証
+- メモリ安全性の検証
+
+# 実装タスク
+
+## Task 1: parking_lot 導入とキャッシュライン分離
+
+- [ ] `Cargo.toml` に `parking_lot` 依存を追加
+- [ ] `ConcurrentLazy` 構造体を `#[repr(C)]` で再配置
+- [ ] `state` と待機用フィールドを別キャッシュラインに分離
+- [ ] `std::sync::Mutex/Condvar` → `parking_lot::Mutex/Condvar` に置換
+- [ ] ベンチマーク測定（高スレッド・低スレッド）
+- [ ] 受入基準を満たすことを確認
+
+## Task 2: アダプティブスピン実装（必要に応じて）
+
+- [ ] `ADAPTIVE_SPIN_LIMIT` 定数を追加
+- [ ] `wait_on_initialization()` にスピンループを追加
+- [ ] スピン回数を調整しながらベンチマーク測定
+- [ ] 最適なスピン回数を決定
+- [ ] 受入基準を満たすことを確認
+
+## Task 3: ドキュメント更新
+
+- [ ] `src/control/concurrent_lazy.rs` のドキュメントコメント更新
+- [ ] パフォーマンス特性の説明を追加
+- [ ] 使用例の更新（必要に応じて）
+
+# 参考資料
+
+## 関連ファイル
+
+- `src/control/concurrent_lazy.rs`: ConcurrentLazy 実装
+- `src/control/lazy.rs`: Lazy 実装（参考）
+- `benches/*/concurrent_lazy*.rs`: ベンチマーク（パス要確認）
+
+## 参考実装
+
+- `std::sync::OnceLock`: https://doc.rust-lang.org/std/sync/struct.OnceLock.html
+- `once_cell`: https://docs.rs/once_cell/
+- `parking_lot`: https://docs.rs/parking_lot/
+
+## Codex レビュー結果
+
+```
+**原因分析**
+- Condvar + Mutex は wait_mutex に全スレッドが集中し、futex 系システムコールによるカーネル遷移・キュー管理コストが増大
+- 旧実装のスピン待機は CPU を燃やすが、初期化区間が極短の場合はユーザ空間で完結
+- wait_mutex が共有 1 本のため「初期化完了通知待ち」と「既に READY かの判定」が同じロック粒度
+- Condvar/Mutex オブジェクト自体のキャッシュミスと false sharing が追加された可能性
+
+**推奨方針（優先度順）**
+1. parking_lot 置換 + READY fast-path を維持しつつ wait ロックを別キャッシュラインに配置（低工数・低リスク）
+2. アダプティブスピン→park ハイブリッドを導入し、既存 Condvar を活用
+3. なお悪化する場合はシャーディングまたはロックフリー化を検討し、ベンチ比較で判断
+```
+
+# 備考
+
+- 変更ごとに `cargo bench` で高スレッドケースを再測定し、低スレッド性能が維持されることを確認する
+- プラットフォーム依存の挙動に注意（特にキャッシュライン分離）
+- メモリ消費増加は許容範囲内（1構造体あたり数十バイト程度）
+
+# 更新履歴
+
+- 2026-02-06T10:30:00+09:00: 初版作成（Codex 分析結果に基づく）

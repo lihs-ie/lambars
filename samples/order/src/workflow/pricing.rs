@@ -1,14 +1,14 @@
-//! 価格計算モジュール
+//! Pricing module
 //!
-//! `ValidatedOrder` を `PricedOrder` に変換する価格計算ロジックを提供する。
+//! Provides pricing logic to convert `ValidatedOrder` to `PricedOrder`.
 //!
-//! # 関数一覧
+//! # Function List
 //!
-//! - [`get_line_price`] - 注文明細から価格を取得
-//! - [`to_priced_order_line`] - 注文明細に価格を付与
-//! - [`add_comment_line`] - プロモーション適用時にコメント行を追加
-//! - [`get_pricing_function`] - 価格取得関数のファクトリ
-//! - [`price_order`] - メイン価格計算関数
+//! - [`get_line_price`] - Gets the price from an order line
+//! - [`to_priced_order_line`] - Attaches price to an order line
+//! - [`add_comment_line`] - Adds a comment line when a promotion is applied
+//! - [`get_pricing_function`] - Factory for pricing functions
+//! - [`price_order`] - Main pricing function
 
 use crate::simple_types::{BillingAmount, Price, ProductCode, PromotionCode};
 use crate::workflow::{
@@ -23,18 +23,18 @@ use std::rc::Rc;
 // get_line_price (REQ-062)
 // =============================================================================
 
-/// `PricedOrderLine` から価格を取得するヘルパー関数
+/// Helper function to retrieve a price from a `PricedOrderLine`
 ///
-/// `ProductLine` の場合は明細の価格を返し、
-/// `CommentLine` の場合は 0 の価格を返す。
+/// For `ProductLine`, returns the line price;
+/// for `CommentLine`, returns a price of 0.
 ///
 /// # Arguments
 ///
-/// * `line` - 価格付き注文明細
+/// * `line` - Priced order line
 ///
 /// # Returns
 ///
-/// 明細の価格
+/// Line price
 ///
 /// # Examples
 ///
@@ -44,7 +44,7 @@ use std::rc::Rc;
 /// use order_taking_sample::simple_types::{OrderLineId, ProductCode, OrderQuantity, Price};
 /// use rust_decimal::Decimal;
 ///
-/// // ProductLine の場合
+/// // ProductLine when
 /// let product_code = ProductCode::create("ProductCode", "W1234").unwrap();
 /// let product_line = PricedOrderProductLine::new(
 ///     OrderLineId::create("OrderLineId", "line-001").unwrap(),
@@ -56,7 +56,7 @@ use std::rc::Rc;
 /// let price = get_line_price(&line);
 /// assert_eq!(price.value(), Decimal::from(500));
 ///
-/// // CommentLine の場合
+/// // CommentLine when
 /// let comment_line = PricedOrderLine::CommentLine("Applied promotion".to_string());
 /// let price = get_line_price(&comment_line);
 /// assert_eq!(price.value(), Decimal::ZERO);
@@ -73,24 +73,24 @@ pub fn get_line_price(line: &PricedOrderLine) -> Price {
 // to_priced_order_line (REQ-060)
 // =============================================================================
 
-/// `ValidatedOrderLine` に価格を付与して `PricedOrderLine` を生成する
+/// Assigns a price to a `ValidatedOrderLine` to create a `PricedOrderLine`
 ///
-/// 単価 × 数量で明細の合計価格を計算する。
-/// 価格が範囲外の場合は `PricingError` を返す。
+/// Calculates the total line price as unit price times quantity.
+/// Returns `PricingError` if the price is out of range.
 ///
 /// # Arguments
 ///
-/// * `get_product_price` - 製品コードから価格を取得する関数
-/// * `validated_order_line` - 検証済み注文明細
+/// * `get_product_price` - Function to retrieve a price from a product code
+/// * `validated_order_line` - Validated order line
 ///
 /// # Returns
 ///
-/// * `Ok(PricedOrderLine)` - 価格付き注文明細
-/// * `Err(PricingError)` - 価格計算エラー（オーバーフロー等）
+/// * `Ok(PricedOrderLine)` - Priced order line
+/// * `Err(PricingError)` - Pricing error (overflow, etc.)
 ///
 /// # Errors
 ///
-/// 単価 × 数量の計算結果が `Price` の範囲を超える場合に `PricingError` を返す。
+/// Returns `PricingError` when the unit price times quantity calculation result exceeds the `Price` range.
 ///
 /// # Examples
 ///
@@ -145,20 +145,20 @@ where
 // add_comment_line (REQ-061)
 // =============================================================================
 
-/// プロモーション適用時にコメント行を追加する
+/// Adds a comment line when a promotion is applied
 ///
-/// `PricingMethod` が `Promotion` の場合、価格付き注文明細リストの末尾に
-/// プロモーション適用を示すコメント行を追加する。
-/// `Standard` の場合は変更なしで返す。
+/// When `PricingMethod` is `Promotion`, appends a comment line to the end of the priced order line list
+/// indicating that a promotion was applied.
+/// For `Standard`, returns the list unchanged.
 ///
 /// # Arguments
 ///
-/// * `pricing_method` - 価格計算方法
-/// * `lines` - 価格付き注文明細リスト
+/// * `pricing_method` - Pricing method
+/// * `lines` - Priced order linelist
 ///
 /// # Returns
 ///
-/// コメント行が追加された（または変更なしの）明細リスト
+/// The line list with a comment line added (or unchanged)
 ///
 /// # Examples
 ///
@@ -167,12 +167,12 @@ where
 /// use order_taking_sample::workflow::{PricedOrderLine, PricingMethod};
 /// use order_taking_sample::simple_types::PromotionCode;
 ///
-/// // Standard の場合は変更なし
+/// // No change for Standard
 /// let lines: Vec<PricedOrderLine> = vec![];
 /// let result = add_comment_line(&PricingMethod::Standard, lines);
 /// assert!(result.is_empty());
 ///
-/// // Promotion の場合はコメント行が追加される
+/// // A comment line is added for Promotion
 /// let lines: Vec<PricedOrderLine> = vec![];
 /// let promo_code = PromotionCode::new("SUMMER2024".to_string());
 /// let result = add_comment_line(&PricingMethod::Promotion(promo_code), lines);
@@ -198,27 +198,27 @@ pub fn add_comment_line(
 // get_pricing_function (REQ-059)
 // =============================================================================
 
-/// 価格取得関数のファクトリ
+/// Factory for price retrieval functions
 ///
-/// 標準価格取得関数とプロモーション価格取得関数を受け取り、
-/// `PricingMethod` に応じた価格取得関数を返すファクトリ関数。
+/// Takes a standard pricing retrieval function and a promotion pricing retrieval function,
+/// and returns a factory function that returns a price retrieval function based on `PricingMethod`.
 ///
-/// - `Standard` の場合: 標準価格を返す関数を返す
-/// - `Promotion` の場合: プロモーション価格を優先し、対象外の商品は標準価格にフォールバック
+/// - For `Standard`: returns a function that returns the standard price
+/// - For `Promotion`: prioritizes the promotion price, falling back to the standard price for non-targeted products
 ///
 /// # Type Parameters
 ///
-/// * `GetStandardPricesFn` - 標準価格取得関数を返す関数
-/// * `GetPromotionPricesFn` - プロモーション価格取得関数を返す関数
+/// * `GetStandardPricesFn` - Function that returns a standard price retrieval function
+/// * `GetPromotionPricesFn` - Function that returns a promotion price retrieval function
 ///
 /// # Arguments
 ///
-/// * `get_standard_prices` - 標準価格取得関数を生成する関数
-/// * `get_promotion_prices` - プロモーションコードに対応する価格取得関数を生成する関数
+/// * `get_standard_prices` - Function that generates a standard price retrieval function
+/// * `get_promotion_prices` - Function that generates a price retrieval function for a given promotion code
 ///
 /// # Returns
 ///
-/// `PricingMethod` を受け取り、対応する価格取得関数を返す関数
+/// A function that takes a `PricingMethod` and returns the corresponding price retrieval function
 ///
 /// # Examples
 ///
@@ -228,13 +228,13 @@ pub fn add_comment_line(
 /// use order_taking_sample::simple_types::{ProductCode, Price, PromotionCode};
 /// use rust_decimal::Decimal;
 ///
-/// // 標準価格取得関数
+/// // Standard pricingretrievalfunction
 /// let get_standard_prices = || {
 ///     Box::new(|_: &ProductCode| Price::create(Decimal::from(100)).unwrap())
 ///         as Box<dyn Fn(&ProductCode) -> Price>
 /// };
 ///
-/// // プロモーション価格取得関数（常に None を返す）
+/// // Promotional pricing retrieval function (always returns None)
 /// let get_promotion_prices = |_: &PromotionCode| {
 ///     Box::new(|_: &ProductCode| None)
 ///         as Box<dyn Fn(&ProductCode) -> Option<Price>>
@@ -242,7 +242,7 @@ pub fn add_comment_line(
 ///
 /// let pricing_fn = get_pricing_function(get_standard_prices, get_promotion_prices);
 ///
-/// // Standard の場合
+/// // Standard when
 /// let get_price = pricing_fn(&PricingMethod::Standard);
 /// let product_code = ProductCode::create("ProductCode", "W1234").unwrap();
 /// assert_eq!(get_price(&product_code).value(), Decimal::from(100));
@@ -257,14 +257,14 @@ where
     GetPromotionPricesFn:
         Fn(&PromotionCode) -> Box<dyn Fn(&ProductCode) -> Option<Price>> + 'static,
 {
-    // lambars の Lazy 型を使用して標準価格取得関数をキャッシュ
+    // Use lambars' Lazy type to cache the standard price retrieval function
     let cached_standard_prices: Rc<Lazy<Box<dyn Fn(&ProductCode) -> Price>, GetStandardPricesFn>> =
         Rc::new(Lazy::new(get_standard_prices));
 
     let get_promotion_prices = Rc::new(get_promotion_prices);
 
     move |pricing_method: &PricingMethod| {
-        // 標準価格取得関数を遅延初期化（Lazy::force で最初のアクセス時に評価）
+        // Deferred initialization of the standard price retrieval function (evaluated on first access via Lazy::force)
         let cached_standard_prices_clone = Rc::clone(&cached_standard_prices);
 
         let get_standard_price: Rc<dyn Fn(&ProductCode) -> Price> =
@@ -291,28 +291,28 @@ where
 // price_order (REQ-063)
 // =============================================================================
 
-/// `ValidatedOrder` を `PricedOrder` に変換するメイン関数
+/// Main function that converts a `ValidatedOrder` to a `PricedOrder`
 ///
-/// 全ての価格計算ロジックを統合し、価格取得関数を注入する。
+/// Integrates all pricing logic and injects the price retrieval function.
 ///
 /// # Type Parameters
 ///
-/// * `GetPricingFn` - `PricingMethod` から価格取得関数を返す関数
+/// * `GetPricingFn` - Function that returns a price retrieval function from a `PricingMethod`
 ///
 /// # Arguments
 ///
-/// * `get_pricing_function` - 価格計算方法から価格取得関数を返す関数
-/// * `validated_order` - 検証済み注文
+/// * `get_pricing_function` - Function that returns a price retrieval function from a pricing method
+/// * `validated_order` - Validated order
 ///
 /// # Returns
 ///
-/// * `Ok(PricedOrder)` - 価格計算済み注文
-/// * `Err(PlaceOrderError)` - 価格計算エラー
+/// * `Ok(PricedOrder)` - Priced order
+/// * `Err(PlaceOrderError)` - Pricing error
 ///
 /// # Errors
 ///
-/// 価格計算中にオーバーフロー等のエラーが発生した場合、
-/// または請求金額の計算でエラーが発生した場合に `PlaceOrderError::Pricing` を返す。
+/// If an error such as overflow occurs during price calculation,
+/// or if an error occurs during billing amount calculation, returns `PlaceOrderError::Pricing`.
 ///
 /// # Examples
 ///
@@ -361,7 +361,7 @@ where
 {
     let get_product_price = get_pricing_function(validated_order.pricing_method());
 
-    // 各注文明細に価格を付与
+    // Assign prices to each order line
     let priced_lines_result: Result<Vec<PricedOrderLine>, PricingError> = validated_order
         .lines()
         .iter()
@@ -370,10 +370,10 @@ where
 
     let priced_lines = priced_lines_result.map_err(PlaceOrderError::Pricing)?;
 
-    // コメント行を追加
+    // Add comment lines
     let lines_with_comment = add_comment_line(validated_order.pricing_method(), priced_lines);
 
-    // 請求金額を計算
+    // Calculate billing amount
     let line_prices: Vec<Price> = lines_with_comment.iter().map(get_line_price).collect();
 
     let amount_to_bill = BillingAmount::sum_prices(&line_prices).map_err(|validation_error| {
@@ -406,7 +406,7 @@ mod tests {
     use std::cell::Cell;
 
     // =========================================================================
-    // モックヘルパー関数
+    // Mock helper functions
     // =========================================================================
 
     fn create_product_code(code: &str) -> ProductCode {
@@ -541,7 +541,7 @@ mod tests {
 
         #[test]
         fn test_price_overflow_boundary() {
-            // 11 * 100 = 1100 > 1000 (Price の上限)
+            // 11 * 100 = 1100 > 1000 (Price upper limit)
             let validated_line = create_validated_order_line("line-001", "W1234", 11);
             let get_price = |_: &ProductCode| create_price(100);
 
@@ -554,7 +554,7 @@ mod tests {
 
         #[test]
         fn test_price_boundary_max() {
-            // 10 * 100 = 1000 (Price の上限ちょうど)
+            // 10 * 100 = 1000 (exactly at Price upper limit)
             let validated_line = create_validated_order_line("line-001", "W1234", 10);
             let get_price = |_: &ProductCode| create_price(100);
 
@@ -671,7 +671,7 @@ mod tests {
             let get_price = pricing_fn(&PricingMethod::Promotion(promo_code));
             let product_code = create_product_code("G123");
 
-            // プロモーション対象外なので標準価格にフォールバック
+            // Not a promotion target, so falls back to the standard price
             assert_eq!(get_price(&product_code).value(), Decimal::from(150));
         }
 
@@ -691,7 +691,7 @@ mod tests {
             let pricing_fn = get_pricing_function(get_standard_prices, get_promotion_prices);
             let product_code = create_product_code("W1234");
 
-            // 複数回呼び出し
+            // Multiple calls
             let get_price1 = pricing_fn(&PricingMethod::Standard);
             let _ = get_price1(&product_code);
             let get_price2 = pricing_fn(&PricingMethod::Standard);
@@ -699,7 +699,7 @@ mod tests {
             let get_price3 = pricing_fn(&PricingMethod::Standard);
             let _ = get_price3(&product_code);
 
-            // 初期化は1回のみ
+            // Initialization happens only once
             assert_eq!(call_count.get(), 1);
         }
     }
@@ -791,7 +791,7 @@ mod tests {
 
         #[test]
         fn test_pricing_error_propagation() {
-            // 11 * 100 = 1100 > 1000 (Price の上限)
+            // 11 * 100 = 1100 > 1000 (Price upper limit)
             let validated_line = create_validated_order_line("line-001", "W1234", 11);
             let validated_order =
                 create_validated_order(vec![validated_line], PricingMethod::Standard);
@@ -842,9 +842,9 @@ mod tests {
 
         #[test]
         fn test_billing_amount_overflow() {
-            // BillingAmount の上限は 10000
-            // 11明細 x 1000円 = 11000 > 10000 でオーバーフロー
-            // Price の上限が 1000 なので、各明細 10 個 x 100円 = 1000円
+            // BillingAmount upper limit is 10000
+            // 11 lines x 1000 yen = 11000 > 10000, overflow
+            // Price upper limit is 1000, so each line is 10 units x 100 yen = 1000 yen
             let mut lines = Vec::new();
             for index in 0..11 {
                 lines.push(create_validated_order_line(

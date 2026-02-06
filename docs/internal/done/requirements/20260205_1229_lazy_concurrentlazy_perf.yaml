@@ -1,0 +1,117 @@
+meta:
+  feature: "Lazy/ConcurrentLazy パフォーマンス改善"
+  proposed_file: "docs/internal/requirements/20260205_1229_lazy_concurrentlazy_perf.yaml"
+  profiling_data: "profiling-results/21697155781"
+  scope: "Lazy/ConcurrentLazy と関連ホットパスの性能退行是正"
+
+components:
+  - "lambars::persistent::ordered_unique_set::OrderedUniqueSet"
+  - "lambars::control::concurrent_lazy::ConcurrentLazy"
+  - "lambars::effect::async_io::AsyncIO"
+  - "for_macro 展開パイプライン"
+
+current_performance_issues:
+  - scenario: "tasks_eff"
+    metrics:
+      avg: "1.24ms -> 3.43s (+276,513%)"
+      p99: "2.47ms -> 9.02s (+365,082%)"
+    impact: "レイテンシSLO逸脱・スループット低下"
+  - scenario: "tasks_update"
+    metrics:
+      error_rate: "0.415 -> 0.538 (+12.23pp)"
+    impact: "競合時の失敗増加"
+
+bottlenecks:
+  - id: "tasks_eff_ordered_unique_set_insert"
+    scenario: "tasks_eff"
+    component: "lambars::persistent::ordered_unique_set::OrderedUniqueSet::insert"
+    evidence:
+      - path: "profiling-results/21697155781/api-profiling-all-628c5704bc56b2c962d7af82e4d65c53afca17d7/tasks_eff/stacks.folded"
+        note: "insert と page fault (clear_page_erms/handle_mm_fault) が上位"
+    why_bottleneck:
+      - "大量の insert による反復アロケーションとページフォルトが支配的"
+      - "永続構造の複製・解放がメモリ圧迫と TLB/ページフォルトを誘発"
+    required_improvements:
+      - "挿入をバッチ化し、既存集合との一括マージに置き換える"
+      - "サイズ見積もりに基づく一括確保 (reserve/with_capacity) を徹底"
+      - "構造共有を維持しつつ差分ノードのみ新規確保し、不要なクローンを削減"
+    algorithm:
+      - "入力を sort + dedup し、既存の ordered set と線形マージ (O(n+m))"
+      - "小規模集合では SmallVec/スタック領域を優先しヒープ割当を削減"
+    expected_effect:
+      - "ページフォルト/alloc の大幅削減、tasks_eff レイテンシの回復"
+    priority: "P0"
+
+  - id: "control_bench_concurrent_lazy_force_slow"
+    scenario: "control_bench"
+    component: "lambars::control::concurrent_lazy::ConcurrentLazy::force_slow"
+    evidence:
+      - path: "profiling-results/21697155781/criterion-profiling-all-628c5704bc56b2c962d7af82e4d65c53afca17d7/criterion-profiling-628c5704bc56b2c962d7af82e4d65c53afca17d7-control_bench/top_functions.txt"
+        note: "force_slow と futex 系が上位"
+    why_bottleneck:
+      - "初期化のスローパス比率が高く、ロック競合で futex が多発"
+      - "待機スレッドが同時に起床し、再競合するサイクルが発生"
+    required_improvements:
+      - "ロック不要な fast path を強化し、初期化完了後の待機を回避"
+      - "状態遷移を最小化し、待機側はスピンからパークへ段階移行"
+      - "一度に1スレッドのみ起床させる待機キュー制御を導入"
+    algorithm:
+      - "Atomic state machine (Uninit/Init/Ready) + compare_exchange による once 初期化"
+      - "待機は event-listener/condvar で逐次起床し thundering herd を抑制"
+    expected_effect:
+      - "futex 呼び出し数の削減、force_slow 比率の低下"
+    priority: "P1"
+
+  - id: "effect_bench_async_io_poll_overhead"
+    scenario: "effect_bench"
+    component: "lambars::effect::async_io::AsyncIO"
+    evidence:
+      - path: "profiling-results/21697155781/criterion-profiling-all-628c5704bc56b2c962d7af82e4d65c53afca17d7/criterion-profiling-628c5704bc56b2c962d7af82e4d65c53afca17d7-effect_bench/top_functions.txt"
+        note: "AsyncIO::poll と FuturesUnordered::poll_next、malloc/cfree が上位"
+    why_bottleneck:
+      - "poll ループでのアロケーション/ドロップが多く、ランタイム出入りが高頻度"
+      - "FuturesUnordered の管理コストが支配的で、I/O本体よりオーバーヘッドが大きい"
+    required_improvements:
+      - "AsyncIO バッチ処理でのランタイム enter/exit を最小化"
+      - "FuturesUnordered の容量事前確保と再利用で alloc/cfree を削減"
+      - "小タスクは同期バッチでまとめて処理し poll 回数を削減"
+    algorithm:
+      - "固定長バッファ + ループ駆動の自前ポーリングで再割当を抑制"
+      - "JoinSet/チャネル駆動のタスク収束で poll_next 呼び出し回数を削減"
+    expected_effect:
+      - "alloc/cfree 50% 以上削減、poll 頻度の低下"
+    priority: "P1"
+
+  - id: "for_macro_flatten_vec_extend"
+    scenario: "for_macro_bench"
+    component: "flatten::and_then_or_clear / Vec::spec_extend"
+    evidence:
+      - path: "profiling-results/21697155781/criterion-profiling-all-628c5704bc56b2c962d7af82e4d65c53afca17d7/criterion-profiling-628c5704bc56b2c962d7af82e4d65c53afca17d7-for_macro_bench/top_functions.txt"
+        note: "flatten と Vec 拡張、malloc/cfree が上位"
+    why_bottleneck:
+      - "flat_map による繰り返し拡張で Vec が再確保を繰り返す"
+      - "サイズ見積もり不足によりメモリ断片化とページフォルトが増加"
+    required_improvements:
+      - "size_hint を用いた事前予約と2パス収集で再確保を抑制"
+      - "拡張時は extend_from_slice を優先し一括コピーする"
+    algorithm:
+      - "まず長さを計算して Vec::with_capacity で一括確保、次に線形コピー"
+    expected_effect:
+      - "再割当回数削減、for_macro ベンチの安定化"
+    priority: "P2"
+
+expected_effects:
+  - "tasks_eff の avg/p99 を前回比 +20% 以内まで回復"
+  - "tasks_update の error_rate を 0.45 以下へ低減"
+  - "futex 呼び出し数 70% 以上削減"
+  - "alloc/cfree 回数 50% 以上削減"
+
+functional_constraints:
+  - "参照透過性を維持し、計算と実行を分離する"
+  - "不変性を維持し、破壊的操作は内部バッファに限定する"
+  - "例外を制御フローに使わず、失敗は型で表現する"
+
+validation:
+  - "profiling-results/21697155781 と同条件で再計測"
+  - "flamegraph で対象関数の幅が縮小していることを確認"
+  - "tasks_eff と control_bench のベンチマーク差分を記録"

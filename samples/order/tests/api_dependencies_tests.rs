@@ -1,7 +1,7 @@
-//! ダミー依存関数のテスト
+//! Tests for dummy dependency functions
 //!
 //! check_product_exists, check_address_exists, get_pricing_function,
-//! calculate_shipping_cost, create_acknowledgment_letter, send_acknowledgment のテスト
+//! Tests for calculate_shipping_cost, create_acknowledgment_letter, and send_acknowledgment
 
 use order_taking_sample::api::{
     calculate_shipping_cost, check_address_exists, check_product_exists,
@@ -20,7 +20,7 @@ use rstest::rstest;
 use rust_decimal::Decimal;
 
 // =============================================================================
-// check_product_exists のテスト
+// Tests for check_product_exists
 // =============================================================================
 
 mod check_product_exists_tests {
@@ -40,7 +40,7 @@ mod check_product_exists_tests {
 }
 
 // =============================================================================
-// check_address_exists のテスト
+// Tests for check_address_exists
 // =============================================================================
 
 mod check_address_exists_tests {
@@ -86,7 +86,7 @@ mod check_address_exists_tests {
 }
 
 // =============================================================================
-// get_pricing_function のテスト
+// Tests for get_pricing_function
 // =============================================================================
 
 mod get_pricing_function_tests {
@@ -114,7 +114,7 @@ mod get_pricing_function_tests {
 
     #[rstest]
     fn test_different_pricing_methods() {
-        // ダミー実装では pricing_method は使用されないが、テストしておく
+        // pricing_method is unused in the dummy implementation, but we test it anyway
         let standard_fn = get_pricing_function(&PricingMethod::Standard);
         let promotion_fn = get_pricing_function(&PricingMethod::Promotion(
             order_taking_sample::simple_types::PromotionCode::new("PROMO".to_string()),
@@ -122,14 +122,14 @@ mod get_pricing_function_tests {
 
         let widget_code = ProductCode::create("ProductCode", "W1234").unwrap();
 
-        // どちらも同じ価格を返す（ダミー実装）
+        // Both return the same price (dummy implementation)
         assert_eq!(standard_fn(&widget_code).value(), Decimal::from(100));
         assert_eq!(promotion_fn(&widget_code).value(), Decimal::from(100));
     }
 }
 
 // =============================================================================
-// calculate_shipping_cost のテスト
+// Tests for calculate_shipping_cost
 // =============================================================================
 
 mod calculate_shipping_cost_tests {
@@ -165,7 +165,7 @@ mod calculate_shipping_cost_tests {
 }
 
 // =============================================================================
-// create_acknowledgment_letter のテスト
+// Tests for create_acknowledgment_letter
 // =============================================================================
 
 mod create_acknowledgment_letter_tests {
@@ -217,7 +217,7 @@ mod create_acknowledgment_letter_tests {
 }
 
 // =============================================================================
-// send_acknowledgment のテスト
+// Tests for send_acknowledgment
 // =============================================================================
 
 mod send_acknowledgment_tests {
@@ -236,7 +236,7 @@ mod send_acknowledgment_tests {
 
         let io_result = send_acknowledgment(&ack);
 
-        // IO モナドを実行して結果を確認
+        // Execute the IO monad and verify the result
         let result = io_result.run_unsafe();
         assert!(matches!(result, SendResult::Sent));
     }

@@ -64,15 +64,14 @@ const BRANCHING_FACTOR: usize = 16;
 const MIN_KEYS: usize = BRANCHING_FACTOR - 1;
 const MAX_KEYS: usize = 2 * BRANCHING_FACTOR - 1;
 
-/// エントリ配列の型エイリアス。
-/// `MAX_KEYS` + 1 = 32 要素までスタック上に配置。
+/// Type alias for the entry array.
+/// Up to `MAX_KEYS` + 1 = 32 elements are placed on the stack.
 type EntryArray<K, V> = SmallVec<[(K, V); 32]>;
 
-/// 子ノード配列の型エイリアス。
-/// SmallVecは32要素までしかサポートしないため、子ノード配列は
-/// 通常のVecを使用する。これにより、ノード当たり1回のヒープ
-/// 割り当ては発生するが、エントリ配列のスタック配置による
-/// 改善は得られる。
+/// Type alias for the child node array.
+/// Since `SmallVec` only supports up to 32 elements, the child node array
+/// uses a regular Vec. This incurs one heap allocation per node, but we
+/// still benefit from the stack allocation of the entry array.
 type ChildArray<K, V> = Vec<ReferenceCounter<BTreeNode<K, V>>>;
 
 /// Internal node structure for the B-Tree.
@@ -2783,7 +2782,7 @@ mod tests {
         }
     }
 
-    /// Copy-on-Write正当性テスト: insert後も結果が正しいことを検証
+    /// Copy-on-Write correctness test: verifies results remain correct after insert
     #[test]
     fn test_cow_insert_correctness() {
         let map1 = PersistentTreeMap::new()
@@ -2794,23 +2793,23 @@ mod tests {
         let map2 = map1.clone().insert(4, "d");
         let map3 = map1.clone().insert(2, "B");
 
-        // map1は変更されていない
+        // map1 is unchanged
         assert_eq!(map1.len(), 3);
         assert_eq!(map1.get(&1), Some(&"a"));
         assert_eq!(map1.get(&2), Some(&"b"));
         assert_eq!(map1.get(&3), Some(&"c"));
         assert_eq!(map1.get(&4), None);
 
-        // map2は新しいエントリを含む
+        // map2 contains the new entry
         assert_eq!(map2.len(), 4);
         assert_eq!(map2.get(&4), Some(&"d"));
 
-        // map3は更新されたエントリを含む
+        // map3 contains the updated entry
         assert_eq!(map3.len(), 3);
         assert_eq!(map3.get(&2), Some(&"B"));
     }
 
-    /// Copy-on-Write正当性テスト: remove後も結果が正しいことを検証
+    /// Copy-on-Write correctness test: verifies results remain correct after remove
     #[test]
     fn test_cow_remove_correctness() {
         let map1 = PersistentTreeMap::new()
@@ -2821,35 +2820,35 @@ mod tests {
         let map2 = map1.clone().remove(&2);
         let map3 = map1.clone().remove(&99);
 
-        // map1は変更されていない
+        // map1 is unchanged
         assert_eq!(map1.len(), 3);
         assert_eq!(map1.get(&2), Some(&"b"));
 
-        // map2は削除されたエントリを含まない
+        // map2 does not contain the removed entry
         assert_eq!(map2.len(), 2);
         assert_eq!(map2.get(&2), None);
         assert_eq!(map2.get(&1), Some(&"a"));
         assert_eq!(map2.get(&3), Some(&"c"));
 
-        // map3は変更されていない（存在しないキーの削除）
+        // map3 is unchanged (removal of a non-existent key)
         assert_eq!(map3.len(), 3);
     }
 
-    /// 構造共有テスト: clone後の操作で元のマップが変更されないことを検証
+    /// Structural sharing test: verifies the original map is not modified by operations after clone
     #[test]
     fn test_structural_sharing_after_clone() {
         let map1 = PersistentTreeMap::new().insert(1, "a").insert(2, "b");
         let map1_clone = map1.clone();
         let _map2 = map1.insert(3, "c");
 
-        // map1_cloneは変更されていない
+        // map1_clone is unchanged
         assert_eq!(map1_clone.len(), 2);
         assert_eq!(map1_clone.get(&3), None);
         assert_eq!(map1_clone.get(&1), Some(&"a"));
         assert_eq!(map1_clone.get(&2), Some(&"b"));
     }
 
-    /// 大量データでのCopy-on-Write正当性テスト
+    /// Copy-on-Write correctness test with large data
     #[test]
     fn test_cow_large_data() {
         let mut map = PersistentTreeMap::new();
@@ -2857,14 +2856,14 @@ mod tests {
             map = map.insert(i, i * 2);
         }
 
-        // cloneしてから操作
+        // Clone then operate on the clone
         let map_clone = map.clone();
         let mut map2 = map;
         for i in 500..1000 {
             map2 = map2.insert(i, i * 2);
         }
 
-        // map_cloneは500件のまま
+        // map_clone still has 500 entries
         assert_eq!(map_clone.len(), 500);
         for i in 0..500 {
             assert_eq!(map_clone.get(&i), Some(&(i * 2)));
@@ -2873,14 +2872,14 @@ mod tests {
             assert_eq!(map_clone.get(&i), None);
         }
 
-        // map2は1000件
+        // map2 has 1000 entries
         assert_eq!(map2.len(), 1000);
         for i in 0..1000 {
             assert_eq!(map2.get(&i), Some(&(i * 2)));
         }
     }
 
-    /// 大量データでのremove Copy-on-Write正当性テスト
+    /// Copy-on-Write correctness test for remove with large data
     #[test]
     fn test_cow_remove_large_data() {
         let mut map = PersistentTreeMap::new();
@@ -2891,18 +2890,18 @@ mod tests {
         let map_clone = map.clone();
         let mut map2 = map;
 
-        // 偶数キーを削除
+        // Remove even keys
         for i in (0..500).step_by(2) {
             map2 = map2.remove(&i);
         }
 
-        // map_cloneは500件のまま
+        // map_clone still has 500 entries
         assert_eq!(map_clone.len(), 500);
         for i in 0..500 {
             assert_eq!(map_clone.get(&i), Some(&(i * 2)));
         }
 
-        // map2は250件（奇数のみ）
+        // map2 has 250 entries (odd keys only)
         assert_eq!(map2.len(), 250);
         for i in (0..500).step_by(2) {
             assert_eq!(map2.get(&i), None);

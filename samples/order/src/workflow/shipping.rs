@@ -1,18 +1,18 @@
-//! 配送コスト計算と確認メール送信
+//! Shipping cost calculation and acknowledgment email sending
 //!
-//! Phase 6 の実装。配送地域の分類、配送コストの計算、
-//! VIP 顧客への無料配送、および注文確認メールの送信を行う。
+//! Phase 6 implementation. Classifies shipping regions, calculates shipping costs,
+//! provides free shipping for VIP customers, and sends order acknowledgment emails.
 //!
-//! # 機能一覧
+//! # Feature List
 //!
-//! - [`ShippingRegion`] - 配送地域の分類（米国近隣州、米国遠方州、国際）
-//! - [`classify_shipping_region`] - 住所から配送地域を分類
-//! - [`calculate_shipping_cost`] - 配送地域に基づいてコストを計算
-//! - [`add_shipping_info_to_order`] - 注文に配送情報を追加
-//! - [`free_vip_shipping`] - VIP 顧客の配送料を無料化
-//! - [`acknowledge_order`] - 注文確認メールを送信（IO モナド）
+//! - [`ShippingRegion`] - Shipping region classification (US local, US remote, international)
+//! - [`classify_shipping_region`] - Classifies shipping region from address
+//! - [`calculate_shipping_cost`] - Calculates cost based on shipping region
+//! - [`add_shipping_info_to_order`] - Adds shipping info to an order
+//! - [`free_vip_shipping`] - Makes shipping free for VIP customers
+//! - [`acknowledge_order`] - Sends order acknowledgment email (IO monad)
 //!
-//! # 使用例
+//! # Usage Examples
 //!
 //! ```
 //! use order_taking_sample::workflow::{
@@ -21,7 +21,7 @@
 //! };
 //! use order_taking_sample::compound_types::Address;
 //!
-//! // 住所から配送地域を分類
+//! // Classify shipping region from address
 //! let address = Address::create(
 //!     "123 Main St", "", "", "", "Los Angeles", "90001", "CA", "US"
 //! ).unwrap();
@@ -42,40 +42,40 @@ use crate::workflow::shipping_types::{
 };
 
 // =============================================================================
-// 定数定義
+// Constant definitions
 // =============================================================================
 
-/// 米国近隣州の州コードリスト
+/// List of US local state codes
 ///
-/// カリフォルニアを中心とした西海岸近隣州。
+/// West coast states near California.
 const US_LOCAL_STATES: [&str; 4] = ["CA", "OR", "AZ", "NV"];
 
-/// 米国を表す国名のバリエーション
+/// Country name variations representing the United States
 const US_COUNTRY_NAMES: [&str; 3] = ["US", "USA", "United States"];
 
-/// 米国近隣州の配送コスト（ドル）
+/// Shipping cost for US local states (in dollars)
 const LOCAL_STATE_SHIPPING_COST: u32 = 5;
 
-/// 米国遠方州の配送コスト（ドル）
+/// Shipping cost for US remote states (in dollars)
 const REMOTE_STATE_SHIPPING_COST: u32 = 10;
 
-/// 国際配送のコスト（ドル）
+/// International shipping cost (in dollars)
 const INTERNATIONAL_SHIPPING_COST: u32 = 20;
 
 // =============================================================================
-// ShippingRegion 列挙型
+// ShippingRegion enum
 // =============================================================================
 
-/// 配送地域の分類
+/// Shipping region classification
 ///
-/// 配送先住所を3つのカテゴリに分類する。
-/// 各カテゴリに応じて配送コストが決定される。
+/// Classifies a shipping address into one of three categories.
+/// Shipping cost is determined based on the category.
 ///
-/// # カテゴリ
+/// # Categories
 ///
-/// - [`UsLocalState`](ShippingRegion::UsLocalState) - 米国近隣州（CA, OR, AZ, NV）
-/// - [`UsRemoteState`](ShippingRegion::UsRemoteState) - 米国遠方州（その他の米国州）
-/// - [`International`](ShippingRegion::International) - 国際（米国以外）
+/// - [`UsLocalState`](ShippingRegion::UsLocalState) - US local states (CA, OR, AZ, NV)
+/// - [`UsRemoteState`](ShippingRegion::UsRemoteState) - US remote state (other US states)
+/// - [`International`](ShippingRegion::International) - International (non-US)
 ///
 /// # Examples
 ///
@@ -89,24 +89,24 @@ const INTERNATIONAL_SHIPPING_COST: u32 = 20;
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShippingRegion {
-    /// 米国近隣州（CA, OR, AZ, NV）
+    /// US local states (CA, OR, AZ, NV)
     ///
-    /// 最も安い配送料金が適用される。
+    /// The lowest shipping rate is applied.
     UsLocalState,
 
-    /// 米国遠方州（近隣州以外の米国内）
+    /// US remote states (US states other than local ones)
     ///
-    /// 中程度の配送料金が適用される。
+    /// A moderate shipping rate is applied.
     UsRemoteState,
 
-    /// 国際配送（米国外）
+    /// International shipping (outside the US)
     ///
-    /// 最も高い配送料金が適用される。
+    /// The highest shipping rate is applied.
     International,
 }
 
 impl ShippingRegion {
-    /// `UsLocalState` バリアントかどうかを返す
+    /// Returns whether this is the `UsLocalState` variant
     ///
     /// # Examples
     ///
@@ -121,7 +121,7 @@ impl ShippingRegion {
         matches!(self, Self::UsLocalState)
     }
 
-    /// `UsRemoteState` バリアントかどうかを返す
+    /// Returns whether this is the `UsRemoteState` variant
     ///
     /// # Examples
     ///
@@ -136,7 +136,7 @@ impl ShippingRegion {
         matches!(self, Self::UsRemoteState)
     }
 
-    /// `International` バリアントかどうかを返す
+    /// Returns whether this is the `International` variant
     ///
     /// # Examples
     ///
@@ -153,26 +153,26 @@ impl ShippingRegion {
 }
 
 // =============================================================================
-// classify_shipping_region 関数
+// classify_shipping_region function
 // =============================================================================
 
-/// 住所から配送地域を分類する
+/// Classifies the shipping region from an address
 ///
-/// 配送先住所の国と州コードに基づいて、[`ShippingRegion`] を決定する。
+/// Determines the [`ShippingRegion`] based on the country and state code of the address.
 ///
-/// # 分類ルール
+/// # Classification Rules
 ///
-/// 1. 国が "US", "USA", "United States" のいずれかでない場合 -> [`International`](ShippingRegion::International)
-/// 2. 州コードが "CA", "OR", "AZ", "NV" のいずれか -> [`UsLocalState`](ShippingRegion::UsLocalState)
-/// 3. それ以外の米国内 -> [`UsRemoteState`](ShippingRegion::UsRemoteState)
+/// 1. If country is not "US", "USA", or "United States" -> [`International`](ShippingRegion::International)
+/// 2. If state code is "CA", "OR", "AZ", or "NV" -> [`UsLocalState`](ShippingRegion::UsLocalState)
+/// 3. Otherwise within US -> [`UsRemoteState`](ShippingRegion::UsRemoteState)
 ///
 /// # Arguments
 ///
-/// * `address` - 分類対象の住所
+/// * `address` - Address to classify
 ///
 /// # Returns
 ///
-/// 配送地域を表す [`ShippingRegion`]
+/// A [`ShippingRegion`] representing the shipping region
 ///
 /// # Examples
 ///
@@ -180,21 +180,21 @@ impl ShippingRegion {
 /// use order_taking_sample::workflow::classify_shipping_region;
 /// use order_taking_sample::compound_types::Address;
 ///
-/// // カリフォルニア州は近隣州
+/// // California is a local state
 /// let ca_address = Address::create(
 ///     "123 Main St", "", "", "", "Los Angeles", "90001", "CA", "US"
 /// ).unwrap();
 /// let region = classify_shipping_region(&ca_address);
 /// assert!(region.is_us_local_state());
 ///
-/// // ニューヨーク州は遠方州
+/// // New York is a remote state
 /// let ny_address = Address::create(
 ///     "456 Broadway", "", "", "", "New York", "10001", "NY", "US"
 /// ).unwrap();
 /// let region = classify_shipping_region(&ny_address);
 /// assert!(region.is_us_remote_state());
 ///
-/// // 日本は国際（UsStateCode には有効な米国州コードが必要だが、country で判定される）
+/// // Japan is international (UsStateCode requires a valid US state code, but determination is by country)
 /// let jp_address = Address::create(
 ///     "1-1-1 Shibuya", "", "", "", "Tokyo", "15000", "CA", "Japan"
 /// ).unwrap();
@@ -206,13 +206,13 @@ pub fn classify_shipping_region(address: &Address) -> ShippingRegion {
     let country = address.country().value();
     let state = address.state().value();
 
-    // 国が米国でない場合は国際配送
+    // International shipping if the country is not the US
     let is_us = US_COUNTRY_NAMES.contains(&country);
     if !is_us {
         return ShippingRegion::International;
     }
 
-    // 近隣州かどうかを判定
+    // Determine if it is a local state
     let is_local = US_LOCAL_STATES.contains(&state);
     if is_local {
         ShippingRegion::UsLocalState
@@ -222,28 +222,28 @@ pub fn classify_shipping_region(address: &Address) -> ShippingRegion {
 }
 
 // =============================================================================
-// calculate_shipping_cost 関数
+// calculate_shipping_cost function
 // =============================================================================
 
-/// 価格計算済み注文から配送コストを計算する
+/// Calculates shipping cost from a priced order
 ///
-/// 配送先住所の地域分類に基づいて、配送コストを決定する。
+/// Determines shipping cost based on the shipping region classification of the address.
 ///
-/// # 配送コスト
+/// # Shipping Cost
 ///
-/// | 地域 | コスト |
+/// | Region | Cost |
 /// |------|--------|
-/// | 米国近隣州 (CA, OR, AZ, NV) | $5 |
-/// | 米国遠方州 | $10 |
-/// | 国際 | $20 |
+/// | US local states (CA, OR, AZ, NV) | $5 |
+/// | US remote states | $10 |
+/// | International | $20 |
 ///
 /// # Arguments
 ///
-/// * `priced_order` - 価格計算済み注文
+/// * `priced_order` - Priced order
 ///
 /// # Returns
 ///
-/// 配送コストを表す [`Price`]
+/// A [`Price`] representing the shipping cost
 ///
 /// # Examples
 ///
@@ -282,26 +282,26 @@ pub fn calculate_shipping_cost(priced_order: &PricedOrder) -> Price {
 }
 
 // =============================================================================
-// add_shipping_info_to_order 関数
+// add_shipping_info_to_order function
 // =============================================================================
 
-/// 価格計算済み注文に配送情報を追加する
+/// Adds shipping information to a priced order
 ///
-/// 引数で渡された配送コスト計算関数を使用して、
-/// 配送情報を含む新しい注文を生成する。
+/// Using the shipping cost calculation function passed as an argument,
+/// generates a new order with shipping information.
 ///
-/// # 配送方法
+/// # Shipping Method
 ///
-/// デフォルトで `Fedex24`（24時間配送）が使用される。
+/// Defaults to `Fedex24` (24-hour delivery).
 ///
 /// # Arguments
 ///
-/// * `calculate_shipping_cost_function` - 配送コストを計算する関数
-/// * `priced_order` - 価格計算済み注文
+/// * `calculate_shipping_cost_function` - Function to calculate shipping cost
+/// * `priced_order` - Priced order
 ///
 /// # Returns
 ///
-/// 配送情報付きの [`PricedOrderWithShippingMethod`]
+/// A [`PricedOrderWithShippingMethod`] with shipping information
 ///
 /// # Examples
 ///
@@ -345,26 +345,26 @@ where
 }
 
 // =============================================================================
-// free_vip_shipping 関数
+// free_vip_shipping function
 // =============================================================================
 
-/// VIP 顧客の配送料を無料にする
+/// Waives shipping charges for VIP customers
 ///
-/// 顧客が VIP の場合、配送料を $0 に設定し、配送方法を `Fedex24` に変更する。
-/// 通常顧客の場合は元の配送情報をそのまま保持する。
+/// If the customer is a VIP, sets shipping cost to $0 and changes the shipping method to `Fedex24`.
+/// For regular customers, the original shipping information is retained as-is.
 ///
-/// # Lens の使用
+/// # Using Lens
 ///
-/// この関数は `PricedOrderWithShippingMethod::shipping_info_lens()` を使用して
-/// 不変的に配送情報を更新する。
+/// This function uses `PricedOrderWithShippingMethod::shipping_info_lens()` to
+/// immutably update the shipping information.
 ///
 /// # Arguments
 ///
-/// * `order` - 配送情報付き注文
+/// * `order` - Order with shipping information
 ///
 /// # Returns
 ///
-/// VIP 割引が適用された [`PricedOrderWithShippingMethod`]
+/// A [`PricedOrderWithShippingMethod`] with VIP discount applied
 ///
 /// # Examples
 ///
@@ -377,7 +377,7 @@ where
 /// use order_taking_sample::simple_types::{OrderId, BillingAmount, Price};
 /// use rust_decimal::Decimal;
 ///
-/// // VIP 顧客の注文を作成
+/// // Create a VIP customer order
 /// let order_id = OrderId::create("OrderId", "order-001").unwrap();
 /// let customer = CustomerInfo::create("John", "Doe", "john@example.com", "VIP").unwrap();
 /// let address = Address::create(
@@ -415,32 +415,32 @@ pub fn free_vip_shipping(order: PricedOrderWithShippingMethod) -> PricedOrderWit
 }
 
 // =============================================================================
-// acknowledge_order 関数
+// acknowledge_order function
 // =============================================================================
 
-/// 注文確認メールを送信する
+/// Sends an order acknowledgment email
 ///
-/// この関数は副作用を IO モナドでラップして返す。
-/// 実際のメール送信は `run_unsafe()` が呼ばれるまで遅延される。
+/// This function wraps side effects in an IO monad and returns them.
+/// Actual email sending is deferred until `run_unsafe()` is called.
 ///
-/// # 処理フロー
+/// # Processing Flow
 ///
-/// 1. 確認メール本文を生成する（`create_letter` 関数）
-/// 2. メールアドレスと本文から `OrderAcknowledgment` を生成
-/// 3. メール送信を実行する（`send_acknowledgment` 関数、IO モナド）
-/// 4. 送信結果に基づいて `OrderAcknowledgmentSent` イベントを生成
+/// 1. Generate the acknowledgment email body (`create_letter` function)
+/// 2. Create `OrderAcknowledgment` from email address and body
+/// 3. Execute email sending (`send_acknowledgment` function, IO monad)
+/// 4. Generate `OrderAcknowledgmentSent` event based on send result
 ///
 /// # Arguments
 ///
-/// * `create_letter` - 注文からメール本文（HTML）を生成する関数
-/// * `send_acknowledgment` - 確認メールを送信する関数（IO モナドを返す）
-/// * `order` - 配送情報付き注文
+/// * `create_letter` - Function to generate email body (HTML) from order
+/// * `send_acknowledgment` - Function to send acknowledgment email (returns IO monad)
+/// * `order` - Order with shipping information
 ///
 /// # Returns
 ///
-/// `IO<Option<OrderAcknowledgmentSent>>` を返す。
-/// - 送信成功時: `Some(OrderAcknowledgmentSent)` を含む IO
-/// - 送信失敗時: `None` を含む IO
+/// Returns `IO<Option<OrderAcknowledgmentSent>>`.
+/// - On success: IO containing `Some(OrderAcknowledgmentSent)`
+/// - On failure: IO containing `None`
 ///
 /// # Examples
 ///
@@ -455,7 +455,7 @@ pub fn free_vip_shipping(order: PricedOrderWithShippingMethod) -> PricedOrderWit
 /// use lambars::effect::IO;
 /// use rust_decimal::Decimal;
 ///
-/// // 注文を作成
+/// // Create the order
 /// let order_id = OrderId::create("OrderId", "order-001").unwrap();
 /// let customer = CustomerInfo::create("John", "Doe", "john@example.com", "Normal").unwrap();
 /// let address = Address::create(
@@ -471,7 +471,7 @@ pub fn free_vip_shipping(order: PricedOrderWithShippingMethod) -> PricedOrderWit
 /// );
 /// let order = PricedOrderWithShippingMethod::new(shipping_info, priced_order);
 ///
-/// // モック関数を定義
+/// // Define mock functions
 /// let create_letter = |_: &PricedOrderWithShippingMethod| {
 ///     HtmlString::new("<p>Order confirmed</p>".to_string())
 /// };
@@ -479,10 +479,10 @@ pub fn free_vip_shipping(order: PricedOrderWithShippingMethod) -> PricedOrderWit
 ///     IO::pure(SendResult::Sent)
 /// };
 ///
-/// // IO モナドを取得（まだ実行されない）
+/// // Get IO monad (not yet executed)
 /// let io_result = acknowledge_order(&create_letter, &send_acknowledgment, &order);
 ///
-/// // 実行して結果を取得
+/// // Execute and get the result
 /// let result = io_result.run_unsafe();
 /// assert!(result.is_some());
 /// ```
@@ -495,22 +495,22 @@ where
     CreateLetter: Fn(&PricedOrderWithShippingMethod) -> HtmlString,
     SendAcknowledgment: Fn(&OrderAcknowledgment) -> IO<SendResult>,
 {
-    // 確認メール本文を生成
+    // Generate acknowledgment email body
     let letter = create_letter(order);
 
-    // メールアドレスを取得
+    // Get email address
     let email_address = order.priced_order().customer_info().email_address().clone();
 
-    // OrderAcknowledgment を生成
+    // Create OrderAcknowledgment
     let acknowledgment = OrderAcknowledgment::new(email_address.clone(), letter);
 
-    // 注文 ID を取得
+    // Get order ID
     let order_id = order.priced_order().order_id().clone();
 
-    // メール送信を IO でラップ
+    // Wrap email sending in IO
     let send_result_io = send_acknowledgment(&acknowledgment);
 
-    // 送信結果に基づいて OrderAcknowledgmentSent イベントを生成
+    // Generate OrderAcknowledgmentSent event based on send result
     send_result_io.fmap(move |send_result| match send_result {
         SendResult::Sent => Some(OrderAcknowledgmentSent::new(order_id, email_address)),
         SendResult::NotSent => None,
@@ -518,46 +518,46 @@ where
 }
 
 // =============================================================================
-// acknowledge_order_with_logging 関数
+// acknowledge_order_with_logging function
 // =============================================================================
 
-/// 注文確認メールを送信する（ログ出力付き）
+/// Sends an order acknowledgment email (with logging)
 ///
-/// eff! マクロを使用して複数の IO 操作（ログ出力、メール送信）を
-/// do 記法スタイルでチェーンする。
+/// Uses the eff! macro to chain multiple IO operations (logging, email sending)
+/// in do-notation style.
 ///
-/// # 処理フロー
+/// # Processing Flow
 ///
-/// 1. "Creating acknowledgment letter" をログ出力
-/// 2. 確認メール本文を生成（純粋）
-/// 3. "Sending acknowledgment email" をログ出力
-/// 4. メール送信を実行
-/// 5. "Acknowledgment process completed" をログ出力
-/// 6. 送信結果に基づいて `OrderAcknowledgmentSent` イベントを生成
+/// 1. Log "Creating acknowledgment letter"
+/// 2. Generate acknowledgment email body (pure)
+/// 3. Log "Sending acknowledgment email"
+/// 4. Execute email sending
+/// 5. Log "Acknowledgment process completed"
+/// 6. Generate `OrderAcknowledgmentSent` event based on send result
 ///
-/// # eff! マクロの構文
+/// # eff! macro syntax
 ///
-/// - `_ <= io_action;` - IO を実行して結果を無視
-/// - `pattern <= io_action;` - IO から値を取り出して束縛
-/// - `let pattern = expr;` - 純粋な値の束縛
-/// - `IO::pure(...)` - 最終的な IO を返す
+/// - `_ <= io_action;` - Execute IO and discard the result
+/// - `pattern <= io_action;` - Extract value from IO and bind it
+/// - `let pattern = expr;` - Bind a pure value
+/// - `IO::pure(...)` - Return the final IO
 ///
 /// # Type Parameters
 ///
-/// * `CreateLetter` - 確認メール本文を生成する関数型
-/// * `SendAcknowledgment` - メールを送信する関数型（IO モナドを返す）
-/// * `LogAction` - ログを出力する関数型（IO モナドを返す）
+/// * `CreateLetter` - Function type to generate acknowledgment email body
+/// * `SendAcknowledgment` - Function type to send email (returns IO monad)
+/// * `LogAction` - Function type for logging (returns IO monad)
 ///
 /// # Arguments
 ///
-/// * `create_letter` - 確認メール本文生成関数
-/// * `send_acknowledgment` - メール送信関数
-/// * `log_action` - ログ出力関数
-/// * `order` - 配送情報付き注文
+/// * `create_letter` - Acknowledgment email body generation function
+/// * `send_acknowledgment` - Email sending function
+/// * `log_action` - Logging function
+/// * `order` - Order with shipping information
 ///
 /// # Returns
 ///
-/// `IO<Option<OrderAcknowledgmentSent>>` - 遅延実行される結果
+/// `IO<Option<OrderAcknowledgmentSent>>` - Lazily executed result
 ///
 /// # Examples
 ///
@@ -585,7 +585,7 @@ where
 ///     IO::pure(SendResult::Sent)
 /// };
 ///
-/// // テストデータ作成は省略
+/// // Test data creation omitted
 /// // let io_result = acknowledge_order_with_logging(
 /// //     &create_letter, &send_acknowledgment, &log_action, &order
 /// // );
@@ -602,11 +602,11 @@ where
     SendAcknowledgment: Fn(&OrderAcknowledgment) -> IO<SendResult>,
     LogAction: Fn(&str) -> IO<()>,
 {
-    // 事前に必要な値をクロージャ用にクローン
+    // Clone required values for closures in advance
     let email_address = order.priced_order().customer_info().email_address().clone();
     let order_id = order.priced_order().order_id().clone();
 
-    // ログ出力用の IO を事前に生成
+    // Pre-generate IO for logging
     let log_creating = log_action("Creating acknowledgment letter");
     let letter = create_letter(order);
     let acknowledgment = OrderAcknowledgment::new(email_address.clone(), letter);
@@ -614,7 +614,7 @@ where
     let send_io = send_acknowledgment(&acknowledgment);
     let log_completed = log_action("Acknowledgment process completed");
 
-    // eff! マクロで IO 操作をチェーン
+    // Chain IO operations with the eff! macro
     lambars::eff! {
         _ <= log_creating;
         _ <= log_sending;
@@ -641,7 +641,7 @@ mod tests {
     use rust_decimal::Decimal;
 
     // =========================================================================
-    // テストヘルパー
+    // Test helpers
     // =========================================================================
 
     fn create_test_address(country: &str, state: &str) -> Address {
@@ -667,7 +667,7 @@ mod tests {
     }
 
     // =========================================================================
-    // ShippingRegion のテスト
+    // Tests for ShippingRegion
     // =========================================================================
 
     #[rstest]
@@ -686,7 +686,7 @@ mod tests {
     }
 
     // =========================================================================
-    // classify_shipping_region のテスト
+    // Tests for classify_shipping_region
     // =========================================================================
 
     #[rstest]
@@ -698,7 +698,7 @@ mod tests {
     #[case("US", "NY", ShippingRegion::UsRemoteState)]
     #[case("US", "TX", ShippingRegion::UsRemoteState)]
     #[case("USA", "FL", ShippingRegion::UsRemoteState)]
-    // 国際配送テストでは有効な州コード（NY）を使用し、国を変更してテスト
+    // For international shipping tests, uses valid state code (NY) and changes the country
     #[case("Japan", "NY", ShippingRegion::International)]
     #[case("Canada", "NY", ShippingRegion::International)]
     #[case("UK", "NY", ShippingRegion::International)]
@@ -713,13 +713,13 @@ mod tests {
     }
 
     // =========================================================================
-    // calculate_shipping_cost のテスト
+    // Tests for calculate_shipping_cost
     // =========================================================================
 
     #[rstest]
     #[case("US", "CA", 5)]
     #[case("US", "NY", 10)]
-    // 国際配送テストでは有効な州コード（NY）を使用し、国を変更してテスト
+    // For international shipping tests, uses valid state code (NY) and changes the country
     #[case("Japan", "NY", 20)]
     fn test_calculate_shipping_cost(
         #[case] country: &str,
@@ -732,7 +732,7 @@ mod tests {
     }
 
     // =========================================================================
-    // add_shipping_info_to_order のテスト
+    // Tests for add_shipping_info_to_order
     // =========================================================================
 
     #[rstest]
@@ -758,7 +758,7 @@ mod tests {
     }
 
     // =========================================================================
-    // free_vip_shipping のテスト
+    // Tests for free_vip_shipping
     // =========================================================================
 
     #[rstest]
@@ -803,7 +803,7 @@ mod tests {
     }
 
     // =========================================================================
-    // acknowledge_order のテスト
+    // Tests for acknowledge_order
     // =========================================================================
 
     #[rstest]

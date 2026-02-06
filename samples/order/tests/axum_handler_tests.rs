@@ -1,13 +1,13 @@
-//! axum ハンドラ統合テスト
+//! Axum handler integration tests
 //!
-//! axum ハンドラの動作を検証する。
+//! Verifies the behavior of the axum handler.
 
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use order_taking_sample::api::axum_handler::place_order_handler;
 use rstest::rstest;
 
-/// 有効な注文 JSON を生成するヘルパー関数
+/// Helper function to generate valid order JSON
 fn create_valid_order_json() -> String {
     r#"{
         "order_id": "order-001",
@@ -50,7 +50,7 @@ fn create_valid_order_json() -> String {
 }
 
 // =============================================================================
-// 成功ケース
+// Success case
 // =============================================================================
 
 #[rstest]
@@ -65,7 +65,7 @@ async fn test_place_order_handler_success_returns_200() {
 #[rstest]
 #[tokio::test]
 async fn test_place_order_handler_success_with_gizmo_product() {
-    // Gizmo 製品は G + 3桁の数字、数量は小数（キログラム）
+    // Gizmo product is G + 3 digits, quantity is decimal (kilograms)
     let json = r#"{
         "order_id": "order-002",
         "customer_info": {
@@ -110,7 +110,7 @@ async fn test_place_order_handler_success_with_gizmo_product() {
 }
 
 // =============================================================================
-// JSON パースエラー
+// JSON parse error
 // =============================================================================
 
 #[rstest]
@@ -131,7 +131,7 @@ async fn test_place_order_handler_empty_body_returns_400() {
 }
 
 // =============================================================================
-// バリデーションエラー
+// Validation error
 // =============================================================================
 
 #[rstest]

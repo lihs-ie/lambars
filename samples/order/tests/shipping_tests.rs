@@ -1,6 +1,6 @@
-//! 配送コスト計算と確認メール送信のテスト
+//! Tests for shipping cost calculation and acknowledgment email sending
 //!
-//! Phase 6 の実装テスト。
+//! Tests for Phase 6 implementation.
 
 use lambars::effect::IO;
 use order_taking_sample::compound_types::{Address, CustomerInfo};
@@ -17,25 +17,25 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 // =============================================================================
-// テストヘルパー関数
+// Test helper functions
 // =============================================================================
 
-/// 固定配送コストを返すモック関数を生成する
+/// Creates a mock function that returns a fixed shipping cost
 fn fixed_shipping_cost(cost: Decimal) -> impl Fn(&PricedOrder) -> Price {
     move |_| Price::unsafe_create(cost)
 }
 
-/// 常に `IO::pure(Sent)` を返すモック関数を生成する
+/// Creates a mock function that always returns `IO::pure(Sent)`
 fn always_send() -> impl Fn(&OrderAcknowledgment) -> IO<SendResult> {
     |_| IO::pure(SendResult::Sent)
 }
 
-/// 常に `IO::pure(NotSent)` を返すモック関数を生成する
+/// Creates a mock function that always returns `IO::pure(NotSent)`
 fn never_send() -> impl Fn(&OrderAcknowledgment) -> IO<SendResult> {
     |_| IO::pure(SendResult::NotSent)
 }
 
-/// シンプルな確認メール生成モック関数を生成する
+/// Creates a simple mock function for acknowledgment email generation
 fn simple_letter() -> impl Fn(&PricedOrderWithShippingMethod) -> HtmlString {
     |order| {
         let order_id = order.priced_order().order_id().value();
@@ -43,7 +43,7 @@ fn simple_letter() -> impl Fn(&PricedOrderWithShippingMethod) -> HtmlString {
     }
 }
 
-/// テスト用 [`PricedOrder`] を生成する
+/// Creates a [`PricedOrder`] for testing
 fn create_test_priced_order(vip_status: &str, country: &str, state: &str) -> PricedOrder {
     let order_id = OrderId::create("OrderId", "order-001").unwrap();
     let customer_info =
@@ -63,7 +63,7 @@ fn create_test_priced_order(vip_status: &str, country: &str, state: &str) -> Pri
     )
 }
 
-/// テスト用 [`PricedOrderWithShippingMethod`] を生成する
+/// Creates a [`PricedOrderWithShippingMethod`] for testing
 fn create_test_order_with_shipping(
     vip_status: &str,
     country: &str,
@@ -77,7 +77,7 @@ fn create_test_order_with_shipping(
 }
 
 // =============================================================================
-// ShippingRegion 列挙型のテスト
+// Tests for ShippingRegion enum
 // =============================================================================
 
 mod shipping_region_tests {
@@ -117,7 +117,7 @@ mod shipping_region_tests {
     #[rstest]
     fn test_clone_trait() {
         let region1 = ShippingRegion::UsRemoteState;
-        // ShippingRegion は Copy を実装しているが、Clone も使用可能であることを確認
+        // Verify that ShippingRegion implements Copy, but Clone is also available
         #[allow(clippy::clone_on_copy)]
         let region2 = region1.clone();
         assert_eq!(region1, region2);
@@ -132,7 +132,7 @@ mod shipping_region_tests {
 }
 
 // =============================================================================
-// classify_shipping_region 関数のテスト
+// Tests for classify_shipping_region function
 // =============================================================================
 
 mod classify_shipping_region_tests {
@@ -214,7 +214,7 @@ mod classify_shipping_region_tests {
 
     #[rstest]
     fn test_canada_is_international() {
-        // 国際配送テストでは有効な州コード（NY）を使用し、国を変更してテスト
+        // For international shipping tests, uses valid state code (NY) and changes the country
         let address = Address::create(
             "500 Maple St",
             "",
@@ -232,7 +232,7 @@ mod classify_shipping_region_tests {
 
     #[rstest]
     fn test_japan_is_international() {
-        // 国際配送テストでは有効な州コード（CA）を使用し、国を変更してテスト
+        // For international shipping tests, uses valid state code (CA) and changes the country
         let address =
             Address::create("1-1-1 Shibuya", "", "", "", "Tokyo", "15000", "CA", "Japan").unwrap();
         let region = classify_shipping_region(&address);
@@ -241,7 +241,7 @@ mod classify_shipping_region_tests {
 
     #[rstest]
     fn test_uk_is_international() {
-        // 国際配送テストでは有効な州コード（TX）を使用し、国を変更してテスト
+        // For international shipping tests, uses valid state code (TX) and changes the country
         let address =
             Address::create("10 Downing St", "", "", "", "London", "12345", "TX", "UK").unwrap();
         let region = classify_shipping_region(&address);
@@ -250,7 +250,7 @@ mod classify_shipping_region_tests {
 }
 
 // =============================================================================
-// calculate_shipping_cost 関数のテスト
+// Tests for calculate_shipping_cost function
 // =============================================================================
 
 mod calculate_shipping_cost_tests {
@@ -286,7 +286,7 @@ mod calculate_shipping_cost_tests {
 
     #[rstest]
     fn test_international_cost_20() {
-        // 国際配送テストでは有効な州コード（CA）を使用し、国を変更してテスト
+        // For international shipping tests, uses valid state code (CA) and changes the country
         let priced_order = create_test_priced_order("Normal", "Japan", "CA");
         let cost = calculate_shipping_cost(&priced_order);
         assert_eq!(cost.value(), Decimal::from(20));
@@ -294,7 +294,7 @@ mod calculate_shipping_cost_tests {
 
     #[rstest]
     fn test_international_canada_cost_20() {
-        // 国際配送テストでは有効な州コード（NY）を使用し、国を変更してテスト
+        // For international shipping tests, uses valid state code (NY) and changes the country
         let priced_order = create_test_priced_order("Normal", "Canada", "NY");
         let cost = calculate_shipping_cost(&priced_order);
         assert_eq!(cost.value(), Decimal::from(20));
@@ -302,7 +302,7 @@ mod calculate_shipping_cost_tests {
 }
 
 // =============================================================================
-// add_shipping_info_to_order 関数のテスト
+// Tests for add_shipping_info_to_order function
 // =============================================================================
 
 mod add_shipping_info_to_order_tests {
@@ -380,7 +380,7 @@ mod add_shipping_info_to_order_tests {
 }
 
 // =============================================================================
-// free_vip_shipping 関数のテスト
+// Tests for free_vip_shipping function
 // =============================================================================
 
 mod free_vip_shipping_tests {
@@ -426,7 +426,7 @@ mod free_vip_shipping_tests {
 
     #[rstest]
     fn test_vip_with_20_dollar_shipping() {
-        // 国際配送テストでは有効な州コード（CA）を使用し、国を変更してテスト
+        // For international shipping tests, uses valid state code (CA) and changes the country
         let order = create_test_order_with_shipping(
             "VIP",
             "Japan",
@@ -484,7 +484,7 @@ mod free_vip_shipping_tests {
 }
 
 // =============================================================================
-// acknowledge_order 関数のテスト
+// Tests for acknowledge_order function
 // =============================================================================
 
 mod acknowledge_order_tests {
@@ -582,10 +582,10 @@ mod acknowledge_order_tests {
 
         let io_result = acknowledge_order(&create_letter, &send_acknowledgment, &order);
 
-        // IO が生成されただけでは実行されない
+        // Creating an IO does not execute it
         assert!(!executed.load(Ordering::SeqCst));
 
-        // run_unsafe() で実行される
+        // Executed by run_unsafe()
         let result = io_result.run_unsafe();
         assert!(executed.load(Ordering::SeqCst));
         assert!(result.is_some());
@@ -614,7 +614,7 @@ mod acknowledge_order_tests {
 }
 
 // =============================================================================
-// 統合テスト
+// Integration tests
 // =============================================================================
 
 mod integration_tests {
@@ -663,7 +663,7 @@ mod integration_tests {
     #[rstest]
     fn test_full_shipping_workflow_vip_customer() {
         // 1. Create a priced order for VIP customer
-        // 国際配送テストでは有効な州コード（NY）を使用し、国を変更してテスト
+        // For international shipping tests, uses valid state code (NY) and changes the country
         let priced_order = create_test_priced_order("VIP", "Japan", "NY");
 
         // 2. Add shipping info using the actual calculate_shipping_cost function

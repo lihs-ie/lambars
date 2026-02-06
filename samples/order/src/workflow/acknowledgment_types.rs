@@ -1,12 +1,12 @@
-//! 確認メール関連型
+//! Acknowledgment email related types
 //!
-//! 注文確認メールに関連する型を定義する。
+//! Defines types related to order acknowledgment emails.
 //!
-//! # 型一覧
+//! # Type List
 //!
-//! - [`HtmlString`] - HTML 文字列
-//! - [`OrderAcknowledgment`] - 注文確認メールの内容
-//! - [`SendResult`] - メール送信結果
+//! - [`HtmlString`] - HTML string
+//! - [`OrderAcknowledgment`] - Order acknowledgment email content
+//! - [`SendResult`] - Email send result
 
 use crate::simple_types::EmailAddress;
 
@@ -14,9 +14,9 @@ use crate::simple_types::EmailAddress;
 // HtmlString
 // =============================================================================
 
-/// HTML 文字列
+/// HTML string
 ///
-/// 通常の文字列と HTML を型レベルで区別するための newtype。
+/// A newtype to distinguish HTML from plain strings at the type level.
 ///
 /// # Examples
 ///
@@ -30,11 +30,11 @@ use crate::simple_types::EmailAddress;
 pub struct HtmlString(String);
 
 impl HtmlString {
-    /// HTML 文字列から `HtmlString` を生成する
+    /// Creates an `HtmlString` from an HTML string
     ///
     /// # Arguments
     ///
-    /// * `html` - HTML 文字列
+    /// * `html` - HTML string
     ///
     /// # Examples
     ///
@@ -48,7 +48,7 @@ impl HtmlString {
         Self(html)
     }
 
-    /// 内部の HTML 文字列への参照を返す
+    /// Returns a reference to the inner  HTML string
     ///
     /// # Examples
     ///
@@ -63,7 +63,7 @@ impl HtmlString {
         &self.0
     }
 
-    /// 内部の `String` を消費して返す
+    /// Consumes and returns the internal `String`
     ///
     /// # Examples
     ///
@@ -84,9 +84,9 @@ impl HtmlString {
 // OrderAcknowledgment
 // =============================================================================
 
-/// 注文確認メールの内容
+/// Order acknowledgment email content
 ///
-/// 送信先アドレスと HTML 本文を保持する。
+/// Holds the recipient address and the HTML body.
 ///
 /// # Examples
 ///
@@ -107,12 +107,12 @@ pub struct OrderAcknowledgment {
 }
 
 impl OrderAcknowledgment {
-    /// 新しい `OrderAcknowledgment` を生成する
+    /// Creates a new `OrderAcknowledgment`
     ///
     /// # Arguments
     ///
-    /// * `email_address` - 送信先メールアドレス
-    /// * `letter` - メール本文（HTML 形式）
+    /// * `email_address` - Recipient email address
+    /// * `letter` - Email body (HTML format)
     ///
     /// # Examples
     ///
@@ -132,7 +132,7 @@ impl OrderAcknowledgment {
         }
     }
 
-    /// メールアドレスへの参照を返す
+    /// Returns a reference to the email address
     ///
     /// # Examples
     ///
@@ -150,7 +150,7 @@ impl OrderAcknowledgment {
         &self.email_address
     }
 
-    /// メール本文への参照を返す
+    /// Returns a reference to the email body
     ///
     /// # Examples
     ///
@@ -173,9 +173,9 @@ impl OrderAcknowledgment {
 // SendResult
 // =============================================================================
 
-/// メール送信結果
+/// Email send result
 ///
-/// 送信成功または送信失敗のいずれかを表す。
+/// Represents either a successful send or a failed send.
 ///
 /// # Examples
 ///
@@ -192,15 +192,15 @@ impl OrderAcknowledgment {
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SendResult {
-    /// 送信成功
+    /// Send succeeded
     Sent,
 
-    /// 送信失敗（エラーではなく、送信しない判断をした場合も含む）
+    /// Send failed (includes cases where a decision was made not to send)
     NotSent,
 }
 
 impl SendResult {
-    /// `Sent` バリアントかどうかを返す
+    /// Returns whether this is the `Sent` variant
     ///
     /// # Examples
     ///
@@ -215,7 +215,7 @@ impl SendResult {
         matches!(self, Self::Sent)
     }
 
-    /// `NotSent` バリアントかどうかを返す
+    /// Returns whether this is the `NotSent` variant
     ///
     /// # Examples
     ///

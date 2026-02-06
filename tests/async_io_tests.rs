@@ -25,7 +25,7 @@ use std::time::Duration;
 #[rstest]
 #[tokio::test]
 async fn test_async_io_pure_creates_value() {
-    // AsyncIO::pure は純粋な値をラップする
+    // AsyncIO::pure wraps a pure value
     let async_io = AsyncIO::pure(42);
     let result = async_io.await;
     assert_eq!(result, 42);
@@ -34,7 +34,7 @@ async fn test_async_io_pure_creates_value() {
 #[rstest]
 #[tokio::test]
 async fn test_async_io_pure_with_string() {
-    // 文字列型でも動作することを確認
+    // Verify it works with String type
     let async_io = AsyncIO::pure("hello".to_string());
     let result = async_io.await;
     assert_eq!(result, "hello");
@@ -43,7 +43,7 @@ async fn test_async_io_pure_with_string() {
 #[rstest]
 #[tokio::test]
 async fn test_async_io_pure_with_struct() {
-    // 構造体でも動作することを確認
+    // Verify it works with a struct type
     #[derive(Debug, Clone, PartialEq)]
     struct TestData {
         value: i32,
@@ -63,7 +63,7 @@ async fn test_async_io_pure_with_struct() {
 #[rstest]
 #[tokio::test]
 async fn test_async_io_new_with_async_closure() {
-    // AsyncIO::new は非同期クロージャを受け取る
+    // AsyncIO::new accepts an async closure
     let async_io = AsyncIO::new(|| async { 10 + 20 });
     let result = async_io.await;
     assert_eq!(result, 30);
@@ -72,7 +72,7 @@ async fn test_async_io_new_with_async_closure() {
 #[rstest]
 #[tokio::test]
 async fn test_async_io_new_with_delay() {
-    // 実際の非同期操作（遅延）が動作することを確認
+    // Verify that an actual async operation (delay) works
     let async_io = AsyncIO::new(|| async {
         tokio::time::sleep(Duration::from_millis(10)).await;
         "delayed"
@@ -84,7 +84,7 @@ async fn test_async_io_new_with_delay() {
 #[rstest]
 #[tokio::test]
 async fn test_async_io_from_future_basic() {
-    // 既存の Future から AsyncIO を作成
+    // Create AsyncIO from an existing Future
     let future = async { 100 };
     let async_io = AsyncIO::from_future(future);
     let result = async_io.await;
@@ -94,7 +94,7 @@ async fn test_async_io_from_future_basic() {
 #[rstest]
 #[tokio::test]
 async fn test_async_io_impl_future_can_be_awaited() {
-    // impl Future により直接 await できる
+    // Can be directly awaited via impl Future
     let async_io = AsyncIO::pure(42);
     let result = async_io.await;
     assert_eq!(result, 42);
@@ -107,7 +107,7 @@ async fn test_async_io_impl_future_can_be_awaited() {
 #[rstest]
 #[tokio::test]
 async fn test_async_io_new_is_lazy() {
-    // AsyncIO::new は実行時まで副作用を発生させない
+    // AsyncIO::new does not produce side effects until execution
     let executed = Arc::new(AtomicBool::new(false));
     let executed_clone = executed.clone();
 
@@ -119,10 +119,10 @@ async fn test_async_io_new_is_lazy() {
         }
     });
 
-    // この時点では実行されていない
+    // Not yet executed at this point
     assert!(!executed.load(Ordering::SeqCst));
 
-    // await で実行
+    // Execute via await
     let result = async_io.await;
     assert!(executed.load(Ordering::SeqCst));
     assert_eq!(result, 42);
@@ -131,7 +131,7 @@ async fn test_async_io_new_is_lazy() {
 #[rstest]
 #[tokio::test]
 async fn test_async_io_side_effect_not_executed_on_creation() {
-    // 作成時には副作用が発生しない
+    // No side effects occur at creation time
     let counter = Arc::new(AtomicUsize::new(0));
     let counter_clone = counter.clone();
 
@@ -142,14 +142,14 @@ async fn test_async_io_side_effect_not_executed_on_creation() {
         }
     });
 
-    // AsyncIO を作成しただけでは副作用は発生しない
+    // Creating AsyncIO alone does not trigger side effects
     assert_eq!(counter.load(Ordering::SeqCst), 0);
 }
 
 #[rstest]
 #[tokio::test]
 async fn test_async_io_fmap_is_lazy() {
-    // fmap も遅延評価
+    // fmap is also lazily evaluated
     let executed = Arc::new(AtomicBool::new(false));
     let executed_clone = executed.clone();
 
@@ -163,7 +163,7 @@ async fn test_async_io_fmap_is_lazy() {
 
     let mapped = async_io.fmap(|x| x * 2);
 
-    // fmap しただけでは実行されない
+    // fmap alone does not trigger execution
     assert!(!executed.load(Ordering::SeqCst));
 
     let result = mapped.await;
@@ -174,7 +174,7 @@ async fn test_async_io_fmap_is_lazy() {
 #[rstest]
 #[tokio::test]
 async fn test_async_io_flat_map_is_lazy() {
-    // flat_map も遅延評価
+    // flat_map is also lazily evaluated
     let executed = Arc::new(AtomicBool::new(false));
     let executed_clone = executed.clone();
 
@@ -188,7 +188,7 @@ async fn test_async_io_flat_map_is_lazy() {
 
     let chained = async_io.flat_map(|x| AsyncIO::pure(x * 2));
 
-    // flat_map しただけでは実行されない
+    // flat_map alone does not trigger execution
     assert!(!executed.load(Ordering::SeqCst));
 
     let result = chained.await;
@@ -203,7 +203,7 @@ async fn test_async_io_flat_map_is_lazy() {
 #[rstest]
 #[tokio::test]
 async fn test_async_io_fmap_basic() {
-    // 基本的な fmap 動作
+    // Basic fmap operation
     let async_io = AsyncIO::pure(21).fmap(|x| x * 2);
     let result = async_io.await;
     assert_eq!(result, 42);
@@ -212,7 +212,7 @@ async fn test_async_io_fmap_basic() {
 #[rstest]
 #[tokio::test]
 async fn test_async_io_fmap_chain() {
-    // fmap のチェーン
+    // Chaining fmap
     let async_io = AsyncIO::pure(2)
         .fmap(|x| x * 3) // 6
         .fmap(|x| x + 4) // 10
@@ -224,7 +224,7 @@ async fn test_async_io_fmap_chain() {
 #[rstest]
 #[tokio::test]
 async fn test_async_io_fmap_type_change() {
-    // fmap で型変換
+    // Type conversion via fmap
     let async_io = AsyncIO::pure(42).fmap(|x| format!("value: {}", x));
     let result = async_io.await;
     assert_eq!(result, "value: 42");
@@ -233,7 +233,7 @@ async fn test_async_io_fmap_type_change() {
 #[rstest]
 #[tokio::test]
 async fn test_async_io_fmap_identity() {
-    // 恒等関数による fmap は値を変えない
+    // fmap with identity function does not change the value
     let async_io = AsyncIO::pure(42).fmap(|x| x);
     let result = async_io.await;
     assert_eq!(result, 42);
@@ -246,7 +246,7 @@ async fn test_async_io_fmap_identity() {
 #[rstest]
 #[tokio::test]
 async fn test_async_io_map2_basic() {
-    // 2つの AsyncIO を結合
+    // Combine two AsyncIO values
     let io1 = AsyncIO::pure(10);
     let io2 = AsyncIO::pure(20);
     let combined = io1.map2(io2, |a, b| a + b);
@@ -257,7 +257,7 @@ async fn test_async_io_map2_basic() {
 #[rstest]
 #[tokio::test]
 async fn test_async_io_map2_with_different_types() {
-    // 異なる型の AsyncIO を結合
+    // Combine AsyncIO values of different types
     let io1 = AsyncIO::pure(42);
     let io2 = AsyncIO::pure("hello".to_string());
     let combined = io1.map2(io2, |n, s| format!("{}: {}", s, n));
@@ -268,7 +268,7 @@ async fn test_async_io_map2_with_different_types() {
 #[rstest]
 #[tokio::test]
 async fn test_async_io_product_basic() {
-    // product はタプルを返す
+    // product returns a tuple
     let io1 = AsyncIO::pure(10);
     let io2 = AsyncIO::pure(20);
     let result = io1.product(io2).await;
@@ -278,7 +278,7 @@ async fn test_async_io_product_basic() {
 #[rstest]
 #[tokio::test]
 async fn test_async_io_product_tuple_type() {
-    // product の型確認
+    // Verify product type
     let io1 = AsyncIO::pure(1);
     let io2 = AsyncIO::pure("hello");
     let result = io1.product(io2).await;
@@ -288,7 +288,7 @@ async fn test_async_io_product_tuple_type() {
 #[rstest]
 #[tokio::test]
 async fn test_async_io_apply_basic() {
-    // apply の基本動作
+    // Basic apply operation
     let function_io = AsyncIO::pure(|x: i32| x * 2);
     let value_io = AsyncIO::pure(21);
     let result = value_io.apply(function_io).await;
@@ -302,7 +302,7 @@ async fn test_async_io_apply_basic() {
 #[rstest]
 #[tokio::test]
 async fn test_async_io_flat_map_basic() {
-    // flat_map の基本動作
+    // Basic flat_map operation
     let async_io = AsyncIO::pure(10).flat_map(|x| AsyncIO::pure(x * 2));
     let result = async_io.await;
     assert_eq!(result, 20);
@@ -311,7 +311,7 @@ async fn test_async_io_flat_map_basic() {
 #[rstest]
 #[tokio::test]
 async fn test_async_io_flat_map_chain() {
-    // flat_map のチェーン
+    // Chaining flat_map
     let async_io = AsyncIO::pure(1)
         .flat_map(|x| AsyncIO::pure(x + 1)) // 2
         .flat_map(|x| AsyncIO::pure(x * 3)) // 6
@@ -323,7 +323,7 @@ async fn test_async_io_flat_map_chain() {
 #[rstest]
 #[tokio::test]
 async fn test_async_io_flat_map_with_effect() {
-    // 副作用を持つ flat_map チェーン
+    // flat_map chain with side effects
     let counter = Arc::new(AtomicUsize::new(0));
     let counter1 = counter.clone();
     let counter2 = counter.clone();
@@ -354,7 +354,7 @@ async fn test_async_io_flat_map_with_effect() {
 #[rstest]
 #[tokio::test]
 async fn test_async_io_and_then_is_flat_map_alias() {
-    // and_then は flat_map のエイリアス
+    // and_then is an alias for flat_map
     let async_io1 = AsyncIO::pure(10).flat_map(|x| AsyncIO::pure(x + 5));
     let async_io2 = AsyncIO::pure(10).and_then(|x| AsyncIO::pure(x + 5));
 
@@ -366,7 +366,7 @@ async fn test_async_io_and_then_is_flat_map_alias() {
 #[rstest]
 #[tokio::test]
 async fn test_async_io_then_discards_first() {
-    // then は最初の結果を無視する
+    // then discards the first result
     let async_io = AsyncIO::pure(10).then(AsyncIO::pure(20));
     let result = async_io.await;
     assert_eq!(result, 20);
@@ -375,7 +375,7 @@ async fn test_async_io_then_discards_first() {
 #[rstest]
 #[tokio::test]
 async fn test_async_io_then_executes_first_for_side_effect() {
-    // then は最初の AsyncIO を副作用のために実行する
+    // then executes the first AsyncIO for its side effect
     let executed = Arc::new(AtomicBool::new(false));
     let executed_clone = executed.clone();
 
@@ -405,7 +405,7 @@ mod conversion_tests {
     #[rstest]
     #[tokio::test]
     async fn test_io_to_async_basic() {
-        // IO を AsyncIO に変換
+        // Convert IO to AsyncIO
         let io = IO::pure(42);
         let async_io = io.to_async();
         let result = async_io.await;
@@ -415,7 +415,7 @@ mod conversion_tests {
     #[rstest]
     #[tokio::test]
     async fn test_io_to_async_preserves_value() {
-        // 変換後も値が保持される
+        // Value is preserved after conversion
         let io = IO::new(|| "hello".to_string());
         let async_io = io.to_async();
         let result = async_io.await;
@@ -425,7 +425,7 @@ mod conversion_tests {
     #[rstest]
     #[tokio::test]
     async fn test_io_to_async_executes_immediately() {
-        // IO::to_async は IO を即座に実行する（IO が Send でないため）
+        // IO::to_async executes the IO immediately (because IO is not Send)
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = counter.clone();
 
@@ -434,11 +434,11 @@ mod conversion_tests {
             42
         });
 
-        // to_async 呼び出し時に IO が実行される
+        // IO is executed when to_async is called
         let async_io = io.to_async();
         assert_eq!(counter.load(Ordering::SeqCst), 1);
 
-        // await は単に結果を返すだけ
+        // await simply returns the result
         let result = async_io.await;
         assert_eq!(result, 42);
         assert_eq!(counter.load(Ordering::SeqCst), 1);
@@ -447,7 +447,7 @@ mod conversion_tests {
     #[rstest]
     #[allow(deprecated)]
     fn test_async_io_to_sync_basic() {
-        // AsyncIO を IO に変換（同期コンテキストで実行）
+        // Convert AsyncIO to IO (executed in a synchronous context)
         let async_io = AsyncIO::pure(42);
         let io = async_io.to_sync();
         let result = io.run_unsafe();
@@ -457,7 +457,7 @@ mod conversion_tests {
     #[rstest]
     #[allow(deprecated)]
     fn test_async_io_to_sync_preserves_value() {
-        // 変換後も値が保持される
+        // Value is preserved after conversion
         let async_io = AsyncIO::pure("hello".to_string());
         let io = async_io.to_sync();
         let result = io.run_unsafe();
@@ -467,7 +467,7 @@ mod conversion_tests {
     #[rstest]
     #[allow(deprecated)]
     fn test_io_to_async_to_sync_roundtrip() {
-        // IO -> AsyncIO -> IO のラウンドトリップ
+        // IO -> AsyncIO -> IO round-trip
         let original = 42;
         let io = IO::pure(original);
         let async_io = io.to_async();
@@ -479,7 +479,7 @@ mod conversion_tests {
     #[rstest]
     #[allow(deprecated)]
     fn test_async_io_to_sync_is_lazy() {
-        // AsyncIO::to_sync で変換された IO は遅延評価を維持
+        // IO converted via AsyncIO::to_sync maintains lazy evaluation
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = counter.clone();
 
@@ -491,11 +491,11 @@ mod conversion_tests {
             }
         });
 
-        // to_sync 呼び出し時には実行されない
+        // Not executed when to_sync is called
         let io = async_io.to_sync();
         assert_eq!(counter.load(Ordering::SeqCst), 0);
 
-        // run_unsafe で実行
+        // Executed via run_unsafe
         let result = io.run_unsafe();
         assert_eq!(result, 42);
         assert_eq!(counter.load(Ordering::SeqCst), 1);
@@ -509,21 +509,21 @@ mod conversion_tests {
 #[rstest]
 #[tokio::test]
 async fn test_async_io_delay_async_waits() {
-    // delay_async は指定時間待機する
+    // delay_async waits for the specified duration
     let start = std::time::Instant::now();
     let async_io = AsyncIO::delay_async(Duration::from_millis(50));
     async_io.await;
     let elapsed = start.elapsed();
-    assert!(elapsed >= Duration::from_millis(45)); // 多少の誤差を許容
+    assert!(elapsed >= Duration::from_millis(45)); // Allow some tolerance
 }
 
 #[rstest]
 #[tokio::test]
 async fn test_async_io_delay_async_is_lazy() {
-    // delay_async も遅延評価
+    // delay_async is also lazily evaluated
     let start = std::time::Instant::now();
     let _async_io = AsyncIO::delay_async(Duration::from_millis(100));
-    // 作成しただけでは時間が経過しない
+    // No time passes by just creating it
     let elapsed = start.elapsed();
     assert!(elapsed < Duration::from_millis(50));
 }
@@ -531,7 +531,7 @@ async fn test_async_io_delay_async_is_lazy() {
 #[rstest]
 #[tokio::test]
 async fn test_async_io_timeout_completes_in_time() {
-    // タイムアウト前に完了する場合
+    // When completed before timeout
     let async_io = AsyncIO::pure(42).timeout(Duration::from_millis(100));
     let result = async_io.await;
     assert_eq!(result, Some(42));
@@ -540,7 +540,7 @@ async fn test_async_io_timeout_completes_in_time() {
 #[rstest]
 #[tokio::test]
 async fn test_async_io_timeout_returns_none_on_timeout() {
-    // タイムアウトした場合は None を返す
+    // Returns None on timeout
     let async_io =
         AsyncIO::delay_async(Duration::from_millis(200)).timeout(Duration::from_millis(50));
     let result = async_io.await;
@@ -552,7 +552,7 @@ async fn test_async_io_timeout_returns_none_on_timeout() {
 async fn test_async_io_race_returns_first_completed() {
     use lambars::control::Either;
 
-    // race は最初に完了した方を返す
+    // race returns the first one to complete
     let slow = AsyncIO::delay_async(Duration::from_millis(100)).fmap(|_| "slow");
     let fast = AsyncIO::pure("fast");
 
@@ -565,19 +565,19 @@ async fn test_async_io_race_returns_first_completed() {
 async fn test_async_io_race_with_immediate_value() {
     use lambars::control::Either;
 
-    // 両方即座に完了する場合
+    // When both complete immediately
     let io1 = AsyncIO::pure(1);
     let io2 = AsyncIO::pure(2);
 
     let result = io1.race(io2).await;
-    // 両方即座に完了するので、どちらかが返る
+    // Both complete immediately, so either one is returned
     assert!(matches!(result, Either::Left(1) | Either::Right(2)));
 }
 
 #[rstest]
 #[tokio::test]
 async fn test_async_io_catch_async_on_success() {
-    // 成功時は Ok を返す
+    // Returns Ok on success
     let async_io = AsyncIO::pure(42).catch_async(|_| "error".to_string());
     let result = async_io.await;
     assert_eq!(result, Ok(42));
@@ -586,7 +586,7 @@ async fn test_async_io_catch_async_on_success() {
 #[rstest]
 #[tokio::test]
 async fn test_async_io_catch_async_recovers_panic() {
-    // パニックをキャッチして Err に変換
+    // Catches a panic and converts it to Err
     let async_io = AsyncIO::new(|| async {
         panic!("test panic");
         #[allow(unreachable_code)]
@@ -605,7 +605,7 @@ async fn test_async_io_catch_async_recovers_panic() {
 #[rstest]
 #[tokio::test]
 async fn test_async_io_execution_order() {
-    // 実行順序のテスト
+    // Execution order test
     let order = Arc::new(std::sync::Mutex::new(Vec::new()));
 
     let order1 = order.clone();

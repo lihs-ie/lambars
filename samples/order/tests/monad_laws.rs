@@ -1,26 +1,26 @@
-//! Result/Option Monad 法則の proptest による検証
+//! Proptest verification of Result/Option Monad laws
 //!
-//! このテストファイルは lambars ライブラリの使用例として
-//! Result と Option の Monad 法則を proptest で検証する。
+//! This test file serves as an example of using the lambars library
+//! Verifies Monad laws for Result and Option using proptest.
 //!
-//! Monad 法則:
+//! Monad laws:
 //! 1. Left Identity: pure(a).flat_map(f) == f(a)
 //! 2. Right Identity: m.flat_map(pure) == m
 //! 3. Associativity: m.flat_map(f).flat_map(g) == m.flat_map(|x| f(x).flat_map(g))
 //!
-//! Rust では:
-//! - pure は Ok/Some
-//! - flat_map は and_then
+//! In Rust:
+//! - pure corresponds to Ok/Some
+//! - flat_map corresponds to and_then
 
 use order_taking_sample::simple_types::{Price, String50, UnitQuantity};
 use proptest::prelude::*;
 use rust_decimal::Decimal;
 
 // =============================================================================
-// 関数選択用のヘルパー
+// Helper for function selection
 // =============================================================================
 
-/// Result 用のテスト関数（インデックスで選択）
+/// Test functions for Result (selected by index)
 fn result_function(index: usize, x: i32) -> Result<i32, String> {
     match index % 5 {
         0 => Ok(x.saturating_mul(2)),
@@ -43,7 +43,7 @@ fn result_function(index: usize, x: i32) -> Result<i32, String> {
     }
 }
 
-/// Option 用のテスト関数（インデックスで選択）
+/// Test functions for Option (selected by index)
 fn option_function(index: usize, x: i32) -> Option<i32> {
     match index % 5 {
         0 => Some(x.saturating_mul(2)),
@@ -67,15 +67,15 @@ fn option_function(index: usize, x: i32) -> Option<i32> {
 }
 
 // =============================================================================
-// Result Monad 法則テスト
+// Result Monad lawTest
 // =============================================================================
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
 
-    /// Result Left Identity 法則: Ok(a).and_then(f) == f(a)
+    /// Result Left Identity law: Ok(a).and_then(f) == f(a)
     ///
-    /// pure(a).flat_map(f) は f(a) と等しくなければならない
+    /// pure(a).flat_map(f) must equal f(a)
     #[test]
     fn test_result_left_identity(
         value in any::<i32>(),
@@ -86,9 +86,9 @@ proptest! {
         prop_assert_eq!(left, right, "Left Identity violated: Ok({}).and_then(f) != f({})", value, value);
     }
 
-    /// Result Right Identity 法則: m.and_then(Ok) == m
+    /// Result Right Identity law: m.and_then(Ok) == m
     ///
-    /// m.flat_map(pure) は m と等しくなければならない
+    /// m.flat_map(pure) must equal m
     #[test]
     fn test_result_right_identity(
         is_ok in any::<bool>(),
@@ -105,10 +105,10 @@ proptest! {
         prop_assert_eq!(left, right, "Right Identity violated");
     }
 
-    /// Result Associativity 法則:
+    /// Result Associativity law:
     /// m.and_then(f).and_then(g) == m.and_then(|x| f(x).and_then(g))
     ///
-    /// 結合法則: 合成の順序を変えても結果は同じ
+    /// Associativity law: changing the order of composition yields the same result
     #[test]
     fn test_result_associativity(
         is_ok in any::<bool>(),
@@ -135,13 +135,13 @@ proptest! {
 }
 
 // =============================================================================
-// Option Monad 法則テスト
+// Option Monad lawTest
 // =============================================================================
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
 
-    /// Option Left Identity 法則: Some(a).and_then(f) == f(a)
+    /// Option Left Identity law: Some(a).and_then(f) == f(a)
     #[test]
     fn test_option_left_identity(
         value in any::<i32>(),
@@ -152,7 +152,7 @@ proptest! {
         prop_assert_eq!(left, right, "Left Identity violated: Some({}).and_then(f) != f({})", value, value);
     }
 
-    /// Option Right Identity 法則: m.and_then(Some) == m
+    /// Option Right Identity law: m.and_then(Some) == m
     #[test]
     fn test_option_right_identity(option in proptest::option::of(any::<i32>())) {
         let left = option.and_then(Some);
@@ -160,7 +160,7 @@ proptest! {
         prop_assert_eq!(left, right, "Right Identity violated");
     }
 
-    /// Option Associativity 法則:
+    /// Option Associativity law:
     /// m.and_then(f).and_then(g) == m.and_then(|x| f(x).and_then(g))
     #[test]
     fn test_option_associativity(
@@ -179,13 +179,13 @@ proptest! {
 }
 
 // =============================================================================
-// Functor 法則テスト（Monad は Functor なので追加検証）
+// Functor law tests (additional verification since Monad is a Functor)
 // =============================================================================
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
 
-    /// Result Functor Identity 法則: m.map(|x| x) == m
+    /// Result Functor Identity law: m.map(|x| x) == m
     #[test]
     fn test_result_functor_identity(
         is_ok in any::<bool>(),
@@ -202,7 +202,7 @@ proptest! {
         prop_assert_eq!(left, right, "Functor Identity violated");
     }
 
-    /// Result Functor Composition 法則: m.map(f).map(g) == m.map(|x| g(f(x)))
+    /// Result Functor Composition law: m.map(f).map(g) == m.map(|x| g(f(x)))
     #[test]
     fn test_result_functor_composition(
         is_ok in any::<bool>(),
@@ -223,7 +223,7 @@ proptest! {
         prop_assert_eq!(left, right, "Functor Composition violated");
     }
 
-    /// Option Functor Identity 法則: m.map(|x| x) == m
+    /// Option Functor Identity law: m.map(|x| x) == m
     #[test]
     fn test_option_functor_identity(option in proptest::option::of(any::<i32>())) {
         let left = option.map(|x| x);
@@ -231,7 +231,7 @@ proptest! {
         prop_assert_eq!(left, right, "Functor Identity violated");
     }
 
-    /// Option Functor Composition 法則: m.map(f).map(g) == m.map(|x| g(f(x)))
+    /// Option Functor Composition law: m.map(f).map(g) == m.map(|x| g(f(x)))
     #[test]
     fn test_option_functor_composition(option in proptest::option::of(any::<i32>())) {
         let function1 = |x: i32| x.saturating_mul(2);
@@ -244,15 +244,15 @@ proptest! {
 }
 
 // =============================================================================
-// Applicative 法則テスト（Monad は Applicative なので追加検証）
+// Applicative law tests (additional verification since Monad is an Applicative)
 // =============================================================================
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
 
-    /// Result Applicative Identity 法則:
+    /// Result Applicative Identity law:
     /// pure(identity).apply(m) == m
-    /// Rust では: Ok(|x| x) と map を組み合わせて表現
+    /// In Rust: Expressed by combining Ok(|x| x) and map
     #[test]
     fn test_result_applicative_identity(
         is_ok in any::<bool>(),
@@ -264,14 +264,14 @@ proptest! {
         } else {
             Err(error_message)
         };
-        // pure(id) <*> v = v に相当
+        // Equivalent to pure(id) <*> v = v
         let identity = |x: i32| x;
         let left: Result<i32, String> = result.clone().map(identity);
         let right = result;
         prop_assert_eq!(left, right, "Applicative Identity violated");
     }
 
-    /// Option Applicative Identity 法則
+    /// Option Applicative Identity law
     #[test]
     fn test_option_applicative_identity(option in proptest::option::of(any::<i32>())) {
         let identity = |x: i32| x;
@@ -282,14 +282,14 @@ proptest! {
 }
 
 // =============================================================================
-// ドメイン型での Monad 法則テスト
+// Monad law tests with domain types
 // =============================================================================
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
 
-    /// Price 生成と Monad 法則の組み合わせテスト
-    /// Smart Constructor の結果（Result）に対して Monad 法則が成り立つ
+    /// Combined test for Price creation and monad laws
+    /// Monad laws hold for the Result from smart constructors
     #[test]
     fn test_price_creation_monad_left_identity(value in 0u32..=1000u32) {
         let decimal = Decimal::from(value);
@@ -303,35 +303,35 @@ proptest! {
         prop_assert_eq!(left, right, "Price creation Left Identity violated");
     }
 
-    /// String50 生成の Monad 合成テスト
-    /// 複数の Smart Constructor を連鎖させても Monad 法則が成り立つ
+    /// Monad composition test for String50 creation
+    /// Monad laws hold even when chaining multiple smart constructors
     #[test]
     fn test_string50_monad_composition(input in "[a-zA-Z]{1,30}") {
-        // 文字列を String50 に変換し、その結果をさらに処理
+        // Convert string to String50, then further process the result
         let result1 = String50::create("Field1", &input);
         let result2 = result1.and_then(|s| {
-            // String50 の値を別の String50 に変換（例: 接頭辞追加）
+            // Convert String50 value to another String50 (e.g., adding prefix)
             let prefixed = format!("prefix_{}", s.value());
             if prefixed.len() <= 50 {
                 String50::create("Field2", &prefixed)
             } else {
-                // 長すぎる場合は切り詰め
+                // Truncate if too long
                 String50::create("Field2", &prefixed[..50])
             }
         });
 
-        // Result の Monad 法則により、これは正しく合成される
-        // 結果が Ok ならば両方の変換が成功している
+        // By Result's monad laws, this is correctly composed
+        // If result is Ok, both conversions succeeded
         if result2.is_ok() {
             let value = result2.unwrap();
             prop_assert!(value.value().starts_with("prefix_"), "Composition failed");
         }
     }
 
-    /// UnitQuantity での演算と Monad 法則
+    /// Operations with UnitQuantity and monad laws
     #[test]
     fn test_unit_quantity_monad_operations(quantity in 1u32..=500u32) {
-        // UnitQuantity を作成し、2倍にする操作
+        // Create UnitQuantity and double it
         let double = |q: UnitQuantity| {
             let doubled = q.value() * 2;
             UnitQuantity::create("Doubled", doubled)
@@ -339,11 +339,11 @@ proptest! {
 
         let result = UnitQuantity::create("Original", quantity);
 
-        // Left Identity の検証
+        // Verify Left Identity
         let left = result.clone().and_then(double);
         let right = result.and_then(|q| double(q));
 
-        // 同じ値に対して同じ操作をするので結果は同じ
+        // Same operation on same value yields same result
         prop_assert_eq!(left.is_ok(), right.is_ok(), "Monad operation consistency");
         if let (Ok(left_val), Ok(right_val)) = (left, right) {
             prop_assert_eq!(left_val.value(), right_val.value());
@@ -352,14 +352,14 @@ proptest! {
 }
 
 // =============================================================================
-// エラー処理の Monad 法則テスト
+// Monad law tests for error handling
 // =============================================================================
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
 
-    /// Err 値に対する Monad 法則（短絡評価の検証）
-    /// Err(e).and_then(f) は常に Err(e) を返す
+    /// Monad law for Err values (verifying short-circuit evaluation)
+    /// Err(e).and_then(f) always returns Err(e)
     #[test]
     fn test_result_error_short_circuit(error_message in "[a-z]{1,20}") {
         let error: Result<i32, String> = Err(error_message.clone());
@@ -370,8 +370,8 @@ proptest! {
         prop_assert_eq!(result.unwrap_err(), error_message, "Error message should be preserved");
     }
 
-    /// None に対する Monad 法則（短絡評価の検証）
-    /// None.and_then(f) は常に None を返す
+    /// Monad law for None (verifying short-circuit evaluation)
+    /// None.and_then(f) always returns None
     #[test]
     fn test_option_none_short_circuit(_dummy in any::<u8>()) {
         let none: Option<i32> = None;
@@ -383,13 +383,13 @@ proptest! {
 }
 
 // =============================================================================
-// Monad 法則と等価性の組み合わせテスト
+// Monad laws and equivalence combination tests
 // =============================================================================
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
 
-    /// Result の map と and_then の関係
+    /// Relationship between Result's map and and_then
     /// m.map(f) == m.and_then(|x| Ok(f(x)))
     #[test]
     fn test_result_map_is_and_then_with_pure(
@@ -411,7 +411,7 @@ proptest! {
         prop_assert_eq!(left, right, "map should be equivalent to and_then with Ok");
     }
 
-    /// Option の map と and_then の関係
+    /// Relationship between Option's map and and_then
     /// m.map(f) == m.and_then(|x| Some(f(x)))
     #[test]
     fn test_option_map_is_and_then_with_pure(option in proptest::option::of(any::<i32>())) {

@@ -1,7 +1,7 @@
-//! workflow モジュールの補完テスト
+//! Supplementary tests for the workflow module
 //!
-//! PlaceOrder ワークフローの状態遷移テスト、IO モナドの動作テスト、
-//! エラーハンドリングとイベント生成のテストを行う。
+//! State transition tests for the PlaceOrder workflow, IO monad behavior tests,
+//! tests for error handling and event generation.
 
 use lambars::effect::IO;
 use order_taking_sample::simple_types::{Price, ProductCode, VipStatus};
@@ -17,7 +17,7 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 // =============================================================================
-// テストデータファクトリ
+// Test data factory
 // =============================================================================
 
 fn valid_customer_info() -> UnvalidatedCustomerInfo {
@@ -123,7 +123,7 @@ fn mock_send_acknowledgment_not_sent() -> impl Fn(&OrderAcknowledgment) -> IO<Se
 }
 
 // =============================================================================
-// 状態遷移テスト
+// State transition tests
 // =============================================================================
 
 mod state_transition_tests {
@@ -187,7 +187,7 @@ mod state_transition_tests {
 }
 
 // =============================================================================
-// IO モナド動作テスト
+// IO monad behavior tests
 // =============================================================================
 
 mod io_monad_tests {
@@ -221,10 +221,10 @@ mod io_monad_tests {
             &order,
         );
 
-        // IO モナドを作成しただけでは実行されない
+        // Creating an IO monad does not execute it
         assert!(!executed.get());
 
-        // run_unsafe() で実行
+        // Execute with run_unsafe()
         let _ = io_result.run_unsafe();
         assert!(executed.get());
     }
@@ -247,7 +247,7 @@ mod io_monad_tests {
         let check_address = mock_address_valid();
         let get_pricing_fn = mock_pricing_fn(100);
 
-        // 1回目の実行
+        // First execution
         let io_result1 = place_order(
             &check_product,
             &check_address,
@@ -259,7 +259,7 @@ mod io_monad_tests {
         );
         let _ = io_result1.run_unsafe();
 
-        // 2回目の実行（新しい IO モナドを作成）
+        // Second execution (create a new IO monad)
         let io_result2 = place_order(
             &check_product,
             &check_address,
@@ -271,13 +271,13 @@ mod io_monad_tests {
         );
         let _ = io_result2.run_unsafe();
 
-        // 複数回実行すると副作用が複数回発生
+        // Multiple executions cause the side effect to occur multiple times
         assert_eq!(execution_count.get(), 2);
     }
 }
 
 // =============================================================================
-// エラーハンドリングテスト
+// Error handling tests
 // =============================================================================
 
 mod error_handling_tests {
@@ -286,7 +286,7 @@ mod error_handling_tests {
     #[rstest]
     fn test_validation_error_stops_workflow() {
         let order = UnvalidatedOrder::new(
-            "".to_string(), // 無効な注文ID
+            "".to_string(), // Invalid order ID
             valid_customer_info(),
             valid_address(),
             valid_address(),
@@ -365,9 +365,9 @@ mod error_handling_tests {
 
     #[rstest]
     fn test_pricing_overflow_error() {
-        // 1000個 x 100 = 100000 > Price の上限
-        // ただし Price の上限は 1000 なので、10 * 100 = 1000 が上限
-        // 11 * 100 = 1100 > 1000 でオーバーフロー
+        // 1000 x 100 = 100000 > Price maximum
+        // However, the Price maximum is 1000, so 10 * 100 = 1000 is the limit
+        // 11 * 100 = 1100 > 1000, overflow
         let order = UnvalidatedOrder::new(
             "order-001".to_string(),
             valid_customer_info(),
@@ -398,7 +398,7 @@ mod error_handling_tests {
 }
 
 // =============================================================================
-// イベント生成テスト
+// Event generation tests
 // =============================================================================
 
 mod event_generation_tests {
@@ -427,7 +427,7 @@ mod event_generation_tests {
         assert!(result.is_ok());
         let events = result.unwrap();
 
-        // 3 イベント: ShippableOrderPlaced, BillableOrderPlaced, OrderAcknowledgmentSent
+        // 3 events: ShippableOrderPlaced, BillableOrderPlaced, OrderAcknowledgmentSent
         assert_eq!(events.len(), 3);
 
         let has_shippable = events
@@ -467,7 +467,7 @@ mod event_generation_tests {
         assert!(result.is_ok());
         let events = result.unwrap();
 
-        // 2 イベント: ShippableOrderPlaced, BillableOrderPlaced（AcknowledgmentSent なし）
+        // 2 events: ShippableOrderPlaced, BillableOrderPlaced (no AcknowledgmentSent)
         assert_eq!(events.len(), 2);
 
         let has_acknowledgment = events
@@ -553,7 +553,7 @@ mod event_generation_tests {
 }
 
 // =============================================================================
-// VIP 顧客テスト
+// VIP customerTest
 // =============================================================================
 
 mod vip_customer_tests {
@@ -581,8 +581,8 @@ mod vip_customer_tests {
         assert!(result.is_ok());
         let events = result.unwrap();
 
-        // VIP 顧客は配送料が無料になる（free_vip_shipping）
-        // BillableOrderPlaced イベントに反映されるかテスト
+        // VIP customer has free shipping (free_vip_shipping)
+        // Test whether it is reflected in the BillableOrderPlaced event
         let billable_event = events.iter().find(|e| {
             matches!(
                 e,
@@ -608,7 +608,7 @@ mod vip_customer_tests {
 }
 
 // =============================================================================
-// プロモーションコードテスト
+// Promotion code tests
 // =============================================================================
 
 mod promotion_code_tests {
@@ -649,7 +649,7 @@ mod promotion_code_tests {
 }
 
 // =============================================================================
-// 複数注文明細テスト
+// Multiple order line tests
 // =============================================================================
 
 mod multiple_order_lines_tests {
@@ -717,7 +717,7 @@ mod multiple_order_lines_tests {
 }
 
 // =============================================================================
-// 空の注文テスト
+// Empty order tests
 // =============================================================================
 
 mod empty_order_tests {
@@ -752,7 +752,7 @@ mod empty_order_tests {
         assert!(result.is_ok());
         let events = result.unwrap();
 
-        // 空の注文でも成功（請求金額は 0）
+        // Succeeds even with an empty order (billing amount is 0)
         let billable_event = events.iter().find(|e| {
             matches!(
                 e,

@@ -153,6 +153,12 @@ impl<T: Clone + Ord> SortedVec<T> {
                 Self::from_sorted(new_vec)
             })
     }
+
+    /// Returns true if two `SortedVec` instances share the same underlying `Arc`.
+    #[cfg(test)]
+    fn ptr_eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
 }
 
 /// Internal representation of the collection state.
@@ -523,6 +529,21 @@ impl<T: Clone + Eq + Hash + Ord> OrderedUniqueSet<T> {
         matches!(self.inner, OrderedUniqueSetInner::Large(_))
     }
 
+    /// Returns `true` if two collections share the same underlying `Arc` storage.
+    ///
+    /// Returns `true` for Empty-Empty or Large-Large with same `Arc`.
+    /// Returns `false` otherwise (Small state uses `SmallVec`, not `Arc`).
+    #[cfg(test)]
+    fn shares_storage_with(&self, other: &Self) -> bool {
+        match (&self.inner, &other.inner) {
+            (OrderedUniqueSetInner::Empty, OrderedUniqueSetInner::Empty) => true,
+            (OrderedUniqueSetInner::Large(this), OrderedUniqueSetInner::Large(that)) => {
+                this.ptr_eq(that)
+            }
+            _ => false,
+        }
+    }
+
     /// Returns an iterator over references to the elements in sorted order.
     ///
     /// Elements are sorted according to their `Ord` implementation.
@@ -866,6 +887,293 @@ impl<T: Clone + Eq + Hash + Ord> OrderedUniqueSet<T> {
 
         result.extend(left.map(Clone::clone));
         Self::from_sorted_vec(result)
+    }
+
+    /// Inserts multiple elements in batch, returning a new collection.
+    ///
+    /// Provides efficient bulk insertion by sorting and deduplicating
+    /// the input, then performing a linear merge with the existing elements.
+    ///
+    /// If all input elements already exist in the collection, returns a clone
+    /// (sharing the underlying `Arc` for Large state).
+    ///
+    /// # Complexity
+    ///
+    /// O(m log m + n + m) where n is the current size and m is the number of
+    /// elements to insert.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::OrderedUniqueSet;
+    ///
+    /// let collection = OrderedUniqueSet::from_sorted_iter([1, 3, 5]);
+    /// let result = collection.insert_all([2, 4, 6]);
+    /// assert_eq!(result.to_sorted_vec(), vec![1, 2, 3, 4, 5, 6]);
+    ///
+    /// // With duplicates in input
+    /// let result = collection.insert_all([3, 3, 7, 7]);
+    /// assert_eq!(result.to_sorted_vec(), vec![1, 3, 5, 7]);
+    /// ```
+    #[must_use]
+    pub fn insert_all<I: IntoIterator<Item = T>>(&self, elements: I) -> Self {
+        let iter = elements.into_iter();
+        let (lower, upper) = iter.size_hint();
+
+        // Small path: use SmallVec when input size is bounded and small
+        if upper.is_some_and(|upper_bound| upper_bound <= SMALL_THRESHOLD) {
+            let mut new_elements: SmallVec<[T; SMALL_THRESHOLD]> = iter.collect();
+            if new_elements.is_empty() {
+                return self.clone();
+            }
+
+            new_elements.sort_unstable();
+            new_elements.dedup();
+
+            return self.insert_all_from_sorted_slice(&new_elements);
+        }
+
+        // Large path: use Vec for potentially large input
+        let mut new_elements: Vec<T> = iter.collect();
+        if new_elements.is_empty() {
+            return self.clone();
+        }
+
+        new_elements.sort_unstable();
+        new_elements.dedup();
+
+        // If after dedup the input is small, use small path
+        if new_elements.len() <= SMALL_THRESHOLD {
+            return self.insert_all_from_sorted_slice(&new_elements);
+        }
+
+        self.insert_all_from_sorted_vec(new_elements, lower)
+    }
+
+    /// Internal helper for `insert_all` with sorted, deduplicated slice.
+    /// Used for small inputs to avoid unnecessary Vec allocation.
+    fn insert_all_from_sorted_slice(&self, new_elements: &[T]) -> Self {
+        // Phase 1: Check if any new elements will actually be added (two-pointer scan)
+        let has_new_elements = {
+            let mut existing_iter = self.iter_sorted().peekable();
+            let mut new_iter = new_elements.iter().peekable();
+            let mut found_new = false;
+
+            while let (Some(existing), Some(new)) = (existing_iter.peek(), new_iter.peek()) {
+                match (*existing).cmp(*new) {
+                    Ordering::Less => {
+                        existing_iter.next();
+                    }
+                    Ordering::Greater => {
+                        found_new = true;
+                        break;
+                    }
+                    Ordering::Equal => {
+                        existing_iter.next();
+                        new_iter.next();
+                    }
+                }
+            }
+            found_new || new_iter.peek().is_some()
+        };
+
+        if !has_new_elements {
+            return self.clone();
+        }
+
+        // Phase 2: Merge - use SmallVec if result will be small
+        let existing_len = self.len();
+        let max_result_size = existing_len + new_elements.len();
+
+        if max_result_size <= SMALL_THRESHOLD {
+            // Small result path: use SmallVec to avoid heap allocation
+            let mut result: SmallVec<[T; SMALL_THRESHOLD]> = SmallVec::new();
+            let mut existing_iter = self.iter_sorted().peekable();
+            let mut new_iter = new_elements.iter().peekable();
+
+            while let (Some(existing), Some(new)) = (existing_iter.peek(), new_iter.peek()) {
+                match (*existing).cmp(*new) {
+                    Ordering::Less => {
+                        result.push((*existing).clone());
+                        existing_iter.next();
+                    }
+                    Ordering::Greater => {
+                        result.push((*new).clone());
+                        new_iter.next();
+                    }
+                    Ordering::Equal => {
+                        result.push((*existing).clone());
+                        existing_iter.next();
+                        new_iter.next();
+                    }
+                }
+            }
+
+            for existing in existing_iter {
+                result.push(existing.clone());
+            }
+            for new in new_iter {
+                result.push(new.clone());
+            }
+
+            return Self {
+                inner: OrderedUniqueSetInner::Small(result),
+            };
+        }
+
+        // Large result path: use Vec
+        let mut result = Vec::with_capacity(max_result_size);
+        let mut existing_iter = self.iter_sorted().peekable();
+        let mut new_iter = new_elements.iter().peekable();
+
+        while let (Some(existing), Some(new)) = (existing_iter.peek(), new_iter.peek()) {
+            match (*existing).cmp(*new) {
+                Ordering::Less => {
+                    result.push((*existing).clone());
+                    existing_iter.next();
+                }
+                Ordering::Greater => {
+                    result.push((*new).clone());
+                    new_iter.next();
+                }
+                Ordering::Equal => {
+                    result.push((*existing).clone());
+                    existing_iter.next();
+                    new_iter.next();
+                }
+            }
+        }
+
+        for existing in existing_iter {
+            result.push(existing.clone());
+        }
+        for new in new_iter {
+            result.push(new.clone());
+        }
+
+        Self::from_sorted_vec(result)
+    }
+
+    /// Internal helper for `insert_all` with sorted, deduplicated `Vec`.
+    /// Used for large inputs.
+    fn insert_all_from_sorted_vec(&self, new_elements: Vec<T>, _size_hint_lower: usize) -> Self {
+        // Phase 1: Check if any new elements will actually be added (two-pointer scan)
+        let has_new_elements = {
+            let mut existing_iter = self.iter_sorted().peekable();
+            let mut new_iter = new_elements.iter().peekable();
+            let mut found_new = false;
+
+            while let (Some(existing), Some(new)) = (existing_iter.peek(), new_iter.peek()) {
+                match (*existing).cmp(*new) {
+                    Ordering::Less => {
+                        existing_iter.next();
+                    }
+                    Ordering::Greater => {
+                        found_new = true;
+                        break;
+                    }
+                    Ordering::Equal => {
+                        existing_iter.next();
+                        new_iter.next();
+                    }
+                }
+            }
+            found_new || new_iter.peek().is_some()
+        };
+
+        if !has_new_elements {
+            return self.clone();
+        }
+
+        // Phase 2: Merge with single-clone strategy
+        let existing_len = self.len();
+        let mut result = Vec::with_capacity(existing_len + new_elements.len());
+        let mut existing_iter = self.iter_sorted().peekable();
+        let mut new_iter = new_elements.into_iter().peekable();
+
+        while let (Some(existing), Some(new)) = (existing_iter.peek(), new_iter.peek()) {
+            match (*existing).cmp(new) {
+                Ordering::Less => {
+                    result.push((*existing).clone());
+                    existing_iter.next();
+                }
+                Ordering::Greater => {
+                    if let Some(new_element) = new_iter.next() {
+                        result.push(new_element);
+                    }
+                }
+                Ordering::Equal => {
+                    result.push((*existing).clone());
+                    existing_iter.next();
+                    new_iter.next();
+                }
+            }
+        }
+
+        for existing in existing_iter {
+            result.push(existing.clone());
+        }
+        result.extend(new_iter);
+
+        Self::from_sorted_vec(result)
+    }
+
+    /// Creates an `OrderedUniqueSet` from an unsorted iterator.
+    ///
+    /// Sorts and deduplicates the input before constructing the collection.
+    ///
+    /// # Complexity
+    ///
+    /// O(n log n) for sorting, O(n) for deduplication and construction.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::OrderedUniqueSet;
+    ///
+    /// let collection = OrderedUniqueSet::from_unsorted_iter([5, 3, 1, 4, 2]);
+    /// assert_eq!(collection.to_sorted_vec(), vec![1, 2, 3, 4, 5]);
+    ///
+    /// // Duplicates are removed
+    /// let collection = OrderedUniqueSet::from_unsorted_iter([1, 2, 2, 3, 3, 3]);
+    /// assert_eq!(collection.to_sorted_vec(), vec![1, 2, 3]);
+    /// ```
+    #[must_use]
+    pub fn from_unsorted_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        let iter = iter.into_iter();
+        let (_, upper) = iter.size_hint();
+
+        // Small path: use SmallVec when input size is bounded and small
+        if upper.is_some_and(|upper_bound| upper_bound <= SMALL_THRESHOLD) {
+            let mut elements: SmallVec<[T; SMALL_THRESHOLD]> = iter.collect();
+            if elements.is_empty() {
+                return Self::new();
+            }
+
+            elements.sort_unstable();
+            elements.dedup();
+            return Self {
+                inner: OrderedUniqueSetInner::Small(elements),
+            };
+        }
+
+        // Large path: use Vec for potentially large input
+        let mut elements: Vec<T> = iter.collect();
+        if elements.is_empty() {
+            return Self::new();
+        }
+
+        elements.sort_unstable();
+        elements.dedup();
+
+        // If after dedup the result is small, convert to SmallVec
+        if elements.len() <= SMALL_THRESHOLD {
+            return Self {
+                inner: OrderedUniqueSetInner::Small(SmallVec::from_vec(elements)),
+            };
+        }
+
+        Self::from_large_vec(elements)
     }
 
     /// Returns the set intersection (self & other).
@@ -1673,5 +1981,278 @@ mod tests {
         // Original collections unchanged
         assert_eq!(set1.to_sorted_vec(), vec![1, 2, 3, 4, 5]);
         assert_eq!(set2.to_sorted_vec(), vec![3, 4, 5, 6, 7]);
+    }
+
+    // =========================================================================
+    // insert_all tests (P0-1: バッチ挿入最適化)
+    // =========================================================================
+
+    #[rstest]
+    fn insert_all_empty_into_empty_returns_empty() {
+        let collection: OrderedUniqueSet<i32> = OrderedUniqueSet::new();
+        let result = collection.insert_all(std::iter::empty::<i32>());
+        assert!(result.is_empty());
+        assert!(result.is_empty_state());
+    }
+
+    #[rstest]
+    fn insert_all_single_element_into_empty() {
+        let collection: OrderedUniqueSet<i32> = OrderedUniqueSet::new();
+        let result = collection.insert_all([42]);
+        assert_eq!(result.len(), 1);
+        assert!(result.contains(&42));
+        assert!(result.is_small_state());
+    }
+
+    #[rstest]
+    fn insert_all_multiple_sorted_elements_into_empty() {
+        let collection: OrderedUniqueSet<i32> = OrderedUniqueSet::new();
+        let result = collection.insert_all([1, 2, 3, 4, 5]);
+        assert_eq!(result.len(), 5);
+        assert_eq!(result.to_sorted_vec(), vec![1, 2, 3, 4, 5]);
+    }
+
+    #[rstest]
+    fn insert_all_multiple_unsorted_elements_into_empty() {
+        let collection: OrderedUniqueSet<i32> = OrderedUniqueSet::new();
+        let result = collection.insert_all([5, 3, 1, 4, 2]);
+        assert_eq!(result.len(), 5);
+        assert_eq!(result.to_sorted_vec(), vec![1, 2, 3, 4, 5]);
+    }
+
+    #[rstest]
+    fn insert_all_with_duplicates_in_input() {
+        let collection: OrderedUniqueSet<i32> = OrderedUniqueSet::new();
+        let result = collection.insert_all([1, 2, 2, 3, 3, 3, 4]);
+        assert_eq!(result.len(), 4);
+        assert_eq!(result.to_sorted_vec(), vec![1, 2, 3, 4]);
+    }
+
+    #[rstest]
+    fn insert_all_into_existing_small_collection() {
+        let collection = OrderedUniqueSet::from_sorted_iter([1, 3, 5]);
+        let result = collection.insert_all([2, 4, 6]);
+        assert_eq!(result.len(), 6);
+        assert_eq!(result.to_sorted_vec(), vec![1, 2, 3, 4, 5, 6]);
+    }
+
+    #[rstest]
+    fn insert_all_into_existing_large_collection() {
+        let collection = OrderedUniqueSet::from_sorted_iter(1..=10);
+        assert!(collection.is_large_state());
+        let result = collection.insert_all([11, 12, 13, 14, 15]);
+        assert_eq!(result.len(), 15);
+        assert_eq!(result.to_sorted_vec(), (1..=15).collect::<Vec<_>>());
+    }
+
+    #[rstest]
+    fn insert_all_with_overlapping_elements() {
+        let collection = OrderedUniqueSet::from_sorted_iter([1, 2, 3, 4, 5]);
+        let result = collection.insert_all([3, 4, 5, 6, 7]);
+        assert_eq!(result.len(), 7);
+        assert_eq!(result.to_sorted_vec(), vec![1, 2, 3, 4, 5, 6, 7]);
+    }
+
+    #[rstest]
+    fn insert_all_all_existing_elements_returns_equivalent() {
+        let collection = OrderedUniqueSet::from_sorted_iter([1, 2, 3]);
+        let result = collection.insert_all([1, 2, 3]);
+        assert_eq!(result.len(), 3);
+        assert_eq!(result.to_sorted_vec(), vec![1, 2, 3]);
+    }
+
+    #[rstest]
+    fn insert_all_transitions_small_to_large() {
+        let collection = OrderedUniqueSet::from_sorted_iter([1, 2, 3, 4, 5, 6, 7, 8]);
+        assert!(collection.is_small_state());
+        let result = collection.insert_all([9, 10]);
+        assert!(result.is_large_state());
+        assert_eq!(result.len(), 10);
+    }
+
+    #[rstest]
+    fn insert_all_preserves_immutability() {
+        let collection = OrderedUniqueSet::from_sorted_iter([1, 2, 3]);
+        let _ = collection.insert_all([4, 5, 6]);
+
+        // Original collection unchanged
+        assert_eq!(collection.len(), 3);
+        assert_eq!(collection.to_sorted_vec(), vec![1, 2, 3]);
+    }
+
+    #[rstest]
+    fn insert_all_referential_transparency() {
+        let collection = OrderedUniqueSet::from_sorted_iter([1, 2, 3]);
+        let elements = vec![4, 5, 6];
+
+        // Same inputs should produce same outputs
+        let result1 = collection.insert_all(elements.clone());
+        let result2 = collection.insert_all(elements);
+
+        assert_eq!(result1, result2);
+    }
+
+    // =========================================================================
+    // from_unsorted_iter tests (P0-2: 未ソートイテレータからの構築)
+    // =========================================================================
+
+    #[rstest]
+    fn from_unsorted_iter_empty_returns_empty() {
+        let collection: OrderedUniqueSet<i32> =
+            OrderedUniqueSet::from_unsorted_iter(std::iter::empty());
+        assert!(collection.is_empty());
+        assert!(collection.is_empty_state());
+    }
+
+    #[rstest]
+    fn from_unsorted_iter_single_element() {
+        let collection = OrderedUniqueSet::from_unsorted_iter([42]);
+        assert_eq!(collection.len(), 1);
+        assert!(collection.contains(&42));
+    }
+
+    #[rstest]
+    fn from_unsorted_iter_unsorted_input() {
+        let collection = OrderedUniqueSet::from_unsorted_iter([5, 3, 1, 4, 2]);
+        assert_eq!(collection.len(), 5);
+        assert_eq!(collection.to_sorted_vec(), vec![1, 2, 3, 4, 5]);
+    }
+
+    #[rstest]
+    fn from_unsorted_iter_with_duplicates() {
+        let collection = OrderedUniqueSet::from_unsorted_iter([3, 1, 2, 1, 3, 2]);
+        assert_eq!(collection.len(), 3);
+        assert_eq!(collection.to_sorted_vec(), vec![1, 2, 3]);
+    }
+
+    #[rstest]
+    fn from_unsorted_iter_small_returns_small_state() {
+        let collection = OrderedUniqueSet::from_unsorted_iter([5, 3, 1, 7, 2, 6, 4, 8]);
+        assert!(collection.is_small_state());
+        assert_eq!(collection.len(), 8);
+    }
+
+    #[rstest]
+    fn from_unsorted_iter_large_returns_large_state() {
+        let collection = OrderedUniqueSet::from_unsorted_iter([9, 5, 3, 1, 7, 2, 6, 4, 8, 10]);
+        assert!(collection.is_large_state());
+        assert_eq!(collection.len(), 10);
+    }
+
+    #[rstest]
+    fn from_unsorted_iter_matches_from_sorted_iter() {
+        let unsorted = vec![5, 3, 1, 4, 2, 8, 6, 7, 9, 10];
+        let sorted: Vec<i32> = (1..=10).collect();
+
+        let from_unsorted = OrderedUniqueSet::from_unsorted_iter(unsorted);
+        let from_sorted = OrderedUniqueSet::from_sorted_iter(sorted);
+
+        assert_eq!(from_unsorted, from_sorted);
+    }
+
+    #[rstest]
+    fn from_unsorted_iter_referential_transparency() {
+        let elements = vec![5, 3, 1, 4, 2];
+
+        // Same inputs should produce same outputs
+        let result1 = OrderedUniqueSet::from_unsorted_iter(elements.clone());
+        let result2 = OrderedUniqueSet::from_unsorted_iter(elements);
+
+        assert_eq!(result1, result2);
+    }
+
+    // =========================================================================
+    // Structural sharing tests (P0-2a: 構造共有の検証)
+    // =========================================================================
+
+    #[rstest]
+    fn insert_all_empty_elements_returns_same_storage_for_large() {
+        // Large state: empty insertion should return clone with same Arc
+        let original = OrderedUniqueSet::from_sorted_iter(1..=10);
+        assert!(original.is_large_state());
+
+        let result = original.insert_all(std::iter::empty::<i32>());
+
+        // Should share storage (same Arc)
+        assert!(original.shares_storage_with(&result));
+    }
+
+    #[rstest]
+    fn insert_all_identical_elements_returns_same_storage_for_large() {
+        // Large state: inserting only existing elements should return clone with same Arc
+        let original = OrderedUniqueSet::from_sorted_iter(1..=10);
+        assert!(original.is_large_state());
+
+        // Insert elements that already exist
+        let result = original.insert_all([1, 2, 3, 4, 5]);
+
+        // Should share storage (same Arc) since no new elements added
+        assert!(original.shares_storage_with(&result));
+    }
+
+    #[rstest]
+    fn insert_all_new_elements_creates_new_storage() {
+        // Large state: inserting new elements should create new Arc
+        let original = OrderedUniqueSet::from_sorted_iter(1..=10);
+        assert!(original.is_large_state());
+
+        // Insert new elements
+        let result = original.insert_all([11, 12, 13]);
+
+        // Should NOT share storage (different Arc)
+        assert!(!original.shares_storage_with(&result));
+        assert_eq!(result.len(), 13);
+    }
+
+    #[rstest]
+    fn insert_all_mixed_elements_creates_new_storage() {
+        // Large state: inserting mix of existing and new elements should create new Arc
+        let original = OrderedUniqueSet::from_sorted_iter(1..=10);
+        assert!(original.is_large_state());
+
+        // Insert mix of existing (1,2,3) and new (11,12) elements
+        let result = original.insert_all([1, 2, 3, 11, 12]);
+
+        // Should NOT share storage since new elements were added
+        assert!(!original.shares_storage_with(&result));
+        assert_eq!(result.len(), 12);
+    }
+
+    #[rstest]
+    fn clone_shares_storage() {
+        // Verify that clone shares storage (baseline test)
+        let original = OrderedUniqueSet::from_sorted_iter(1..=10);
+        assert!(original.is_large_state());
+
+        let cloned = original.clone();
+
+        // Clone should share storage
+        assert!(original.shares_storage_with(&cloned));
+    }
+
+    #[rstest]
+    fn insert_all_empty_elements_small_state() {
+        // Small state: empty insertion behavior
+        let original = OrderedUniqueSet::from_sorted_iter([1, 2, 3]);
+        assert!(original.is_small_state());
+
+        let result = original.insert_all(std::iter::empty::<i32>());
+
+        // Small state uses SmallVec, not Arc, so shares_storage_with returns false
+        // But the result should be equivalent
+        assert_eq!(original, result);
+        assert_eq!(original.len(), result.len());
+    }
+
+    #[rstest]
+    fn insert_all_identical_elements_small_state() {
+        // Small state: inserting only existing elements
+        let original = OrderedUniqueSet::from_sorted_iter([1, 2, 3]);
+        assert!(original.is_small_state());
+
+        let result = original.insert_all([1, 2]);
+
+        // Result should be equivalent even though SmallVec doesn't share
+        assert_eq!(original, result);
     }
 }

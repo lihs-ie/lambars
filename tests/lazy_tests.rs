@@ -13,7 +13,7 @@ use rstest::rstest;
 use std::cell::Cell;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
-/// force は初回のみ評価し、その後は同一値を返す。
+/// `force` evaluates only on the first call and returns the same value thereafter.
 #[rstest]
 fn force_is_idempotent() {
     let call_count = Cell::new(0);

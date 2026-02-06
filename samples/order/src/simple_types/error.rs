@@ -1,11 +1,11 @@
-//! バリデーションエラー型の定義
+//! Validation error type definition
 
 use thiserror::Error;
 
-/// バリデーションエラーを表す構造体
+/// Struct representing a validation error
 ///
-/// 全ての制約付き型で共通して使用する。
-/// フィールド名とエラーメッセージを保持する。
+/// Used commonly by all constrained types.
+/// Holds a field name and error message.
 ///
 /// # Examples
 ///
@@ -20,23 +20,23 @@ use thiserror::Error;
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 #[error("{field_name}: {message}")]
 pub struct ValidationError {
-    /// エラーが発生したフィールド名
+    /// Name of the field where the error occurred
     pub field_name: String,
-    /// エラーメッセージ
+    /// Error message
     pub message: String,
 }
 
 impl ValidationError {
-    /// 新しい `ValidationError` を生成する
+    /// Creates a new `ValidationError`
     ///
     /// # Arguments
     ///
-    /// * `field_name` - エラーが発生したフィールド名
-    /// * `message` - エラーメッセージ
+    /// * `field_name` - Name of the field where the error occurred
+    /// * `message` - error message
     ///
     /// # Returns
     ///
-    /// 新しい `ValidationError` インスタンス
+    /// A new `ValidationError` instance
     #[must_use]
     pub fn new(field_name: &str, message: &str) -> Self {
         Self {
@@ -70,7 +70,7 @@ mod tests {
     fn test_validation_error_error_trait() {
         let error = ValidationError::new("OrderId", "Must not be empty");
 
-        // std::error::Error トレイトが実装されていることを確認
+        // Verify that std::error::Error is implemented
         let _: &dyn std::error::Error = &error;
     }
 

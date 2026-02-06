@@ -1,6 +1,6 @@
-//! PlaceOrder ワークフローのテスト
+//! Tests for the PlaceOrder workflow
 //!
-//! Phase 7 の place_order 関数に対するユニットテストと統合テスト。
+//! Unit tests and integration tests for the Phase 7 place_order function.
 
 use lambars::effect::IO;
 use order_taking_sample::simple_types::{Price, ProductCode};
@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 // =============================================================================
-// テストヘルパー関数
+// Test helper functions
 // =============================================================================
 
 fn create_valid_customer_info() -> UnvalidatedCustomerInfo {
@@ -104,7 +104,7 @@ fn never_send() -> impl Fn(&OrderAcknowledgment) -> IO<SendResult> {
 }
 
 // =============================================================================
-// place_order テスト (REQ-074)
+// place_order Test (REQ-074)
 // =============================================================================
 
 mod place_order_tests {
@@ -148,7 +148,7 @@ mod place_order_tests {
     fn test_validation_error_invalid_order_id() {
         // Arrange
         let order = UnvalidatedOrder::new(
-            "".to_string(), // 空の注文ID
+            "".to_string(), // Empty order ID
             create_valid_customer_info(),
             create_valid_address(),
             create_valid_address(),
@@ -261,7 +261,7 @@ mod place_order_tests {
         let result = io_result.run_unsafe();
         assert!(result.is_ok());
         let events = result.unwrap();
-        // メール送信失敗でも成功、AcknowledgmentSent なし
+        // Succeeds even on email send failure, no AcknowledgmentSent
         // ShippableOrderPlaced + BillableOrderPlaced = 2
         assert_eq!(events.len(), 2);
         assert!(events[0].is_shippable());
@@ -320,7 +320,7 @@ mod place_order_tests {
         let calculate_shipping = calculate_shipping_cost_mock();
         let create_letter = create_letter_mock();
 
-        // 副作用が実行されたかどうかを追跡
+        // Track whether the side effect has been executed
         let executed = Arc::new(AtomicBool::new(false));
         let executed_clone = executed.clone();
 
@@ -343,10 +343,10 @@ mod place_order_tests {
             &order,
         );
 
-        // IO が生成されただけでは実行されない
+        // Creating an IO does not execute it
         assert!(!executed.load(Ordering::SeqCst));
 
-        // run_unsafe() で実行される
+        // Executed by run_unsafe()
         let result = io_result.run_unsafe();
         assert!(result.is_ok());
         assert!(executed.load(Ordering::SeqCst));
@@ -365,7 +365,7 @@ mod place_order_tests {
         );
         let check_product = always_exists_product();
         let check_address = always_valid_address();
-        let get_pricing_fn = fixed_price_function(Decimal::from(80)); // 割引価格
+        let get_pricing_fn = fixed_price_function(Decimal::from(80)); // Discounted price
         let calculate_shipping = calculate_shipping_cost_mock();
         let create_letter = create_letter_mock();
         let send_acknowledgment = always_send();

@@ -1,14 +1,14 @@
-//! 顧客情報を表す複合型
+//! Customer information compound type
 
 use lambars_derive::Lenses;
 
 use super::PersonalName;
 use crate::simple_types::{EmailAddress, ValidationError, VipStatus};
 
-/// 顧客情報を表す複合型
+/// Customer information compound type
 ///
-/// 個人名、メールアドレス、VIP ステータスの3つのフィールドを持つ。
-/// `PersonalName` を含むネスト構造により、Lens 合成の良い例となる。
+/// Has three fields: personal name, email address, and VIP status.
+/// The nested structure containing `PersonalName` provides a good example of Lens composition.
 ///
 /// # Examples
 ///
@@ -20,7 +20,7 @@ use crate::simple_types::{EmailAddress, ValidationError, VipStatus};
 /// assert_eq!(customer.email_address().value(), "john@example.com");
 /// ```
 ///
-/// # Lens 合成の使用
+/// # Using Lens Composition
 ///
 /// ```
 /// use order_taking_sample::compound_types::{CustomerInfo, PersonalName};
@@ -29,7 +29,7 @@ use crate::simple_types::{EmailAddress, ValidationError, VipStatus};
 ///
 /// let customer = CustomerInfo::create("John", "Doe", "john@example.com", "Normal").unwrap();
 ///
-/// // Lens 合成で深いネストにアクセス
+/// // Access deep nesting via Lens composition
 /// let name_lens = CustomerInfo::name_lens();
 /// let first_name_lens = PersonalName::first_name_lens();
 /// let customer_first_name = name_lens.compose(first_name_lens);
@@ -37,7 +37,7 @@ use crate::simple_types::{EmailAddress, ValidationError, VipStatus};
 /// let first_name = customer_first_name.get(&customer);
 /// assert_eq!(first_name.value(), "John");
 ///
-/// // first_name を更新（不変更新）
+/// // Update first_name (immutable update)
 /// let new_first_name = String50::create("FirstName", "Jonathan").unwrap();
 /// let updated = customer_first_name.set(customer, new_first_name);
 /// assert_eq!(updated.name().first_name().value(), "Jonathan");
@@ -50,23 +50,23 @@ pub struct CustomerInfo {
 }
 
 impl CustomerInfo {
-    /// 個人名（姓・名）、メールアドレス、VIP ステータスから `CustomerInfo` を生成する
+    /// Creates a `CustomerInfo` from personal name, email, and VIP status
     ///
     /// # Arguments
     ///
-    /// * `first_name` - 名（ファーストネーム）
-    /// * `last_name` - 姓（ラストネーム）
-    /// * `email` - メールアドレス
-    /// * `vip_status` - VIP ステータス（"Normal" または "VIP"）
+    /// * `first_name` - First name
+    /// * `last_name` - Last name
+    /// * `email` - Email address
+    /// * `vip_status` - VIP status ("Normal" or "VIP")
     ///
     /// # Returns
     ///
-    /// * `Ok(CustomerInfo)` - バリデーション成功時
-    /// * `Err(ValidationError)` - いずれかのフィールドが無効な場合
+    /// * `Ok(CustomerInfo)` - On successful validation
+    /// * `Err(ValidationError)` - If any field is invalid
     ///
     /// # Errors
     ///
-    /// いずれかのフィールドが無効な場合に `ValidationError` を返す。
+    /// Returns `ValidationError` if any field is invalid.
     ///
     /// # Examples
     ///
@@ -77,7 +77,7 @@ impl CustomerInfo {
     /// let customer = CustomerInfo::create("John", "Doe", "john@example.com", "VIP").unwrap();
     /// assert!(matches!(customer.vip_status(), VipStatus::Vip));
     ///
-    /// // 無効なメールアドレスはエラー
+    /// // Invalid email addresses cause an error
     /// assert!(CustomerInfo::create("John", "Doe", "invalid", "Normal").is_err());
     /// ```
     pub fn create(
@@ -97,19 +97,19 @@ impl CustomerInfo {
         })
     }
 
-    /// 既にバリデーション済みの構成要素から `CustomerInfo` を生成する
+    /// Creates a `CustomerInfo` from pre-validated components
     ///
-    /// バリデーションは不要（既に各型でバリデーション済み）。
+    /// No validation needed (each type is already validated).
     ///
     /// # Arguments
     ///
-    /// * `name` - 個人名
-    /// * `email_address` - メールアドレス
-    /// * `vip_status` - VIP ステータス
+    /// * `name` - Personal name
+    /// * `email_address` - Email address
+    /// * `vip_status` - VIP status
     ///
     /// # Returns
     ///
-    /// 新しい `CustomerInfo` インスタンス
+    /// A new `CustomerInfo` instance
     ///
     /// # Examples
     ///
@@ -137,31 +137,31 @@ impl CustomerInfo {
         }
     }
 
-    /// 個人名への参照を返す
+    /// Returns a reference to the personal name
     ///
     /// # Returns
     ///
-    /// `PersonalName` 型の個人名への参照
+    /// A reference to the `PersonalName` personal name
     #[must_use]
     pub const fn name(&self) -> &PersonalName {
         &self.name
     }
 
-    /// メールアドレスへの参照を返す
+    /// Returns a reference to the email address
     ///
     /// # Returns
     ///
-    /// `EmailAddress` 型のメールアドレスへの参照
+    /// A reference to the `EmailAddress` email address
     #[must_use]
     pub const fn email_address(&self) -> &EmailAddress {
         &self.email_address
     }
 
-    /// VIP ステータスを返す（Copy 型なのでコピー）
+    /// Returns VIP status (copied since it is a Copy type)
     ///
     /// # Returns
     ///
-    /// `VipStatus` 型の VIP ステータス
+    /// The `VipStatus` VIP status
     #[must_use]
     pub const fn vip_status(&self) -> VipStatus {
         self.vip_status
@@ -176,7 +176,7 @@ mod tests {
     use rstest::rstest;
 
     // =========================================================================
-    // create のテスト
+    // Tests for create
     // =========================================================================
 
     #[rstest]
@@ -237,7 +237,7 @@ mod tests {
     }
 
     // =========================================================================
-    // create_from_parts のテスト
+    // Tests for create_from_parts
     // =========================================================================
 
     #[rstest]
@@ -253,7 +253,7 @@ mod tests {
     }
 
     // =========================================================================
-    // Getter のテスト
+    // Tests for getters
     // =========================================================================
 
     #[rstest]
@@ -267,7 +267,7 @@ mod tests {
     }
 
     // =========================================================================
-    // Clone/Eq のテスト
+    // Tests for Clone/Eq
     // =========================================================================
 
     #[rstest]
@@ -289,7 +289,7 @@ mod tests {
     }
 
     // =========================================================================
-    // Lens のテスト
+    // Tests for Lens
     // =========================================================================
 
     #[rstest]
@@ -354,7 +354,7 @@ mod tests {
     }
 
     // =========================================================================
-    // Lens 合成のテスト
+    // Tests for Lens composition
     // =========================================================================
 
     #[rstest]

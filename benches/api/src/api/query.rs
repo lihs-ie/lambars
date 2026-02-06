@@ -7632,11 +7632,11 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // Phase 1.1c: BMP外文字（絵文字）検索テスト (Codex Review #225)
+    // Phase 1.1c: Supplementary (non-BMP) character (emoji) search tests (Codex Review #225)
     // -------------------------------------------------------------------------
 
-    /// BMP外文字テスト: 絵文字を含むタイトルで "call" を検索すると "call😀back" がヒットする。
-    /// UTF-8 の `char_indices` で正しくバイト境界を処理することを確認。
+    /// Non-BMP character test: searching "call" in a title containing an emoji matches "call😀back".
+    /// Verifies correct byte boundary handling via UTF-8 `char_indices`.
     #[rstest]
     fn test_search_title_with_emoji_call_in_callback_emoji() {
         let tasks: PersistentVector<Task> = vec![
@@ -7659,7 +7659,7 @@ mod tests {
         );
     }
 
-    /// BMP外文字テスト: 絵文字を含むタイトルで "task" を検索すると "task🎉done" がヒットする。
+    /// Non-BMP character test: searching "task" in a title containing an emoji matches "task🎉done".
     #[rstest]
     fn test_search_title_with_emoji_task_in_task_emoji_done() {
         let tasks: PersistentVector<Task> = vec![
@@ -7682,7 +7682,7 @@ mod tests {
         );
     }
 
-    /// BMP外文字テスト: 絵文字を含むタグで "emoji" を検索すると "emoji😀tag" がヒットする。
+    /// Non-BMP character test: searching "emoji" in a tag containing an emoji matches "emoji😀tag".
     #[rstest]
     fn test_search_tag_with_emoji_emoji_in_emoji_tag() {
         let tasks: PersistentVector<Task> = vec![
@@ -7705,7 +7705,7 @@ mod tests {
         );
     }
 
-    /// BMP外文字テスト: 絵文字の後ろの文字列 "back" で "call😀back" を検索できる。
+    /// Non-BMP character test: searching "back" (suffix after emoji) finds "call😀back".
     #[rstest]
     fn test_search_title_with_emoji_suffix_back_in_callback_emoji() {
         let tasks: PersistentVector<Task> = vec![
@@ -7728,7 +7728,7 @@ mod tests {
         assert!(result.tasks.iter().any(|t| t.title.contains("call😀back")));
     }
 
-    /// BMP外文字テスト: 絵文字の後ろの文字列 "tag" で "emoji😀tag" タグを検索できる。
+    /// Non-BMP character test: searching "tag" (suffix after emoji) finds the "emoji😀tag" tag.
     #[rstest]
     fn test_search_tag_with_emoji_suffix_tag_in_emoji_tag() {
         let tasks: PersistentVector<Task> = vec![
@@ -7750,7 +7750,7 @@ mod tests {
         assert_eq!(result.tasks.len(), 1);
     }
 
-    /// BMP外文字テスト: 複数の絵文字を含むタイトルでも正しく検索できる。
+    /// Non-BMP character test: search works correctly even with multiple emojis in a title.
     #[rstest]
     fn test_search_title_with_multiple_emojis() {
         let tasks: PersistentVector<Task> = vec![
@@ -11027,7 +11027,7 @@ mod ngram_tests {
 
     /// Tests n-gram generation from multibyte (UTF-8) string.
     ///
-    /// - Input: "日本語テスト", `ngram_size`=3, `max_ngrams`=64
+    /// - Input: a 6-character Japanese string, `ngram_size`=3, `max_ngrams`=64
     /// - Expected: 4 n-grams (6 chars - 3 + 1 = 4)
     #[rstest]
     fn generate_ngrams_multibyte() {
@@ -11249,7 +11249,7 @@ mod ngram_tests {
 
     /// Tests Unicode (Japanese) n-gram generation with `NgramWindow`.
     ///
-    /// - Input: "こんにちは", `ngram_size`=2, `max_ngrams`=100
+    /// - Input: a 5-character Japanese string, `ngram_size`=2, `max_ngrams`=100
     /// - Expected: 4 n-grams
     #[rstest]
     fn ngram_window_unicode_basic() {
@@ -14613,7 +14613,7 @@ mod apply_changes_tests {
     /// Asserts that two SearchIndex instances have identical content.
     /// Requirements: apply_changes must equal sequential apply_change
     fn assert_search_index_equals(batch: &SearchIndex, sequential: &SearchIndex) {
-        // 1. tasks_by_id の一致
+        // 1. tasks_by_id equality
         assert_eq!(
             batch.tasks_by_id.len(),
             sequential.tasks_by_id.len(),
@@ -14633,7 +14633,7 @@ mod apply_changes_tests {
             );
         }
 
-        // 2. title_full_index の一致
+        // 2. title_full_index equality
         assert_eq!(
             batch.title_full_index.len(),
             sequential.title_full_index.len(),
@@ -14657,7 +14657,7 @@ mod apply_changes_tests {
             );
         }
 
-        // 3. title_word_index の一致
+        // 3. title_word_index equality
         assert_eq!(
             batch.title_word_index.len(),
             sequential.title_word_index.len(),
@@ -14681,7 +14681,7 @@ mod apply_changes_tests {
             );
         }
 
-        // 4. tag_index の一致
+        // 4. tag_index equality
         assert_eq!(
             batch.tag_index.len(),
             sequential.tag_index.len(),
@@ -14707,7 +14707,7 @@ mod apply_changes_tests {
             );
         }
 
-        // 5. title_full_ngram_index の一致
+        // 5. title_full_ngram_index equality
         assert_eq!(
             batch.title_full_ngram_index.len(),
             sequential.title_full_ngram_index.len(),
@@ -14731,7 +14731,7 @@ mod apply_changes_tests {
             );
         }
 
-        // 6. title_word_ngram_index の一致
+        // 6. title_word_ngram_index equality
         assert_eq!(
             batch.title_word_ngram_index.len(),
             sequential.title_word_ngram_index.len(),
@@ -14755,7 +14755,7 @@ mod apply_changes_tests {
             );
         }
 
-        // 7. tag_ngram_index の一致
+        // 7. tag_ngram_index equality
         assert_eq!(
             batch.tag_ngram_index.len(),
             sequential.tag_ngram_index.len(),
@@ -14779,7 +14779,7 @@ mod apply_changes_tests {
             );
         }
 
-        // 8. title_full_all_suffix_index の一致
+        // 8. title_full_all_suffix_index equality
         assert_eq!(
             batch.title_full_all_suffix_index.len(),
             sequential.title_full_all_suffix_index.len(),
@@ -14803,7 +14803,7 @@ mod apply_changes_tests {
             );
         }
 
-        // 9. title_word_all_suffix_index の一致
+        // 9. title_word_all_suffix_index equality
         assert_eq!(
             batch.title_word_all_suffix_index.len(),
             sequential.title_word_all_suffix_index.len(),
@@ -14827,7 +14827,7 @@ mod apply_changes_tests {
             );
         }
 
-        // 10. tag_all_suffix_index の一致
+        // 10. tag_all_suffix_index equality
         assert_eq!(
             batch.tag_all_suffix_index.len(),
             sequential.tag_all_suffix_index.len(),
@@ -14911,19 +14911,19 @@ mod apply_changes_tests {
             .map(|t| TaskChange::Add(t.clone()))
             .collect();
 
-        // バッチ適用
+        // Batch apply
         let batch_result = index.apply_changes(&changes);
 
-        // 逐次適用
+        // Sequential apply
         let mut sequential_result = index.clone();
         for change in &changes {
             sequential_result = sequential_result.apply_change(change.clone());
         }
 
-        // インデックス全体の一致を検証
+        // Verify entire index equality
         assert_search_index_equals(&batch_result, &sequential_result);
 
-        // 検索結果の一致を検証
+        // Verify search results match
         assert_search_results_equal(&batch_result, &sequential_result, "New");
         assert_search_results_equal(&batch_result, &sequential_result, "Task");
     }
@@ -14947,10 +14947,10 @@ mod apply_changes_tests {
         let batch_result = index.apply_changes(&changes);
         let sequential_result = index.apply_change(changes[0].clone());
 
-        // インデックス全体の一致を検証
+        // Verify entire index equality
         assert_search_index_equals(&batch_result, &sequential_result);
 
-        // 検索結果の一致を検証（old が消え、new が見つかる）
+        // Verify search results match (old disappears, new is found)
         assert_search_results_equal(&batch_result, &sequential_result, "Updated");
         assert_search_results_equal(&batch_result, &sequential_result, &old_task.title);
     }
@@ -14967,10 +14967,10 @@ mod apply_changes_tests {
         let batch_result = index.apply_changes(&changes);
         let sequential_result = index.apply_change(changes[0].clone());
 
-        // インデックス全体の一致を検証
+        // Verify entire index equality
         assert_search_index_equals(&batch_result, &sequential_result);
 
-        // 検索結果の一致を検証（削除されたタスクが見つからない）
+        // Verify search results match (removed task is no longer found)
         assert_search_results_equal(&batch_result, &sequential_result, &task_to_remove.title);
     }
 
@@ -15004,10 +15004,10 @@ mod apply_changes_tests {
             sequential_result = sequential_result.apply_change(change.clone());
         }
 
-        // インデックス全体の一致を検証
+        // Verify entire index equality
         assert_search_index_equals(&batch_result, &sequential_result);
 
-        // 検索結果の一致を検証
+        // Verify search results match
         assert_search_results_equal(&batch_result, &sequential_result, "New");
         assert_search_results_equal(&batch_result, &sequential_result, "Updated");
         assert_search_results_equal(&batch_result, &sequential_result, &task_to_remove.title);
@@ -15043,7 +15043,7 @@ mod apply_changes_tests {
         let changes = vec![TaskChange::Remove(task.task_id.clone())];
         let result = index.apply_changes(&changes);
 
-        // title_full_index から空のエントリが除去される
+        // Empty entries should be removed from title_full_index
         let normalized = normalize_query(&task.title);
         assert!(
             result
@@ -15063,7 +15063,7 @@ mod apply_changes_tests {
         let task = create_test_task("Test Task");
         let index = create_empty_index();
 
-        // Add してから Remove（同一バッチ内）
+        // Add then Remove (within the same batch)
         let changes = vec![
             TaskChange::Add(task.clone()),
             TaskChange::Remove(task.task_id.clone()),
@@ -15071,10 +15071,10 @@ mod apply_changes_tests {
 
         let result = index.apply_changes(&changes);
 
-        // tasks_by_id にタスクが存在しない（打ち消された）
+        // Task should not exist in tasks_by_id (cancelled out)
         assert!(!result.tasks_by_id.contains_key(&task.task_id));
 
-        // インデックスにもエントリが残らない
+        // No entries should remain in the index
         let normalized = normalize_query(&task.title);
         assert!(
             result
@@ -15091,11 +15091,11 @@ mod apply_changes_tests {
         let old_task = create_test_task_with_id("Old Title", task_id.clone());
         let new_task = create_test_task_with_id("New Title", task_id.clone());
 
-        // 初期状態: old_task が存在
+        // Initial state: old_task exists
         let tasks: PersistentVector<Task> = vec![old_task.clone()].into_iter().collect();
         let index = SearchIndex::build_with_config(&tasks, SearchIndexConfig::default());
 
-        // Update してから Remove（同一バッチ内）
+        // Update then Remove (within the same batch)
         let changes = vec![
             TaskChange::Update {
                 old: old_task.clone(),
@@ -15106,10 +15106,10 @@ mod apply_changes_tests {
 
         let result = index.apply_changes(&changes);
 
-        // tasks_by_id にタスクが存在しない
+        // Task should not exist in tasks_by_id
         assert!(!result.tasks_by_id.contains_key(&old_task.task_id));
 
-        // old と new のどちらのインデックスも存在しない
+        // Neither old nor new index entries should exist
         let old_normalized = normalize_query(&old_task.title);
         let new_normalized = normalize_query(&new_task.title);
         assert!(
@@ -15141,16 +15141,16 @@ mod apply_changes_tests {
             TaskChange::Remove(task.task_id.clone()),
         ];
 
-        // バッチ適用
+        // Batch apply
         let batch_result = index.apply_changes(&changes);
 
-        // 逐次適用
+        // Sequential apply
         let mut sequential_result = index.clone();
         for change in &changes {
             sequential_result = sequential_result.apply_change(change.clone());
         }
 
-        // 結果が一致
+        // Results should match
         assert_eq!(
             batch_result.tasks_by_id.len(),
             sequential_result.tasks_by_id.len()
@@ -15166,7 +15166,7 @@ mod apply_changes_tests {
         let old_task = create_test_task_with_id("Old Title", task_id.clone());
         let new_task = create_test_task_with_id("New Title", task_id.clone());
 
-        // 初期状態: old_task が存在
+        // Initial state: old_task exists
         let tasks: PersistentVector<Task> = vec![old_task.clone()].into_iter().collect();
         let index = SearchIndex::build_with_config(&tasks, SearchIndexConfig::default());
 
@@ -15178,19 +15178,19 @@ mod apply_changes_tests {
             TaskChange::Remove(new_task.task_id.clone()),
         ];
 
-        // バッチ適用
+        // Batch apply
         let batch_result = index.apply_changes(&changes);
 
-        // 逐次適用
+        // Sequential apply
         let mut sequential_result = index.clone();
         for change in &changes {
             sequential_result = sequential_result.apply_change(change.clone());
         }
 
-        // インデックス全体の一致を検証
+        // Verify entire index equality
         assert_search_index_equals(&batch_result, &sequential_result);
 
-        // タスクが存在しないことを検証
+        // Verify that the task no longer exists
         assert!(!batch_result.tasks_by_id.contains_key(&old_task.task_id));
         assert!(
             !sequential_result
@@ -15231,16 +15231,16 @@ mod apply_changes_tests {
             new: new_task.clone(),
         }];
 
-        // バッチ適用
+        // Batch apply
         let batch_result = index.apply_changes(&changes);
 
-        // 逐次適用
+        // Sequential apply
         let mut sequential_result = index.clone();
         for change in &changes {
             sequential_result = sequential_result.apply_change(change.clone());
         }
 
-        // インデックス全体の一致を検証
+        // Verify entire index equality
         assert_search_index_equals(&batch_result, &sequential_result);
     }
 
@@ -15256,11 +15256,11 @@ mod apply_changes_tests {
         let task_id = task_id_from_u128(1);
         let task = create_test_task_with_id("Test Task", task_id.clone());
 
-        // 初期状態: task が存在
+        // Initial state: task exists
         let tasks: PersistentVector<Task> = vec![task.clone()].into_iter().collect();
         let index = SearchIndex::build_with_config(&tasks, SearchIndexConfig::default());
 
-        // Remove してから Add（同一 TaskId）- Add が勝つ
+        // Remove then Add (same TaskId) - Add wins
         let changes = vec![
             TaskChange::Remove(task.task_id.clone()),
             TaskChange::Add(task.clone()),
@@ -15268,14 +15268,14 @@ mod apply_changes_tests {
 
         let batch_result = index.apply_changes(&changes);
 
-        // 逐次適用と同じ結果になるはず
+        // Should produce the same result as sequential apply
         let mut sequential_result = index.clone();
         for change in &changes {
             sequential_result = sequential_result.apply_change(change.clone());
         }
 
         assert_search_index_equals(&batch_result, &sequential_result);
-        // タスクは存在するはず
+        // Task should still exist
         assert!(batch_result.tasks_by_id.contains_key(&task_id));
     }
 
@@ -15288,11 +15288,11 @@ mod apply_changes_tests {
         let old_task = create_test_task_with_id("Old Title", task_id.clone());
         let new_task = create_test_task_with_id("New Title", task_id);
 
-        // 初期状態: old_task が存在
+        // Initial state: old_task exists
         let tasks: PersistentVector<Task> = vec![old_task.clone()].into_iter().collect();
         let index = SearchIndex::build_with_config(&tasks, SearchIndexConfig::default());
 
-        // Remove してから Update（同一 TaskId）- Add として扱われる
+        // Remove then Update (same TaskId) - treated as Add
         let changes = vec![
             TaskChange::Remove(old_task.task_id.clone()),
             TaskChange::Update {
@@ -15303,14 +15303,14 @@ mod apply_changes_tests {
 
         let batch_result = index.apply_changes(&changes);
 
-        // 逐次適用と同じ結果になるはず
+        // Should produce the same result as sequential apply
         let mut sequential_result = index.clone();
         for change in &changes {
             sequential_result = sequential_result.apply_change(change.clone());
         }
 
         assert_search_index_equals(&batch_result, &sequential_result);
-        // タスクは存在するはず（新しいタイトルで）
+        // Task should exist (with the new title)
         assert!(batch_result.tasks_by_id.contains_key(&new_task.task_id));
     }
 
@@ -15337,19 +15337,19 @@ mod apply_changes_tests {
             .map(|task| TaskChange::Add(task.clone()))
             .collect();
 
-        // バッチ適用
+        // Batch apply
         let batch_result = index.apply_changes(&changes);
 
-        // 逐次適用
+        // Sequential apply
         let mut sequential_result = index.clone();
         for change in &changes {
             sequential_result = sequential_result.apply_change(change.clone());
         }
 
-        // インデックス全体の一致を検証
+        // Verify entire index equality
         assert_search_index_equals(&batch_result, &sequential_result);
 
-        // 検索結果の一致を検証
+        // Verify search results match
         assert_search_results_equal(&batch_result, &sequential_result, "New");
         assert_search_results_equal(&batch_result, &sequential_result, "Task");
         // infix search ("ew" is a suffix of "New")
@@ -15379,10 +15379,10 @@ mod apply_changes_tests {
         let batch_result = index.apply_changes(&changes);
         let sequential_result = index.apply_change(changes[0].clone());
 
-        // インデックス全体の一致を検証
+        // Verify entire index equality
         assert_search_index_equals(&batch_result, &sequential_result);
 
-        // 検索結果の一致を検証（old が消え、new が見つかる）
+        // Verify search results match (old disappears, new is found)
         assert_search_results_equal(&batch_result, &sequential_result, "Updated");
         assert_search_results_equal(&batch_result, &sequential_result, &old_task.title);
         // infix search ("pdated" is a suffix of "Updated")
@@ -15405,10 +15405,10 @@ mod apply_changes_tests {
         let batch_result = index.apply_changes(&changes);
         let sequential_result = index.apply_change(changes[0].clone());
 
-        // インデックス全体の一致を検証
+        // Verify entire index equality
         assert_search_index_equals(&batch_result, &sequential_result);
 
-        // 検索結果の一致を検証（削除されたタスクが見つからない）
+        // Verify search results match (removed task is no longer found)
         assert_search_results_equal(&batch_result, &sequential_result, &task_to_remove.title);
     }
 
@@ -15439,19 +15439,19 @@ mod apply_changes_tests {
             TaskChange::Remove(task_to_remove.task_id.clone()),
         ];
 
-        // バッチ適用
+        // Batch apply
         let batch_result = index.apply_changes(&changes);
 
-        // 逐次適用
+        // Sequential apply
         let mut sequential_result = index.clone();
         for change in &changes {
             sequential_result = sequential_result.apply_change(change.clone());
         }
 
-        // インデックス全体の一致を検証
+        // Verify entire index equality
         assert_search_index_equals(&batch_result, &sequential_result);
 
-        // 検索結果の一致を検証
+        // Verify search results match
         assert_search_results_equal(&batch_result, &sequential_result, "New");
         assert_search_results_equal(&batch_result, &sequential_result, "Updated");
         assert_search_results_equal(&batch_result, &sequential_result, &task_to_remove.title);
@@ -15473,19 +15473,19 @@ mod apply_changes_tests {
             TaskChange::Remove(new_task.task_id.clone()),
         ];
 
-        // バッチ適用
+        // Batch apply
         let batch_result = index.apply_changes(&changes);
 
-        // 逐次適用
+        // Sequential apply
         let mut sequential_result = index.clone();
         for change in &changes {
             sequential_result = sequential_result.apply_change(change.clone());
         }
 
-        // インデックス全体の一致を検証
+        // Verify entire index equality
         assert_search_index_equals(&batch_result, &sequential_result);
 
-        // 追加して削除したタスクは見つからないはず
+        // Task that was added then removed should not be found
         assert_search_results_equal(&batch_result, &sequential_result, "Temporary");
     }
 

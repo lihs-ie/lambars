@@ -1,7 +1,7 @@
-//! pricing モジュールの補完テスト
+//! Supplementary tests for the pricing module
 //!
-//! lambars の Lazy 型によるキャッシュ動作、
-//! 小数精度テスト、エッジケースのテストを行う。
+//! Lazy type caching behavior from lambars,
+//! decimal precision tests, and edge case tests.
 
 use order_taking_sample::compound_types::{Address, CustomerInfo};
 use order_taking_sample::simple_types::{
@@ -20,7 +20,7 @@ use std::rc::Rc;
 use std::str::FromStr;
 
 // =============================================================================
-// テストデータファクトリ
+// Test data factory
 // =============================================================================
 
 fn create_product_code(code: &str) -> ProductCode {
@@ -87,7 +87,7 @@ fn create_validated_order(
 }
 
 // =============================================================================
-// Lazy キャッシュ動作テスト
+// Lazy caching behavior tests
 // =============================================================================
 
 mod lazy_cache_tests {
@@ -109,13 +109,13 @@ mod lazy_cache_tests {
         let pricing_fn = get_pricing_function(get_standard_prices, get_promotion_prices);
         let product_code = create_product_code("W1234");
 
-        // 標準価格を複数回取得
+        // Retrieve standard pricing multiple times
         for _ in 0..10 {
             let get_price = pricing_fn(&PricingMethod::Standard);
             let _ = get_price(&product_code);
         }
 
-        // 初期化は1回のみ（Lazy による遅延評価とキャッシュ）
+        // Initialization happens only once (deferred evaluation and caching via Lazy)
         assert_eq!(initialization_count.get(), 1);
     }
 
@@ -129,7 +129,7 @@ mod lazy_cache_tests {
             Box::new(|_: &ProductCode| create_price(100)) as Box<dyn Fn(&ProductCode) -> Price>
         };
         let get_promotion_prices = |_: &PromotionCode| {
-            // プロモーション対象外（None を返す）→ 標準価格にフォールバック
+            // Not a promotion target (returns None) -> falls back to standard price
             Box::new(|_: &ProductCode| None) as Box<dyn Fn(&ProductCode) -> Option<Price>>
         };
 
@@ -137,17 +137,17 @@ mod lazy_cache_tests {
         let product_code = create_product_code("W1234");
         let promo_code = PromotionCode::new("SUMMER2024".to_string());
 
-        // 標準価格で1回呼び出し
+        // Called once with standard pricing
         let get_standard = pricing_fn(&PricingMethod::Standard);
         let _ = get_standard(&product_code);
 
-        // プロモーション価格（フォールバック）で複数回呼び出し
+        // Called multiple times with promotional pricing (fallback)
         for _ in 0..5 {
             let get_promo = pricing_fn(&PricingMethod::Promotion(promo_code.clone()));
             let _ = get_promo(&product_code);
         }
 
-        // 標準価格関数の初期化は1回のみ
+        // Standard pricing function initialization happens only once
         assert_eq!(standard_init_count.get(), 1);
     }
 
@@ -166,10 +166,10 @@ mod lazy_cache_tests {
 
         let pricing_fn = get_pricing_function(get_standard_prices, get_promotion_prices);
 
-        // pricing_fn を作成しただけでは初期化されない
+        // Creating pricing_fn does not trigger initialization
         assert!(!initialized.get());
 
-        // 実際に価格取得を行うと初期化される
+        // Initialization occurs when actually performing price retrieval
         let product_code = create_product_code("W1234");
         let get_price = pricing_fn(&PricingMethod::Standard);
         let _ = get_price(&product_code);
@@ -179,7 +179,7 @@ mod lazy_cache_tests {
 }
 
 // =============================================================================
-// 小数精度テスト
+// Decimal precision tests
 // =============================================================================
 
 mod decimal_precision_tests {
@@ -224,17 +224,17 @@ mod decimal_precision_tests {
     #[rstest]
     fn test_small_quantity_small_price() {
         let product_code = create_product_code("G123");
-        let quantity = create_quantity_decimal(&product_code, "0.05"); // 最小数量
+        let quantity = create_quantity_decimal(&product_code, "0.05"); // minimumquantity
         let validated_line =
             ValidatedOrderLine::new(create_order_line_id("line-001"), product_code, quantity);
 
-        let get_price = |_: &ProductCode| create_price_decimal("0.01"); // 最小価格
+        let get_price = |_: &ProductCode| create_price_decimal("0.01"); // minimumprice
 
         let result = to_priced_order_line(&get_price, &validated_line);
 
         assert!(result.is_ok());
         let priced_line = result.unwrap();
-        // 0.05 * 0.01 = 0.0005（非常に小さい）
+        // 0.05 * 0.01 = 0.0005 (extremely small)
         assert!(priced_line.line_price().unwrap().value() < Decimal::from_str("0.01").unwrap());
     }
 
@@ -254,7 +254,7 @@ mod decimal_precision_tests {
 }
 
 // =============================================================================
-// エッジケーステスト
+// Edge case tests
 // =============================================================================
 
 mod edge_case_tests {
@@ -263,7 +263,7 @@ mod edge_case_tests {
     #[rstest]
     fn test_zero_price_product() {
         let validated_line = create_validated_order_line("line-001", "W1234", 10);
-        let get_price = |_: &ProductCode| create_price(0); // 無料商品
+        let get_price = |_: &ProductCode| create_price(0); // freeproduct
 
         let result = to_priced_order_line(&get_price, &validated_line);
 
@@ -276,7 +276,7 @@ mod edge_case_tests {
     #[rstest]
     fn test_max_valid_price() {
         let validated_line = create_validated_order_line("line-001", "W1234", 1);
-        let get_price = |_: &ProductCode| create_price(1000); // Price の上限
+        let get_price = |_: &ProductCode| create_price(1000); // Price upper limit
 
         let result = to_priced_order_line(&get_price, &validated_line);
 
@@ -297,7 +297,7 @@ mod edge_case_tests {
         let result = to_priced_order_line(&get_price, &validated_line);
 
         assert!(result.is_ok());
-        // 10 * 100 = 1000（上限ちょうど）
+        // 10 * 100 = 1000 (exactly at upper limit)
         assert_eq!(
             result.unwrap().line_price().unwrap().value(),
             Decimal::from(1000)
@@ -311,20 +311,20 @@ mod edge_case_tests {
 
         let result = to_priced_order_line(&get_price, &validated_line);
 
-        // 11 * 100 = 1100 > 1000（上限超過）
+        // 11 * 100 = 1100 > 1000 (exceeds upper limit)
         assert!(result.is_err());
     }
 
     #[rstest]
     fn test_billing_amount_max_valid() {
-        // BillingAmount の上限は 10000
-        // 10 明細 x 1000円 = 10000（上限ちょうど）
+        // BillingAmount upper limit is 10000
+        // 10 lines x 1000 yen = 10000 (exactly at upper limit)
         let mut lines = Vec::new();
         for index in 0..10 {
             lines.push(create_validated_order_line(
                 &format!("line-{:03}", index),
                 "W1234",
-                10, // 10個 x 100円 = 1000円
+                10, // 10 units x 100 yen = 1000 yen
             ));
         }
         let validated_order = create_validated_order(lines, PricingMethod::Standard);
@@ -342,9 +342,9 @@ mod edge_case_tests {
 
     #[rstest]
     fn test_billing_amount_just_over_max() {
-        // 10000.01 > 10000（上限超過）
-        // 10 明細 x 1000円 + 1 明細 x 0.01円（実際には不可能だが概念的に）
-        // 代わりに 11 明細 x 1000円 = 11000 でテスト
+        // 10000.01 > 10000 (exceeds upper limit)
+        // 10 lines x 1000 yen + 1 line x 0.01 yen (not actually possible, but conceptually)
+        // Instead test with 11 lines x 1000 yen = 11000
         let mut lines = Vec::new();
         for index in 0..11 {
             lines.push(create_validated_order_line(
@@ -366,7 +366,7 @@ mod edge_case_tests {
 }
 
 // =============================================================================
-// get_line_price テスト
+// get_line_price Test
 // =============================================================================
 
 mod get_line_price_tests {
@@ -409,7 +409,7 @@ mod get_line_price_tests {
 }
 
 // =============================================================================
-// add_comment_line テスト
+// add_comment_line Test
 // =============================================================================
 
 mod add_comment_line_tests {
@@ -464,7 +464,7 @@ mod add_comment_line_tests {
 }
 
 // =============================================================================
-// 複数商品タイプテスト
+// Multiple product type tests
 // =============================================================================
 
 mod mixed_product_types_tests {

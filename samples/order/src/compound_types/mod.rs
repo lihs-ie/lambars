@@ -1,22 +1,22 @@
-//! 注文ドメインで使用する複合型（Compound Types）
+//! Compound types used in the order domain
 //!
-//! Phase 1 で定義した基本型を組み合わせて、より高レベルなドメインエンティティを表現する。
-//! lambars の Optics（Lens）を活用して不変データの更新を効率的に行う。
+//! Combines the basic types defined in Phase 1 to express higher-level domain entities.
+//! Uses lambars Optics (Lens) for efficient immutable data updates.
 //!
-//! # 型一覧
+//! # Type List
 //!
-//! - [`PersonalName`] - 個人名（姓・名）
-//! - [`CustomerInfo`] - 顧客情報（個人名、メール、VIP ステータス）
-//! - [`Address`] - 住所
+//! - [`PersonalName`] - Personal name (first and last name)
+//! - [`CustomerInfo`] - Customer information (name, email, VIP status)
+//! - [`Address`] - Address
 //!
-//! # Lens の使用例
+//! # Lens Usage Examples
 //!
 //! ```
 //! use order_taking_sample::compound_types::{PersonalName, CustomerInfo};
 //! use order_taking_sample::simple_types::String50;
 //! use lambars::optics::Lens;
 //!
-//! // CustomerInfo から first_name を取得（Lens 合成）
+//! // Get first_name from CustomerInfo (via Lens composition)
 //! let customer = CustomerInfo::create("John", "Doe", "john@example.com", "Normal").unwrap();
 //!
 //! let name_lens = CustomerInfo::name_lens();

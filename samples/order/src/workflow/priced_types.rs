@@ -1,13 +1,13 @@
-//! 価格付き型
+//! Priced types
 //!
-//! 価格計算済みのデータを表す型を定義する。
-//! 検証済みデータに価格情報を追加した状態を表現する。
+//! Defines types representing priced data.
+//! Expresses the state where pricing information has been added to validated data.
 //!
-//! # 型一覧
+//! # Type List
 //!
-//! - [`PricedOrderProductLine`] - 価格付き製品注文明細
-//! - [`PricedOrderLine`] - 価格付き注文明細（製品またはコメント）
-//! - [`PricedOrder`] - 価格計算済み注文
+//! - [`PricedOrderProductLine`] - Priced product order line
+//! - [`PricedOrderLine`] - Priced order line (product or comment)
+//! - [`PricedOrder`] - Priced order
 
 use crate::compound_types::{Address, CustomerInfo};
 use crate::simple_types::{BillingAmount, OrderId, OrderLineId, OrderQuantity, Price, ProductCode};
@@ -18,9 +18,9 @@ use lambars_derive::Lenses;
 // PricedOrderProductLine
 // =============================================================================
 
-/// 価格付き製品注文明細
+/// Priced product order line
 ///
-/// [`ValidatedOrderLine`](super::ValidatedOrderLine) に価格情報を追加した型。
+/// A type that adds price information to [`ValidatedOrderLine`](super::ValidatedOrderLine).
 ///
 /// # Examples
 ///
@@ -46,14 +46,14 @@ pub struct PricedOrderProductLine {
 }
 
 impl PricedOrderProductLine {
-    /// 新しい `PricedOrderProductLine` を生成する
+    /// Creates a new `PricedOrderProductLine`
     ///
     /// # Arguments
     ///
-    /// * `order_line_id` - 注文明細ID
-    /// * `product_code` - 製品コード
-    /// * `quantity` - 数量
-    /// * `line_price` - 明細の合計価格（単価 x 数量）
+    /// * `order_line_id` - Order line ID
+    /// * `product_code` - Product code
+    /// * `quantity` - quantity
+    /// * `line_price` - Total line price (unit price x quantity)
     ///
     /// # Examples
     ///
@@ -84,25 +84,25 @@ impl PricedOrderProductLine {
         }
     }
 
-    /// 注文明細IDへの参照を返す
+    /// Returns a reference to Order line ID
     #[must_use]
     pub const fn order_line_id(&self) -> &OrderLineId {
         &self.order_line_id
     }
 
-    /// 製品コードへの参照を返す
+    /// Returns a reference to Product code
     #[must_use]
     pub const fn product_code(&self) -> &ProductCode {
         &self.product_code
     }
 
-    /// 数量への参照を返す
+    /// Returns a reference to quantity
     #[must_use]
     pub const fn quantity(&self) -> &OrderQuantity {
         &self.quantity
     }
 
-    /// 明細価格への参照を返す
+    /// Returns a reference to lineprice
     #[must_use]
     pub const fn line_price(&self) -> &Price {
         &self.line_price
@@ -113,9 +113,9 @@ impl PricedOrderProductLine {
 // PricedOrderLine
 // =============================================================================
 
-/// 価格付き注文明細
+/// Priced order line
 ///
-/// 製品明細またはコメント明細のいずれかを表す直和型。
+/// A sum type representing either a product line or a comment line.
 ///
 /// # Examples
 ///
@@ -124,7 +124,7 @@ impl PricedOrderProductLine {
 /// use order_taking_sample::simple_types::{OrderLineId, ProductCode, OrderQuantity, Price};
 /// use rust_decimal::Decimal;
 ///
-/// // 製品明細
+/// // Product line
 /// let order_line_id = OrderLineId::create("OrderLineId", "line-001").unwrap();
 /// let product_code = ProductCode::create("ProductCode", "W1234").unwrap();
 /// let quantity = OrderQuantity::create("Quantity", &product_code, Decimal::from(5)).unwrap();
@@ -135,22 +135,22 @@ impl PricedOrderProductLine {
 /// assert!(priced_line.is_product_line());
 /// assert!(priced_line.line_price().is_some());
 ///
-/// // コメント明細
+/// // Comment line
 /// let comment_line = PricedOrderLine::CommentLine("Gift message: Happy Birthday!".to_string());
 /// assert!(comment_line.is_comment_line());
 /// assert!(comment_line.line_price().is_none());
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PricedOrderLine {
-    /// 製品の明細（価格付き）
+    /// Product line (with price)
     ProductLine(PricedOrderProductLine),
 
-    /// コメント行（ギフトメッセージなど）
+    /// Comment line (gift message, etc.)
     CommentLine(String),
 }
 
 impl PricedOrderLine {
-    /// `ProductLine` バリアントかどうかを返す
+    /// Returns whether this is the `ProductLine` variant
     ///
     /// # Examples
     ///
@@ -174,7 +174,7 @@ impl PricedOrderLine {
         matches!(self, Self::ProductLine(_))
     }
 
-    /// `CommentLine` バリアントかどうかを返す
+    /// Returns whether this is the `CommentLine` variant
     ///
     /// # Examples
     ///
@@ -189,10 +189,10 @@ impl PricedOrderLine {
         matches!(self, Self::CommentLine(_))
     }
 
-    /// 明細の価格を返す
+    /// Returns the line price
     ///
-    /// `ProductLine` の場合は `Some(&Price)` を、
-    /// `CommentLine` の場合は `None` を返す。
+    /// For `ProductLine`, returns `Some(&Price)`;
+    /// for `CommentLine`, returns `None`.
     ///
     /// # Examples
     ///
@@ -201,7 +201,7 @@ impl PricedOrderLine {
     /// use order_taking_sample::simple_types::{OrderLineId, ProductCode, OrderQuantity, Price};
     /// use rust_decimal::Decimal;
     ///
-    /// // ProductLine は価格を持つ
+    /// // ProductLine has a price
     /// let product_code = ProductCode::create("ProductCode", "W1234").unwrap();
     /// let product_line = PricedOrderProductLine::new(
     ///     OrderLineId::create("OrderLineId", "line-001").unwrap(),
@@ -212,7 +212,7 @@ impl PricedOrderLine {
     /// let priced_line = PricedOrderLine::ProductLine(product_line);
     /// assert!(priced_line.line_price().is_some());
     ///
-    /// // CommentLine は価格を持たない
+    /// // CommentLine does not have a price
     /// let comment_line = PricedOrderLine::CommentLine("Note".to_string());
     /// assert!(comment_line.line_price().is_none());
     /// ```
@@ -229,10 +229,10 @@ impl PricedOrderLine {
 // PricedOrder
 // =============================================================================
 
-/// 価格計算済み注文
+/// Priced order
 ///
-/// [`ValidatedOrder`](super::ValidatedOrder) に価格情報を追加した型。
-/// 請求金額と価格付き明細リストを持つ。
+/// A type that adds price information to [`ValidatedOrder`](super::ValidatedOrder).
+/// Has a billing amount and a list of priced order lines.
 ///
 /// # Examples
 ///
@@ -270,17 +270,17 @@ pub struct PricedOrder {
 }
 
 impl PricedOrder {
-    /// 新しい `PricedOrder` を生成する
+    /// Creates a new `PricedOrder`
     ///
     /// # Arguments
     ///
-    /// * `order_id` - 注文ID
-    /// * `customer_info` - 顧客情報
-    /// * `shipping_address` - 配送先住所
-    /// * `billing_address` - 請求先住所
-    /// * `amount_to_bill` - 請求合計金額
-    /// * `lines` - 価格付き注文明細リスト
-    /// * `pricing_method` - 使用された価格計算方法
+    /// * `order_id` - Order ID
+    /// * `customer_info` - customer information
+    /// * `shipping_address` - Shipping address
+    /// * `billing_address` - Billing address
+    /// * `amount_to_bill` - Total billing amount
+    /// * `lines` - Priced order linelist
+    /// * `pricing_method` - Pricing method used
     #[must_use]
     #[allow(clippy::too_many_arguments)]
     pub const fn new(
@@ -303,43 +303,43 @@ impl PricedOrder {
         }
     }
 
-    /// 注文IDへの参照を返す
+    /// Returns a reference to Order ID
     #[must_use]
     pub const fn order_id(&self) -> &OrderId {
         &self.order_id
     }
 
-    /// 顧客情報への参照を返す
+    /// Returns a reference to customer information
     #[must_use]
     pub const fn customer_info(&self) -> &CustomerInfo {
         &self.customer_info
     }
 
-    /// 配送先住所への参照を返す
+    /// Returns a reference to Shipping address
     #[must_use]
     pub const fn shipping_address(&self) -> &Address {
         &self.shipping_address
     }
 
-    /// 請求先住所への参照を返す
+    /// Returns a reference to Billing address
     #[must_use]
     pub const fn billing_address(&self) -> &Address {
         &self.billing_address
     }
 
-    /// 請求金額への参照を返す
+    /// Returns a reference to Billing amount
     #[must_use]
     pub const fn amount_to_bill(&self) -> &BillingAmount {
         &self.amount_to_bill
     }
 
-    /// 価格付き明細リストへの参照を返す
+    /// Returns a reference to Priced order lines
     #[must_use]
     pub fn lines(&self) -> &[PricedOrderLine] {
         &self.lines
     }
 
-    /// 価格計算方法への参照を返す
+    /// Returns a reference to Pricing method
     #[must_use]
     pub const fn pricing_method(&self) -> &PricingMethod {
         &self.pricing_method

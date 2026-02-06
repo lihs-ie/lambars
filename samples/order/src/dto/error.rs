@@ -1,6 +1,6 @@
-//! エラー DTO
+//! Error DTOs
 //!
-//! API レスポンスのエラーをシリアライズするための型を定義する。
+//! Defines types for serializing API response errors.
 
 use serde::{Deserialize, Serialize};
 
@@ -10,10 +10,10 @@ use crate::workflow::{PlaceOrderError, PricingError, RemoteServiceError, Workflo
 // PlaceOrderErrorDto (REQ-086)
 // =============================================================================
 
-/// `PlaceOrder` ワークフローのエラー DTO
+/// `PlaceOrder` workflow error DTO
 ///
-/// ワークフローで発生したエラーをシリアライズするための型。
-/// `type` フィールドで判別する隣接タグ形式。
+/// A type for serializing errors that occurred in the workflow.
+/// Adjacently tagged format discriminated by the `type` field.
 ///
 /// # Examples
 ///
@@ -34,41 +34,41 @@ use crate::workflow::{PlaceOrderError, PricingError, RemoteServiceError, Workflo
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum PlaceOrderErrorDto {
-    /// バリデーションエラー
+    /// Validation error
     Validation {
-        /// フィールド名
+        /// Field name
         field_name: String,
-        /// エラーメッセージ
+        /// Error message
         message: String,
     },
-    /// 価格計算エラー
+    /// Pricing error
     Pricing {
-        /// エラーメッセージ
+        /// Error message
         message: String,
     },
-    /// 外部サービスエラー
+    /// Remote service error
     RemoteService {
-        /// サービス名
+        /// Service name
         service_name: String,
-        /// サービスエンドポイント
+        /// Service endpoint
         service_endpoint: String,
-        /// エラーメッセージ
+        /// Error message
         message: String,
     },
 }
 
 impl PlaceOrderErrorDto {
-    /// ドメインの `PlaceOrderError` から `PlaceOrderErrorDto` を生成する
+    /// Creates a `PlaceOrderErrorDto` from the domain `PlaceOrderError`
     ///
-    /// 純粋関数として DTO に変換する。
+    /// Converts to DTO as a pure function.
     ///
     /// # Arguments
     ///
-    /// * `error` - 変換元の `PlaceOrderError`
+    /// * `error` - Source `PlaceOrderError`
     ///
     /// # Returns
     ///
-    /// `PlaceOrderErrorDto` インスタンス
+    /// A `PlaceOrderErrorDto` instance
     ///
     /// # Examples
     ///
@@ -91,7 +91,7 @@ impl PlaceOrderErrorDto {
         }
     }
 
-    /// `WorkflowValidationError` から `PlaceOrderErrorDto` を生成する
+    /// Creates a `PlaceOrderErrorDto` from a `WorkflowValidationError`
     #[must_use]
     fn from_validation_error(error: &WorkflowValidationError) -> Self {
         Self::Validation {
@@ -100,7 +100,7 @@ impl PlaceOrderErrorDto {
         }
     }
 
-    /// `PricingError` から `PlaceOrderErrorDto` を生成する
+    /// Creates a `PlaceOrderErrorDto` from a `PricingError`
     #[must_use]
     fn from_pricing_error(error: &PricingError) -> Self {
         Self::Pricing {
@@ -108,7 +108,7 @@ impl PlaceOrderErrorDto {
         }
     }
 
-    /// `RemoteServiceError` から `PlaceOrderErrorDto` を生成する
+    /// Creates a `PlaceOrderErrorDto` from a `RemoteServiceError`
     #[must_use]
     fn from_remote_service_error(error: &RemoteServiceError) -> Self {
         Self::RemoteService {

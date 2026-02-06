@@ -1,24 +1,24 @@
-//! axum ハンドラ
+//! Axum handler
 //!
-//! axum フレームワーク用のハンドラ関数を提供する。
-//! IO モナドを `AsyncIO` に変換し、`run_async()` を「世界の端」で呼び出す。
+//! Provides handler functions for the axum framework.
+//! Converts IO monads to `AsyncIO` and calls `run_async()` at the "edge of the world".
 
 use axum::{http::StatusCode, response::IntoResponse};
 
 use crate::api::{HttpRequest, place_order_api};
 
-/// POST /place-order ハンドラ
+/// POST /place-order handler
 ///
-/// JSON リクエストを受け取り、`place_order_api` を呼び出し、
-/// IO モナドを `AsyncIO` に変換して非同期実行し、レスポンスを返す。
+/// Receives a JSON request, calls `place_order_api`,
+/// converts the IO monad to `AsyncIO` for async execution, and returns the response.
 ///
 /// # Arguments
 ///
-/// * `body` - リクエストボディ（JSON 文字列）
+/// * `body` - Request body (JSON string)
 ///
 /// # Returns
 ///
-/// axum のレスポンス型
+/// An axum response type
 ///
 /// # Examples
 ///
@@ -29,16 +29,16 @@ use crate::api::{HttpRequest, place_order_api};
 /// let app = Router::new().route("/place-order", post(place_order_handler));
 /// ```
 pub async fn place_order_handler(body: String) -> impl IntoResponse {
-    // HttpRequest を構築
+    // Build HttpRequest
     let request = HttpRequest::new(body);
 
-    // IO モナドを取得
+    // Get IO monad
     let io_response = place_order_api(&request);
 
-    // IO を AsyncIO に変換して非同期実行（世界の端）
+    // Convert IO to AsyncIO and execute asynchronously (edge of the world)
     let response = io_response.to_async().run_async().await;
 
-    // axum レスポンスに変換
+    // Convert to axum response
     (
         StatusCode::from_u16(response.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
         [(axum::http::header::CONTENT_TYPE, "application/json")],
@@ -106,7 +106,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_place_order_handler_with_validation_error() {
-        // 無効な order_id（空文字列）
+        // Invalid order_id (empty string)
         let json = r#"{
             "order_id": "",
             "customer_info": {

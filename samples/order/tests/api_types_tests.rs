@@ -1,12 +1,12 @@
-//! API 型のテスト
+//! Tests for API types
 //!
-//! HttpRequest, HttpResponse のテスト
+//! Tests for HttpRequest and HttpResponse
 
 use order_taking_sample::api::{HttpRequest, HttpResponse};
 use rstest::rstest;
 
 // =============================================================================
-// HttpRequest のテスト
+// Tests for HttpRequest
 // =============================================================================
 
 mod http_request_tests {
@@ -45,7 +45,7 @@ mod http_request_tests {
 }
 
 // =============================================================================
-// HttpResponse のテスト
+// Tests for HttpResponse
 // =============================================================================
 
 mod http_response_tests {

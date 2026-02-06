@@ -1,23 +1,23 @@
 //! order-taking-server
 //!
-//! axum を使用した注文処理 HTTP サーバー。
+//! HTTP server for order processing using axum.
 //!
-//! # 概要
+//! # Overview
 //!
-//! このサーバーは `PlaceOrder` ワークフローを HTTP API として公開する。
-//! 既存の IO モナドパターンを維持しつつ、axum の async/await 環境と統合する。
+//! This server exposes the `PlaceOrder` workflow as an HTTP API.
+//! It integrates with the axum async/await environment while maintaining the existing IO monad pattern.
 //!
-//! # エンドポイント
+//! # Endpoints
 //!
-//! - `POST /place-order` - 注文を処理し、イベントを返す
+//! - `POST /place-order` - Processes an order and returns events
 //!
-//! # 使用方法
+//! # Usage
 //!
 //! ```bash
-//! # サーバー起動
+//! # Start the server
 //! cargo run --bin order-taking-server
 //!
-//! # リクエスト送信
+//! # Send a request
 //! curl -X POST http://localhost:8080/place-order \
 //!   -H "Content-Type: application/json" \
 //!   -d '{"order_id": "order-001", ...}'
@@ -31,7 +31,7 @@ use order_taking_sample::api::axum_handler::place_order_handler;
 
 #[tokio::main]
 async fn main() {
-    // トレーシング初期化
+    // Initialize tracing
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -40,10 +40,10 @@ async fn main() {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    // ルーター構築
+    // Build router
     let app = Router::new().route("/place-order", post(place_order_handler));
 
-    // サーバー起動
+    // Start server
     let address = SocketAddr::from(([0, 0, 0, 0], 8080));
     tracing::info!("Starting server on {}", address);
 

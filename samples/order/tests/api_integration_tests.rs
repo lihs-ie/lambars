@@ -1,7 +1,7 @@
-//! API 統合テスト
+//! API integration tests
 //!
-//! DTO -> ドメイン -> ワークフロー -> DTO の全体フローをテストする。
-//! エンドツーエンドのシナリオテスト。
+//! Tests the full flow: DTO -> Domain -> Workflow -> DTO.
+//! End-to-end scenario tests.
 
 use order_taking_sample::api::{HttpRequest, place_order_api};
 use order_taking_sample::dto::PlaceOrderEventDto;
@@ -9,13 +9,13 @@ use rstest::rstest;
 use serde_json::Value;
 
 // =============================================================================
-// エンドツーエンドシナリオテスト
+// End-to-end scenario tests
 // =============================================================================
 
 mod end_to_end_tests {
     use super::*;
 
-    /// 単一の Widget 注文のフルフロー
+    /// Full flow for a single Widget order
     #[rstest]
     fn test_single_widget_order_flow() {
         let json = r#"{
@@ -60,14 +60,14 @@ mod end_to_end_tests {
         let io_response = place_order_api(&request);
         let response = io_response.run_unsafe();
 
-        // 成功レスポンス
+        // Successful response
         assert_eq!(response.status_code(), 200);
 
-        // イベントをパース
+        // Parse events
         let events: Vec<PlaceOrderEventDto> = serde_json::from_str(response.body()).unwrap();
         assert_eq!(events.len(), 3);
 
-        // 各イベントタイプを確認
+        // Verify each event type
         let has_shippable = events
             .iter()
             .any(|e| matches!(e, PlaceOrderEventDto::ShippableOrderPlaced(_)));
@@ -89,7 +89,7 @@ mod end_to_end_tests {
         );
     }
 
-    /// 単一の Gizmo 注文のフルフロー
+    /// Full flow for a single Gizmo order
     #[rstest]
     fn test_single_gizmo_order_flow() {
         let json = r#"{
@@ -140,7 +140,7 @@ mod end_to_end_tests {
         assert_eq!(events.len(), 3);
     }
 
-    /// 複数ラインの注文（Widget と Gizmo の混合）
+    /// Multi-line order (mix of Widget and Gizmo)
     #[rstest]
     fn test_mixed_product_order_flow() {
         let json = r#"{
@@ -200,7 +200,7 @@ mod end_to_end_tests {
         let events: Vec<PlaceOrderEventDto> = serde_json::from_str(response.body()).unwrap();
         assert_eq!(events.len(), 3);
 
-        // ShippableOrderPlaced イベントの詳細を確認
+        // Verify ShippableOrderPlaced event details
         let shippable_event = events.iter().find_map(|e| match e {
             PlaceOrderEventDto::ShippableOrderPlaced(data) => Some(data),
             _ => None,
@@ -214,7 +214,7 @@ mod end_to_end_tests {
 }
 
 // =============================================================================
-// JSON シリアライゼーション詳細テスト
+// JSON serialization detail tests
 // =============================================================================
 
 mod json_serialization_tests {
@@ -264,14 +264,14 @@ mod json_serialization_tests {
         let io_response = place_order_api(&request);
         let response = io_response.run_unsafe();
 
-        // JSON としてパース
+        // Parse as JSON
         let json_value: Value = serde_json::from_str(response.body()).unwrap();
         assert!(json_value.is_array());
 
         let array = json_value.as_array().unwrap();
         assert_eq!(array.len(), 3);
 
-        // 各イベントが type フィールドを持つことを確認
+        // Verify each event has a type field
         for event in array {
             assert!(
                 event.get("type").is_some(),
@@ -327,13 +327,13 @@ mod json_serialization_tests {
         let json_value: Value = serde_json::from_str(response.body()).unwrap();
         let array = json_value.as_array().unwrap();
 
-        // ShippableOrderPlaced イベントを見つける
+        // Find the ShippableOrderPlaced event
         let shippable = array
             .iter()
             .find(|e| e.get("type").and_then(|t| t.as_str()) == Some("ShippableOrderPlaced"))
             .expect("ShippableOrderPlaced event should exist");
 
-        // data フィールドを確認
+        // Verify the data field
         let data = shippable.get("data").expect("data field should exist");
         assert!(data.get("order_id").is_some());
         assert!(data.get("shipping_address").is_some());
@@ -389,13 +389,13 @@ mod json_serialization_tests {
         let json_value: Value = serde_json::from_str(response.body()).unwrap();
         let array = json_value.as_array().unwrap();
 
-        // BillableOrderPlaced イベントを見つける
+        // Find the BillableOrderPlaced event
         let billable = array
             .iter()
             .find(|e| e.get("type").and_then(|t| t.as_str()) == Some("BillableOrderPlaced"))
             .expect("BillableOrderPlaced event should exist");
 
-        // data フィールドを確認
+        // Verify the data field
         let data = billable.get("data").expect("data field should exist");
         assert!(data.get("order_id").is_some());
         assert!(data.get("billing_address").is_some());
@@ -449,13 +449,13 @@ mod json_serialization_tests {
         let json_value: Value = serde_json::from_str(response.body()).unwrap();
         let array = json_value.as_array().unwrap();
 
-        // AcknowledgmentSent イベントを見つける
+        // Find the AcknowledgmentSent event
         let acknowledgment = array
             .iter()
             .find(|e| e.get("type").and_then(|t| t.as_str()) == Some("AcknowledgmentSent"))
             .expect("AcknowledgmentSent event should exist");
 
-        // data フィールドを確認
+        // Verify the data field
         let data = acknowledgment.get("data").expect("data field should exist");
         assert!(data.get("order_id").is_some());
         assert!(data.get("email_address").is_some());
@@ -463,7 +463,7 @@ mod json_serialization_tests {
 }
 
 // =============================================================================
-// エラーハンドリング統合テスト
+// Error handling integration tests
 // =============================================================================
 
 mod error_handling_integration_tests {
@@ -517,12 +517,12 @@ mod error_handling_integration_tests {
 
         let json_value: Value = serde_json::from_str(response.body()).unwrap();
 
-        // エラーレスポンスの構造を確認（内部タグ形式）
+        // Verify error response structure (internally tagged format)
         assert_eq!(
             json_value.get("type").and_then(|t| t.as_str()),
             Some("Validation")
         );
-        // 内部タグ形式なので、フィールドは直接 json_value に含まれる
+        // Since it's internally tagged, fields are directly included in json_value
         assert!(json_value.get("field_name").is_some());
         assert!(json_value.get("message").is_some());
     }
@@ -539,7 +539,7 @@ mod error_handling_integration_tests {
 
         let json_value: Value = serde_json::from_str(response.body()).unwrap();
 
-        // JSON パースエラーの構造を確認
+        // Verify JSON parse error structure
         assert_eq!(
             json_value.get("type").and_then(|t| t.as_str()),
             Some("JsonParseError")
@@ -549,7 +549,7 @@ mod error_handling_integration_tests {
 
     #[rstest]
     fn test_multiple_validation_errors_returns_first() {
-        // 複数のバリデーションエラーがある場合、最初のエラーが返される
+        // When there are multiple validation errors, the first error is returned
         let json = r#"{
             "order_id": "",
             "customer_info": {
@@ -597,7 +597,7 @@ mod error_handling_integration_tests {
 }
 
 // =============================================================================
-// IO モナドのテスト
+// IO monad tests
 // =============================================================================
 
 mod io_monad_tests {
@@ -645,11 +645,11 @@ mod io_monad_tests {
 
         let request = HttpRequest::new(json.to_string());
 
-        // IO を作成するが、まだ実行しない
+        // Create IO but do not execute yet
         let io_response = place_order_api(&request);
 
-        // この時点では副作用は発生していない（純粋な値としての IO）
-        // run_unsafe を呼び出して初めて実行される
+        // No side effects at this point (IO as a pure value)
+        // Only executed when run_unsafe is called
         let response = io_response.run_unsafe();
 
         assert_eq!(response.status_code(), 200);
@@ -704,7 +704,7 @@ mod io_monad_tests {
         let response1 = io_response1.run_unsafe();
         let response2 = io_response2.run_unsafe();
 
-        // 同じ入力に対して同じ結果が得られる
+        // Same input produces same result
         assert_eq!(response1.status_code(), response2.status_code());
         assert_eq!(response1.body(), response2.body());
     }

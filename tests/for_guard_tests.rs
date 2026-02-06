@@ -66,7 +66,7 @@ fn test_for_guard_nested_iteration() {
         if x + y > 20;
         yield (x, y)
     };
-    // x + y > 20 を満たす組み合わせ:
+    // Combinations where x + y > 20:
     // (1,20)=21, (1,30)=31, (2,20)=22, (2,30)=32, (3,20)=23, (3,30)=33 = 6 elements
     assert_eq!(result.len(), 6);
     assert!(result.contains(&(1, 20)));
