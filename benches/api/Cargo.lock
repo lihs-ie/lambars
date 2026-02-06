@@ -1065,6 +1065,7 @@ dependencies = [
  "futures",
  "lambars-derive",
  "num_cpus",
+ "parking_lot",
  "paste",
  "pin-project-lite",
  "serde",

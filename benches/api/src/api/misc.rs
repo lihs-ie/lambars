@@ -97,11 +97,6 @@ pub struct ConcurrentLazyRequest {
     /// Used to demonstrate that memoized calls are near-instant.
     #[serde(default = "default_subsequent_calls")]
     pub subsequent_calls: usize,
-    /// Whether to use eager initialization (bypasses lazy evaluation overhead).
-    /// When true, uses `ConcurrentLazy::new_with_value()` instead of `ConcurrentLazy::new()`.
-    /// This is useful for performance benchmarks where lazy evaluation overhead is unwanted.
-    #[serde(default)]
-    pub eager_init: bool,
 }
 
 /// Default number of subsequent `force()` calls.
@@ -686,9 +681,6 @@ pub async fn partial_apply(
 /// Demonstrates `ConcurrentLazy` for thread-safe lazy evaluation.
 /// Calls `force()` multiple times to show that computation happens only once.
 ///
-/// When `eager_init` is true, uses `ConcurrentLazy::new_with_value()` to bypass
-/// lazy evaluation overhead (useful for performance benchmarks).
-///
 /// # Errors
 ///
 /// Returns `ApiErrorResponse` when:
@@ -718,71 +710,30 @@ pub async fn concurrent_lazy(
 
     // Create a ConcurrentLazy for the expensive calculation
     // The calculation will only happen once, regardless of how many times force() is called
-    //
-    // When eager_init is true, we use ConcurrentLazy::new_with_value() which pre-computes
-    // the value, eliminating the lazy initialization overhead. This is useful for performance
-    // benchmarks where the initialization cost of ConcurrentLazy::new() is a bottleneck.
-    let (computed_stats, first_force_time_us, subsequent_force_time_us, memoization_note) =
-        if request.eager_init {
-            // Eager init: compute value immediately and wrap in ConcurrentLazy
-            // This bypasses the lazy initialization overhead
-            let compute_start = std::time::Instant::now();
-            let precomputed_stats = calculate_stats(&tasks);
-            let eager_init_time_us = compute_start.elapsed().as_micros() as u64;
+    let lazy_stats = ConcurrentLazy::new(move || calculate_stats(&tasks));
 
-            let lazy_stats = ConcurrentLazy::new_with_value(precomputed_stats);
+    // First force() - this triggers the actual computation
+    let first_start = std::time::Instant::now();
+    let computed_stats = lazy_stats.force().clone();
+    let first_force_time_us = first_start.elapsed().as_micros() as u64;
 
-            // First force() - returns pre-computed value (should be near-instant)
-            let first_start = std::time::Instant::now();
-            let computed_result = lazy_stats.force().clone();
-            let first_time = first_start.elapsed().as_micros() as u64;
-
-            // Subsequent force() calls - also near-instant (memoized)
-            let subsequent_start = std::time::Instant::now();
-            for _ in 0..request.subsequent_calls {
-                let _ = lazy_stats.force();
-            }
-            let subsequent_time = subsequent_start.elapsed().as_micros() as u64;
-
-            let note = format!(
-                "Eager init computed in {eager_init_time_us}μs. \
-                 First force() returned pre-computed value in {first_time}μs. \
-                 {subsequent_calls} subsequent calls took {subsequent_time}μs total (memoized).",
-                subsequent_calls = request.subsequent_calls
-            );
-
-            (computed_result, first_time, subsequent_time, note)
-        } else {
-            // Lazy init: computation is deferred until force() is called
-            let lazy_stats = ConcurrentLazy::new(move || calculate_stats(&tasks));
-
-            // First force() - this triggers the actual computation
-            let first_start = std::time::Instant::now();
-            let computed_result = lazy_stats.force().clone();
-            let first_time = first_start.elapsed().as_micros() as u64;
-
-            // Subsequent force() calls - these return the memoized result (should be near-instant)
-            let subsequent_start = std::time::Instant::now();
-            for _ in 0..request.subsequent_calls {
-                let _ = lazy_stats.force();
-            }
-            let subsequent_time = subsequent_start.elapsed().as_micros() as u64;
-
-            let note = format!(
-                "First force() computed in {first_time}μs. \
-                 {subsequent_calls} subsequent calls took {subsequent_time}μs total (memoized).",
-                subsequent_calls = request.subsequent_calls
-            );
-
-            (computed_result, first_time, subsequent_time, note)
-        };
+    // Subsequent force() calls - these return the memoized result (should be near-instant)
+    let subsequent_start = std::time::Instant::now();
+    for _ in 0..request.subsequent_calls {
+        let _ = lazy_stats.force();
+    }
+    let subsequent_force_time_us = subsequent_start.elapsed().as_micros() as u64;
 
     Ok(JsonResponse(ConcurrentLazyResponse {
         stats: computed_stats,
         subsequent_calls: request.subsequent_calls,
         first_force_time_us,
         subsequent_force_time_us,
-        memoization_note,
+        memoization_note: format!(
+            "First force() computed in {first_force_time_us}μs. \
+             {subsequent_calls} subsequent calls took {subsequent_force_time_us}μs total (memoized).",
+            subsequent_calls = request.subsequent_calls
+        ),
     }))
 }
 

@@ -119,9 +119,9 @@ pub fn build_task_id(prefix: &str, index: usize) -> String {
 /// ```
 #[inline]
 pub fn build_subtask_title_into(depth: usize, index: usize, buffer: &mut String) {
+    buffer.clear();
     const PREFIX_LEN: usize = 17; // "Subtask at depth "
     const MIDDLE_LEN: usize = 8; // ", index "
-    buffer.clear();
     let required = PREFIX_LEN + digit_count(depth) + MIDDLE_LEN + digit_count(index);
     if buffer.capacity() < required {
         buffer.reserve(required);
@@ -177,8 +177,8 @@ pub fn build_subtask_title(depth: usize, index: usize) -> String {
 /// ```
 #[inline]
 pub fn build_child_task_id_into(parent_id: &str, index: usize, buffer: &mut String) {
-    const SUFFIX_LEN: usize = 7; // "-child-"
     buffer.clear();
+    const SUFFIX_LEN: usize = 7; // "-child-"
     let required = parent_id.len() + SUFFIX_LEN + digit_count(index);
     if buffer.capacity() < required {
         buffer.reserve(required);
@@ -233,9 +233,9 @@ pub fn build_child_task_id(parent_id: &str, index: usize) -> String {
 /// ```
 #[inline]
 pub fn build_task_title_with_level_into(title: &str, level: usize, buffer: &mut String) {
+    buffer.clear();
     const PREFIX_LEN: usize = 8; // " (level "
     const SUFFIX_LEN: usize = 1; // ")"
-    buffer.clear();
     let required = title.len() + PREFIX_LEN + digit_count(level) + SUFFIX_LEN;
     if buffer.capacity() < required {
         buffer.reserve(required);
