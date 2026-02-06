@@ -1,0 +1,904 @@
+---
+id: PLAN-20260206-01
+title: "ConcurrentLazy Phase 1: parking_lot 置換 + キャッシュライン分離 - 詳細実装計画"
+version: 1.1.0
+created_at: 2026-02-06
+updated_at: 2026-02-06
+status: draft
+requirement_reference: "docs/internal/requirements/20260206_1030_concurrent_lazy_high_thread_regression.yaml"
+branch: "perf/tasks-bulk-search-index-merge"
+
+# ==============================================================================
+# レビュー履歴
+# ==============================================================================
+review_history:
+  - version: "1.1.0"
+    date: "2026-02-06"
+    reviewer: "Codex"
+    findings:
+      - severity: "critical"
+        issue: "再入デッドロック検知が消失する（Condvar::wait で無期限ブロック）"
+        resolution: "thread_local による再入検知を do_init() に追加 + アダプティブスピンを wait_on_initialization() に導入"
+      - severity: "high"
+        issue: "try_force のタイムアウト設計が非現実的（100ms x 10,000 = 1000秒）"
+        resolution: "Instant ベースの総待機予算（50ms）に変更し、deadline 超過で即 Err を返す"
+      - severity: "high"
+        issue: "const fn new() の削除が NFR-2（API後方互換性）と衝突"
+        resolution: "const fn new() は維持不可のため、API互換性の例外として明記。parking_lot は const 初期化不可"
+      - severity: "medium"
+        issue: "単一 Mutex/Condvar への集中が未解消"
+        resolution: "アダプティブスピン(128回) -> Condvar フォールバックで kernel 遷移を回避"
+      - severity: "medium"
+        issue: "デッドロック検出ロジックが Condvar::wait で機能しない"
+        resolution: "wait_for で時間ベースの上限(500ms)を設け、超過でパニック"
+      - severity: "medium"
+        issue: "ベンチマーク/計測タスクが不足"
+        resolution: "ベンチマーク比較タスク(IMPL-012)を追加"
+      - severity: "medium"
+        issue: "feature 整合性の記述が不足"
+        resolution: "concurrent_lazy.rs は control feature 内で管理されるため、cfg は mod.rs レベルで十分。確認タスクを追加"
+      - severity: "low"
+        issue: "キャッシュラインサイズ 64 固定の仮定"
+        resolution: "CACHE_LINE_SIZE 定数として切り出し、コメントで前提を明記"
+
+# ==============================================================================
+# 1. 実装の背景と目的
+# ==============================================================================
+background:
+  current_state: |
+    現在の ConcurrentLazy は指数バックオフ付きスピンウェイト実装。
+    - spin_wait() メソッドで STATE_COMPUTING 中のスレッドを待機
+    - MAX_SPIN_ITERATIONS (10,000) で deadlock 検出
+    - CPU を消費するが、短い初期化ではユーザ空間で完結
+    - 高スレッド数(16, 32) で過度な CPU 消費とキャッシュラインバウンスが発生
+
+  target_state: |
+    parking_lot::Mutex/Condvar ベースのブロッキング待機に置換し、
+    キャッシュライン分離で高スレッド数での false sharing を回避する。
+    アダプティブスピンで短い初期化ではユーザ空間で完結させつつ、
+    長い初期化では Condvar にフォールバックする。
+    - 低スレッド数(2, 4): ブロッキング待機でCPU浪費削減、改善率 -20% 以上
+    - 高スレッド数(16, 32): キャッシュライン分離 + アダプティブスピンでリグレッション +10% 以内
+
+  design_principles:
+    - "STATE_READY の fast path は lock-free のまま維持（Acquire load のみ）"
+    - "待機時のみ Mutex/Condvar を使用（初期化完了後はゼロコスト）"
+    - "state フィールドと wait_mutex/wait_condvar を別キャッシュラインに配置"
+    - "notify_all を使用（デッドロック回避のため notify_one は不採用）"
+    - "アダプティブスピン(128回) -> Condvar フォールバックのハイブリッド戦略"
+    - "thread_local による再入検知で同一スレッドからの再帰呼び出しを即座にパニック"
+    - "const fn new() は parking_lot の制約により fn に変更（API互換性の例外）"
+
+# ==============================================================================
+# 2. 現在のコード構造の分析
+# ==============================================================================
+current_code_analysis:
+  file: "src/control/concurrent_lazy.rs"
+
+  struct_layout:
+    description: "現在の ConcurrentLazy 構造体レイアウト"
+    fields:
+      - name: "state"
+        type: "AtomicU8"
+        size: "1 byte"
+        access_pattern: "全スレッドが頻繁にアクセス（Acquire load）"
+
+      - name: "value"
+        type: "UnsafeCell<MaybeUninit<T>>"
+        size: "size_of::<T> bytes"
+        access_pattern: "STATE_READY 後に読み取り"
+
+      - name: "initializer"
+        type: "UnsafeCell<Option<F>>"
+        size: "size_of::<Option<F>> bytes"
+        access_pattern: "初期化時に1回 take()"
+
+  methods_to_modify:
+    - name: "new()"
+      current: "const fn new() -> Self"
+      change: "fn new() -> Self（const 解除、wait_sync の初期化追加）"
+      reason: "parking_lot::Mutex/Condvar は const 初期化不可"
+
+    - name: "spin_wait()"
+      current: "指数バックオフ付きスピンループ"
+      change: "wait_on_initialization() に置換（アダプティブスピン + Condvar フォールバック）"
+      reason: "CPU 消費削減 + 短い初期化でのユーザ空間完結"
+
+    - name: "do_init()"
+      current: "初期化後に state.store(STATE_READY)"
+      change: "thread_local 再入検知追加 + 初期化後に notify_all()"
+      reason: "再入デッドロック即座検出 + 待機スレッドの起床"
+
+    - name: "force()"
+      current: "STATE_COMPUTING で spin_wait() を呼び出し"
+      change: "STATE_COMPUTING で wait_on_initialization() を呼び出し"
+
+    - name: "try_force()"
+      current: "独自のスピンウェイトロジック"
+      change: "Instant ベースの総待機予算(50ms)付きブロッキング待機"
+
+    - name: "new_with_value()"
+      current: "wait_sync なし"
+      change: "wait_sync フィールドの初期化追加"
+
+  unsafe_impl_blocks:
+    - "Send: T: Send + Sync, F: Send のまま維持"
+    - "Sync: T: Send + Sync, F: Send のまま維持"
+
+  feature_gating:
+    description: |
+      concurrent_lazy.rs は src/control/mod.rs で管理されており、
+      control feature が無効な場合はコンパイルされない。
+      したがって、parking_lot の use 宣言に追加の cfg ゲートは不要。
+    confirmation: |
+      src/lib.rs で #[cfg(feature = "control")] mod control;
+      src/control/mod.rs で mod concurrent_lazy;
+
+# ==============================================================================
+# 3. 新しい構造体レイアウト設計
+# ==============================================================================
+new_struct_layout:
+  description: |
+    #[repr(C)] でフィールド順を固定し、state と wait_sync を
+    別キャッシュラインに配置する。CacheAligned ラッパーでパディングを実現。
+
+  design: |
+    /// Assumed cache line size for the target architecture.
+    /// x86_64: 64 bytes, ARM (some): 128 bytes.
+    /// This value can be adjusted for different architectures.
+    const CACHE_LINE_SIZE: usize = 64;
+
+    /// Cache-line aligned wrapper to prevent false sharing.
+    #[repr(C, align(64))]
+    struct CacheAligned<T>(T);
+
+    #[repr(C)]
+    pub struct ConcurrentLazy<T, F = fn() -> T> {
+        // Cache line 1: hot path (frequently accessed by all threads)
+        state: AtomicU8,
+        value: UnsafeCell<MaybeUninit<T>>,
+        initializer: UnsafeCell<Option<F>>,
+
+        // Cache line 2: cold path (accessed only during initialization wait)
+        wait_sync: CacheAligned<WaitSync>,
+    }
+
+    struct WaitSync {
+        condvar: parking_lot::Condvar,
+        mutex: parking_lot::Mutex<()>,
+    }
+
+  rationale:
+    - "CacheAligned<WaitSync> は #[repr(C, align(64))] で64バイト境界に配置"
+    - "state の Acquire load は wait_sync に触れない（キャッシュミス回避）"
+    - "待機スレッドのみが wait_sync にアクセスする"
+    - "T, F のサイズが変わっても CacheAligned がパディングを保証"
+
+  cache_line_note: |
+    CACHE_LINE_SIZE は x86_64 を前提に 64 バイトとしている。
+    ARM サーバ等では 128 バイトのケースがあるが、64 バイト境界でも
+    効果は得られる（最悪ケースで2本のキャッシュラインにまたがる）。
+    将来的にプラットフォーム別の定数切り替えが必要になった場合は、
+    CACHE_LINE_SIZE を cfg で分岐する。
+
+  memory_overhead:
+    description: "1構造体あたりの追加メモリ"
+    estimate: "最大64バイト（パディング）+ Mutex(1 byte) + Condvar(1 byte)"
+    note: "parking_lot の Mutex/Condvar は各1バイト程度と非常に小さい"
+
+# ==============================================================================
+# 4. 詳細実装計画
+# ==============================================================================
+implementation_tasks:
+
+  # --------------------------------------------------------------------------
+  # Task 1: Cargo.toml に parking_lot 依存を追加
+  # --------------------------------------------------------------------------
+  - id: IMPL-001
+    name: "Cargo.toml に parking_lot 依存を追加"
+    file: "Cargo.toml"
+    category: "dependency"
+    effort: "XS"
+    priority: 0
+    description: |
+      parking_lot クレートを control feature の依存として追加する。
+      control feature が有効な場合のみ parking_lot が利用される。
+
+    changes:
+      - location: "[dependencies] セクション"
+        action: "追加"
+        content: |
+          parking_lot = { version = "0.12", optional = true }
+
+      - location: "[features] セクション"
+        action: "control feature に parking_lot を追加"
+        before: |
+          control = ["typeclass", "dep:smallvec"]
+        after: |
+          control = ["typeclass", "dep:smallvec", "dep:parking_lot"]
+
+    acceptance_criteria:
+      - "cargo check --features control がパス"
+      - "cargo check --no-default-features がパス（parking_lot は含まれない）"
+      - "cargo check がパス（default features に control が含まれる）"
+
+    notes:
+      - "parking_lot 0.12 は安定版で広く使われている"
+      - "optional = true で feature ゲートする"
+      - "control feature に紐づけることで、ConcurrentLazy を使わない場合は不要"
+
+  # --------------------------------------------------------------------------
+  # Task 2: CacheAligned / WaitSync / 定数の追加
+  # --------------------------------------------------------------------------
+  - id: IMPL-002
+    name: "CacheAligned / WaitSync ヘルパー構造体と CACHE_LINE_SIZE 定数の追加"
+    file: "src/control/concurrent_lazy.rs"
+    category: "rust"
+    effort: "XS"
+    priority: 1
+    description: |
+      キャッシュライン分離のための CacheAligned<T> ラッパー、
+      WaitSync 構造体、CACHE_LINE_SIZE 定数を concurrent_lazy.rs 内に追加する。
+
+    changes:
+      - location: "モジュール先頭（use 宣言の後）"
+        action: "追加"
+        content: |
+          use std::cell::Cell;
+          use parking_lot::{Condvar, Mutex};
+
+          /// Assumed cache line size for the target architecture (x86_64: 64 bytes).
+          /// On ARM servers with 128-byte cache lines, 64-byte alignment still provides
+          /// partial benefit. Adjust this value if targeting different architectures.
+          #[allow(dead_code)]
+          const CACHE_LINE_SIZE: usize = 64;
+
+          /// Cache-line aligned wrapper to prevent false sharing.
+          ///
+          /// Forces the inner value to be aligned to a cache line boundary,
+          /// ensuring that the hot `state` field and the cold `wait_sync` field
+          /// do not share the same cache line.
+          #[repr(C, align(64))]
+          struct CacheAligned<T>(T);
+
+          /// Synchronization primitives for thread waiting during initialization.
+          ///
+          /// These are only accessed when `state` is `STATE_COMPUTING`, making them
+          /// cold-path data that should not share a cache line with the hot `state` field.
+          struct WaitSync {
+              condvar: Condvar,
+              mutex: Mutex<()>,
+          }
+
+          impl WaitSync {
+              fn new() -> Self {
+                  Self {
+                      condvar: Condvar::new(),
+                      mutex: Mutex::new(()),
+                  }
+              }
+          }
+
+          /// Thread-local flag to detect re-entrant initialization.
+          ///
+          /// If `force()` is called from within the initializer on the same thread,
+          /// this flag detects the re-entry and panics immediately, preventing deadlock.
+          thread_local! {
+              static IN_CONCURRENT_LAZY_INIT: Cell<bool> = const { Cell::new(false) };
+          }
+
+    acceptance_criteria:
+      - "cargo check がパス"
+      - "CacheAligned のアライメントが 64 バイトであること"
+      - "IN_CONCURRENT_LAZY_INIT が thread_local として機能すること"
+
+    notes:
+      - "CacheAligned は concurrent_lazy モジュール内のプライベート構造体"
+      - "WaitSync は Condvar と Mutex をまとめて管理"
+      - "CACHE_LINE_SIZE はコメントでプラットフォーム前提を明記"
+      - "IN_CONCURRENT_LAZY_INIT は再入検知に使用"
+
+  # --------------------------------------------------------------------------
+  # Task 3: ConcurrentLazy 構造体の再配置
+  # --------------------------------------------------------------------------
+  - id: IMPL-003
+    name: "ConcurrentLazy 構造体を #[repr(C)] で再配置"
+    file: "src/control/concurrent_lazy.rs"
+    category: "rust"
+    effort: "S"
+    priority: 2
+    description: |
+      ConcurrentLazy 構造体に #[repr(C)] を追加し、
+      wait_sync フィールドを CacheAligned で包んで追加する。
+
+    changes:
+      - location: "ConcurrentLazy 構造体定義"
+        before: |
+          pub struct ConcurrentLazy<T, F = fn() -> T> {
+              state: AtomicU8,
+              value: UnsafeCell<MaybeUninit<T>>,
+              initializer: UnsafeCell<Option<F>>,
+          }
+        after: |
+          #[repr(C)]
+          pub struct ConcurrentLazy<T, F = fn() -> T> {
+              // Cache line 1: hot path (frequently accessed by all threads)
+              state: AtomicU8,
+              value: UnsafeCell<MaybeUninit<T>>,
+              initializer: UnsafeCell<Option<F>>,
+
+              // Cache line 2: cold path (accessed only during initialization wait)
+              wait_sync: CacheAligned<WaitSync>,
+          }
+
+    acceptance_criteria:
+      - "cargo check がパス"
+      - "Send/Sync の unsafe impl がそのまま有効"
+
+    dependencies: ["IMPL-002"]
+
+  # --------------------------------------------------------------------------
+  # Task 4: new() / new_with_value() の修正
+  # --------------------------------------------------------------------------
+  - id: IMPL-004
+    name: "new() / new_with_value() の修正（const fn 解除 + wait_sync 初期化）"
+    file: "src/control/concurrent_lazy.rs"
+    category: "rust"
+    effort: "S"
+    priority: 3
+    description: |
+      new() と new_with_value() を修正し、wait_sync フィールドを初期化する。
+      const fn は parking_lot の制約により fn に変更する。
+
+    changes:
+      - location: "new() メソッド"
+        before: |
+          #[inline]
+          pub const fn new(initializer: F) -> Self {
+              Self {
+                  state: AtomicU8::new(STATE_EMPTY),
+                  value: UnsafeCell::new(MaybeUninit::uninit()),
+                  initializer: UnsafeCell::new(Some(initializer)),
+              }
+          }
+        after: |
+          #[inline]
+          pub fn new(initializer: F) -> Self {
+              Self {
+                  state: AtomicU8::new(STATE_EMPTY),
+                  value: UnsafeCell::new(MaybeUninit::uninit()),
+                  initializer: UnsafeCell::new(Some(initializer)),
+                  wait_sync: CacheAligned(WaitSync::new()),
+              }
+          }
+
+      - location: "new_with_value() メソッド"
+        note: "同様に wait_sync: CacheAligned(WaitSync::new()) を追加"
+
+    acceptance_criteria:
+      - "cargo check がパス"
+      - "既存テストがパス"
+
+    api_compatibility_note: |
+      const fn new() -> fn new() は API の破壊的変更。
+      NFR-2（API後方互換性）との衝突だが、parking_lot::Mutex/Condvar が
+      const 初期化を提供しないため回避不可。
+      実プロジェクトで ConcurrentLazy を const コンテキストで使用する
+      ケースは極めて稀であり、影響は限定的と判断。
+
+    dependencies: ["IMPL-003"]
+
+  # --------------------------------------------------------------------------
+  # Task 5: spin_wait() を wait_on_initialization() に置換
+  #          【Codex 指摘反映: アダプティブスピン + 時間ベースデッドロック検出】
+  # --------------------------------------------------------------------------
+  - id: IMPL-005
+    name: "spin_wait() を wait_on_initialization() に置換（アダプティブスピン + Condvar）"
+    file: "src/control/concurrent_lazy.rs"
+    category: "rust"
+    effort: "M"
+    priority: 4
+    description: |
+      spin_wait() メソッドを削除し、wait_on_initialization() メソッドを追加する。
+      アダプティブスピン(128回) -> Condvar フォールバックのハイブリッド戦略を採用。
+      時間ベースの deadlock 検出（500ms 上限）を実装。
+
+      【Codex レビュー指摘反映】
+      - 純粋な Condvar::wait ではなくアダプティブスピンを先行させる
+      - ループ回数ベースではなく時間ベースのデッドロック検出に変更
+      - wait_for でタイムアウト付き待機を使用
+
+    changes:
+      - location: "spin_wait() メソッドと MAX_SPIN_ITERATIONS"
+        action: "削除"
+
+      - location: "新しい wait_on_initialization() メソッド"
+        action: "追加"
+        content: |
+          /// Number of spin iterations before falling back to Condvar wait.
+          ///
+          /// For short initializations, spinning avoids the overhead of kernel
+          /// transitions. After this many spins, the thread falls back to
+          /// blocking via Condvar to avoid wasting CPU.
+          const ADAPTIVE_SPIN_LIMIT: u32 = 128;
+
+          /// Maximum time to wait for initialization before assuming deadlock.
+          ///
+          /// This timeout is used instead of iteration counting because
+          /// Condvar::wait may not return in a timely fashion during deadlock.
+          const DEADLOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
+
+          /// Waits for `STATE_COMPUTING` to transition to another state.
+          ///
+          /// Uses an adaptive strategy:
+          /// 1. First, spin for `ADAPTIVE_SPIN_LIMIT` iterations (fast path for short inits)
+          /// 2. Then, fall back to `Condvar::wait_for` with timeout
+          ///
+          /// # Panics
+          ///
+          /// Panics if initialization does not complete within `DEADLOCK_TIMEOUT`,
+          /// which typically indicates re-entry deadlock or an excessively long initialization.
+          fn wait_on_initialization(&self) {
+              // Phase 1: Adaptive spin (user-space, no kernel transition)
+              for _ in 0..Self::ADAPTIVE_SPIN_LIMIT {
+                  if self.state.load(Ordering::Acquire) != STATE_COMPUTING {
+                      return;
+                  }
+                  std::hint::spin_loop();
+              }
+
+              // Phase 2: Condvar wait with deadline-based deadlock detection
+              let deadline = std::time::Instant::now() + Self::DEADLOCK_TIMEOUT;
+
+              loop {
+                  if self.state.load(Ordering::Acquire) != STATE_COMPUTING {
+                      return;
+                  }
+
+                  let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                  assert!(
+                      !remaining.is_zero(),
+                      "ConcurrentLazy::force potential deadlock detected: \
+                       initialization did not complete within {:?}. \
+                       This may indicate recursive initialization (calling force() \
+                       from within the initializer on the same thread).",
+                      Self::DEADLOCK_TIMEOUT,
+                  );
+
+                  let mut guard = self.wait_sync.0.mutex.lock();
+
+                  // Double-check state after acquiring lock (avoid spurious wait)
+                  if self.state.load(Ordering::Acquire) != STATE_COMPUTING {
+                      return;
+                  }
+
+                  self.wait_sync.0.condvar.wait_for(&mut guard, remaining);
+              }
+          }
+
+      - location: "force() メソッド内の spin_wait() 呼び出し"
+        before: |
+          STATE_COMPUTING => {
+              // Another thread is initializing. Spin-wait with exponential backoff
+              self.spin_wait();
+              state = self.state.load(Ordering::Acquire);
+          }
+        after: |
+          STATE_COMPUTING => {
+              // Another thread is initializing. Wait with adaptive strategy.
+              self.wait_on_initialization();
+              state = self.state.load(Ordering::Acquire);
+          }
+
+    acceptance_criteria:
+      - "cargo check がパス"
+      - "既存テストがパス"
+      - "短い初期化ではスピンで完結し Condvar に入らない"
+      - "500ms 超で deadlock panic が発生する"
+
+    dependencies: ["IMPL-004"]
+
+  # --------------------------------------------------------------------------
+  # Task 6: do_init() に再入検知と notify_all を追加
+  #          【Codex 指摘反映: thread_local による再入検知】
+  # --------------------------------------------------------------------------
+  - id: IMPL-006
+    name: "do_init() に再入検知と notify_all() を追加"
+    file: "src/control/concurrent_lazy.rs"
+    category: "rust"
+    effort: "S"
+    priority: 5
+    description: |
+      do_init() の入口で thread_local フラグによる再入検知を行い、
+      同一スレッドからの再帰呼び出しを即座にパニックさせる。
+      初期化完了後に notify_all() で待機スレッドを起床する。
+
+      【Codex レビュー指摘反映】
+      - Condvar::wait は再入時に永遠にブロックするため、do_init 入口で即座に検知
+
+    changes:
+      - location: "do_init() の先頭"
+        action: "再入検知を追加"
+        content: |
+          // Detect re-entrant initialization (calling force() from within the initializer)
+          IN_CONCURRENT_LAZY_INIT.with(|flag| {
+              assert!(
+                  !flag.replace(true),
+                  "ConcurrentLazy::force re-entrant initialization detected: \
+                   force() was called from within the initializer on the same thread. \
+                   This would cause a deadlock."
+              );
+          });
+
+      - location: "do_init() の Ok(value) ブランチ"
+        before: |
+          self.state.store(STATE_READY, Ordering::Release);
+        after: |
+          self.state.store(STATE_READY, Ordering::Release);
+          // Wake all waiting threads
+          self.wait_sync.0.condvar.notify_all();
+          // Clear re-entry flag
+          IN_CONCURRENT_LAZY_INIT.with(|flag| flag.set(false));
+
+      - location: "do_init() の Err(_) ブランチ"
+        before: |
+          self.state.store(STATE_POISONED, Ordering::Release);
+        after: |
+          self.state.store(STATE_POISONED, Ordering::Release);
+          // Wake all waiting threads so they can observe the poisoned state
+          self.wait_sync.0.condvar.notify_all();
+          // Clear re-entry flag
+          IN_CONCURRENT_LAZY_INIT.with(|flag| flag.set(false));
+
+    acceptance_criteria:
+      - "cargo check がパス"
+      - "既存テストがパス"
+      - "パニック時もスレッドが正常に起床する"
+      - "再入時に即座にパニックする"
+
+    notes:
+      - "notify_all を使用（notify_one はデッドロックの原因となる）"
+      - "state.store(Release) の後に notify_all を呼ぶ順序が重要"
+      - "IN_CONCURRENT_LAZY_INIT は thread_local なのでスレッド間で共有されない"
+
+    dependencies: ["IMPL-005"]
+
+  # --------------------------------------------------------------------------
+  # Task 7: try_force() のスピンウェイトを置換
+  #          【Codex 指摘反映: Instant ベースの総待機予算】
+  # --------------------------------------------------------------------------
+  - id: IMPL-007
+    name: "try_force() のスピンウェイトを Instant ベース待機に置換"
+    file: "src/control/concurrent_lazy.rs"
+    category: "rust"
+    effort: "S"
+    priority: 6
+    description: |
+      try_force() の STATE_COMPUTING ブランチを、Instant ベースの
+      総待機予算(50ms)付きブロッキング待機に置換する。
+
+      【Codex レビュー指摘反映】
+      - 100ms x 10,000回 = 1000秒の非現実的な待機を排除
+      - Instant::now() + 50ms の deadline で管理
+      - deadline 超過で即 Err(ConcurrentLazyPoisonedError) を返す
+
+    changes:
+      - location: "try_force() の STATE_COMPUTING ブランチ"
+        action: "置換"
+        content: |
+          /// Maximum time budget for try_force to wait for initialization.
+          const TRY_FORCE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(50);
+
+          // ... inside try_force():
+
+          STATE_COMPUTING => {
+              // Adaptive spin first
+              let mut spun = false;
+              for _ in 0..Self::ADAPTIVE_SPIN_LIMIT {
+                  if self.state.load(Ordering::Acquire) != STATE_COMPUTING {
+                      state = self.state.load(Ordering::Acquire);
+                      spun = true;
+                      break;
+                  }
+                  std::hint::spin_loop();
+              }
+              if spun {
+                  continue;
+              }
+
+              // Condvar wait with absolute deadline
+              let deadline = std::time::Instant::now() + Self::TRY_FORCE_TIMEOUT;
+
+              loop {
+                  let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                  if remaining.is_zero() {
+                      return Err(ConcurrentLazyPoisonedError);
+                  }
+
+                  let mut guard = self.wait_sync.0.mutex.lock();
+                  if self.state.load(Ordering::Acquire) != STATE_COMPUTING {
+                      state = self.state.load(Ordering::Acquire);
+                      break;
+                  }
+
+                  self.wait_sync.0.condvar.wait_for(&mut guard, remaining);
+                  state = self.state.load(Ordering::Acquire);
+                  if state != STATE_COMPUTING {
+                      break;
+                  }
+              }
+          }
+
+      - location: "TRY_FORCE_MAX_SPIN_ITERATIONS"
+        action: "削除（TRY_FORCE_TIMEOUT に置換）"
+
+    acceptance_criteria:
+      - "cargo check がパス"
+      - "既存テストがパス"
+      - "50ms 超過で Err が返る"
+      - "短い初期化ではスピンで完結する"
+
+    dependencies: ["IMPL-006"]
+
+  # --------------------------------------------------------------------------
+  # Task 8: ドキュメントコメントの更新
+  # --------------------------------------------------------------------------
+  - id: IMPL-008
+    name: "ドキュメントコメントの更新"
+    file: "src/control/concurrent_lazy.rs"
+    category: "documentation"
+    effort: "S"
+    priority: 7
+    description: |
+      モジュールドキュメントと構造体ドキュメントを更新し、
+      スピンウェイトからアダプティブスピン + ブロッキング待機への変更を反映する。
+
+      【Codex レビュー指摘反映】
+      - 再入検知方法の説明を追加
+      - 待機戦略の変更（アダプティブスピン -> Condvar）を記載
+
+    changes:
+      - location: "モジュールドキュメント"
+        items:
+          - "spin-wait の記述をアダプティブスピン + Condvar ベースのブロッキング待機に変更"
+          - "Re-entry Warning: thread_local による即座のパニック検出を記載"
+          - "parking_lot 依存の追加を記載"
+
+      - location: "ConcurrentLazy 構造体ドキュメント"
+        items:
+          - "Thread Safety セクションの待機メカニズム説明を更新"
+          - "キャッシュライン分離の説明を追加"
+
+      - location: "force() ドキュメント"
+        items:
+          - "待機メカニズムの説明を更新"
+          - "再入検知によるパニックの説明を追加"
+
+      - location: "SAFETY コメント"
+        items:
+          - "spin_wait 参照を wait_on_initialization に変更"
+
+    acceptance_criteria:
+      - "cargo doc がパス"
+      - "ドキュメントが実装を正確に反映"
+
+    dependencies: ["IMPL-007"]
+
+  # --------------------------------------------------------------------------
+  # Task 9: 既存テストの確認とアダプテーション
+  # --------------------------------------------------------------------------
+  - id: IMPL-009
+    name: "既存テストの確認とアダプテーション"
+    file: "src/control/concurrent_lazy.rs"
+    category: "test"
+    effort: "S"
+    priority: 8
+    description: |
+      既存の全テストが変更後もパスすることを確認する。
+      const fn new() の削除により影響を受けるテストがあれば修正する。
+
+    checks:
+      - "全 32 テスト（26 単体テスト + 6 proptest）がパス"
+      - "100スレッド並行アクセステストがパス"
+
+    acceptance_criteria:
+      - "cargo test 全パス"
+      - "proptest 全パス"
+
+    dependencies: ["IMPL-007"]
+
+  # --------------------------------------------------------------------------
+  # Task 10: 品質チェックの実行
+  # --------------------------------------------------------------------------
+  - id: IMPL-010
+    name: "品質チェックの実行"
+    file: "N/A"
+    category: "verification"
+    effort: "S"
+    priority: 9
+    description: |
+      コード品質チェックを実行し、全てパスすることを確認する。
+
+    commands:
+      - "cargo fmt"
+      - "cargo clippy --all-features --all-targets -- -D warnings"
+      - "cargo doc --no-deps"
+      - "cargo test"
+
+    acceptance_criteria:
+      - "cargo fmt -- --check が差分なし"
+      - "cargo clippy が警告なし"
+      - "cargo doc がエラーなし"
+      - "cargo test が全パス"
+
+    dependencies: ["IMPL-008", "IMPL-009"]
+
+  # --------------------------------------------------------------------------
+  # Task 11: feature 整合性の確認
+  #          【Codex 指摘反映: feature gating の確認】
+  # --------------------------------------------------------------------------
+  - id: IMPL-011
+    name: "feature 整合性の確認"
+    file: "src/lib.rs, src/control/mod.rs"
+    category: "verification"
+    effort: "XS"
+    priority: 10
+    description: |
+      parking_lot が control feature でのみ利用されることを確認する。
+      concurrent_lazy.rs が control feature 外でコンパイルされないことを確認する。
+
+    checks:
+      - "src/lib.rs で #[cfg(feature = \"control\")] mod control; を確認"
+      - "cargo check --no-default-features がパス"
+      - "cargo check --features typeclass がパス（control なし）"
+
+    acceptance_criteria:
+      - "feature なしでビルド可能"
+      - "control feature なしで parking_lot が参照されない"
+
+    dependencies: ["IMPL-001"]
+
+  # --------------------------------------------------------------------------
+  # Task 12: ベンチマーク比較の実行
+  #          【Codex 指摘反映: 計測タスクの追加】
+  # --------------------------------------------------------------------------
+  - id: IMPL-012
+    name: "ベンチマーク比較の実行（高スレッド・低スレッド）"
+    file: "N/A"
+    category: "benchmark"
+    effort: "M"
+    priority: 11
+    description: |
+      変更前後のベンチマーク比較を実施し、受入基準を満たすことを確認する。
+      /perf-gate スキルを使用してリグレッション検出を行う。
+
+    commands:
+      - "cargo bench --bench control_bench -- concurrent_lazy_init_contention"
+      - "cargo bench --bench control_bench -- concurrent_lazy_thread_scalability"
+      - "cargo bench --bench control_bench -- concurrent_contention"
+      - "cargo bench --bench control_bench -- concurrent_lazy_cached_access"
+
+    acceptance_criteria:
+      high_thread_count:
+        - "concurrent_lazy_thread_scalability/thread_count/16: +10% 以内"
+        - "concurrent_contention/32_threads: +10% 以内"
+        - "concurrent_lazy_init_contention/thread_count/16: +10% 以内"
+      low_thread_count:
+        - "concurrent_lazy_init_contention/thread_count/2: -20% 以上改善"
+        - "concurrent_lazy_init_contention/thread_count/4: -20% 以上改善"
+        - "concurrent_lazy_cached_access/thread_count/4: -20% 以上改善"
+
+    dependencies: ["IMPL-010"]
+
+# ==============================================================================
+# 5. 依存関係グラフ
+# ==============================================================================
+dependency_graph: |
+  IMPL-001 (Cargo.toml: parking_lot 追加) ---> IMPL-011 (feature 整合性確認)
+       |
+  IMPL-002 (CacheAligned, WaitSync, thread_local 追加)
+       |
+  IMPL-003 (構造体レイアウト変更)
+       |
+  IMPL-004 (new() / new_with_value() 修正)
+       |
+  IMPL-005 (アダプティブスピン + wait_on_initialization)
+       |
+  IMPL-006 (do_init に再入検知 + notify_all 追加)
+       |
+  IMPL-007 (try_force の Instant ベース待機)
+       |
+       +---> IMPL-008 (ドキュメント更新)
+       |
+       +---> IMPL-009 (テスト確認)
+                |
+           IMPL-010 (品質チェック)
+                |
+           IMPL-012 (ベンチマーク比較)
+
+# ==============================================================================
+# 6. リスクと対策
+# ==============================================================================
+risks:
+  - risk: "const fn new() の削除が既存利用者に影響"
+    probability: "低"
+    impact: "中"
+    mitigation: |
+      parking_lot::Mutex/Condvar が const 初期化を提供しないため回避不可。
+      const コンテキストでの ConcurrentLazy 使用は極めて稀。
+      CHANGELOG に破壊的変更として記載する。
+
+  - risk: "parking_lot のバージョン非互換"
+    probability: "低"
+    impact: "低"
+    mitigation: |
+      parking_lot 0.12 は安定版。Cargo.toml で明示的にバージョン指定。
+
+  - risk: "CacheAligned のパディングによるメモリ消費増加"
+    probability: "確実"
+    impact: "低"
+    mitigation: |
+      1構造体あたり最大64バイトの追加。通常の使用パターンでは許容範囲。
+
+  - risk: "アダプティブスピン回数(128)の最適性"
+    probability: "中"
+    impact: "低"
+    mitigation: |
+      128回は短い初期化（数十ns〜数百ns）をカバーする値。
+      ベンチマーク結果に応じて調整可能。
+
+  - risk: "notify_all による thundering herd"
+    probability: "低"
+    impact: "低"
+    mitigation: |
+      parking_lot の Condvar は効率的な wakeup キュー管理を行う。
+      初期化は1回のみなので thundering herd は一時的。
+
+  - risk: "thread_local の TLS アクセスコスト"
+    probability: "低"
+    impact: "低"
+    mitigation: |
+      thread_local アクセスは do_init() 内（コールドパス）でのみ発生。
+      STATE_READY の fast path には影響しない。
+
+  - risk: "ARM サーバ等でキャッシュライン 128 バイトの場合"
+    probability: "低"
+    impact: "低"
+    mitigation: |
+      64 バイト境界でも partial benefit あり。
+      将来的に CACHE_LINE_SIZE を cfg で分岐可能。
+
+# ==============================================================================
+# 7. 受入基準（Phase 1 完了基準）
+# ==============================================================================
+acceptance_criteria:
+  functional:
+    - "既存の全テスト（単体テスト + proptest）がパス"
+    - "100スレッド並行アクセステストがパス"
+    - "パニック時の poisoned 状態テストがパス"
+    - "再入検知テストがパス（同一スレッドで force() 再帰呼び出し）"
+    - "cargo clippy / cargo fmt / cargo doc がパス"
+
+  performance:
+    high_thread_count:
+      - metric: "concurrent_lazy_thread_scalability/thread_count/16"
+        target: "リグレッション +10% 以内"
+      - metric: "concurrent_contention/32_threads"
+        target: "リグレッション +10% 以内"
+      - metric: "concurrent_lazy_init_contention/thread_count/16"
+        target: "リグレッション +10% 以内"
+
+    low_thread_count:
+      - metric: "concurrent_lazy_init_contention/thread_count/2"
+        target: "改善率 -20% 以上"
+      - metric: "concurrent_lazy_init_contention/thread_count/4"
+        target: "改善率 -20% 以上"
+      - metric: "concurrent_lazy_cached_access/thread_count/4"
+        target: "改善率 -20% 以上"
+
+  api_compatibility:
+    - "ConcurrentLazy::new() のシグネチャ: fn に変更（const fn からの破壊的変更）"
+    - "force(), get(), is_initialized(), is_poisoned() は変更なし"
+    - "Send + Sync の境界が維持"
+    - "map(), flat_map(), zip(), zip_with() が動作"
+---

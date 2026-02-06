@@ -1,0 +1,505 @@
+---
+id: TASKLIST-20260206-01
+title: "ConcurrentLazy Phase 1: parking_lot 置換 + キャッシュライン分離 - 実装対象別タスクリスト"
+version: 1.1.0
+created_at: 2026-02-06
+updated_at: 2026-02-06
+plan_reference: "docs/internal/plans/20260206_concurrent_lazy_phase1_parking_lot_detail.yaml"
+requirement_reference: "docs/internal/requirements/20260206_1030_concurrent_lazy_high_thread_regression.yaml"
+
+# ==============================================================================
+# レビュー履歴
+# ==============================================================================
+review_history:
+  - version: "1.1.0"
+    date: "2026-02-06"
+    reviewer: "Codex"
+    changes:
+      - "thread_local による再入検知を RUST-004 (do_init) に追加"
+      - "アダプティブスピン(128回) を wait_on_initialization に追加"
+      - "try_force を Instant ベースの総待機予算(50ms)に変更"
+      - "時間ベースのデッドロック検出(500ms)に変更"
+      - "CACHE_LINE_SIZE 定数を切り出し"
+      - "feature 整合性確認タスク(VERIFY-001)を追加"
+      - "ベンチマーク比較タスク(BENCH-001)を追加"
+      - "const fn new() 削除の API 互換性例外を明記"
+
+# ==============================================================================
+# タスク分類概要
+# ==============================================================================
+task_categories:
+  dependency_management:
+    description: "外部クレート依存の追加"
+    count: 1
+    files:
+      - "Cargo.toml"
+
+  rust_implementation:
+    description: "Rust コード実装タスク"
+    count: 6
+    files:
+      - "src/control/concurrent_lazy.rs"
+
+  documentation:
+    description: "ドキュメント更新タスク"
+    count: 1
+    files:
+      - "src/control/concurrent_lazy.rs"
+
+  test_verification:
+    description: "テスト確認・品質チェック"
+    count: 2
+    files:
+      - "src/control/concurrent_lazy.rs"
+
+  feature_verification:
+    description: "feature 整合性確認"
+    count: 1
+    files:
+      - "src/lib.rs"
+      - "src/control/mod.rs"
+
+  benchmark:
+    description: "ベンチマーク比較"
+    count: 1
+    files:
+      - "benches/control_bench.rs"
+
+# ==============================================================================
+# 依存関係管理タスク
+# ==============================================================================
+dependency_tasks:
+  - id: DEP-001
+    name: "Cargo.toml に parking_lot 依存を追加"
+    file: "Cargo.toml"
+    effort: "XS"
+    priority: 0
+    status: "pending"
+    description: |
+      parking_lot = { version = "0.12", optional = true } を [dependencies] に追加。
+      control feature に dep:parking_lot を追加。
+    changes:
+      - section: "[dependencies]"
+        add: 'parking_lot = { version = "0.12", optional = true }'
+      - section: "[features]"
+        before: 'control = ["typeclass", "dep:smallvec"]'
+        after: 'control = ["typeclass", "dep:smallvec", "dep:parking_lot"]'
+    validation:
+      - "cargo check --features control"
+      - "cargo check --no-default-features"
+    acceptance_criteria:
+      - "parking_lot が control feature 時のみコンパイルされる"
+      - "feature なしでもビルドが通る"
+
+# ==============================================================================
+# Rust 実装タスク
+# ==============================================================================
+rust_tasks:
+
+  # --------------------------------------------------------------------------
+  # Step 1: ヘルパー型・定数・再入検知の追加
+  # --------------------------------------------------------------------------
+  - id: RUST-001
+    name: "CacheAligned / WaitSync / CACHE_LINE_SIZE / IN_CONCURRENT_LAZY_INIT の追加"
+    file: "src/control/concurrent_lazy.rs"
+    effort: "S"
+    priority: 1
+    status: "pending"
+    description: |
+      以下のプライベートヘルパー型・定数・thread_local を追加する。
+      - CACHE_LINE_SIZE 定数（64、プラットフォーム前提をコメントで明記）
+      - CacheAligned<T> ラッパー（#[repr(C, align(64))]）
+      - WaitSync 構造体（parking_lot::Condvar + Mutex）
+      - IN_CONCURRENT_LAZY_INIT thread_local（再入検知用）
+    location: "use 宣言の後、STATE 定数の前"
+    code_to_add: |
+      use std::cell::Cell;
+      use parking_lot::{Condvar, Mutex};
+
+      /// Assumed cache line size (x86_64: 64 bytes, some ARM: 128 bytes).
+      #[allow(dead_code)]
+      const CACHE_LINE_SIZE: usize = 64;
+
+      #[repr(C, align(64))]
+      struct CacheAligned<T>(T);
+
+      struct WaitSync {
+          condvar: Condvar,
+          mutex: Mutex<()>,
+      }
+
+      impl WaitSync {
+          fn new() -> Self {
+              Self {
+                  condvar: Condvar::new(),
+                  mutex: Mutex::new(()),
+              }
+          }
+      }
+
+      thread_local! {
+          static IN_CONCURRENT_LAZY_INIT: Cell<bool> = const { Cell::new(false) };
+      }
+    acceptance_criteria:
+      - "cargo check がパス"
+      - "CacheAligned のアライメントが 64"
+    depends_on: ["DEP-001"]
+
+  # --------------------------------------------------------------------------
+  # Step 2: 構造体レイアウトの変更
+  # --------------------------------------------------------------------------
+  - id: RUST-002
+    name: "ConcurrentLazy 構造体に #[repr(C)] と wait_sync フィールドを追加"
+    file: "src/control/concurrent_lazy.rs"
+    effort: "S"
+    priority: 2
+    status: "pending"
+    description: |
+      ConcurrentLazy 構造体を #[repr(C)] で宣言し、
+      wait_sync: CacheAligned<WaitSync> フィールドを追加する。
+    changes:
+      before: |
+        pub struct ConcurrentLazy<T, F = fn() -> T> {
+            state: AtomicU8,
+            value: UnsafeCell<MaybeUninit<T>>,
+            initializer: UnsafeCell<Option<F>>,
+        }
+      after: |
+        #[repr(C)]
+        pub struct ConcurrentLazy<T, F = fn() -> T> {
+            // Cache line 1: hot path
+            state: AtomicU8,
+            value: UnsafeCell<MaybeUninit<T>>,
+            initializer: UnsafeCell<Option<F>>,
+            // Cache line 2: cold path
+            wait_sync: CacheAligned<WaitSync>,
+        }
+    depends_on: ["RUST-001"]
+
+  # --------------------------------------------------------------------------
+  # Step 3: コンストラクタの修正
+  # --------------------------------------------------------------------------
+  - id: RUST-003
+    name: "new() / new_with_value() の修正（const fn 解除 + wait_sync 初期化）"
+    file: "src/control/concurrent_lazy.rs"
+    effort: "S"
+    priority: 3
+    status: "pending"
+    description: |
+      new() から const を削除し、wait_sync フィールドを初期化する。
+      new_with_value() にも wait_sync フィールドを追加する。
+    api_impact: |
+      const fn new() -> fn new() は破壊的変更。
+      parking_lot は const 初期化不可のため回避不可。
+    acceptance_criteria:
+      - "cargo check がパス"
+      - "全コンストラクタが正常に動作"
+    depends_on: ["RUST-002"]
+
+  # --------------------------------------------------------------------------
+  # Step 4: 待機メカニズムの置換（コア変更）
+  #          【Codex 指摘反映: アダプティブスピン + 時間ベースデッドロック検出】
+  # --------------------------------------------------------------------------
+  - id: RUST-004
+    name: "spin_wait() -> wait_on_initialization()（アダプティブスピン + Condvar）"
+    file: "src/control/concurrent_lazy.rs"
+    effort: "M"
+    priority: 4
+    status: "pending"
+    description: |
+      spin_wait() を削除し、wait_on_initialization() を追加する。
+
+      待機戦略:
+      1. Phase 1: アダプティブスピン (128回) - ユーザ空間で完結
+      2. Phase 2: Condvar::wait_for - kernel 遷移、500ms deadline でデッドロック検出
+
+      削除:
+      - spin_wait()
+      - MAX_SPIN_ITERATIONS
+
+      追加:
+      - ADAPTIVE_SPIN_LIMIT (128)
+      - DEADLOCK_TIMEOUT (500ms)
+      - wait_on_initialization()
+
+      変更:
+      - force() の STATE_COMPUTING ブランチ
+
+    key_design_decisions:
+      - "アダプティブスピンで短い初期化はユーザ空間で完結（kernel 遷移回避）"
+      - "wait_for で時間ベースの上限（ループ回数ベースは Condvar で機能しない）"
+      - "lock 取得前に state チェック（不要なロック取得回避）"
+      - "lock 取得後に state 再チェック（spurious wakeup 対策）"
+
+    acceptance_criteria:
+      - "cargo check がパス"
+      - "既存テストがパス"
+      - "短い初期化ではスピンで完結"
+      - "500ms 超で deadlock panic"
+    depends_on: ["RUST-003"]
+
+  # --------------------------------------------------------------------------
+  # Step 5: do_init() に再入検知 + notify_all
+  #          【Codex 指摘反映: thread_local による再入検知】
+  # --------------------------------------------------------------------------
+  - id: RUST-005
+    name: "do_init() に thread_local 再入検知 + notify_all() を追加"
+    file: "src/control/concurrent_lazy.rs"
+    effort: "S"
+    priority: 5
+    status: "pending"
+    description: |
+      do_init() の入口で IN_CONCURRENT_LAZY_INIT による再入検知を行う。
+      初期化完了後に notify_all() で待機スレッドを起床する。
+
+      追加箇所:
+      - do_init() 先頭: assert!(!flag.replace(true), ...)
+      - Ok ブランチ: state.store + notify_all + flag.set(false)
+      - Err ブランチ: state.store + notify_all + flag.set(false)
+
+    rationale: |
+      Condvar::wait は同一スレッドからの再帰呼び出しで永遠にブロックする。
+      thread_local フラグで do_init 入口で即座にパニックさせることで、
+      再入デッドロックを防止する。
+    acceptance_criteria:
+      - "再入時に即座にパニック"
+      - "パニック時もスレッドが正常に起床"
+      - "既存テストがパス"
+    depends_on: ["RUST-004"]
+
+  # --------------------------------------------------------------------------
+  # Step 6: try_force() の待機ロジック置換
+  #          【Codex 指摘反映: Instant ベースの総待機予算】
+  # --------------------------------------------------------------------------
+  - id: RUST-006
+    name: "try_force() を Instant ベースの総待機予算(50ms)に置換"
+    file: "src/control/concurrent_lazy.rs"
+    effort: "S"
+    priority: 6
+    status: "pending"
+    description: |
+      try_force() の STATE_COMPUTING ブランチを以下に置換:
+      1. アダプティブスピン (128回)
+      2. Condvar::wait_for + Instant ベースの deadline (50ms)
+      3. deadline 超過で Err(ConcurrentLazyPoisonedError)
+
+      削除:
+      - TRY_FORCE_MAX_SPIN_ITERATIONS
+      - 独自スピンカウンタロジック
+
+      追加:
+      - TRY_FORCE_TIMEOUT (50ms)
+    acceptance_criteria:
+      - "cargo check がパス"
+      - "既存テストがパス"
+      - "50ms 超過で Err が返る"
+    depends_on: ["RUST-005"]
+
+# ==============================================================================
+# ドキュメントタスク
+# ==============================================================================
+documentation_tasks:
+  - id: DOC-001
+    name: "ドキュメントコメントの更新"
+    file: "src/control/concurrent_lazy.rs"
+    effort: "S"
+    priority: 7
+    status: "pending"
+    description: |
+      以下のドキュメントを更新:
+      - モジュール冒頭: spin-wait -> アダプティブスピン + Condvar
+      - Re-entry Warning: thread_local による即座パニック検出
+      - Thread Safety: キャッシュライン分離、parking_lot 使用
+      - force(): 待機メカニズム、再入検知
+      - SAFETY コメント: spin_wait -> wait_on_initialization
+    acceptance_criteria:
+      - "cargo doc --no-deps がエラーなし"
+      - "ドキュメントが実装を正確に反映"
+    depends_on: ["RUST-006"]
+
+# ==============================================================================
+# テスト・検証タスク
+# ==============================================================================
+test_tasks:
+  - id: TEST-001
+    name: "既存テストの確認"
+    file: "src/control/concurrent_lazy.rs"
+    effort: "S"
+    priority: 8
+    status: "pending"
+    description: |
+      変更後に既存の全テスト（26テスト + 6 proptest）がパスすることを確認する。
+    commands:
+      - "cargo test -- concurrent_lazy"
+    acceptance_criteria:
+      - "全32テストがパス"
+      - "proptest が全パス"
+    depends_on: ["DOC-001"]
+
+  - id: TEST-002
+    name: "品質チェックの実行"
+    file: "N/A"
+    effort: "S"
+    priority: 9
+    status: "pending"
+    description: |
+      コード品質チェックを実行し全てパスすることを確認する。
+    commands:
+      - "cargo fmt"
+      - "cargo clippy --all-features --all-targets -- -D warnings"
+      - "cargo doc --no-deps"
+      - "cargo test"
+    acceptance_criteria:
+      - "全チェックがパス"
+    depends_on: ["TEST-001"]
+
+# ==============================================================================
+# feature 整合性確認タスク【Codex 指摘反映】
+# ==============================================================================
+feature_verification_tasks:
+  - id: VERIFY-001
+    name: "feature 整合性の確認"
+    file: "src/lib.rs, src/control/mod.rs"
+    effort: "XS"
+    priority: 10
+    status: "pending"
+    description: |
+      parking_lot が control feature でのみ利用されることを確認する。
+      concurrent_lazy.rs は src/control/mod.rs 内で管理されており、
+      control feature 無効時はコンパイルされない。
+    checks:
+      - "src/lib.rs: #[cfg(feature = \"control\")] mod control;"
+      - "cargo check --no-default-features"
+      - "cargo check --features typeclass"
+    acceptance_criteria:
+      - "control feature なしで parking_lot が参照されない"
+    depends_on: ["DEP-001"]
+
+# ==============================================================================
+# ベンチマークタスク【Codex 指摘反映】
+# ==============================================================================
+benchmark_tasks:
+  - id: BENCH-001
+    name: "ベンチマーク比較の実行（高スレッド・低スレッド）"
+    file: "N/A"
+    effort: "M"
+    priority: 11
+    status: "pending"
+    description: |
+      変更前後のベンチマーク比較を実施し、受入基準を満たすことを確認する。
+      /perf-gate スキルでリグレッション検出を行う。
+    commands:
+      - "cargo bench --bench control_bench -- concurrent_lazy_init_contention"
+      - "cargo bench --bench control_bench -- concurrent_lazy_thread_scalability"
+      - "cargo bench --bench control_bench -- concurrent_contention"
+      - "cargo bench --bench control_bench -- concurrent_lazy_cached_access"
+    acceptance_criteria:
+      high_thread_count:
+        - "concurrent_lazy_thread_scalability/thread_count/16: +10% 以内"
+        - "concurrent_contention/32_threads: +10% 以内"
+        - "concurrent_lazy_init_contention/thread_count/16: +10% 以内"
+      low_thread_count:
+        - "concurrent_lazy_init_contention/thread_count/2: -20% 以上改善"
+        - "concurrent_lazy_init_contention/thread_count/4: -20% 以上改善"
+        - "concurrent_lazy_cached_access/thread_count/4: -20% 以上改善"
+    depends_on: ["TEST-002"]
+
+# ==============================================================================
+# 実行順序（優先度順）
+# ==============================================================================
+execution_order:
+  - priority: 0
+    task_id: "DEP-001"
+    name: "Cargo.toml に parking_lot 依存を追加"
+    category: "dependency"
+
+  - priority: 1
+    task_id: "RUST-001"
+    name: "CacheAligned / WaitSync / 定数 / thread_local の追加"
+    category: "rust"
+
+  - priority: 2
+    task_id: "RUST-002"
+    name: "ConcurrentLazy 構造体の再配置"
+    category: "rust"
+
+  - priority: 3
+    task_id: "RUST-003"
+    name: "new() / new_with_value() の修正"
+    category: "rust"
+
+  - priority: 4
+    task_id: "RUST-004"
+    name: "spin_wait() -> wait_on_initialization()（アダプティブスピン + Condvar）"
+    category: "rust"
+
+  - priority: 5
+    task_id: "RUST-005"
+    name: "do_init() に再入検知 + notify_all() 追加"
+    category: "rust"
+
+  - priority: 6
+    task_id: "RUST-006"
+    name: "try_force() の Instant ベース待機"
+    category: "rust"
+
+  - priority: 7
+    task_id: "DOC-001"
+    name: "ドキュメントコメントの更新"
+    category: "documentation"
+
+  - priority: 8
+    task_id: "TEST-001"
+    name: "既存テストの確認"
+    category: "test"
+
+  - priority: 9
+    task_id: "TEST-002"
+    name: "品質チェックの実行"
+    category: "verification"
+
+  - priority: 10
+    task_id: "VERIFY-001"
+    name: "feature 整合性の確認"
+    category: "verification"
+
+  - priority: 11
+    task_id: "BENCH-001"
+    name: "ベンチマーク比較の実行"
+    category: "benchmark"
+
+# ==============================================================================
+# 工数見積もり
+# ==============================================================================
+effort_summary:
+  total_tasks: 12
+  by_size:
+    XS: 2
+    S: 8
+    M: 2
+    L: 0
+  estimated_total_hours: 5-8
+  breakdown:
+    dependency_management: "0.5 hours"
+    rust_implementation: "2.5-4 hours"
+    documentation: "0.5 hours"
+    test_verification: "1-2 hours"
+    feature_verification: "0.5 hours"
+    benchmark: "1-2 hours"
+
+# ==============================================================================
+# 品質チェックリスト
+# ==============================================================================
+quality_checklist:
+  pre_commit:
+    - "cargo fmt -- --check"
+    - "cargo clippy --all-features --all-targets -- -D warnings"
+    - "cargo test"
+    - "cargo doc --no-deps"
+
+  pre_merge:
+    - "cargo bench --bench control_bench -- concurrent_lazy"
+    - "cargo bench --bench control_bench -- concurrent_contention"
+    - "ベンチマーク結果の比較（高スレッド: +10% 以内、低スレッド: -20% 以上）"
+    - "cargo check --no-default-features（feature 整合性）"
+---
