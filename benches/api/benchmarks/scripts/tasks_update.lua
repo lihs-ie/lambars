@@ -243,7 +243,7 @@ function response(status, headers, body)
             reset_retry_state()
         elseif status == 409 then
             retry_attempt = retry_attempt + 1
-            if retry_attempt >= RETRY_COUNT then
+            if retry_attempt > RETRY_COUNT then
                 io.stderr:write(string.format("[tasks_update] Retry exhausted after %d attempts\n", RETRY_COUNT))
                 thread_retry_exhausted_count = thread_retry_exhausted_count + 1
                 reset_retry_state()
