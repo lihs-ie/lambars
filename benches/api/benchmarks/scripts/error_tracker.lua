@@ -3,6 +3,7 @@
 local M = {}
 
 M.threads = {}
+M.initialized = false
 M.state = {
     timeout_ms = 30000,
     connect_timeout_ms = 5000,
@@ -43,7 +44,11 @@ function M.init()
     M.state.fail_on_error_threshold = os.getenv("FAIL_ON_ERROR_THRESHOLD") == "1"
     M.state.inject_error_rate = tonumber(os.getenv("INJECT_ERROR_RATE"))
     reset_counters()
-    M.threads = {}
+    -- threads は既に登録済みの場合リセットしない
+    if not M.initialized then
+        M.threads = {}
+    end
+    M.initialized = true
 end
 
 local function safe_rate(count)
