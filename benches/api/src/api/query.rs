@@ -1997,7 +1997,8 @@ fn append_or_merge_sorted(
     existing: &TaskIdCollection,
     add: &TaskIdCollection,
 ) -> TaskIdCollection {
-    let can_concat = match (existing.iter_sorted().last(), add.iter_sorted().next()) {
+    // Use O(1) accessors for Large state instead of O(n) iter_sorted().last()
+    let can_concat = match (existing.last_sorted(), add.first_sorted()) {
         (Some(existing_max), Some(add_min)) => existing_max < add_min,
         // Either side is empty, so concat is safe
         (None, _) | (_, None) => true,
@@ -5688,7 +5689,9 @@ impl SearchIndex {
             if scratch.is_empty() {
                 transient.remove(key_str);
             } else {
-                let collected = std::mem::take(&mut scratch);
+                // Move data out while preserving scratch capacity for reuse in next iteration
+                let mut collected = Vec::with_capacity(scratch.len());
+                collected.append(&mut scratch);
                 let collection = TaskIdCollection::from_sorted_vec(collected);
                 transient.insert(key.clone(), collection);
             }
@@ -5748,7 +5751,9 @@ impl SearchIndex {
             if scratch.is_empty() {
                 result.remove(key_str);
             } else {
-                let collected = std::mem::take(&mut scratch);
+                // Move data out while preserving scratch capacity for reuse in next iteration
+                let mut collected = Vec::with_capacity(scratch.len());
+                collected.append(&mut scratch);
                 let collection = TaskIdCollection::from_sorted_vec(collected);
                 result.insert((*key).clone(), collection);
             }
@@ -5793,7 +5798,9 @@ impl SearchIndex {
             if scratch.is_empty() {
                 keys_to_remove.push(key_str);
             } else {
-                let collected = std::mem::take(&mut scratch);
+                // Move data out while preserving scratch capacity for reuse in next iteration
+                let mut collected = Vec::with_capacity(scratch.len());
+                collected.append(&mut scratch);
                 let collection = TaskIdCollection::from_sorted_vec(collected);
                 entries_to_insert.push(((*key).clone(), collection));
             }
@@ -6155,12 +6162,17 @@ impl SearchIndex {
                         &mut scratch,
                     );
                     if !scratch.is_empty() {
-                        let collection = TaskIdCollection::from_sorted_vec(
-                            std::mem::take(&mut scratch),
-                        );
+                        // Move data out while preserving scratch capacity for reuse
+                        let mut collected = Vec::with_capacity(scratch.len());
+                        collected.append(&mut scratch);
+                        let collection =
+                            TaskIdCollection::from_sorted_vec(collected);
                         transient.insert(key.clone(), collection);
                     }
                 }
+                // TB4-001: Direct build from add_list without merge loop.
+                // clone() is required because MutableIndex is borrowed; the memcpy cost
+                // is lower than the old merge_posting_add_only_into(empty, ...) path.
                 None if !add_list.is_empty() => {
                     let collection = TaskIdCollection::from_sorted_vec(add_list.clone());
                     transient.insert(key.clone(), collection);
@@ -6206,12 +6218,17 @@ impl SearchIndex {
                         &mut scratch,
                     );
                     if !scratch.is_empty() {
-                        let collection = TaskIdCollection::from_sorted_vec(
-                            std::mem::take(&mut scratch),
-                        );
+                        // Move data out while preserving scratch capacity for reuse
+                        let mut collected = Vec::with_capacity(scratch.len());
+                        collected.append(&mut scratch);
+                        let collection =
+                            TaskIdCollection::from_sorted_vec(collected);
                         result.insert(key.clone(), collection);
                     }
                 }
+                // TB4-001: Direct build from add_list without merge loop.
+                // clone() is required because MutableIndex is borrowed; the memcpy cost
+                // is lower than the old merge_posting_add_only_into(empty, ...) path.
                 None if !add_list.is_empty() => {
                     let collection = TaskIdCollection::from_sorted_vec(add_list.clone());
                     result.insert(key.clone(), collection);
@@ -6243,12 +6260,17 @@ impl SearchIndex {
                         &mut scratch,
                     );
                     if !scratch.is_empty() {
-                        let collection = TaskIdCollection::from_sorted_vec(
-                            std::mem::take(&mut scratch),
-                        );
+                        // Move data out while preserving scratch capacity for reuse
+                        let mut collected = Vec::with_capacity(scratch.len());
+                        collected.append(&mut scratch);
+                        let collection =
+                            TaskIdCollection::from_sorted_vec(collected);
                         entries_to_insert.push((key.clone(), collection));
                     }
                 }
+                // TB4-001: Direct build from add_list without merge loop.
+                // clone() is required because MutableIndex is borrowed; the memcpy cost
+                // is lower than the old merge_posting_add_only_into(empty, ...) path.
                 None if !add_list.is_empty() => {
                     let collection = TaskIdCollection::from_sorted_vec(add_list.clone());
                     entries_to_insert.push((key.clone(), collection));
@@ -20170,5 +20192,47 @@ mod merge_delta_add_only_none_branch_tests {
                 .into_index();
 
         assert!(index.get(key.as_str()).is_none());
+    }
+}
+
+#[cfg(test)]
+mod append_or_merge_sorted_property_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    fn make_task_id(id: u128) -> TaskId {
+        TaskId::from_uuid(uuid::Uuid::from_u128(id))
+    }
+
+    /// Builds a sorted, deduplicated TaskIdCollection from arbitrary u128 values.
+    fn sorted_unique_collection(mut values: Vec<u128>) -> TaskIdCollection {
+        values.sort_unstable();
+        values.dedup();
+        let task_ids: Vec<TaskId> = values.into_iter().map(make_task_id).collect();
+        TaskIdCollection::from_sorted_vec(task_ids)
+    }
+
+    proptest! {
+        /// Property: `append_or_merge_sorted(a, b)` produces the same result as `a.merge(b)`.
+        ///
+        /// This verifies that the concat fast-path and the merge fallback are
+        /// semantically equivalent to the canonical two-pointer merge.
+        #[test]
+        fn append_or_merge_equivalent_to_merge(
+            existing_values in prop::collection::vec(1u128..5000, 0..64),
+            add_values in prop::collection::vec(1u128..5000, 0..64),
+        ) {
+            let existing = sorted_unique_collection(existing_values);
+            let add = sorted_unique_collection(add_values);
+
+            let result_optimized = append_or_merge_sorted(&existing, &add);
+            let result_canonical = existing.merge(&add);
+
+            prop_assert_eq!(
+                result_optimized.to_sorted_vec(),
+                result_canonical.to_sorted_vec(),
+                "append_or_merge_sorted must be equivalent to merge"
+            );
+        }
     }
 }
