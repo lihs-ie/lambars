@@ -1993,53 +1993,7 @@ fn merge_sorted_posting_lists(
     existing: &TaskIdCollection,
     new_entries: &TaskIdCollection,
 ) -> TaskIdCollection {
-    // Fast paths for empty collections
-    if existing.is_empty() {
-        return new_entries.clone();
-    }
-    if new_entries.is_empty() {
-        return existing.clone();
-    }
-
-    // Get sorted vectors for merge
-    let existing_sorted = existing.to_sorted_vec();
-    let new_sorted = new_entries.to_sorted_vec();
-
-    // Pre-allocate result with exact capacity
-    let mut result = Vec::with_capacity(existing_sorted.len() + new_sorted.len());
-
-    // Two-pointer merge
-    let mut existing_iterator = existing_sorted.into_iter().peekable();
-    let mut new_iterator = new_sorted.into_iter().peekable();
-
-    loop {
-        match (existing_iterator.peek(), new_iterator.peek()) {
-            (Some(existing_id), Some(new_id)) => match existing_id.cmp(new_id) {
-                std::cmp::Ordering::Less => {
-                    result.push(existing_iterator.next().unwrap());
-                }
-                std::cmp::Ordering::Greater => {
-                    result.push(new_iterator.next().unwrap());
-                }
-                std::cmp::Ordering::Equal => {
-                    // Skip duplicate - take from existing, advance both
-                    result.push(existing_iterator.next().unwrap());
-                    new_iterator.next();
-                }
-            },
-            (Some(_), None) => {
-                result.extend(existing_iterator);
-                break;
-            }
-            (None, Some(_)) => {
-                result.extend(new_iterator);
-                break;
-            }
-            (None, None) => break,
-        }
-    }
-
-    TaskIdCollection::from_sorted_vec(result)
+    existing.merge(new_entries)
 }
 
 /// Keys added during an Update operation, used for remove entry cancellation.
@@ -5665,22 +5619,28 @@ impl SearchIndex {
         // TB-001: Use transient for bulk updates to reduce COW overhead
         let mut transient = index.clone().transient();
 
+        // BENCH-003: Scratch buffer allocated once and reused across iterations
+        // to avoid repeated heap allocations for each key's merge result.
+        let mut scratch: Vec<TaskId> = Vec::new();
+
         for key in all_keys {
             let key_str = key.as_str();
-            let existing: Vec<TaskId> = transient
-                .get(key_str)
-                .map(TaskIdCollection::to_sorted_vec)
-                .unwrap_or_default();
-            let merged = Self::compute_merged_posting_list_sorted(
-                &existing,
+            let existing_collection = transient.get(key_str);
+            let existing_iterator: Box<dyn Iterator<Item = &TaskId>> = match existing_collection {
+                Some(collection) => Box::new(collection.iter_sorted()),
+                None => Box::new(std::iter::empty()),
+            };
+            Self::merge_posting_streaming_into(
+                existing_iterator,
                 add.get(key).map_or(&[], Vec::as_slice),
                 remove.get(key).map_or(&[], Vec::as_slice),
+                &mut scratch,
             );
 
-            if merged.is_empty() {
+            if scratch.is_empty() {
                 transient.remove(key_str);
             } else {
-                let collection = TaskIdCollection::from_sorted_vec(merged);
+                let collection = TaskIdCollection::from_sorted_vec(std::mem::take(&mut scratch));
                 transient.insert(key.clone(), collection);
             }
         }
@@ -5740,23 +5700,25 @@ impl SearchIndex {
         all_keys: &std::collections::HashSet<&NgramKey>,
     ) -> MergeNgramDeltaResult {
         let mut result = index.clone().transient();
+        let mut scratch: Vec<TaskId> = Vec::new();
 
         for key in all_keys {
             let key_str = key.as_str();
-            let existing: Vec<TaskId> = result
-                .get(key_str)
-                .map(TaskIdCollection::to_sorted_vec)
-                .unwrap_or_default();
-            let merged = Self::compute_merged_posting_list_sorted(
-                &existing,
+            let existing_collection = result.get(key_str);
+            Self::merge_posting_streaming_into(
+                existing_collection.map_or_else(
+                    || Box::new(std::iter::empty()) as Box<dyn Iterator<Item = &TaskId>>,
+                    |collection| Box::new(collection.iter_sorted()),
+                ),
                 add.get(*key).map_or(&[], Vec::as_slice),
                 remove.get(*key).map_or(&[], Vec::as_slice),
+                &mut scratch,
             );
 
-            if merged.is_empty() {
+            if scratch.is_empty() {
                 result.remove(key_str);
             } else {
-                let collection = TaskIdCollection::from_sorted_vec(merged);
+                let collection = TaskIdCollection::from_sorted_vec(std::mem::take(&mut scratch));
                 result.insert((*key).clone(), collection);
             }
         }
@@ -5786,23 +5748,25 @@ impl SearchIndex {
         let mut result = index.clone().transient();
         let mut entries_to_insert: Vec<(NgramKey, TaskIdCollection)> = Vec::new();
         let mut keys_to_remove: Vec<&str> = Vec::new();
+        let mut scratch: Vec<TaskId> = Vec::new();
 
         for key in all_keys {
             let key_str = key.as_str();
-            let existing: Vec<TaskId> = result
-                .get(key_str)
-                .map(TaskIdCollection::to_sorted_vec)
-                .unwrap_or_default();
-            let merged = Self::compute_merged_posting_list_sorted(
-                &existing,
+            let existing_collection = result.get(key_str);
+            Self::merge_posting_streaming_into(
+                existing_collection.map_or_else(
+                    || Box::new(std::iter::empty()) as Box<dyn Iterator<Item = &TaskId>>,
+                    |collection| Box::new(collection.iter_sorted()),
+                ),
                 add.get(*key).map_or(&[], Vec::as_slice),
                 remove.get(*key).map_or(&[], Vec::as_slice),
+                &mut scratch,
             );
 
-            if merged.is_empty() {
+            if scratch.is_empty() {
                 keys_to_remove.push(key_str);
             } else {
-                let collection = TaskIdCollection::from_sorted_vec(merged);
+                let collection = TaskIdCollection::from_sorted_vec(std::mem::take(&mut scratch));
                 entries_to_insert.push(((*key).clone(), collection));
             }
         }
@@ -5823,8 +5787,9 @@ impl SearchIndex {
                     Err(_) => {
                         // TB-003: Fallback to individual merge to ensure correct semantics.
                         // This guarantees `(existing ∪ add) - remove` is preserved.
-                        let fallback = Self::merge_ngram_delta_individual(index, add, remove, all_keys)
-                            .into_index();
+                        let fallback =
+                            Self::merge_ngram_delta_individual(index, add, remove, all_keys)
+                                .into_index();
                         return MergeNgramDeltaResult::Fallback {
                             index: fallback,
                             reason: MergeNgramDeltaFallbackReason::TooManyEntries {
@@ -5875,6 +5840,7 @@ impl SearchIndex {
     /// All input slices must be sorted in ascending order and deduplicated.
     /// Debug builds validate with `debug_assert!`; release builds produce
     /// incorrect results for invalid input.
+    #[allow(dead_code)]
     fn compute_merged_posting_list_sorted(
         existing: &[TaskId],
         add: &[TaskId],
@@ -5991,6 +5957,145 @@ impl SearchIndex {
         result
     }
 
+    /// Computes `(existing ∪ add) - remove` in a single streaming pass.
+    ///
+    /// This is an iterator-based variant of [`compute_merged_posting_list_sorted`]
+    /// that accepts `existing` as a generic sorted iterator instead of a slice.
+    /// The result is a new `Vec<TaskId>` containing the merged, deduplicated,
+    /// sorted posting list.
+    ///
+    /// # Preconditions
+    ///
+    /// All inputs must be sorted in ascending order and deduplicated.
+    /// `existing` must yield elements in strictly ascending order.
+    /// Debug builds validate `add` and `remove` with `debug_assert!`;
+    /// release builds produce incorrect results for invalid input.
+    ///
+    /// # Algorithm
+    ///
+    /// 1. Perform a sorted union of `existing` and `add` (the "driver").
+    /// 2. Use `remove` as a filter, advancing only as needed.
+    /// 3. When the driver is exhausted, stop (no residual `remove` scan).
+    #[allow(dead_code)]
+    fn merge_posting_streaming<'a>(
+        existing: impl Iterator<Item = &'a TaskId>,
+        add: &[TaskId],
+        remove: &[TaskId],
+    ) -> Vec<TaskId> {
+        let mut output = Vec::with_capacity(add.len());
+        Self::merge_posting_streaming_into(existing, add, remove, &mut output);
+        output
+    }
+
+    /// Computes `(existing ∪ add) - remove` in a single streaming pass,
+    /// writing the result into the provided `output` buffer.
+    ///
+    /// This variant allows callers to reuse a pre-allocated `Vec` across
+    /// multiple invocations to reduce allocation overhead.
+    ///
+    /// # Behaviour
+    ///
+    /// - Clears `output` at the start of each call.
+    /// - Capacity management is the caller's responsibility.
+    ///
+    /// # Preconditions
+    ///
+    /// Same as [`merge_posting_streaming`]: all inputs must be sorted and
+    /// deduplicated.
+    fn merge_posting_streaming_into<'a>(
+        existing: impl Iterator<Item = &'a TaskId>,
+        add: &[TaskId],
+        remove: &[TaskId],
+        output: &mut Vec<TaskId>,
+    ) {
+        // Helper: advance `remove_iterator` past elements less than `candidate`,
+        // returning `true` if `candidate` is found in `remove`.
+        fn should_remove(
+            candidate: &TaskId,
+            remove_iterator: &mut std::iter::Peekable<std::slice::Iter<'_, TaskId>>,
+        ) -> bool {
+            while let Some(remove_element) = remove_iterator.peek() {
+                match (*remove_element).cmp(candidate) {
+                    std::cmp::Ordering::Less => {
+                        remove_iterator.next();
+                    }
+                    std::cmp::Ordering::Equal => {
+                        remove_iterator.next();
+                        return true;
+                    }
+                    std::cmp::Ordering::Greater => {
+                        return false;
+                    }
+                }
+            }
+            false
+        }
+
+        #[cfg(debug_assertions)]
+        fn is_strictly_sorted(slice: &[TaskId]) -> bool {
+            slice.windows(2).all(|window| window[0] < window[1])
+        }
+
+        #[cfg(debug_assertions)]
+        {
+            debug_assert!(
+                add.is_empty() || is_strictly_sorted(add),
+                "add slice must be sorted and deduplicated"
+            );
+            debug_assert!(
+                remove.is_empty() || is_strictly_sorted(remove),
+                "remove slice must be sorted and deduplicated"
+            );
+        }
+
+        output.clear();
+
+        let mut existing_iterator = existing.peekable();
+        let mut add_iterator = add.iter().peekable();
+        let mut remove_iterator = remove.iter().peekable();
+
+        loop {
+            match (existing_iterator.peek(), add_iterator.peek()) {
+                (None, None) => break,
+                (Some(&existing_element), None) => {
+                    existing_iterator.next();
+                    if !should_remove(existing_element, &mut remove_iterator) {
+                        output.push(existing_element.clone());
+                    }
+                }
+                (None, Some(&add_element)) => {
+                    add_iterator.next();
+                    if !should_remove(add_element, &mut remove_iterator) {
+                        output.push(add_element.clone());
+                    }
+                }
+                (Some(&existing_element), Some(&add_element)) => {
+                    match existing_element.cmp(add_element) {
+                        std::cmp::Ordering::Less => {
+                            existing_iterator.next();
+                            if !should_remove(existing_element, &mut remove_iterator) {
+                                output.push(existing_element.clone());
+                            }
+                        }
+                        std::cmp::Ordering::Greater => {
+                            add_iterator.next();
+                            if !should_remove(add_element, &mut remove_iterator) {
+                                output.push(add_element.clone());
+                            }
+                        }
+                        std::cmp::Ordering::Equal => {
+                            existing_iterator.next();
+                            add_iterator.next();
+                            if !should_remove(existing_element, &mut remove_iterator) {
+                                output.push(existing_element.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Computes `(existing ∪ add) - remove` with sorted, deduplicated output.
     #[allow(dead_code)]
     fn compute_merged_posting_list_iter<'a>(
@@ -6065,6 +6170,26 @@ impl SearchIndex {
         remove: &[TaskId],
     ) -> Vec<TaskId> {
         Self::compute_merged_posting_list_iter(existing.iter(), add, remove)
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub fn merge_posting_streaming_for_test(
+        existing: &[TaskId],
+        add: &[TaskId],
+        remove: &[TaskId],
+    ) -> Vec<TaskId> {
+        Self::merge_posting_streaming(existing.iter(), add, remove)
+    }
+
+    #[cfg(test)]
+    pub fn merge_posting_streaming_into_for_test(
+        existing: &[TaskId],
+        add: &[TaskId],
+        remove: &[TaskId],
+        output: &mut Vec<TaskId>,
+    ) {
+        Self::merge_posting_streaming_into(existing.iter(), add, remove, output);
     }
 }
 
@@ -6457,7 +6582,12 @@ pub async fn search_tasks(
     // Security: Skip cache operations for excessively long queries to prevent
     // memory exhaustion. The search itself still proceeds but results won't be cached.
     let cache_key = if normalized_q.len() <= MAX_CACHE_QUERY_LENGTH {
-        Some(SearchCacheKey::from_raw(normalized_q, query.scope, query.limit, query.offset))
+        Some(SearchCacheKey::from_raw(
+            normalized_q,
+            query.scope,
+            query.limit,
+            query.offset,
+        ))
     } else {
         tracing::debug!(
             query_length = normalized_q.len(),
@@ -6502,7 +6632,12 @@ pub async fn search_tasks(
     // for consistent behavior with cache key generation
     let tasks = state
         .task_repository
-        .search(normalized_q, query.scope.to_repository_scope(), limit, offset)
+        .search(
+            normalized_q,
+            query.scope.to_repository_scope(),
+            limit,
+            offset,
+        )
         .await
         .map_err(ApiErrorResponse::from)?;
 
@@ -10051,7 +10186,9 @@ mod search_index_differential_update_tests {
         // Apply bulk Add (which returns a new index via Result)
         let new_task = create_test_task("Added via bulk", Priority::High);
         let changes = vec![TaskChange::Add(new_task)];
-        let _new_index = original_index.apply_bulk(&changes).expect("apply_bulk should succeed");
+        let _new_index = original_index
+            .apply_bulk(&changes)
+            .expect("apply_bulk should succeed");
 
         // Original index should be unchanged
         let count_after = original_index.all_tasks().len();
@@ -10069,7 +10206,8 @@ mod search_index_differential_update_tests {
         );
 
         // Verify new task is NOT in original index (immutability)
-        let result_new = search_with_scope_indexed(&original_index, "added via bulk", SearchScope::All);
+        let result_new =
+            search_with_scope_indexed(&original_index, "added via bulk", SearchScope::All);
         assert_eq!(
             result_new.tasks.len(),
             0,
@@ -18535,6 +18673,261 @@ mod compute_merged_posting_list_iter_tests {
 }
 
 // =============================================================================
+// merge_posting_streaming Tests (BENCH-001)
+// =============================================================================
+
+#[cfg(test)]
+mod merge_posting_streaming_tests {
+    use super::*;
+    use proptest::prelude::*;
+    use rstest::rstest;
+    use uuid::Uuid;
+
+    fn task_ids(values: &[u128]) -> Vec<TaskId> {
+        values
+            .iter()
+            .map(|&v| TaskId::from_uuid(Uuid::from_u128(v)))
+            .collect()
+    }
+
+    // -------------------------------------------------------------------------
+    // Basic Tests
+    // -------------------------------------------------------------------------
+
+    /// All inputs are empty -> empty Vec.
+    #[rstest]
+    fn merge_posting_streaming_all_empty() {
+        // Arrange
+        let existing: Vec<TaskId> = vec![];
+        let add: Vec<TaskId> = vec![];
+        let remove: Vec<TaskId> = vec![];
+
+        // Act
+        let result = SearchIndex::merge_posting_streaming_for_test(&existing, &add, &remove);
+
+        // Assert
+        assert!(result.is_empty());
+    }
+
+    /// Only existing is provided -> returns existing content.
+    #[rstest]
+    fn merge_posting_streaming_existing_only() {
+        // Arrange
+        let existing = task_ids(&[1, 3, 5, 7, 9]);
+        let add: Vec<TaskId> = vec![];
+        let remove: Vec<TaskId> = vec![];
+
+        // Act
+        let result = SearchIndex::merge_posting_streaming_for_test(&existing, &add, &remove);
+
+        // Assert
+        assert_eq!(result, task_ids(&[1, 3, 5, 7, 9]));
+    }
+
+    /// Only add is provided -> returns add content.
+    #[rstest]
+    fn merge_posting_streaming_add_only() {
+        // Arrange
+        let existing: Vec<TaskId> = vec![];
+        let add = task_ids(&[2, 4, 6, 8, 10]);
+        let remove: Vec<TaskId> = vec![];
+
+        // Act
+        let result = SearchIndex::merge_posting_streaming_for_test(&existing, &add, &remove);
+
+        // Assert
+        assert_eq!(result, task_ids(&[2, 4, 6, 8, 10]));
+    }
+
+    /// existing + remove (all removed) -> empty.
+    #[rstest]
+    fn merge_posting_streaming_remove_only() {
+        // Arrange
+        let existing = task_ids(&[1, 2, 3]);
+        let add: Vec<TaskId> = vec![];
+        let remove = task_ids(&[1, 2, 3]);
+
+        // Act
+        let result = SearchIndex::merge_posting_streaming_for_test(&existing, &add, &remove);
+
+        // Assert
+        assert!(result.is_empty());
+    }
+
+    // -------------------------------------------------------------------------
+    // Union Tests
+    // -------------------------------------------------------------------------
+
+    /// existing + add (with and without duplicates) -> sorted union.
+    #[rstest]
+    #[case::no_overlap(
+        &[1, 3, 5],
+        &[2, 4, 6],
+        &[1, 2, 3, 4, 5, 6]
+    )]
+    #[case::with_overlap(
+        &[1, 3, 5, 7],
+        &[3, 5, 9],
+        &[1, 3, 5, 7, 9]
+    )]
+    #[case::identical(
+        &[1, 2, 3],
+        &[1, 2, 3],
+        &[1, 2, 3]
+    )]
+    fn merge_posting_streaming_union_no_remove(
+        #[case] existing_values: &[u128],
+        #[case] add_values: &[u128],
+        #[case] expected_values: &[u128],
+    ) {
+        // Arrange
+        let existing = task_ids(existing_values);
+        let add = task_ids(add_values);
+        let remove: Vec<TaskId> = vec![];
+
+        // Act
+        let result = SearchIndex::merge_posting_streaming_for_test(&existing, &add, &remove);
+
+        // Assert
+        assert_eq!(result, task_ids(expected_values));
+    }
+
+    /// 3-way merge: (existing ∪ add) - remove.
+    #[rstest]
+    #[case::basic(
+        &[1, 3, 5, 7],
+        &[2, 4, 6, 8],
+        &[3, 4],
+        &[1, 2, 5, 6, 7, 8]
+    )]
+    #[case::remove_from_both_sources(
+        &[1, 3, 5],
+        &[2, 4, 6],
+        &[3, 4],
+        &[1, 2, 5, 6]
+    )]
+    #[case::remove_overlapping_element(
+        &[1, 3, 5],
+        &[3, 7],
+        &[3],
+        &[1, 5, 7]
+    )]
+    fn merge_posting_streaming_union_with_remove(
+        #[case] existing_values: &[u128],
+        #[case] add_values: &[u128],
+        #[case] remove_values: &[u128],
+        #[case] expected_values: &[u128],
+    ) {
+        // Arrange
+        let existing = task_ids(existing_values);
+        let add = task_ids(add_values);
+        let remove = task_ids(remove_values);
+
+        // Act
+        let result = SearchIndex::merge_posting_streaming_for_test(&existing, &add, &remove);
+
+        // Assert
+        assert_eq!(result, task_ids(expected_values));
+    }
+
+    // -------------------------------------------------------------------------
+    // Edge Case Tests
+    // -------------------------------------------------------------------------
+
+    /// remove is longer than union -> no residual remove scan, correct result.
+    #[rstest]
+    fn merge_posting_streaming_remove_longer_than_union() {
+        // Arrange: union is {2, 4}, remove is {1, 2, 3, 4, 5, 6, 7, 8, 9, 10}
+        let existing = task_ids(&[2, 4]);
+        let add: Vec<TaskId> = vec![];
+        let remove = task_ids(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+
+        // Act
+        let result = SearchIndex::merge_posting_streaming_for_test(&existing, &add, &remove);
+
+        // Assert: all elements removed
+        assert!(result.is_empty());
+    }
+
+    // -------------------------------------------------------------------------
+    // _into Variant Tests
+    // -------------------------------------------------------------------------
+
+    /// Two consecutive calls to `merge_posting_streaming_into` correctly clear output.
+    #[rstest]
+    fn merge_posting_streaming_into_reuse() {
+        // Arrange
+        let mut output = Vec::with_capacity(16);
+
+        let existing_1 = task_ids(&[1, 2, 3]);
+        let add_1 = task_ids(&[4, 5]);
+        let remove_1: Vec<TaskId> = vec![];
+
+        let existing_2 = task_ids(&[10, 20]);
+        let add_2 = task_ids(&[30]);
+        let remove_2 = task_ids(&[20]);
+
+        // Act: first call
+        SearchIndex::merge_posting_streaming_into_for_test(
+            &existing_1,
+            &add_1,
+            &remove_1,
+            &mut output,
+        );
+        let first_result = output.clone();
+
+        // Act: second call (should clear and overwrite)
+        SearchIndex::merge_posting_streaming_into_for_test(
+            &existing_2,
+            &add_2,
+            &remove_2,
+            &mut output,
+        );
+
+        // Assert: first call produced correct result
+        assert_eq!(first_result, task_ids(&[1, 2, 3, 4, 5]));
+
+        // Assert: second call produced correct result (not appended to first)
+        assert_eq!(output, task_ids(&[10, 30]));
+    }
+
+    // -------------------------------------------------------------------------
+    // Property Tests: Equivalence with compute_merged_posting_list_sorted
+    // -------------------------------------------------------------------------
+
+    /// Strategy that generates a sorted, deduplicated `Vec<u128>` of TaskId values.
+    fn sorted_unique_u128_vec() -> impl Strategy<Value = Vec<u128>> {
+        prop::collection::hash_set(1u128..1000, 0..30).prop_map(|set| {
+            let mut vec: Vec<u128> = set.into_iter().collect();
+            vec.sort();
+            vec
+        })
+    }
+
+    proptest! {
+        /// Property: `merge_posting_streaming` produces the same result as
+        /// `compute_merged_posting_list_sorted` for all valid inputs.
+        #[test]
+        fn merge_posting_streaming_equivalence_with_sorted(
+            existing_values in sorted_unique_u128_vec(),
+            add_values in sorted_unique_u128_vec(),
+            remove_values in sorted_unique_u128_vec(),
+        ) {
+            let existing = task_ids(&existing_values);
+            let add = task_ids(&add_values);
+            let remove = task_ids(&remove_values);
+
+            let streaming_result =
+                SearchIndex::merge_posting_streaming_for_test(&existing, &add, &remove);
+            let sorted_result =
+                SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &add, &remove);
+
+            prop_assert_eq!(streaming_result, sorted_result);
+        }
+    }
+}
+
+// =============================================================================
 // SearchIndexBulkBuilder Tests
 // =============================================================================
 
@@ -19000,6 +19393,57 @@ mod merge_sorted_posting_lists_tests {
             assert!(
                 sorted[i - 1] < sorted[i],
                 "Result should be strictly sorted"
+            );
+        }
+    }
+
+    /// Test merging Small state (<=8 elements) with Large state (>8 elements).
+    /// Ensures correctness across OrderedUniqueSet internal state boundaries.
+    #[rstest]
+    fn merge_sorted_posting_lists_small_large_mixed() {
+        // Small state: 3 elements (well below SMALL_THRESHOLD of 8)
+        let small = TaskIdCollection::from_sorted_vec(vec![
+            make_task_id(2),
+            make_task_id(5),
+            make_task_id(8),
+        ]);
+
+        // Large state: 10 elements (above SMALL_THRESHOLD of 8)
+        let large = TaskIdCollection::from_sorted_vec(vec![
+            make_task_id(1),
+            make_task_id(3),
+            make_task_id(4),
+            make_task_id(5), // overlaps with small
+            make_task_id(6),
+            make_task_id(7),
+            make_task_id(8), // overlaps with small
+            make_task_id(9),
+            make_task_id(10),
+            make_task_id(11),
+        ]);
+
+        // Small merged into Large
+        let merged_small_large = merge_sorted_posting_lists(&small, &large);
+        // Expected union: {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11} = 11 unique elements
+        assert_eq!(merged_small_large.len(), 11);
+        let sorted = merged_small_large.to_sorted_vec();
+        for (index, expected_id) in (1u128..=11).enumerate() {
+            assert_eq!(
+                sorted[index],
+                make_task_id(expected_id),
+                "Element at index {index} should be task_id({expected_id})"
+            );
+        }
+
+        // Large merged into Small (reversed order)
+        let merged_large_small = merge_sorted_posting_lists(&large, &small);
+        assert_eq!(merged_large_small.len(), 11);
+        let sorted_reversed = merged_large_small.to_sorted_vec();
+        for (index, expected_id) in (1u128..=11).enumerate() {
+            assert_eq!(
+                sorted_reversed[index],
+                make_task_id(expected_id),
+                "Reversed: element at index {index} should be task_id({expected_id})"
             );
         }
     }
