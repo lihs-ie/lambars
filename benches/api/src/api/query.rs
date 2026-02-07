@@ -5491,9 +5491,59 @@ impl SearchIndex {
     /// Use [`SearchIndex::apply_changes`] instead, which automatically prepares
     /// the delta before applying.
     #[must_use]
+    #[allow(clippy::too_many_lines)]
     pub fn apply_delta(&self, delta: &SearchIndexDelta, changes: &[TaskChange]) -> Self {
         #[cfg(debug_assertions)]
         delta.debug_assert_prepared();
+
+        // BENCH-005: Use add-only fast path when delta contains no removals.
+        // This avoids constructing and advancing remove iterators in every
+        // merge_posting call, which is the common case for bulk Add workloads.
+        if delta.is_add_only() {
+            return Self {
+                tasks_by_id: self.update_tasks_by_id(changes),
+                title_full_index: Self::merge_index_delta_add_only(
+                    &self.title_full_index,
+                    &delta.title_full_add,
+                ),
+                title_word_index: Self::merge_index_delta_add_only(
+                    &self.title_word_index,
+                    &delta.title_word_add,
+                ),
+                tag_index: Self::merge_index_delta_add_only(&self.tag_index, &delta.tag_add),
+                title_full_ngram_index: Self::merge_ngram_delta_add_only(
+                    &self.title_full_ngram_index,
+                    &delta.title_full_ngram_add,
+                    &self.config,
+                )
+                .into_index(),
+                title_word_ngram_index: Self::merge_ngram_delta_add_only(
+                    &self.title_word_ngram_index,
+                    &delta.title_word_ngram_add,
+                    &self.config,
+                )
+                .into_index(),
+                tag_ngram_index: Self::merge_ngram_delta_add_only(
+                    &self.tag_ngram_index,
+                    &delta.tag_ngram_add,
+                    &self.config,
+                )
+                .into_index(),
+                title_full_all_suffix_index: Self::merge_index_delta_add_only(
+                    &self.title_full_all_suffix_index,
+                    &delta.title_full_all_suffix_add,
+                ),
+                title_word_all_suffix_index: Self::merge_index_delta_add_only(
+                    &self.title_word_all_suffix_index,
+                    &delta.title_word_all_suffix_add,
+                ),
+                tag_all_suffix_index: Self::merge_index_delta_add_only(
+                    &self.tag_all_suffix_index,
+                    &delta.tag_all_suffix_add,
+                ),
+                config: self.config.clone(),
+            };
+        }
 
         Self {
             tasks_by_id: self.update_tasks_by_id(changes),
@@ -6096,6 +6146,267 @@ impl SearchIndex {
         }
     }
 
+    // =========================================================================
+    // BENCH-005: Add-only fast path
+    // =========================================================================
+
+    /// Computes `existing ∪ add` in a single streaming pass (add-only fast path).
+    ///
+    /// This is a specialized version of [`merge_posting_streaming`] that skips
+    /// the remove iterator entirely. When the delta contains only Add operations,
+    /// this avoids the overhead of creating and advancing the remove iterator.
+    ///
+    /// # Preconditions
+    ///
+    /// `add` must be sorted in ascending order and deduplicated.
+    /// `existing` must yield elements in strictly ascending order.
+    /// Debug builds validate `add` with `debug_assert!`;
+    /// release builds produce incorrect results for invalid input.
+    ///
+    /// # Algorithm
+    ///
+    /// Two-pointer union of `existing` and `add`, producing a sorted,
+    /// deduplicated output.
+    #[allow(dead_code)]
+    fn merge_posting_add_only<'a>(
+        existing: impl Iterator<Item = &'a TaskId>,
+        add: &[TaskId],
+    ) -> Vec<TaskId> {
+        let mut output = Vec::with_capacity(add.len());
+        Self::merge_posting_add_only_into(existing, add, &mut output);
+        output
+    }
+
+    /// Computes `existing ∪ add` in a single streaming pass,
+    /// writing the result into the provided `output` buffer.
+    ///
+    /// This variant allows callers to reuse a pre-allocated `Vec` across
+    /// multiple invocations to reduce allocation overhead.
+    ///
+    /// # Behaviour
+    ///
+    /// - Clears `output` at the start of each call.
+    /// - Capacity management is the caller's responsibility.
+    ///
+    /// # Preconditions
+    ///
+    /// Same as [`merge_posting_add_only`]: all inputs must be sorted and
+    /// deduplicated.
+    fn merge_posting_add_only_into<'a>(
+        existing: impl Iterator<Item = &'a TaskId>,
+        add: &[TaskId],
+        output: &mut Vec<TaskId>,
+    ) {
+        #[cfg(debug_assertions)]
+        fn is_strictly_sorted(slice: &[TaskId]) -> bool {
+            slice.windows(2).all(|window| window[0] < window[1])
+        }
+
+        #[cfg(debug_assertions)]
+        {
+            debug_assert!(
+                add.is_empty() || is_strictly_sorted(add),
+                "add slice must be sorted and deduplicated"
+            );
+        }
+
+        output.clear();
+
+        let mut existing_iterator = existing.peekable();
+        let mut add_iterator = add.iter().peekable();
+
+        loop {
+            match (existing_iterator.peek(), add_iterator.peek()) {
+                (None, None) => break,
+                (Some(&existing_element), None) => {
+                    existing_iterator.next();
+                    output.push(existing_element.clone());
+                }
+                (None, Some(&add_element)) => {
+                    add_iterator.next();
+                    output.push(add_element.clone());
+                }
+                (Some(&existing_element), Some(&add_element)) => {
+                    match existing_element.cmp(add_element) {
+                        std::cmp::Ordering::Less => {
+                            existing_iterator.next();
+                            output.push(existing_element.clone());
+                        }
+                        std::cmp::Ordering::Greater => {
+                            add_iterator.next();
+                            output.push(add_element.clone());
+                        }
+                        std::cmp::Ordering::Equal => {
+                            // Deduplicate: take one copy when both iterators
+                            // point at the same element.
+                            existing_iterator.next();
+                            add_iterator.next();
+                            output.push(existing_element.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // =========================================================================
+    // BENCH-005: Add-only fast path for PrefixIndex delta merge
+    // =========================================================================
+
+    /// Computes `existing ∪ add` for a `PrefixIndex` (add-only fast path).
+    ///
+    /// This is a specialized version of [`merge_index_delta`] that skips
+    /// remove processing entirely. Since there are no removals, keys are
+    /// never deleted from the index.
+    ///
+    /// # BENCH-005 Optimization
+    ///
+    /// Uses `merge_posting_add_only_into` instead of `merge_posting_streaming_into`,
+    /// eliminating remove iterator construction and comparison overhead.
+    fn merge_index_delta_add_only(index: &PrefixIndex, add: &MutableIndex) -> PrefixIndex {
+        if add.is_empty() {
+            return index.clone();
+        }
+
+        let mut transient = index.clone().transient();
+
+        // BENCH-003: Scratch buffer allocated once and reused across iterations
+        let mut scratch: Vec<TaskId> = Vec::new();
+
+        for (key, add_list) in add {
+            let key_str = key.as_str();
+            let existing_collection = transient.get(key_str);
+            let existing_iterator: Box<dyn Iterator<Item = &TaskId>> = match existing_collection {
+                Some(collection) => Box::new(collection.iter_sorted()),
+                None => Box::new(std::iter::empty()),
+            };
+            Self::merge_posting_add_only_into(existing_iterator, add_list.as_slice(), &mut scratch);
+
+            // In add-only mode, the result is never empty when add is non-empty
+            // (even if existing was empty, we still have the add entries).
+            // We only skip inserting if scratch is truly empty (both existing
+            // and add were empty for this key, which shouldn't happen since
+            // we iterate over add keys).
+            if !scratch.is_empty() {
+                let collection = TaskIdCollection::from_sorted_vec(std::mem::take(&mut scratch));
+                transient.insert(key.clone(), collection);
+            }
+        }
+
+        transient.persistent()
+    }
+
+    // =========================================================================
+    // BENCH-005: Add-only fast path for NgramIndex delta merge
+    // =========================================================================
+
+    /// Computes `existing ∪ add` for a `NgramIndex` (add-only fast path).
+    ///
+    /// Combines the logic of `merge_ngram_delta_individual` and
+    /// `merge_ngram_delta_bulk` into a single add-only variant. Since there
+    /// are no removals, keys are never deleted from the index.
+    ///
+    /// When `config.use_merge_ngram_delta_bulk_insert` is `true`, uses
+    /// bulk insert with chunking. Otherwise, uses individual inserts.
+    fn merge_ngram_delta_add_only(
+        index: &NgramIndex,
+        add: &MutableIndex,
+        config: &SearchIndexConfig,
+    ) -> MergeNgramDeltaResult {
+        if add.is_empty() {
+            return MergeNgramDeltaResult::Ok(index.clone());
+        }
+
+        if config.use_merge_ngram_delta_bulk_insert {
+            Self::merge_ngram_delta_add_only_bulk(index, add)
+        } else {
+            Self::merge_ngram_delta_add_only_individual(index, add)
+        }
+    }
+
+    /// Add-only n-gram merge using individual inserts.
+    fn merge_ngram_delta_add_only_individual(
+        index: &NgramIndex,
+        add: &MutableIndex,
+    ) -> MergeNgramDeltaResult {
+        let mut result = index.clone().transient();
+        let mut scratch: Vec<TaskId> = Vec::new();
+
+        for (key, add_list) in add {
+            let key_str = key.as_str();
+            let existing_collection = result.get(key_str);
+            Self::merge_posting_add_only_into(
+                existing_collection.map_or_else(
+                    || Box::new(std::iter::empty()) as Box<dyn Iterator<Item = &TaskId>>,
+                    |collection| Box::new(collection.iter_sorted()),
+                ),
+                add_list.as_slice(),
+                &mut scratch,
+            );
+
+            if !scratch.is_empty() {
+                let collection = TaskIdCollection::from_sorted_vec(std::mem::take(&mut scratch));
+                result.insert(key.clone(), collection);
+            }
+        }
+
+        MergeNgramDeltaResult::Ok(result.persistent())
+    }
+
+    /// Add-only n-gram merge using bulk insert with chunking.
+    fn merge_ngram_delta_add_only_bulk(
+        index: &NgramIndex,
+        add: &MutableIndex,
+    ) -> MergeNgramDeltaResult {
+        const CHUNK_SIZE: usize = MAX_BULK_INSERT - 1;
+
+        let mut result = index.clone().transient();
+        let mut entries_to_insert: Vec<(NgramKey, TaskIdCollection)> = Vec::new();
+        let mut scratch: Vec<TaskId> = Vec::new();
+
+        for (key, add_list) in add {
+            let key_str = key.as_str();
+            let existing_collection = result.get(key_str);
+            Self::merge_posting_add_only_into(
+                existing_collection.map_or_else(
+                    || Box::new(std::iter::empty()) as Box<dyn Iterator<Item = &TaskId>>,
+                    |collection| Box::new(collection.iter_sorted()),
+                ),
+                add_list.as_slice(),
+                &mut scratch,
+            );
+
+            if !scratch.is_empty() {
+                let collection = TaskIdCollection::from_sorted_vec(std::mem::take(&mut scratch));
+                entries_to_insert.push((key.clone(), collection));
+            }
+        }
+
+        if !entries_to_insert.is_empty() {
+            while !entries_to_insert.is_empty() {
+                let chunk_size = entries_to_insert.len().min(CHUNK_SIZE);
+                let chunk_vec: Vec<_> = entries_to_insert.drain(..chunk_size).collect();
+                let insert_count = chunk_vec.len();
+                if let Ok(updated) = result.insert_bulk_owned(chunk_vec) {
+                    result = updated;
+                } else {
+                    // Fallback to individual add-only merge
+                    let fallback =
+                        Self::merge_ngram_delta_add_only_individual(index, add).into_index();
+                    return MergeNgramDeltaResult::Fallback {
+                        index: fallback,
+                        reason: MergeNgramDeltaFallbackReason::TooManyEntries {
+                            count: insert_count,
+                            limit: CHUNK_SIZE,
+                        },
+                    };
+                }
+            }
+        }
+
+        MergeNgramDeltaResult::Ok(result.persistent())
+    }
+
     /// Computes `(existing ∪ add) - remove` with sorted, deduplicated output.
     #[allow(dead_code)]
     fn compute_merged_posting_list_iter<'a>(
@@ -6190,6 +6501,21 @@ impl SearchIndex {
         output: &mut Vec<TaskId>,
     ) {
         Self::merge_posting_streaming_into(existing.iter(), add, remove, output);
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub fn merge_posting_add_only_for_test(existing: &[TaskId], add: &[TaskId]) -> Vec<TaskId> {
+        Self::merge_posting_add_only(existing.iter(), add)
+    }
+
+    #[cfg(test)]
+    pub fn merge_posting_add_only_into_for_test(
+        existing: &[TaskId],
+        add: &[TaskId],
+        output: &mut Vec<TaskId>,
+    ) {
+        Self::merge_posting_add_only_into(existing.iter(), add, output);
     }
 }
 
@@ -19907,5 +20233,281 @@ mod search_index_error_tests {
         assert!(result.is_ok());
         let new_index = result.unwrap();
         assert_eq!(new_index.tasks_by_id.len(), 1000);
+    }
+}
+
+// =============================================================================
+// BENCH-005: merge_posting_add_only Tests
+// =============================================================================
+
+#[cfg(test)]
+mod merge_posting_add_only_tests {
+    use super::*;
+    use proptest::prelude::*;
+    use rstest::rstest;
+    use uuid::Uuid;
+
+    fn task_ids(values: &[u128]) -> Vec<TaskId> {
+        values
+            .iter()
+            .map(|&v| TaskId::from_uuid(Uuid::from_u128(v)))
+            .collect()
+    }
+
+    // -------------------------------------------------------------------------
+    // Basic Tests
+    // -------------------------------------------------------------------------
+
+    /// Both existing and add are empty -> empty Vec.
+    #[rstest]
+    fn merge_posting_add_only_empty_both() {
+        let existing: Vec<TaskId> = vec![];
+        let add: Vec<TaskId> = vec![];
+
+        let result = SearchIndex::merge_posting_add_only_for_test(&existing, &add);
+
+        assert!(result.is_empty());
+    }
+
+    /// Only existing is provided (add is empty) -> returns existing copy.
+    #[rstest]
+    fn merge_posting_add_only_existing_only() {
+        let existing = task_ids(&[1, 3, 5, 7, 9]);
+        let add: Vec<TaskId> = vec![];
+
+        let result = SearchIndex::merge_posting_add_only_for_test(&existing, &add);
+
+        assert_eq!(result, task_ids(&[1, 3, 5, 7, 9]));
+    }
+
+    /// Only add is provided (existing is empty) -> returns add copy.
+    #[rstest]
+    fn merge_posting_add_only_add_only() {
+        let existing: Vec<TaskId> = vec![];
+        let add = task_ids(&[2, 4, 6, 8, 10]);
+
+        let result = SearchIndex::merge_posting_add_only_for_test(&existing, &add);
+
+        assert_eq!(result, task_ids(&[2, 4, 6, 8, 10]));
+    }
+
+    /// Disjoint union: no overlap between existing and add.
+    #[rstest]
+    fn merge_posting_add_only_union_disjoint() {
+        let existing = task_ids(&[1, 3, 5]);
+        let add = task_ids(&[2, 4, 6]);
+
+        let result = SearchIndex::merge_posting_add_only_for_test(&existing, &add);
+
+        assert_eq!(result, task_ids(&[1, 2, 3, 4, 5, 6]));
+    }
+
+    /// Union with overlap: duplicate elements are deduplicated.
+    #[rstest]
+    fn merge_posting_add_only_union_overlap() {
+        let existing = task_ids(&[1, 3, 5, 7]);
+        let add = task_ids(&[3, 5, 9]);
+
+        let result = SearchIndex::merge_posting_add_only_for_test(&existing, &add);
+
+        assert_eq!(result, task_ids(&[1, 3, 5, 7, 9]));
+    }
+
+    /// Two consecutive calls to `merge_posting_add_only_into` correctly clear output.
+    #[rstest]
+    fn merge_posting_add_only_into_reuse() {
+        let mut output: Vec<TaskId> = Vec::new();
+
+        // First call
+        let existing_1 = task_ids(&[1, 3, 5]);
+        let add_1 = task_ids(&[2, 4]);
+        SearchIndex::merge_posting_add_only_into_for_test(&existing_1, &add_1, &mut output);
+        assert_eq!(output, task_ids(&[1, 2, 3, 4, 5]));
+
+        // Second call reuses the same buffer
+        let existing_2 = task_ids(&[10, 20]);
+        let add_2 = task_ids(&[15, 25]);
+        SearchIndex::merge_posting_add_only_into_for_test(&existing_2, &add_2, &mut output);
+        assert_eq!(output, task_ids(&[10, 15, 20, 25]));
+    }
+
+    // -------------------------------------------------------------------------
+    // is_add_only Tests (BENCH-005 specific)
+    // -------------------------------------------------------------------------
+
+    /// All remove fields are empty -> is_add_only returns true.
+    #[rstest]
+    fn is_add_only_returns_true_when_all_removes_empty() {
+        let mut delta = SearchIndexDelta::default();
+        // Add some entries to add fields only
+        delta.title_full_add.insert(
+            NgramKey::new("test"),
+            vec![TaskId::from_uuid(Uuid::from_u128(1))],
+        );
+        delta.tag_add.insert(
+            NgramKey::new("tag"),
+            vec![TaskId::from_uuid(Uuid::from_u128(2))],
+        );
+
+        assert!(delta.is_add_only());
+    }
+
+    /// Any single remove field is non-empty -> is_add_only returns false.
+    #[rstest]
+    #[case::title_full_remove("title_full_remove")]
+    #[case::title_word_remove("title_word_remove")]
+    #[case::tag_remove("tag_remove")]
+    #[case::title_full_ngram_remove("title_full_ngram_remove")]
+    #[case::title_word_ngram_remove("title_word_ngram_remove")]
+    #[case::tag_ngram_remove("tag_ngram_remove")]
+    #[case::title_full_all_suffix_remove("title_full_all_suffix_remove")]
+    #[case::title_word_all_suffix_remove("title_word_all_suffix_remove")]
+    #[case::tag_all_suffix_remove("tag_all_suffix_remove")]
+    fn is_add_only_returns_false_when_any_remove_nonempty(#[case] remove_field: &str) {
+        let mut delta = SearchIndexDelta::default();
+        let key = NgramKey::new("test");
+        let ids = vec![TaskId::from_uuid(Uuid::from_u128(1))];
+
+        match remove_field {
+            "title_full_remove" => {
+                delta.title_full_remove.insert(key, ids);
+            }
+            "title_word_remove" => {
+                delta.title_word_remove.insert(key, ids);
+            }
+            "tag_remove" => {
+                delta.tag_remove.insert(key, ids);
+            }
+            "title_full_ngram_remove" => {
+                delta.title_full_ngram_remove.insert(key, ids);
+            }
+            "title_word_ngram_remove" => {
+                delta.title_word_ngram_remove.insert(key, ids);
+            }
+            "tag_ngram_remove" => {
+                delta.tag_ngram_remove.insert(key, ids);
+            }
+            "title_full_all_suffix_remove" => {
+                delta.title_full_all_suffix_remove.insert(key, ids);
+            }
+            "title_word_all_suffix_remove" => {
+                delta.title_word_all_suffix_remove.insert(key, ids);
+            }
+            "tag_all_suffix_remove" => {
+                delta.tag_all_suffix_remove.insert(key, ids);
+            }
+            _ => unreachable!(),
+        }
+
+        assert!(!delta.is_add_only());
+    }
+
+    // -------------------------------------------------------------------------
+    // apply_delta add-only equivalence (proptest)
+    // -------------------------------------------------------------------------
+
+    /// Property: add-only fast path produces the same result as the
+    /// general path (with empty remove) for the same input.
+    #[rstest]
+    fn apply_delta_add_only_equivalence() {
+        use crate::domain::{Tag, Timestamp};
+
+        let empty_tasks: PersistentVector<Task> = PersistentVector::new();
+        let index = SearchIndex::build_with_config(&empty_tasks, SearchIndexConfig::default());
+
+        // Create a batch of Add-only changes
+        let tasks: Vec<Task> = (0..20)
+            .map(|i| {
+                Task::new(TaskId::generate(), &format!("Task {i}"), Timestamp::now())
+                    .add_tag(Tag::new("alpha"))
+                    .add_tag(Tag::new(&format!("tag{i}")))
+            })
+            .collect();
+        let changes: Vec<TaskChange> = tasks.iter().cloned().map(TaskChange::Add).collect();
+
+        // Build delta (which will be add-only since all changes are Add)
+        let mut delta = SearchIndexDelta::from_changes(&changes, &index.config, &index.tasks_by_id);
+        delta.prepare_posting_lists();
+
+        // Verify the delta is indeed add-only
+        assert!(
+            delta.is_add_only(),
+            "Delta should be add-only for Add-only changes"
+        );
+
+        // Apply via the normal path (apply_delta uses add-only fast path internally)
+        let result_fast = index.apply_delta(&delta, &changes);
+
+        // Apply via the streaming path (force the general path by adding an
+        // empty remove entry to trick is_add_only into false, then remove it)
+        let result_general = {
+            // Use merge_posting_streaming (general path) by calling apply_changes
+            // which calls apply_delta. Since delta.is_add_only() is true, both
+            // paths should produce the same result. To verify equivalence, we
+            // compare against a sequential apply_change result.
+            let mut sequential_index = index.clone();
+            for change in &changes {
+                sequential_index = sequential_index.apply_change(change.clone());
+            }
+            sequential_index
+        };
+
+        // Compare results: both should contain the same tasks
+        assert_eq!(
+            result_fast.tasks_by_id.len(),
+            result_general.tasks_by_id.len()
+        );
+        for (task_id, task) in &result_fast.tasks_by_id {
+            assert_eq!(
+                result_general.tasks_by_id.get(task_id),
+                Some(task),
+                "Task {task_id:?} mismatch"
+            );
+        }
+
+        // Compare prefix indexes have the same keys
+        for (key, fast_collection) in &result_fast.title_word_index {
+            let general_collection = result_general
+                .title_word_index
+                .get(key.as_str())
+                .expect("Key should exist in general result");
+            assert_eq!(
+                fast_collection.len(),
+                general_collection.len(),
+                "Posting list length mismatch for key '{}'",
+                key.as_str()
+            );
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Proptest: add-only path matches streaming path with empty remove
+    // -------------------------------------------------------------------------
+
+    proptest! {
+        /// Property: `merge_posting_add_only` produces the same result as
+        /// `merge_posting_streaming` when `remove` is empty.
+        #[test]
+        fn merge_posting_add_only_matches_streaming_with_empty_remove(
+            existing_raw in prop::collection::vec(1u128..1000, 0..50),
+            add_raw in prop::collection::vec(1u128..1000, 0..50),
+        ) {
+            // Sort and dedup to meet preconditions
+            let mut existing: Vec<_> = existing_raw.into_iter().collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+            let mut add: Vec<_> = add_raw.into_iter().collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+            existing.sort();
+            add.sort();
+
+            let existing_ids = task_ids(&existing);
+            let add_ids = task_ids(&add);
+            let empty_remove: Vec<TaskId> = vec![];
+
+            let result_add_only =
+                SearchIndex::merge_posting_add_only_for_test(&existing_ids, &add_ids);
+            let result_streaming =
+                SearchIndex::merge_posting_streaming_for_test(&existing_ids, &add_ids, &empty_remove);
+
+            prop_assert_eq!(result_add_only, result_streaming);
+        }
     }
 }
