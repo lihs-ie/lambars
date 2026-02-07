@@ -1,0 +1,613 @@
+meta:
+  file_name: "20260207_api_metrics_status_coverage_phase3_task_list.yaml"
+  title: "API メトリクス status coverage Phase3 タスクリスト"
+  date: "2026-02-07"
+  requirement: "docs/internal/requirements/20260207_1549_api_metrics_status_coverage_phase3.yaml"
+  plan: "docs/internal/plans/20260207_api_metrics_status_coverage_phase3_detail.yaml"
+  revision: "v2 - Codex レビュー指摘反映 (CR-001 ~ CR-011)"
+
+# ==============================================================================
+# タスク一覧 (v2)
+# ==============================================================================
+# カテゴリ: Shell / Lua / Python / YAML-JavaScript / テスト
+# 状態: pending / in_progress / completed
+#
+# v1 -> v2 変更点:
+#   - CR-006: Phase A/B の順序を入れ替え (A=status coverage, B=error_rate)
+#   - CR-001: SHELL-001 の requests=0 戻り値を "null" -> "0.0" に変更
+#   - CR-002: LUA-005 の推定2xx埋めを廃止し、allow_no_http 設定方式に変更
+#   - CR-003: SHELL-006 (p95 フィールド追加) を新規追加、WORKFLOW-001 を p95 対応に更新
+#   - CR-004: LUA-004 (二重初期化修正) を新規追加
+#   - CR-007: LUA-007 (全スクリプト網羅検査) を新規追加、LUA-006 を再定義
+#   - CR-008: SHELL-002 のスコープに phase merge 経路を含める
+#   - CR-009: WORKFLOW-003 に失敗レポート artifact 保存を追加
+#   - CR-010: TEST-004 (36/36 スナップショット統合テスト) を新規追加
+#   - CR-011: SHELL-005 (後方互換性対応) を新規追加
+#   - LUA-008 (create_done_handler 修正) を新規追加
+# ==============================================================================
+
+tasks:
+  # ============================================================================
+  # Phase A: status coverage 100% (REQ-MET-P3-001)
+  # [CR-006] status 収集完全化を最優先に変更
+  # ============================================================================
+  - id: "LUA-004"
+    name: "error_tracker の二重初期化によるスレッドリスト消去を修正"
+    category: "Lua"
+    requirement: "REQ-MET-P3-001"
+    phase: "A"
+    status: "pending"
+    dependencies: []
+    target_files:
+      - "benches/api/benchmarks/scripts/error_tracker.lua"
+      - "benches/api/benchmarks/scripts/result_collector.lua"
+    description: |
+      [CR-004 対応: 根本原因分析の補完]
+      error_tracker.init() (L46) が M.threads = {} でスレッドリストをリセットする。
+      result_collector.init() (L94) が error_tracker.init() を呼び出すため、
+      create_standard_handlers の ensure_initialized() 経由で二重初期化が発生し、
+      setup_thread で登録されたスレッドが消去される可能性がある。
+      修正方針:
+      1. error_tracker.init() で M.threads のリセットをガード化
+         (既に setup_thread で登録済みの場合はリセットしない)
+      2. または result_collector.init() から error_tracker.init() の呼び出しを削除し、
+         error_tracker の初期化は各スクリプトの init/setup で一度だけ行う
+    acceptance_criteria:
+      - "error_tracker.init() の二重呼び出しでスレッドリストが消去されない"
+      - "setup_thread で登録されたスレッドが done() 時点で参照可能"
+
+  - id: "LUA-007"
+    name: "全 .lua スクリプトの setup_thread/track_thread_response 適用状況を網羅検査"
+    category: "Lua"
+    requirement: "REQ-MET-P3-001"
+    phase: "A"
+    status: "pending"
+    dependencies: []
+    target_files:
+      - "benches/api/benchmarks/scripts/*.lua"
+    description: |
+      [CR-007 対応: LUA-006 の粒度を上げて網羅検査に変更]
+      benches/api/benchmarks/scripts/ 配下の全ベンチマークスクリプトで:
+      1. setup(thread) 関数が存在し、error_tracker.setup_thread(thread) を呼んでいるか
+      2. response(status, headers, body) で error_tracker.track_thread_response(status) を呼んでいるか
+      3. common.track_response(status, headers) も呼んでいるか
+      未適用のスクリプトに対して適用を追加する。
+      現状の調査結果:
+      - create_standard_handlers 使用: tasks_search, tasks_eff, traversable,
+        projects_progress, health, optics, recursive, misc, ordered
+        -> handlers.setup で自動適用されるため OK
+      - 独自 done() 使用: tasks_update, tasks_bulk, contention, profile_wrk, load_shape_demo
+        -> 個別に確認が必要
+      - alternative.lua, applicative.lua, bifunctor.lua, async_pipeline.lua
+        -> ハンドラ構成を確認
+    acceptance_criteria:
+      - "全 .lua スクリプトで setup_thread/track_thread_response の適用状況が確認済み"
+      - "未適用のスクリプトに対して追加が完了"
+
+  - id: "LUA-008"
+    name: "common.lua の create_done_handler に finalize_benchmark 追加"
+    category: "Lua"
+    requirement: "REQ-MET-P3-001"
+    phase: "A"
+    status: "pending"
+    dependencies: []
+    target_files:
+      - "benches/api/benchmarks/scripts/common.lua"
+    description: |
+      create_done_handler (L254-258) が print_summary のみ呼んで
+      finalize_benchmark を呼ばない問題を修正:
+      ```lua
+      function M.create_done_handler(script_name)
+          return function(summary, latency, requests)
+              M.print_summary(script_name, summary)
+              M.finalize_benchmark(summary, latency, requests)
+          end
+      end
+      ```
+      これにより、create_done_handler を使う全シナリオで
+      result_collector.finalize が呼ばれ、http_status が出力される。
+      注意: create_standard_handlers と create_threaded_handlers は既に
+      finalize_benchmark を呼んでいるため影響なし。
+    acceptance_criteria:
+      - "create_done_handler が finalize_benchmark を呼ぶ"
+      - "create_standard_handlers, create_threaded_handlers に影響しない"
+      - "create_done_handler を使うシナリオで http_status が出力される"
+
+  - id: "LUA-005"
+    name: "result_collector.lua の finalize で http_status フォールバック修正"
+    category: "Lua"
+    requirement: "REQ-MET-P3-001"
+    phase: "A"
+    status: "pending"
+    dependencies: ["LUA-004"]
+    target_files:
+      - "benches/api/benchmarks/scripts/result_collector.lua"
+    description: |
+      [CR-002 対応: 推定2xx埋め廃止、allow_no_http 設定方式]
+      finalize() の http_status 構築ロジック (L449-480) を修正:
+      1. error_tracker が存在し aggregated が全て 0 の場合:
+         M.status_counts にフォールバックする (現在はフォールバックしない)
+      2. M.status_counts も空の場合:
+         http_status を空のままにし、coverage 検証で検出させる
+         (推定2xx埋めは要件違反のため行わない -- CR-002)
+      3. allow_no_http 設定: 特定のシナリオ (no-http) のみ coverage 検証をスキップ
+         可能にする設定を meta に追加
+    acceptance_criteria:
+      - "error_tracker aggregated が 0 のときに M.status_counts にフォールバックする"
+      - "推定2xx埋めが行われない"
+      - "allow_no_http 設定が meta に追加される"
+
+  - id: "LUA-006"
+    name: "個別スクリプトの done() で finalize_benchmark 呼び出し確認・修正"
+    category: "Lua"
+    requirement: "REQ-MET-P3-001"
+    phase: "A"
+    status: "pending"
+    dependencies: ["LUA-008"]
+    target_files:
+      - "benches/api/benchmarks/scripts/tasks_update.lua"
+      - "benches/api/benchmarks/scripts/tasks_bulk.lua"
+      - "benches/api/benchmarks/scripts/contention.lua"
+      - "benches/api/benchmarks/scripts/profile_wrk.lua"
+      - "benches/api/benchmarks/scripts/load_shape_demo.lua"
+    description: |
+      独自 done() を持つ全スクリプトで:
+      1. common.finalize_benchmark(summary, latency, requests) を末尾で呼んでいるか確認
+      2. error_tracker の get_all_threads_aggregated_summary() が
+         finalize_benchmark より前に呼ばれていることを確認
+      現状確認済み:
+      - tasks_update.lua L398: finalize_benchmark あり
+      - tasks_bulk.lua L50: finalize_benchmark あり
+      - contention.lua L309: finalize_benchmark あり
+      - profile_wrk.lua L112: finalize_benchmark あり
+      - load_shape_demo.lua L179: finalize_benchmark あり
+      各スクリプトの呼び出し順序が正しいことを検証する。
+    acceptance_criteria:
+      - "全個別スクリプトの done() が finalize_benchmark を呼ぶ"
+      - "error_tracker 集計が finalize_benchmark より前に実行される"
+
+  - id: "SHELL-003"
+    name: "run_benchmark.sh で status coverage 検証ログを追加"
+    category: "Shell"
+    requirement: "REQ-MET-P3-001"
+    phase: "A"
+    status: "pending"
+    dependencies: []
+    target_files:
+      - "benches/api/benchmarks/run_benchmark.sh"
+    description: |
+      generate_meta_json() の末尾で、生成した meta.json の
+      sum(http_status.*) と requests を比較し、
+      coverage != 1.0 の場合に WARNING を出力する関数を追加する。
+      allow_no_http シナリオの場合はスキップ。
+    acceptance_criteria:
+      - "meta.json 生成後に coverage を計算・表示する"
+      - "coverage < 1.0 の場合に WARNING を出力する"
+      - "allow_no_http シナリオはスキップされる"
+
+  # ============================================================================
+  # Phase B: error_rate 単一ソース化 (REQ-MET-P3-002)
+  # [CR-006] status coverage の後に実行
+  # ============================================================================
+  - id: "SHELL-001"
+    name: "compute_error_rate 関数を run_benchmark.sh に追加"
+    category: "Shell"
+    requirement: "REQ-MET-P3-002"
+    phase: "B"
+    status: "pending"
+    dependencies: []
+    target_files:
+      - "benches/api/benchmarks/run_benchmark.sh"
+    description: |
+      [CR-001 対応: requests=0 -> 0.0]
+      error_rate = (http_4xx + http_5xx + socket_errors_total) / requests を計算する
+      シェル関数 compute_error_rate() を追加する。
+      - 引数: requests, http_4xx, http_5xx, socket_errors_total
+      - requests == 0 の場合は "0.0" を返す (要件定義 L80 に明記、null ではない)
+      - 出力: 6桁精度の浮動小数点文字列 ("0.323835" 等) または "0.0"
+      - format_error_rate_json() と同じ正規化 (0-1 クランプ) を適用
+    acceptance_criteria:
+      - "関数が追加されている"
+      - "requests=0 で 0.0 を返す (null ではない)"
+      - "正常系で正しい値を返す (テストで検証)"
+
+  - id: "LUA-001"
+    name: "result_collector.lua の error_rate 計算を統一"
+    category: "Lua"
+    requirement: "REQ-MET-P3-002"
+    phase: "B"
+    status: "pending"
+    dependencies: []
+    target_files:
+      - "benches/api/benchmarks/scripts/result_collector.lua"
+    description: |
+      set_error_metrics() 関数 (L375-447) を修正:
+      1. L412 の `M.results.error_rate = non_conflict_errors / tracked_requests` を
+         `M.results.error_rate = (count_4xx_total + count_5xx_total) / tracked_requests` に変更
+      2. 409 除外の error_rate は削除 (conflict_rate は別フィールドで保持)
+      3. socket_errors は Lua 側では取得困難なため、http のみの error_rate として記録
+         (shell 側で socket_errors を加算して最終 error_rate を確定)
+    acceptance_criteria:
+      - "error_rate が 4xx + 5xx の合計から計算される"
+      - "409 が除外されない"
+      - "conflict_rate は別フィールドで保持される"
+
+  - id: "LUA-002"
+    name: "error_tracker.lua の error_rate() メソッドを更新"
+    category: "Lua"
+    requirement: "REQ-MET-P3-002"
+    phase: "B"
+    status: "pending"
+    dependencies: []
+    target_files:
+      - "benches/api/benchmarks/scripts/error_tracker.lua"
+    description: |
+      error_rate() (L78) を変更:
+      - 現在: `function M.error_rate() return M.http_error_rate() end`
+      - 変更後: `function M.error_rate() return M.total_error_rate() end`
+      get_summary() (L125) も更新:
+      - `error_rate: M.http_error_rate()` -> `error_rate: M.total_error_rate()`
+      これにより error_rate が http_errors + network_errors を含むように統一。
+    acceptance_criteria:
+      - "error_rate() が total_error_rate() と同じ値を返す"
+      - "get_summary() の error_rate も更新される"
+
+  - id: "LUA-003"
+    name: "merge_lua_metrics.py の error_rate 計算を確認・コメント追加"
+    category: "Python"
+    requirement: "REQ-MET-P3-002"
+    phase: "B"
+    status: "pending"
+    dependencies: ["LUA-001"]
+    target_files:
+      - "benches/api/benchmarks/scripts/merge_lua_metrics.py"
+    description: |
+      merge_lua_metrics.py の error_rate 計算 (L183-184) を確認:
+      - 現在: `total_errors = http_4xx + http_5xx`, `error_rate = total_errors / total_requests_sum`
+      - socket_errors は個別 lua_metrics.json に含まれないため、http のみで計算する
+      - コメントで「socket_errors は shell 側 (run_benchmark.sh) で加算される」旨を明記
+      - error_rate キーの出力が compute_error_rate と整合することを確認
+    acceptance_criteria:
+      - "error_rate 計算が http_4xx + http_5xx ベースであることが明記される"
+      - "socket_errors の取り扱いがコメントで説明される"
+
+  - id: "SHELL-002"
+    name: "generate_meta_json と phase merge の error_rate を compute_error_rate に統一"
+    category: "Shell"
+    requirement: "REQ-MET-P3-002"
+    phase: "B"
+    status: "pending"
+    dependencies: ["SHELL-001"]
+    target_files:
+      - "benches/api/benchmarks/run_benchmark.sh"
+    description: |
+      [CR-008 対応: phase merge 経路も統一]
+      1. generate_meta_json() 内 (L1566-1637) の 3段階フォールバックを廃止。
+         compute_error_rate() を一度だけ呼び出す:
+         ```
+         error_rate=$(compute_error_rate "${total_requests}" "${http_4xx}" "${http_5xx}" "${socket_errors}")
+         ```
+      2. phase merge 経路 (L2920-2942) でも lua_metrics.error_rate の直接採用を廃止。
+         (http_4xx + http_5xx + socket_errors.total) / requests を再計算。
+      3. lua_metrics.json の error_rate を「最優先」にする現行ロジックを廃止。
+    acceptance_criteria:
+      - "error_rate の計算が compute_error_rate の 1箇所のみ"
+      - "3段階フォールバックが削除される"
+      - "phase merge 経路も compute_error_rate に統一される"
+
+  - id: "SHELL-005"
+    name: "error_rate 意味変更の後方互換性対応"
+    category: "Shell"
+    requirement: "REQ-MET-P3-002"
+    phase: "B"
+    status: "pending"
+    dependencies: ["SHELL-002"]
+    target_files:
+      - "benches/api/benchmarks/check_thresholds.sh"
+      - "benches/api/benchmarks/run_benchmark.sh"
+    description: |
+      [CR-011 対応: 後方互換性リスク対策]
+      error_rate の計算式変更 (409 を含むように変更) に伴い:
+      1. check_thresholds.sh の error_rate 閾値を確認・更新
+         (tasks_update 系で 409 が含まれることにより閾値超過する可能性)
+      2. meta.json に error_rate_includes_409: true フラグを追加して
+         計算式の変更を明示的に記録
+      3. 移行期間中は check_thresholds.sh で両方の計算式を許容するオプションを検討
+    acceptance_criteria:
+      - "check_thresholds.sh の error_rate 閾値が新計算式で適切"
+      - "meta.json に error_rate_includes_409 フラグが追加される"
+      - "既存の閾値判定が不当に FAIL しない"
+
+  # ============================================================================
+  # Phase C: summary JSON 欠損解消 (REQ-MET-P3-003)
+  # ============================================================================
+  - id: "SHELL-006"
+    name: "meta.json v3 に p95 フィールドを追加"
+    category: "Shell"
+    requirement: "REQ-MET-P3-003"
+    phase: "C"
+    status: "pending"
+    dependencies: []
+    target_files:
+      - "benches/api/benchmarks/run_benchmark.sh"
+    description: |
+      [CR-003 対応: p95 キーを維持]
+      run_benchmark.sh の generate_meta_json() で results.latency_ms に p95 を追加。
+      wrk の latency:percentile(95) から取得。
+      parse_wrk_output.sh は既に p95 を抽出可能。
+      meta.json v3 テンプレート (L1960-2037) の latency_ms セクションに p95 を追加:
+      ```json
+      "latency_ms": {
+        "avg": ...,
+        "p50": ...,
+        "p90": ...,
+        "p95": ...,
+        "p99": ...
+      }
+      ```
+    acceptance_criteria:
+      - "meta.json に results.latency_ms.p95 が出力される"
+      - "wrk の P95 percentile から正しい値が取得される"
+      - "validate_meta_schema.sh のスキーマが更新される"
+
+  - id: "WORKFLOW-001"
+    name: "profiling.yml の summary 生成で正しい JSON パスを参照"
+    category: "YAML/JavaScript"
+    requirement: "REQ-MET-P3-003"
+    phase: "C"
+    status: "pending"
+    dependencies: ["SHELL-006"]
+    target_files:
+      - ".github/workflows/profiling.yml"
+    description: |
+      [CR-003 対応: p95 キーを維持]
+      profiling.yml の summary 生成 Node.js コード (L584-590) を修正:
+      変更前:
+        rps: results.rps ?? null,
+        p50: results.p50 ?? null,
+        p95: results.p95 ?? null,
+        p99: results.p99 ?? null,
+        error_rate: results.error_rate ?? null
+      変更後:
+        rps: results.rps ?? null,
+        p50: (results.latency_ms && results.latency_ms.p50) ?? null,
+        p95: (results.latency_ms && results.latency_ms.p95) ?? null,
+        p99: (results.latency_ms && results.latency_ms.p99) ?? null,
+        error_rate: results.error_rate ?? null
+      p95 は SHELL-006 で meta.json に追加済み。
+    acceptance_criteria:
+      - "summary JSON の p50/p95/p99 が meta.json の値を正しく参照する"
+      - "p95 キーが維持される (p90 に変更しない)"
+
+  - id: "WORKFLOW-002"
+    name: "summary JSON に summary.txt のレイテンシ値をマージ"
+    category: "YAML/JavaScript"
+    requirement: "REQ-MET-P3-003"
+    phase: "C"
+    status: "pending"
+    dependencies: ["WORKFLOW-001"]
+    target_files:
+      - ".github/workflows/profiling.yml"
+    description: |
+      summary JSON 生成時に、meta.json のレイテンシ値が null の場合のフォールバック:
+      1. 同一シナリオの benchmark/summary.txt を読み取る
+      2. "P50: 742.00us" 等のパターンを正規表現で抽出
+      3. 単位を ms に正規化 (us -> /1000, ms -> そのまま, s -> *1000)
+      4. null の項目のみ上書き
+      5. 欠損が解消できない場合は理由コード (例: "no_measurement") を付与
+      Node.js 内で実装 (外部スクリプト不要)。
+      summary.txt のフォーマット:
+        P50: <value><unit>  (例: P50: 742.00us, P50: 1.23ms, P50: N/A)
+    acceptance_criteria:
+      - "meta.json のレイテンシが null の場合に summary.txt から取得"
+      - "単位変換が正しく動作する (us, ms, s)"
+      - "N/A の場合は null のまま保持し理由コードを付与する"
+
+  # ============================================================================
+  # Phase D: CI ゲート (REQ-MET-P3-004)
+  # ============================================================================
+  - id: "SHELL-004"
+    name: "validate_metrics_invariants.sh の新規作成"
+    category: "Shell"
+    requirement: "REQ-MET-P3-004"
+    phase: "D"
+    status: "pending"
+    dependencies: ["SHELL-002", "SHELL-003"]
+    target_files:
+      - "benches/api/benchmarks/validate_metrics_invariants.sh"
+    description: |
+      [CR-005 対応: シェルスクリプトのみで実装 (pnpm 不使用)]
+      3系統の不変条件を同時検証するシェルスクリプトを新規作成:
+
+      入力: meta.json を含むディレクトリ (--all で再帰検索)
+
+      検証 1: status coverage
+        - sum(results.http_status.*) == results.requests
+        - results.requests == 0 の場合はスキップ
+        - allow_no_http シナリオは設定ファイルで明示的に除外
+
+      検証 2: error_rate 整合性
+        - 再計算: (errors.http_4xx + errors.http_5xx + errors.socket_errors.total) / results.requests
+        - |results.error_rate - 再計算値| <= 1e-9
+        - results.requests == 0 の場合は error_rate == 0.0 を検証
+
+      検証 3: latency 欠損
+        - results.requests > 0 なら results.latency_ms.p50, .p95, .p99 が非 null
+        - results.requests == 0 の場合はスキップ
+
+      出力:
+        - scenario 別のパス/フェイル表
+        - 違反の詳細 (scenario名, requests, status_sum, error_rate 等)
+        - 集計サマリー (total/passed/failed)
+        - レポートファイル出力 (CI artifact 用)
+
+      終了コード: 0=全パス, 1=違反あり
+    acceptance_criteria:
+      - "3系統の検証が正しく動作する"
+      - "違反時に詳細レポートを出力する"
+      - "レポートファイルが出力される"
+      - "終了コードが正しい"
+
+  - id: "WORKFLOW-003"
+    name: "profiling.yml に invariant check ステップを追加"
+    category: "YAML/Shell"
+    requirement: "REQ-MET-P3-004"
+    phase: "D"
+    status: "pending"
+    dependencies: ["SHELL-004", "WORKFLOW-002"]
+    target_files:
+      - ".github/workflows/profiling.yml"
+    description: |
+      [CR-009 対応: 失敗レポート artifact 保存を含む]
+      summarize-profiling ジョブに新しいステップを追加:
+      1. "Check metrics invariants" ステップを api-profiling-summary.json 生成後に配置
+      2. validate_metrics_invariants.sh --all <api-profiling-all ディレクトリ> を実行
+      3. 終了コード != 0 の場合はジョブを失敗させる
+      4. 失敗時のレポートを $GITHUB_STEP_SUMMARY に出力
+      5. 失敗時も invariant レポートファイルを upload-artifact で保存 (if: always())
+      6. artifact 公開ステップの if 条件に invariant check 通過を追加
+    acceptance_criteria:
+      - "invariant check ステップが追加される"
+      - "違反時にジョブが失敗する"
+      - "失敗レポートが GitHub summary に出力される"
+      - "失敗時も invariant レポートが artifact として保存される"
+
+  # ============================================================================
+  # Phase E: テスト・後方互換性
+  # ============================================================================
+  - id: "TEST-001"
+    name: "compute_error_rate 関数のユニットテスト"
+    category: "Shell (テスト)"
+    requirement: "REQ-MET-P3-002"
+    phase: "E"
+    status: "pending"
+    dependencies: ["SHELL-001"]
+    target_files:
+      - "benches/api/benchmarks/scripts/test_error_rate_accuracy.sh"
+    description: |
+      [CR-001 対応: requests=0 -> 0.0]
+      compute_error_rate のテストを追加:
+      - (7773 + 0 + 0) / 24003 = 0.323835
+      - requests=0 -> 0.0 を返す (null ではない)
+      - (0 + 0 + 0) / 1000 -> 0.000000
+      - (100 + 50 + 10) / 1000 -> 0.160000 (socket_errors 込み)
+      - 負の値のハンドリング
+    acceptance_criteria:
+      - "全テストケースがパスする"
+      - "requests=0 で 0.0 が返ることを検証"
+
+  - id: "TEST-002"
+    name: "validate_metrics_invariants.sh のユニットテスト"
+    category: "Shell (テスト)"
+    requirement: "REQ-MET-P3-004"
+    phase: "E"
+    status: "pending"
+    dependencies: ["SHELL-004"]
+    target_files:
+      - "benches/api/benchmarks/scripts/test_metrics_invariants.sh"
+    description: |
+      テスト用 meta.json を /tmp に生成し、3種類の違反ケースをテスト:
+      1. coverage 欠損: status_sum=100, requests=200 -> FAIL
+      2. error_rate 不整合: error_rate=0.5, 再計算=0.3 -> FAIL
+      3. latency 欠損: requests > 0, p50=null -> FAIL
+      4. 正常ケース: 全条件パス -> PASS
+    acceptance_criteria:
+      - "4種類のテストケースが正しく判定される"
+
+  - id: "TEST-003"
+    name: "result_collector.lua の error_rate テスト更新"
+    category: "Lua (テスト)"
+    requirement: "REQ-MET-P3-002"
+    phase: "E"
+    status: "pending"
+    dependencies: ["LUA-001"]
+    target_files:
+      - "benches/api/benchmarks/scripts/test_result_collector_metrics.lua"
+    description: |
+      test_result_collector_metrics.lua を更新し、以下を検証:
+      - error_rate が (4xx + 5xx) / total で計算される (409 を含む)
+      - conflict_rate が別フィールドで正しく計算される
+      - tracked_requests == 0 の場合に error_rate == 0
+    acceptance_criteria:
+      - "error_rate が 409 を含む計算結果と一致する"
+      - "conflict_rate が正しく分離されている"
+
+  - id: "TEST-004"
+    name: "36/36 シナリオ通過のスナップショット統合テスト"
+    category: "Shell (テスト)"
+    requirement: "REQ-MET-P3-004"
+    phase: "E"
+    status: "pending"
+    dependencies: ["SHELL-004"]
+    target_files:
+      - "benches/api/benchmarks/scripts/test_metrics_invariants.sh"
+    description: |
+      [CR-010 対応]
+      全36シナリオの fixture meta.json を用意し、
+      validate_metrics_invariants.sh が全てパスすることを検証する。
+      テスト内容:
+      1. 正常ケース: 36/36 通過する fixture セット
+      2. coverage 欠損ケース: 1件の fixture で coverage != 1.0 -> FAIL
+      3. error_rate 不整合ケース: 1件の fixture で再計算値と不一致 -> FAIL
+      4. latency 欠損ケース: 1件の fixture で p50=null -> FAIL
+    acceptance_criteria:
+      - "36件の fixture meta.json が用意される"
+      - "正常ケースで全パスすることを検証"
+      - "3種類の失敗ケースが正しく検出される"
+
+# ==============================================================================
+# 依存関係グラフ (テキスト表現)
+# ==============================================================================
+dependency_graph: |
+  Phase A (status coverage 100%):
+    LUA-004 ──> LUA-005
+    LUA-007 (独立)
+    LUA-008 ──> LUA-006
+    SHELL-003 (独立)
+
+  Phase B (error_rate 単一ソース化):
+    SHELL-001 ──> SHELL-002 ──> SHELL-005
+    LUA-001 ──> LUA-003
+    LUA-002 (独立)
+
+  Phase C (summary JSON):
+    SHELL-006 ──> WORKFLOW-001 ──> WORKFLOW-002
+
+  Phase D (CI ゲート):
+    SHELL-002 ──┐
+    SHELL-003 ──┼──> SHELL-004 ──> TEST-002, TEST-004
+    WORKFLOW-002 ──┼──> WORKFLOW-003
+
+  Phase E (テスト):
+    SHELL-001 ──> TEST-001
+    LUA-001 ──> TEST-003
+    SHELL-004 ──> TEST-002, TEST-004
+
+  Phase 間依存:
+    Phase A (LUA-004, LUA-005, LUA-006, LUA-007, LUA-008) は Phase B の前提
+    Phase C (SHELL-006, WORKFLOW-001, WORKFLOW-002) は Phase A/B と並行可能
+    Phase D (SHELL-004, WORKFLOW-003) は Phase A-C の成果を検証
+
+# ==============================================================================
+# サマリー
+# ==============================================================================
+summary:
+  total_tasks: 22
+  by_category:
+    shell: 6     # SHELL-001, SHELL-002, SHELL-003, SHELL-004, SHELL-005, SHELL-006
+    lua: 7       # LUA-001, LUA-002, LUA-004, LUA-005, LUA-006, LUA-007, LUA-008
+    python: 1    # LUA-003 (merge_lua_metrics.py)
+    workflow: 3  # WORKFLOW-001, WORKFLOW-002, WORKFLOW-003
+    test: 4      # TEST-001, TEST-002, TEST-003, TEST-004
+    test_shell: 3   # TEST-001, TEST-002, TEST-004
+    test_lua: 1     # TEST-003
+  by_phase:
+    A: 7  # status coverage (LUA-004, LUA-005, LUA-006, LUA-007, LUA-008, SHELL-003)
+    B: 6  # error_rate 単一ソース化 (SHELL-001, SHELL-002, SHELL-005, LUA-001, LUA-002, LUA-003)
+    C: 3  # summary JSON (SHELL-006, WORKFLOW-001, WORKFLOW-002)
+    D: 2  # CI ゲート (SHELL-004, WORKFLOW-003)
+    E: 4  # テスト (TEST-001, TEST-002, TEST-003, TEST-004)
+  v1_to_v2_changes:
+    added_tasks: ["LUA-004", "LUA-007", "LUA-008", "SHELL-005", "SHELL-006", "TEST-004"]
+    modified_tasks: ["SHELL-001", "LUA-005", "LUA-006", "SHELL-002", "WORKFLOW-001", "WORKFLOW-003"]
+    phase_reorder: "Phase A/B 入れ替え (A=status coverage, B=error_rate)"
