@@ -1986,21 +1986,12 @@ fn merge_sorted_posting_lists(
     existing.merge(new_entries)
 }
 
-/// Merges two sorted posting lists using concat when monotonically separated,
-/// falling back to full merge otherwise.
-///
-/// When `max(existing) < min(add)`, the two lists can be concatenated directly
-/// without element-wise comparison, avoiding the overhead of a full merge-sort.
-/// For overlapping or adjacent-with-equal ranges, delegates to [`OrderedUniqueSet::merge`].
+/// Merges two sorted posting lists using concat when `max(existing) < min(add)`,
+/// falling back to [`OrderedUniqueSet::merge`] otherwise.
 ///
 /// # Preconditions
 ///
-/// - Both `existing` and `add` must be sorted in ascending order with no internal duplicates.
-///
-/// # Complexity
-///
-/// - Concat path: O(n + m) copy without comparison
-/// - Merge path: O(n + m) merge-sort with comparison
+/// Both `existing` and `add` must be sorted ascending with no internal duplicates.
 #[must_use]
 fn append_or_merge_sorted(
     existing: &TaskIdCollection,
@@ -2008,12 +1999,12 @@ fn append_or_merge_sorted(
 ) -> TaskIdCollection {
     let can_concat = match (existing.iter_sorted().last(), add.iter_sorted().next()) {
         (Some(existing_max), Some(add_min)) => existing_max < add_min,
-        // empty existing or empty add: concat is safe (one side contributes nothing)
+        // Either side is empty, so concat is safe
         (None, _) | (_, None) => true,
     };
 
     if can_concat {
-        let mut result: Vec<TaskId> = Vec::with_capacity(existing.len() + add.len());
+        let mut result = Vec::with_capacity(existing.len() + add.len());
         result.extend(existing.iter_sorted().cloned());
         result.extend(add.iter_sorted().cloned());
         TaskIdCollection::from_sorted_vec(result)
@@ -6152,7 +6143,6 @@ impl SearchIndex {
         }
 
         let mut transient = index.clone().transient();
-
         let mut scratch: Vec<TaskId> = Vec::new();
 
         for (key, add_list) in add {
@@ -6165,17 +6155,17 @@ impl SearchIndex {
                         &mut scratch,
                     );
                     if !scratch.is_empty() {
-                        let collected = std::mem::take(&mut scratch);
-                        let collection = TaskIdCollection::from_sorted_vec(collected);
+                        let collection = TaskIdCollection::from_sorted_vec(
+                            std::mem::take(&mut scratch),
+                        );
                         transient.insert(key.clone(), collection);
                     }
                 }
-                None => {
-                    if !add_list.is_empty() {
-                        let collection = TaskIdCollection::from_sorted_vec(add_list.clone());
-                        transient.insert(key.clone(), collection);
-                    }
+                None if !add_list.is_empty() => {
+                    let collection = TaskIdCollection::from_sorted_vec(add_list.clone());
+                    transient.insert(key.clone(), collection);
                 }
+                None => {}
             }
         }
 
@@ -6216,17 +6206,17 @@ impl SearchIndex {
                         &mut scratch,
                     );
                     if !scratch.is_empty() {
-                        let collected = std::mem::take(&mut scratch);
-                        let collection = TaskIdCollection::from_sorted_vec(collected);
+                        let collection = TaskIdCollection::from_sorted_vec(
+                            std::mem::take(&mut scratch),
+                        );
                         result.insert(key.clone(), collection);
                     }
                 }
-                None => {
-                    if !add_list.is_empty() {
-                        let collection = TaskIdCollection::from_sorted_vec(add_list.clone());
-                        result.insert(key.clone(), collection);
-                    }
+                None if !add_list.is_empty() => {
+                    let collection = TaskIdCollection::from_sorted_vec(add_list.clone());
+                    result.insert(key.clone(), collection);
                 }
+                None => {}
             }
         }
 
@@ -6253,17 +6243,17 @@ impl SearchIndex {
                         &mut scratch,
                     );
                     if !scratch.is_empty() {
-                        let collected = std::mem::take(&mut scratch);
-                        let collection = TaskIdCollection::from_sorted_vec(collected);
+                        let collection = TaskIdCollection::from_sorted_vec(
+                            std::mem::take(&mut scratch),
+                        );
                         entries_to_insert.push((key.clone(), collection));
                     }
                 }
-                None => {
-                    if !add_list.is_empty() {
-                        let collection = TaskIdCollection::from_sorted_vec(add_list.clone());
-                        entries_to_insert.push((key.clone(), collection));
-                    }
+                None if !add_list.is_empty() => {
+                    let collection = TaskIdCollection::from_sorted_vec(add_list.clone());
+                    entries_to_insert.push((key.clone(), collection));
                 }
+                None => {}
             }
         }
 
@@ -6402,7 +6392,6 @@ impl SearchIndex {
         Self::merge_posting_add_only_into(existing.iter(), add, output);
     }
 
-    /// Test helper: wraps [`merge_index_delta_add_only`] for unit tests.
     #[cfg(test)]
     #[must_use]
     pub fn merge_index_delta_add_only_for_test(
@@ -6412,7 +6401,6 @@ impl SearchIndex {
         Self::merge_index_delta_add_only(index, add)
     }
 
-    /// Test helper: wraps [`merge_ngram_delta_add_only_individual`] for unit tests.
     #[cfg(test)]
     #[must_use]
     pub fn merge_ngram_delta_add_only_individual_for_test(
@@ -6422,7 +6410,6 @@ impl SearchIndex {
         Self::merge_ngram_delta_add_only_individual(index, add)
     }
 
-    /// Test helper: wraps [`merge_ngram_delta_add_only_bulk`] for unit tests.
     #[cfg(test)]
     #[must_use]
     pub fn merge_ngram_delta_add_only_bulk_for_test(
@@ -19995,10 +19982,6 @@ mod merge_posting_add_only_tests {
     }
 }
 
-// =============================================================================
-// append_or_merge_sorted Tests
-// =============================================================================
-
 #[cfg(test)]
 mod append_or_merge_sorted_tests {
     use super::*;
@@ -20008,124 +19991,78 @@ mod append_or_merge_sorted_tests {
         TaskId::from_uuid(uuid::Uuid::from_u128(id))
     }
 
-    #[rstest]
-    fn append_or_merge_sorted_disjoint_ranges_uses_concat() {
-        let existing = TaskIdCollection::from_sorted_vec(vec![
-            make_task_id(1),
-            make_task_id(2),
-            make_task_id(3),
-        ]);
-        let add = TaskIdCollection::from_sorted_vec(vec![
-            make_task_id(4),
-            make_task_id(5),
-            make_task_id(6),
-        ]);
+    fn ids(values: &[u128]) -> Vec<TaskId> {
+        values.iter().map(|&v| make_task_id(v)).collect()
+    }
 
-        let result = append_or_merge_sorted(&existing, &add);
-
-        let sorted = result.to_sorted_vec();
-        assert_eq!(sorted.len(), 6);
-        for (index, expected_id) in (1u128..=6).enumerate() {
-            assert_eq!(sorted[index], make_task_id(expected_id));
-        }
+    fn assert_sorted_eq(collection: &TaskIdCollection, expected_ids: &[u128]) {
+        let sorted = collection.to_sorted_vec();
+        assert_eq!(sorted, ids(expected_ids));
     }
 
     #[rstest]
-    fn append_or_merge_sorted_overlapping_uses_merge() {
-        let existing = TaskIdCollection::from_sorted_vec(vec![
-            make_task_id(1),
-            make_task_id(3),
-            make_task_id(5),
-        ]);
-        let add = TaskIdCollection::from_sorted_vec(vec![
-            make_task_id(2),
-            make_task_id(4),
-            make_task_id(6),
-        ]);
+    fn disjoint_ranges_uses_concat() {
+        let existing = TaskIdCollection::from_sorted_vec(ids(&[1, 2, 3]));
+        let add = TaskIdCollection::from_sorted_vec(ids(&[4, 5, 6]));
 
         let result = append_or_merge_sorted(&existing, &add);
 
-        let sorted = result.to_sorted_vec();
-        assert_eq!(sorted.len(), 6);
-        for (index, expected_id) in (1u128..=6).enumerate() {
-            assert_eq!(sorted[index], make_task_id(expected_id));
-        }
+        assert_sorted_eq(&result, &[1, 2, 3, 4, 5, 6]);
     }
 
     #[rstest]
-    fn append_or_merge_sorted_adjacent_uses_concat() {
-        // max(existing) = 2 < min(add) = 3
-        let existing =
-            TaskIdCollection::from_sorted_vec(vec![make_task_id(1), make_task_id(2)]);
-        let add =
-            TaskIdCollection::from_sorted_vec(vec![make_task_id(3), make_task_id(4)]);
+    fn overlapping_uses_merge() {
+        let existing = TaskIdCollection::from_sorted_vec(ids(&[1, 3, 5]));
+        let add = TaskIdCollection::from_sorted_vec(ids(&[2, 4, 6]));
 
         let result = append_or_merge_sorted(&existing, &add);
 
-        let sorted = result.to_sorted_vec();
-        assert_eq!(sorted.len(), 4);
-        for (index, expected_id) in (1u128..=4).enumerate() {
-            assert_eq!(sorted[index], make_task_id(expected_id));
-        }
+        assert_sorted_eq(&result, &[1, 2, 3, 4, 5, 6]);
     }
 
     #[rstest]
-    fn append_or_merge_sorted_touching_uses_merge() {
-        // max(existing) = 3 == min(add) = 3 -> overlapping, must use merge
-        let existing = TaskIdCollection::from_sorted_vec(vec![
-            make_task_id(1),
-            make_task_id(2),
-            make_task_id(3),
-        ]);
-        let add = TaskIdCollection::from_sorted_vec(vec![
-            make_task_id(3),
-            make_task_id(4),
-            make_task_id(5),
-        ]);
+    fn adjacent_uses_concat() {
+        let existing = TaskIdCollection::from_sorted_vec(ids(&[1, 2]));
+        let add = TaskIdCollection::from_sorted_vec(ids(&[3, 4]));
 
         let result = append_or_merge_sorted(&existing, &add);
 
-        let sorted = result.to_sorted_vec();
-        assert_eq!(sorted.len(), 5);
-        for (index, expected_id) in (1u128..=5).enumerate() {
-            assert_eq!(sorted[index], make_task_id(expected_id));
-        }
+        assert_sorted_eq(&result, &[1, 2, 3, 4]);
     }
 
     #[rstest]
-    fn append_or_merge_sorted_empty_existing() {
+    fn touching_boundary_uses_merge() {
+        let existing = TaskIdCollection::from_sorted_vec(ids(&[1, 2, 3]));
+        let add = TaskIdCollection::from_sorted_vec(ids(&[3, 4, 5]));
+
+        let result = append_or_merge_sorted(&existing, &add);
+
+        assert_sorted_eq(&result, &[1, 2, 3, 4, 5]);
+    }
+
+    #[rstest]
+    fn empty_existing() {
         let existing = TaskIdCollection::new();
-        let add =
-            TaskIdCollection::from_sorted_vec(vec![make_task_id(1), make_task_id(2)]);
+        let add = TaskIdCollection::from_sorted_vec(ids(&[1, 2]));
 
         let result = append_or_merge_sorted(&existing, &add);
 
-        let sorted = result.to_sorted_vec();
-        assert_eq!(sorted.len(), 2);
-        assert_eq!(sorted[0], make_task_id(1));
-        assert_eq!(sorted[1], make_task_id(2));
+        assert_sorted_eq(&result, &[1, 2]);
     }
 
     #[rstest]
-    fn append_or_merge_sorted_empty_add() {
-        let existing =
-            TaskIdCollection::from_sorted_vec(vec![make_task_id(1), make_task_id(2)]);
+    fn empty_add() {
+        let existing = TaskIdCollection::from_sorted_vec(ids(&[1, 2]));
         let add = TaskIdCollection::new();
 
         let result = append_or_merge_sorted(&existing, &add);
 
-        let sorted = result.to_sorted_vec();
-        assert_eq!(sorted.len(), 2);
-        assert_eq!(sorted[0], make_task_id(1));
-        assert_eq!(sorted[1], make_task_id(2));
+        assert_sorted_eq(&result, &[1, 2]);
     }
 
     #[rstest]
-    fn append_or_merge_sorted_both_empty() {
-        let existing = TaskIdCollection::new();
-        let add = TaskIdCollection::new();
-
-        let result = append_or_merge_sorted(&existing, &add);
+    fn both_empty() {
+        let result = append_or_merge_sorted(&TaskIdCollection::new(), &TaskIdCollection::new());
 
         assert!(result.is_empty());
     }
@@ -20135,10 +20072,9 @@ mod append_or_merge_sorted_tests {
 mod merge_delta_add_only_none_branch_tests {
     use super::*;
     use rstest::rstest;
-    use uuid::Uuid;
 
     fn make_task_id(value: u128) -> TaskId {
-        TaskId::from_uuid(Uuid::from_u128(value))
+        TaskId::from_uuid(uuid::Uuid::from_u128(value))
     }
 
     fn sorted_task_ids(values: &[u128]) -> Vec<TaskId> {
@@ -20147,115 +20083,91 @@ mod merge_delta_add_only_none_branch_tests {
         ids
     }
 
-    /// When the PrefixIndex has no existing entry for a key, the None branch
-    /// should directly build a `TaskIdCollection` from the add_list without
-    /// going through the merge loop.
-    #[rstest]
-    fn merge_index_delta_add_only_none_branch_builds_directly() {
-        let empty_index: PrefixIndex = PersistentTreeMap::new();
-        let add_list = sorted_task_ids(&[10, 20, 30]);
+    fn make_add_index(key: &str, ids: Vec<TaskId>) -> (NgramKey, MutableIndex) {
+        let ngram_key = NgramKey::new(key);
+        let mut add = std::collections::HashMap::new();
+        add.insert(ngram_key.clone(), ids);
+        (ngram_key, add)
+    }
 
-        let mut add: MutableIndex = std::collections::HashMap::new();
-        let key = NgramKey::new("hello");
-        add.insert(key.clone(), add_list.clone());
-
-        let result = SearchIndex::merge_index_delta_add_only_for_test(&empty_index, &add);
-
-        let expected = TaskIdCollection::from_sorted_vec(add_list);
-        let actual = result.get(key.as_str()).expect("key should be present");
+    fn assert_collection_eq(actual: &TaskIdCollection, expected_ids: &[TaskId]) {
         assert_eq!(
             actual.iter_sorted().cloned().collect::<Vec<_>>(),
-            expected.iter_sorted().cloned().collect::<Vec<_>>(),
+            expected_ids,
         );
     }
 
-    /// When the NgramIndex (individual path) has no existing entry for a key,
-    /// the None branch should directly build a `TaskIdCollection` from the add_list.
-    #[rstest]
-    fn merge_ngram_delta_add_only_individual_none_branch_builds_directly() {
-        let empty_index: NgramIndex = PersistentHashMap::new();
-        let add_list = sorted_task_ids(&[5, 15, 25]);
+    // -- None branch: direct build from add_list --
 
-        let mut add: MutableIndex = std::collections::HashMap::new();
-        let key = NgramKey::new("wor");
-        add.insert(key.clone(), add_list.clone());
+    #[rstest]
+    fn prefix_index_none_branch_builds_directly() {
+        let add_list = sorted_task_ids(&[10, 20, 30]);
+        let (key, add) = make_add_index("hello", add_list.clone());
 
         let result =
-            SearchIndex::merge_ngram_delta_add_only_individual_for_test(&empty_index, &add);
-        let index = result.into_index();
+            SearchIndex::merge_index_delta_add_only_for_test(&PersistentTreeMap::new(), &add);
 
-        let expected = TaskIdCollection::from_sorted_vec(add_list);
-        let actual = index.get(key.as_str()).expect("key should be present");
-        assert_eq!(
-            actual.iter_sorted().cloned().collect::<Vec<_>>(),
-            expected.iter_sorted().cloned().collect::<Vec<_>>(),
-        );
+        assert_collection_eq(result.get(key.as_str()).unwrap(), &add_list);
     }
 
-    /// When the NgramIndex (bulk path) has no existing entry for a key,
-    /// the None branch should directly build a `TaskIdCollection` from the add_list
-    /// and push it into `entries_to_insert`.
     #[rstest]
-    fn merge_ngram_delta_add_only_bulk_none_branch_builds_directly() {
-        let empty_index: NgramIndex = PersistentHashMap::new();
+    fn ngram_individual_none_branch_builds_directly() {
+        let add_list = sorted_task_ids(&[5, 15, 25]);
+        let (key, add) = make_add_index("wor", add_list.clone());
+
+        let index = SearchIndex::merge_ngram_delta_add_only_individual_for_test(
+            &PersistentHashMap::new(),
+            &add,
+        )
+        .into_index();
+
+        assert_collection_eq(index.get(key.as_str()).unwrap(), &add_list);
+    }
+
+    #[rstest]
+    fn ngram_bulk_none_branch_builds_directly() {
         let add_list = sorted_task_ids(&[3, 7, 11]);
+        let (key, add) = make_add_index("tes", add_list.clone());
 
-        let mut add: MutableIndex = std::collections::HashMap::new();
-        let key = NgramKey::new("tes");
-        add.insert(key.clone(), add_list.clone());
+        let index =
+            SearchIndex::merge_ngram_delta_add_only_bulk_for_test(&PersistentHashMap::new(), &add)
+                .into_index();
 
-        let result = SearchIndex::merge_ngram_delta_add_only_bulk_for_test(&empty_index, &add);
-        let index = result.into_index();
-
-        let expected = TaskIdCollection::from_sorted_vec(add_list);
-        let actual = index.get(key.as_str()).expect("key should be present");
-        assert_eq!(
-            actual.iter_sorted().cloned().collect::<Vec<_>>(),
-            expected.iter_sorted().cloned().collect::<Vec<_>>(),
-        );
+        assert_collection_eq(index.get(key.as_str()).unwrap(), &add_list);
     }
 
-    /// Empty add_list with no existing entry should not insert anything.
+    // -- None branch: empty add_list should not insert --
+
     #[rstest]
-    fn merge_index_delta_add_only_none_branch_empty_add_list_no_insert() {
-        let empty_index: PrefixIndex = PersistentTreeMap::new();
+    fn prefix_index_none_branch_empty_add_list_no_insert() {
+        let (key, add) = make_add_index("empty", vec![]);
 
-        let mut add: MutableIndex = std::collections::HashMap::new();
-        let key = NgramKey::new("empty");
-        add.insert(key.clone(), vec![]);
-
-        let result = SearchIndex::merge_index_delta_add_only_for_test(&empty_index, &add);
+        let result =
+            SearchIndex::merge_index_delta_add_only_for_test(&PersistentTreeMap::new(), &add);
 
         assert!(result.get(key.as_str()).is_none());
     }
 
-    /// Empty add_list with no existing entry should not insert anything (individual path).
     #[rstest]
-    fn merge_ngram_delta_add_only_individual_none_branch_empty_add_list_no_insert() {
-        let empty_index: NgramIndex = PersistentHashMap::new();
+    fn ngram_individual_none_branch_empty_add_list_no_insert() {
+        let (key, add) = make_add_index("emp", vec![]);
 
-        let mut add: MutableIndex = std::collections::HashMap::new();
-        let key = NgramKey::new("emp");
-        add.insert(key.clone(), vec![]);
-
-        let result =
-            SearchIndex::merge_ngram_delta_add_only_individual_for_test(&empty_index, &add);
-        let index = result.into_index();
+        let index = SearchIndex::merge_ngram_delta_add_only_individual_for_test(
+            &PersistentHashMap::new(),
+            &add,
+        )
+        .into_index();
 
         assert!(index.get(key.as_str()).is_none());
     }
 
-    /// Empty add_list with no existing entry should not insert anything (bulk path).
     #[rstest]
-    fn merge_ngram_delta_add_only_bulk_none_branch_empty_add_list_no_insert() {
-        let empty_index: NgramIndex = PersistentHashMap::new();
+    fn ngram_bulk_none_branch_empty_add_list_no_insert() {
+        let (key, add) = make_add_index("emp", vec![]);
 
-        let mut add: MutableIndex = std::collections::HashMap::new();
-        let key = NgramKey::new("emp");
-        add.insert(key.clone(), vec![]);
-
-        let result = SearchIndex::merge_ngram_delta_add_only_bulk_for_test(&empty_index, &add);
-        let index = result.into_index();
+        let index =
+            SearchIndex::merge_ngram_delta_add_only_bulk_for_test(&PersistentHashMap::new(), &add)
+                .into_index();
 
         assert!(index.get(key.as_str()).is_none());
     }
