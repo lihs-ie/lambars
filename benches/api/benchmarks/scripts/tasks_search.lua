@@ -12,6 +12,14 @@ package.path = package.path .. ";scripts/?.lua"
 local common = require("common")
 
 local counter = 0
+local handlers = common.create_standard_handlers("tasks_search", {scenario_name = "tasks_search", output_format = "json"})
+
+function setup(thread)
+    handlers.setup(thread)
+end
+
+function init(args)
+end
 
 -- Search queries to cycle through
 local search_queries = {
@@ -34,5 +42,5 @@ function request()
     return wrk.format("GET", path)
 end
 
-response = common.create_response_handler("tasks_search")
-done = common.create_done_handler("tasks_search")
+response = handlers.response
+done = handlers.done

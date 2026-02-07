@@ -13,6 +13,14 @@ local test_ids = common.load_test_ids()
 
 local counter = 0
 local request_types = {"transform", "workflow", "batch", "conditional"}
+local handlers = common.create_standard_handlers("async_pipeline", {scenario_name = "async_pipeline", output_format = "json"})
+
+function setup(thread)
+    handlers.setup(thread)
+end
+
+function init(args)
+end
 
 function request()
     counter = counter + 1
@@ -60,5 +68,5 @@ function request()
     end
 end
 
-response = common.create_response_handler("async_pipeline")
-done = common.create_done_handler("async_pipeline")
+response = handlers.response
+done = handlers.done

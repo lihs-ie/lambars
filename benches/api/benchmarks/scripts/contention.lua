@@ -53,6 +53,7 @@ end
 
 -- Load common utilities
 local common = require("common")
+local error_tracker = pcall(require, "error_tracker") and require("error_tracker") or nil
 
 -- Configuration
 local config = {
@@ -217,10 +218,12 @@ end
 -- wrk setup hook
 function setup(thread)
     thread:set("id", thread.id)
+    if error_tracker then error_tracker.setup_thread(thread) end
 end
 
 -- wrk init hook
 function init(args)
+    common.init_benchmark({scenario_name = "contention", output_format = "json"})
     io.write(string.format(
         "[contention] Initialized: level=%s, write_ratio=%d%%, target_resources=%d\n",
         config.contention_level, config.write_ratio, config.target_resources
@@ -243,6 +246,7 @@ end
 function response(status, headers, body)
     -- Pass headers and endpoint to track_response for cache metrics and per-endpoint tracking
     common.track_response(status, headers, last_endpoint)
+    if error_tracker then error_tracker.track_thread_response(status) end
 
     if status >= 400 then
         counters.errors = counters.errors + 1
@@ -296,4 +300,6 @@ function done(summary, latency, requests)
 
     -- Print standard summary
     common.print_summary("contention", summary)
+
+    common.finalize_benchmark(summary, latency, requests)
 end

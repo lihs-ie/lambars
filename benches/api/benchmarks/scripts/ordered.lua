@@ -11,6 +11,14 @@ local common = require("common")
 
 local counter = 0
 local request_types = {"by_deadline", "timeline", "leaderboard"}
+local handlers = common.create_standard_handlers("ordered", {scenario_name = "ordered", output_format = "json"})
+
+function setup(thread)
+    handlers.setup(thread)
+end
+
+function init(args)
+end
 
 -- Date ranges for testing
 local date_ranges = {
@@ -55,5 +63,5 @@ function request()
     end
 end
 
-response = common.create_response_handler("ordered")
-done = common.create_done_handler("ordered")
+response = handlers.response
+done = handlers.done

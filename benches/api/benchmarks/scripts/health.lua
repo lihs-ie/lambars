@@ -12,13 +12,22 @@
 package.path = package.path .. ";scripts/?.lua"
 local common = require("common")
 
+local handlers = common.create_standard_handlers("health", {scenario_name = "health", output_format = "json"})
+
+function setup(thread)
+    handlers.setup(thread)
+end
+
+function init(args)
+end
+
 -- Simple request function that always hits /health
 function request()
     return wrk.format("GET", "/health")
 end
 
 -- Standard response handler
-response = common.create_response_handler("health")
+response = handlers.response
 
 -- Standard done handler
-done = common.create_done_handler("health")
+done = handlers.done

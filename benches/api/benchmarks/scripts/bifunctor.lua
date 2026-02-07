@@ -14,6 +14,14 @@ local test_ids = common.load_test_ids()
 
 local counter = 0
 local request_types = {"process", "pair", "enrich", "convert", "batch"}
+local handlers = common.create_standard_handlers("bifunctor", {scenario_name = "bifunctor", output_format = "json"})
+
+function setup(thread)
+    handlers.setup(thread)
+end
+
+function init(args)
+end
 
 function request()
     counter = counter + 1
@@ -78,5 +86,5 @@ function request()
     end
 end
 
-response = common.create_response_handler("bifunctor")
-done = common.create_done_handler("bifunctor")
+response = handlers.response
+done = handlers.done

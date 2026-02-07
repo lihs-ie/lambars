@@ -14,6 +14,14 @@ local test_ids = common.load_test_ids()
 
 local counter = 0
 local request_types = {"batch_update", "optional", "metadata", "filtered", "nested"}
+local handlers = common.create_standard_handlers("optics", {scenario_name = "optics", output_format = "json"})
+
+function setup(thread)
+    handlers.setup(thread)
+end
+
+function init(args)
+end
 
 -- Metadata keys for testing
 local metadata_keys = {"owner", "deadline", "category", "version"}
@@ -78,5 +86,5 @@ function request()
     end
 end
 
-response = common.create_response_handler("optics")
-done = common.create_done_handler("optics")
+response = handlers.response
+done = handlers.done

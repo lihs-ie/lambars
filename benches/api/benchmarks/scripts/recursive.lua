@@ -12,6 +12,14 @@ local test_ids = common.load_test_ids()
 
 local counter = 0
 local request_types = {"flatten", "dependencies", "aggregate"}
+local handlers = common.create_standard_handlers("recursive", {scenario_name = "recursive", output_format = "json"})
+
+function setup(thread)
+    handlers.setup(thread)
+end
+
+function init(args)
+end
 
 function request()
     counter = counter + 1
@@ -36,5 +44,5 @@ function request()
     end
 end
 
-response = common.create_response_handler("recursive")
-done = common.create_done_handler("recursive")
+response = handlers.response
+done = handlers.done

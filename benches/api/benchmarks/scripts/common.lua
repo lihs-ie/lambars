@@ -329,4 +329,23 @@ function M.create_threaded_handlers(script_name)
     }
 end
 
+function M.create_standard_handlers(script_name, init_opts)
+    local handlers = M.create_threaded_handlers(script_name)
+    local initialized = false
+    return {
+        setup = function(thread)
+            if not initialized then
+                local opts = init_opts or {scenario_name = script_name, output_format = "json"}
+                M.init_benchmark(opts)
+                initialized = true
+            end
+            handlers.setup(thread)
+        end,
+        response = handlers.response,
+        done = function(summary, latency, requests)
+            handlers.done(summary, latency, requests)
+        end
+    }
+end
+
 return M

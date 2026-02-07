@@ -13,6 +13,14 @@ package.path = package.path .. ";scripts/?.lua"
 local common = require("common")
 
 local counter = 0
+local handlers = common.create_standard_handlers("tasks_eff", {scenario_name = "tasks_eff", output_format = "json"})
+
+function setup(thread)
+    handlers.setup(thread)
+end
+
+function init(args)
+end
 
 function request()
     counter = counter + 1
@@ -28,5 +36,5 @@ function request()
     return wrk.format("POST", "/tasks-eff", {["Content-Type"] = "application/json"}, body)
 end
 
-response = common.create_response_handler("tasks_eff")
-done = common.create_done_handler("tasks_eff")
+response = handlers.response
+done = handlers.done
