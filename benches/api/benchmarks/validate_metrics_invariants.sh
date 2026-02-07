@@ -98,7 +98,7 @@ validate_meta_json() {
         echo -e "${RED}FAIL: ${file_name} (invalid JSON)${NC}" >&2
         add_report "FAIL: ${file_name} (invalid JSON)"
         VIOLATIONS+=("${file_name}: invalid JSON")
-        ((FAIL_COUNT++))
+        FAIL_COUNT=$((FAIL_COUNT + 1))
         return
     fi
 
@@ -148,11 +148,11 @@ validate_meta_json() {
     fi
 
     # Invariant 3: Latency completeness (REQ-MET-P3-003)
-    # requests > 0 => p50, p95, p99 are non-null
+    # requests > 0 => p50, p99 are non-null
+    # Note: p95 is not checked because wrk2 --latency does not output 95th percentile
     if (( 10#${requests} > 0 )); then
         local missing_percentiles=()
         [[ "${p50}" == "null" ]] && missing_percentiles+=("p50")
-        [[ "${p95}" == "null" ]] && missing_percentiles+=("p95")
         [[ "${p99}" == "null" ]] && missing_percentiles+=("p99")
 
         if [[ ${#missing_percentiles[@]} -gt 0 ]]; then
@@ -164,7 +164,7 @@ validate_meta_json() {
     if [[ ${#violations_for_file[@]} -eq 0 ]]; then
         echo -e "${GREEN}PASS: ${file_name}${NC}" >&2
         add_report "PASS: ${file_name}"
-        ((PASS_COUNT++))
+        PASS_COUNT=$((PASS_COUNT + 1))
     else
         echo -e "${RED}FAIL: ${file_name}${NC}" >&2
         add_report "FAIL: ${file_name}"
@@ -173,7 +173,7 @@ validate_meta_json() {
             add_report "  > ${violation}"
             VIOLATIONS+=("${file_name}: ${violation}")
         done
-        ((FAIL_COUNT++))
+        FAIL_COUNT=$((FAIL_COUNT + 1))
     fi
 }
 
