@@ -5624,6 +5624,7 @@ impl SearchIndex {
     }
 
     /// Computes `(existing ∪ add) - remove` for a `PrefixIndex`.
+    #[allow(clippy::drain_collect, clippy::iter_with_drain)]
     fn merge_index_delta(
         index: &PrefixIndex,
         add: &MutableIndex,
@@ -5640,22 +5641,28 @@ impl SearchIndex {
 
         for key in all_keys {
             let key_str = key.as_str();
-            let existing_iterator: Box<dyn Iterator<Item = &TaskId>> =
-                match transient.get(key_str) {
-                    Some(collection) => Box::new(collection.iter_sorted()),
-                    None => Box::new(std::iter::empty()),
-                };
-            Self::merge_posting_streaming_into(
-                existing_iterator,
-                add.get(key).map_or(&[], Vec::as_slice),
-                remove.get(key).map_or(&[], Vec::as_slice),
-                &mut scratch,
-            );
+            let add_slice: &[TaskId] = add.get(key).map_or(&[], Vec::as_slice);
+            let remove_slice: &[TaskId] = remove.get(key).map_or(&[], Vec::as_slice);
+            match transient.get(key_str) {
+                Some(collection) => Self::merge_posting_streaming_into(
+                    collection.iter_sorted(),
+                    add_slice,
+                    remove_slice,
+                    &mut scratch,
+                ),
+                None => Self::merge_posting_streaming_into(
+                    std::iter::empty(),
+                    add_slice,
+                    remove_slice,
+                    &mut scratch,
+                ),
+            }
 
             if scratch.is_empty() {
                 transient.remove(key_str);
             } else {
-                let collection = TaskIdCollection::from_sorted_vec(std::mem::take(&mut scratch));
+                let collected: Vec<TaskId> = scratch.drain(..).collect();
+                let collection = TaskIdCollection::from_sorted_vec(collected);
                 transient.insert(key.clone(), collection);
             }
         }
@@ -5683,6 +5690,7 @@ impl SearchIndex {
         }
     }
 
+    #[allow(clippy::drain_collect, clippy::iter_with_drain)]
     fn merge_ngram_delta_individual(
         index: &NgramIndex,
         add: &MutableIndex,
@@ -5694,20 +5702,28 @@ impl SearchIndex {
 
         for key in all_keys {
             let key_str = key.as_str();
-            Self::merge_posting_streaming_into(
-                result.get(key_str).map_or_else(
-                    || Box::new(std::iter::empty()) as Box<dyn Iterator<Item = &TaskId>>,
-                    |collection| Box::new(collection.iter_sorted()),
+            let add_slice: &[TaskId] = add.get(*key).map_or(&[], Vec::as_slice);
+            let remove_slice: &[TaskId] = remove.get(*key).map_or(&[], Vec::as_slice);
+            match result.get(key_str) {
+                Some(collection) => Self::merge_posting_streaming_into(
+                    collection.iter_sorted(),
+                    add_slice,
+                    remove_slice,
+                    &mut scratch,
                 ),
-                add.get(*key).map_or(&[], Vec::as_slice),
-                remove.get(*key).map_or(&[], Vec::as_slice),
-                &mut scratch,
-            );
+                None => Self::merge_posting_streaming_into(
+                    std::iter::empty(),
+                    add_slice,
+                    remove_slice,
+                    &mut scratch,
+                ),
+            }
 
             if scratch.is_empty() {
                 result.remove(key_str);
             } else {
-                let collection = TaskIdCollection::from_sorted_vec(std::mem::take(&mut scratch));
+                let collected: Vec<TaskId> = scratch.drain(..).collect();
+                let collection = TaskIdCollection::from_sorted_vec(collected);
                 result.insert((*key).clone(), collection);
             }
         }
@@ -5716,6 +5732,7 @@ impl SearchIndex {
     }
 
     /// Bulk insert variant. Falls back to individual inserts on failure.
+    #[allow(clippy::drain_collect, clippy::iter_with_drain)]
     fn merge_ngram_delta_bulk(
         index: &NgramIndex,
         add: &MutableIndex,
@@ -5731,20 +5748,28 @@ impl SearchIndex {
 
         for key in all_keys {
             let key_str = key.as_str();
-            Self::merge_posting_streaming_into(
-                result.get(key_str).map_or_else(
-                    || Box::new(std::iter::empty()) as Box<dyn Iterator<Item = &TaskId>>,
-                    |collection| Box::new(collection.iter_sorted()),
+            let add_slice: &[TaskId] = add.get(*key).map_or(&[], Vec::as_slice);
+            let remove_slice: &[TaskId] = remove.get(*key).map_or(&[], Vec::as_slice);
+            match result.get(key_str) {
+                Some(collection) => Self::merge_posting_streaming_into(
+                    collection.iter_sorted(),
+                    add_slice,
+                    remove_slice,
+                    &mut scratch,
                 ),
-                add.get(*key).map_or(&[], Vec::as_slice),
-                remove.get(*key).map_or(&[], Vec::as_slice),
-                &mut scratch,
-            );
+                None => Self::merge_posting_streaming_into(
+                    std::iter::empty(),
+                    add_slice,
+                    remove_slice,
+                    &mut scratch,
+                ),
+            }
 
             if scratch.is_empty() {
                 keys_to_remove.push(key_str);
             } else {
-                let collection = TaskIdCollection::from_sorted_vec(std::mem::take(&mut scratch));
+                let collected: Vec<TaskId> = scratch.drain(..).collect();
+                let collection = TaskIdCollection::from_sorted_vec(collected);
                 entries_to_insert.push(((*key).clone(), collection));
             }
         }
@@ -5753,16 +5778,18 @@ impl SearchIndex {
             result.remove(*key_str);
         }
 
-        while !entries_to_insert.is_empty() {
-            let chunk_size = entries_to_insert.len().min(CHUNK_SIZE);
-            let chunk_vec: Vec<_> = entries_to_insert.drain(..chunk_size).collect();
+        let mut entries_iterator = entries_to_insert.into_iter();
+        loop {
+            let chunk_vec: Vec<_> = entries_iterator.by_ref().take(CHUNK_SIZE).collect();
+            if chunk_vec.is_empty() {
+                break;
+            }
             let insert_count = chunk_vec.len();
             if let Ok(updated) = result.insert_bulk_owned(chunk_vec) {
                 result = updated;
             } else {
                 let fallback =
-                    Self::merge_ngram_delta_individual(index, add, remove, all_keys)
-                        .into_index();
+                    Self::merge_ngram_delta_individual(index, add, remove, all_keys).into_index();
                 return MergeNgramDeltaResult::Fallback {
                     index: fallback,
                     reason: MergeNgramDeltaFallbackReason::TooManyEntries {
@@ -6085,6 +6112,7 @@ impl SearchIndex {
     }
 
     /// Computes `existing ∪ add` for a `PrefixIndex` (add-only fast path).
+    #[allow(clippy::drain_collect, clippy::iter_with_drain)]
     fn merge_index_delta_add_only(index: &PrefixIndex, add: &MutableIndex) -> PrefixIndex {
         if add.is_empty() {
             return index.clone();
@@ -6096,15 +6124,22 @@ impl SearchIndex {
 
         for (key, add_list) in add {
             let key_str = key.as_str();
-            let existing_iterator: Box<dyn Iterator<Item = &TaskId>> =
-                match transient.get(key_str) {
-                    Some(collection) => Box::new(collection.iter_sorted()),
-                    None => Box::new(std::iter::empty()),
-                };
-            Self::merge_posting_add_only_into(existing_iterator, add_list.as_slice(), &mut scratch);
+            match transient.get(key_str) {
+                Some(collection) => Self::merge_posting_add_only_into(
+                    collection.iter_sorted(),
+                    add_list.as_slice(),
+                    &mut scratch,
+                ),
+                None => Self::merge_posting_add_only_into(
+                    std::iter::empty(),
+                    add_list.as_slice(),
+                    &mut scratch,
+                ),
+            }
 
             if !scratch.is_empty() {
-                let collection = TaskIdCollection::from_sorted_vec(std::mem::take(&mut scratch));
+                let collected: Vec<TaskId> = scratch.drain(..).collect();
+                let collection = TaskIdCollection::from_sorted_vec(collected);
                 transient.insert(key.clone(), collection);
             }
         }
@@ -6129,6 +6164,7 @@ impl SearchIndex {
         }
     }
 
+    #[allow(clippy::drain_collect, clippy::iter_with_drain)]
     fn merge_ngram_delta_add_only_individual(
         index: &NgramIndex,
         add: &MutableIndex,
@@ -6138,17 +6174,22 @@ impl SearchIndex {
 
         for (key, add_list) in add {
             let key_str = key.as_str();
-            Self::merge_posting_add_only_into(
-                result.get(key_str).map_or_else(
-                    || Box::new(std::iter::empty()) as Box<dyn Iterator<Item = &TaskId>>,
-                    |collection| Box::new(collection.iter_sorted()),
+            match result.get(key_str) {
+                Some(collection) => Self::merge_posting_add_only_into(
+                    collection.iter_sorted(),
+                    add_list.as_slice(),
+                    &mut scratch,
                 ),
-                add_list.as_slice(),
-                &mut scratch,
-            );
+                None => Self::merge_posting_add_only_into(
+                    std::iter::empty(),
+                    add_list.as_slice(),
+                    &mut scratch,
+                ),
+            }
 
             if !scratch.is_empty() {
-                let collection = TaskIdCollection::from_sorted_vec(std::mem::take(&mut scratch));
+                let collected: Vec<TaskId> = scratch.drain(..).collect();
+                let collection = TaskIdCollection::from_sorted_vec(collected);
                 result.insert(key.clone(), collection);
             }
         }
@@ -6156,6 +6197,7 @@ impl SearchIndex {
         MergeNgramDeltaResult::Ok(result.persistent())
     }
 
+    #[allow(clippy::drain_collect, clippy::iter_with_drain)]
     fn merge_ngram_delta_add_only_bulk(
         index: &NgramIndex,
         add: &MutableIndex,
@@ -6168,30 +6210,37 @@ impl SearchIndex {
 
         for (key, add_list) in add {
             let key_str = key.as_str();
-            Self::merge_posting_add_only_into(
-                result.get(key_str).map_or_else(
-                    || Box::new(std::iter::empty()) as Box<dyn Iterator<Item = &TaskId>>,
-                    |collection| Box::new(collection.iter_sorted()),
+            match result.get(key_str) {
+                Some(collection) => Self::merge_posting_add_only_into(
+                    collection.iter_sorted(),
+                    add_list.as_slice(),
+                    &mut scratch,
                 ),
-                add_list.as_slice(),
-                &mut scratch,
-            );
+                None => Self::merge_posting_add_only_into(
+                    std::iter::empty(),
+                    add_list.as_slice(),
+                    &mut scratch,
+                ),
+            }
 
             if !scratch.is_empty() {
-                let collection = TaskIdCollection::from_sorted_vec(std::mem::take(&mut scratch));
+                let collected: Vec<TaskId> = scratch.drain(..).collect();
+                let collection = TaskIdCollection::from_sorted_vec(collected);
                 entries_to_insert.push((key.clone(), collection));
             }
         }
 
-        while !entries_to_insert.is_empty() {
-            let chunk_size = entries_to_insert.len().min(CHUNK_SIZE);
-            let chunk_vec: Vec<_> = entries_to_insert.drain(..chunk_size).collect();
+        let mut entries_iterator = entries_to_insert.into_iter();
+        loop {
+            let chunk_vec: Vec<_> = entries_iterator.by_ref().take(CHUNK_SIZE).collect();
+            if chunk_vec.is_empty() {
+                break;
+            }
             let insert_count = chunk_vec.len();
             if let Ok(updated) = result.insert_bulk_owned(chunk_vec) {
                 result = updated;
             } else {
-                let fallback =
-                    Self::merge_ngram_delta_add_only_individual(index, add).into_index();
+                let fallback = Self::merge_ngram_delta_add_only_individual(index, add).into_index();
                 return MergeNgramDeltaResult::Fallback {
                     index: fallback,
                     reason: MergeNgramDeltaFallbackReason::TooManyEntries {
@@ -18197,8 +18246,7 @@ mod compute_merged_posting_list_sorted_tests {
     #[rstest]
     fn existing_only() {
         let existing = task_ids(&[1, 3, 5, 7, 9]);
-        let result =
-            SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &[], &[]);
+        let result = SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &[], &[]);
         assert_eq!(result, task_ids(&[1, 3, 5, 7, 9]));
     }
 
@@ -18231,8 +18279,7 @@ mod compute_merged_posting_list_sorted_tests {
     fn merge_with_no_remove() {
         let existing = task_ids(&[1, 3, 5]);
         let add = task_ids(&[2, 4, 6]);
-        let result =
-            SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &add, &[]);
+        let result = SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &add, &[]);
         assert_eq!(result, task_ids(&[1, 2, 3, 4, 5, 6]));
     }
 
@@ -18249,8 +18296,7 @@ mod compute_merged_posting_list_sorted_tests {
     fn remove_from_add() {
         let add = task_ids(&[1, 2, 3, 4, 5]);
         let remove = task_ids(&[2, 4]);
-        let result =
-            SearchIndex::compute_merged_posting_list_sorted_for_test(&[], &add, &remove);
+        let result = SearchIndex::compute_merged_posting_list_sorted_for_test(&[], &add, &remove);
         assert_eq!(result, task_ids(&[1, 3, 5]));
     }
 
@@ -18268,8 +18314,7 @@ mod compute_merged_posting_list_sorted_tests {
     fn deduplicates_overlap_in_existing_and_add() {
         let existing = task_ids(&[1, 3, 5, 7]);
         let add = task_ids(&[3, 5, 9]);
-        let result =
-            SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &add, &[]);
+        let result = SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &add, &[]);
         assert_eq!(result, task_ids(&[1, 3, 5, 7, 9]));
     }
 
@@ -18351,8 +18396,7 @@ mod compute_merged_posting_list_sorted_tests {
     fn large_gap_in_ids() {
         let existing = task_ids(&[1, 1_000_000]);
         let add = task_ids(&[500_000]);
-        let result =
-            SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &add, &[]);
+        let result = SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &add, &[]);
         assert_eq!(result, task_ids(&[1, 500_000, 1_000_000]));
     }
 
@@ -18360,8 +18404,7 @@ mod compute_merged_posting_list_sorted_tests {
     fn interleaved() {
         let existing = task_ids(&[1, 3, 5, 7, 9]);
         let add = task_ids(&[2, 4, 6, 8, 10]);
-        let result =
-            SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &add, &[]);
+        let result = SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &add, &[]);
         assert_eq!(result, task_ids(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]));
     }
 
@@ -18377,8 +18420,7 @@ mod compute_merged_posting_list_sorted_tests {
     #[rstest]
     fn early_return_existing_only() {
         let existing = task_ids(&[10, 20, 30, 40, 50]);
-        let result =
-            SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &[], &[]);
+        let result = SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &[], &[]);
         assert_eq!(result, existing);
     }
 
@@ -18407,8 +18449,7 @@ mod compute_merged_posting_list_sorted_tests {
         let existing: Vec<TaskId> = (1..=1000)
             .map(|v| TaskId::from_uuid(Uuid::from_u128(v)))
             .collect();
-        let result =
-            SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &[], &[]);
+        let result = SearchIndex::compute_merged_posting_list_sorted_for_test(&existing, &[], &[]);
         assert_eq!(result.len(), 1000);
         assert_eq!(result, existing);
     }
