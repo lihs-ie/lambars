@@ -47,7 +47,17 @@ if [[ "${ALL_MODE}" == "true" ]]; then
     echo "Searching for meta.json files in ${ALL_DIR}..." >&2
     while IFS= read -r -d '' file; do
         META_FILES+=("$file")
-    done < <(find "${ALL_DIR}" -type f -name 'meta.json' -print0 2>/dev/null)
+    done < <(
+        find "${ALL_DIR}" -type f \
+            \( -name 'meta.json' -o -path '*/benchmark/meta/*.json' \) \
+            -print0 2>/dev/null
+    )
+
+    if [[ ${#META_FILES[@]} -eq 0 ]]; then
+        echo -e "${RED}ERROR: No metrics JSON files found in ${ALL_DIR}${NC}" >&2
+        exit 1
+    fi
+
     echo "Found ${#META_FILES[@]} meta.json files" >&2
 fi
 
@@ -123,15 +133,15 @@ validate_meta_json() {
         recomputed=$(awk -v h4="${http_4xx}" -v h5="${http_5xx}" -v se="${socket_errors}" -v req="${requests}" 'BEGIN {
             total_errors = h4 + h5 + se
             rate = total_errors / req
-            printf "%.6f", rate
+            printf "%.12f", rate
         }')
         local diff
         diff=$(awk -v er="${error_rate}" -v rc="${recomputed}" 'BEGIN {
             d = er - rc
             if (d < 0) d = -d
-            printf "%.9f", d
+            printf "%.12f", d
         }')
-        local threshold="0.000001"
+        local threshold="0.000000001"
         if awk -v d="${diff}" -v t="${threshold}" 'BEGIN { exit !(d > t) }'; then
             violations_for_file+=("Error rate inconsistency: error_rate=${error_rate}, recomputed=${recomputed}, diff=${diff}")
         fi

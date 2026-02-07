@@ -183,7 +183,7 @@ function M.track_thread_response(status)
     for _, code in ipairs(STANDARD_CODES) do
         if status == code then is_standard = true break end
     end
-    if not is_standard and status >= 400 then
+    if not is_standard then
         thread:set("status_other", (tonumber(thread:get("status_other")) or 0) + 1)
     end
 end

@@ -1646,6 +1646,9 @@ generate_meta_json() {
         p99_json=$(format_latency_json "${MERGED_P99}")
         p99_ms="${MERGED_P99}"
     fi
+    if [[ -n "${MERGED_SOCKET_ERRORS:-}" ]]; then
+        socket_errors="${MERGED_SOCKET_ERRORS}"
+    fi
     if [[ -n "${MERGED_ERROR_RATE:-}" ]]; then
         # Normalize MERGED_ERROR_RATE using format_error_rate_json
         # This handles bc output format (.123 -> 0.123) and clamps to [0, 1]
@@ -2725,6 +2728,7 @@ merge_phase_results() {
     declare -a p50_latencies=()
     declare -a p75_latencies=()
     declare -a p90_latencies=()
+    declare -a p95_latencies=()
     declare -a p99_latencies=()
 
     for phase_dir in ${phase_dirs}; do
@@ -2784,17 +2788,19 @@ merge_phase_results() {
                 fi
 
                 # Collect latencies for potential averaging
-                local avg_lat p50_lat p75_lat p90_lat p99_lat
+                local avg_lat p50_lat p75_lat p90_lat p95_lat p99_lat
                 avg_lat=$(grep "Latency" "${wrk_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
                 p50_lat=$(grep -E "^[[:space:]]+50[.0-9]*%" "${wrk_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
                 p75_lat=$(grep -E "^[[:space:]]+75[.0-9]*%" "${wrk_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
                 p90_lat=$(grep -E "^[[:space:]]+90[.0-9]*%" "${wrk_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
+                p95_lat=$(grep -E "^[[:space:]]+95[.0-9]*%" "${wrk_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
                 p99_lat=$(grep -E "^[[:space:]]+99[.0-9]*%" "${wrk_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
 
                 [[ -n "${avg_lat}" ]] && avg_latencies+=("${avg_lat}")
                 [[ -n "${p50_lat}" ]] && p50_latencies+=("${p50_lat}")
                 [[ -n "${p75_lat}" ]] && p75_latencies+=("${p75_lat}")
                 [[ -n "${p90_lat}" ]] && p90_latencies+=("${p90_lat}")
+                [[ -n "${p95_lat}" ]] && p95_latencies+=("${p95_lat}")
                 [[ -n "${p99_lat}" ]] && p99_latencies+=("${p99_lat}")
             fi
         fi
@@ -2816,21 +2822,24 @@ merge_phase_results() {
 
     # Use the last phase's latency values for the merged output (representative of peak load)
     # Exception: p99 uses max_p99 (worst case across all phases) for conservative reporting
-    local last_avg="" last_p50="" last_p75="" last_p90="" last_p99=""
+    local last_avg="" last_p50="" last_p75="" last_p90="" last_p95="" last_p99=""
     if [[ ${#avg_latencies[@]} -gt 0 ]]; then
-        last_avg="${avg_latencies[-1]}"
+        last_avg="${avg_latencies[$((${#avg_latencies[@]} - 1))]}"
     fi
     if [[ ${#p50_latencies[@]} -gt 0 ]]; then
-        last_p50="${p50_latencies[-1]}"
+        last_p50="${p50_latencies[$((${#p50_latencies[@]} - 1))]}"
     fi
     if [[ ${#p75_latencies[@]} -gt 0 ]]; then
-        last_p75="${p75_latencies[-1]}"
+        last_p75="${p75_latencies[$((${#p75_latencies[@]} - 1))]}"
     fi
     if [[ ${#p90_latencies[@]} -gt 0 ]]; then
-        last_p90="${p90_latencies[-1]}"
+        last_p90="${p90_latencies[$((${#p90_latencies[@]} - 1))]}"
+    fi
+    if [[ ${#p95_latencies[@]} -gt 0 ]]; then
+        last_p95="${p95_latencies[$((${#p95_latencies[@]} - 1))]}"
     fi
     if [[ ${#p99_latencies[@]} -gt 0 ]]; then
-        last_p99="${p99_latencies[-1]}"
+        last_p99="${p99_latencies[$((${#p99_latencies[@]} - 1))]}"
     fi
 
     # Format max_p99 for display (convert from ms number to human-readable string)
@@ -2926,9 +2935,13 @@ merge_phase_results() {
     if [[ -n "${last_p90}" ]]; then
         export MERGED_P90="$(parse_latency_to_ms "${last_p90}")"
     fi
+    if [[ -n "${last_p95}" ]]; then
+        export MERGED_P95="$(parse_latency_to_ms "${last_p95}")"
+    fi
     export MERGED_P99="${max_p99}"
     export MERGED_ERROR_RATE="${error_rate}"
     export MERGED_PHASE_COUNT="${phase_count}"
+    export MERGED_SOCKET_ERRORS="${total_socket_errors}"
 
     # Concatenate raw_wrk.txt files
     local raw_wrk_files=()
@@ -3249,15 +3262,16 @@ run_benchmark() {
 
         # Extract key metrics from merged wrk.txt for summary
         local result_file="${script_results_dir}/wrk.txt"
-        local reqs_sec avg_latency p50 p75 p90 p99
+        local reqs_sec avg_latency p50 p75 p90 p95 p99
 
         reqs_sec=$(grep "Requests/sec:" "${result_file}" 2>/dev/null | awk '{print $2}')
         avg_latency=$(grep "Latency" "${result_file}" 2>/dev/null | head -1 | awk '{print $2}')
 
-        # Extract latency percentiles (P50, P75, P90, P99)
+        # Extract latency percentiles (P50, P75, P90, P95, P99)
         p50=$(grep -E "^[[:space:]]+50[.0-9]*%" "${result_file}" 2>/dev/null | awk '{print $2}')
         p75=$(grep -E "^[[:space:]]+75[.0-9]*%" "${result_file}" 2>/dev/null | awk '{print $2}')
         p90=$(grep -E "^[[:space:]]+90[.0-9]*%" "${result_file}" 2>/dev/null | awk '{print $2}')
+        p95=$(grep -E "^[[:space:]]+95[.0-9]*%" "${result_file}" 2>/dev/null | awk '{print $2}')
         p99=$(grep -E "^[[:space:]]+99[.0-9]*%" "${result_file}" 2>/dev/null | awk '{print $2}')
 
         echo "" >> "${SUMMARY_FILE}"
@@ -3267,6 +3281,7 @@ run_benchmark() {
         echo "  P50: ${p50:-N/A}" >> "${SUMMARY_FILE}"
         echo "  P75: ${p75:-N/A}" >> "${SUMMARY_FILE}"
         echo "  P90: ${p90:-N/A}" >> "${SUMMARY_FILE}"
+        echo "  P95: ${p95:-N/A}" >> "${SUMMARY_FILE}"
         echo "  P99: ${p99:-N/A}" >> "${SUMMARY_FILE}"
 
         # Add HTTP Status Distribution (REQ-PIPELINE-005)
