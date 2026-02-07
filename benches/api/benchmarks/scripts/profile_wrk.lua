@@ -27,24 +27,31 @@
 
 package.path = package.path .. ";scripts/?.lua"
 local common = require("common")
+local error_tracker = pcall(require, "error_tracker") and require("error_tracker") or nil
 
 -- State
 local counter = 0
 local request_types = {"create", "read", "update", "search"}
 local last_endpoint = nil  -- Track endpoint for per-endpoint metrics
+local benchmark_initialized = false
 
 local test_ids = common.load_test_ids()
 
 -- Setup function (called once per thread)
 function setup(thread)
-    -- Initialize benchmark with profiling settings from environment variables
-    common.init_benchmark({
-        scenario_name = os.getenv("SCENARIO_NAME") or "profile",
-        load_profile = os.getenv("LOAD_PROFILE") or "constant",
-        target_rps = tonumber(os.getenv("TARGET_RPS")) or 100,
-        payload_variant = os.getenv("PAYLOAD_VARIANT") or "standard",
-        output_format = os.getenv("OUTPUT_FORMAT") or "json"  -- Default to JSON for profiling
-    })
+    if not benchmark_initialized then
+        -- Initialize benchmark with profiling settings from environment variables
+        common.init_benchmark({
+            scenario_name = os.getenv("SCENARIO_NAME") or "profile",
+            load_profile = os.getenv("LOAD_PROFILE") or "constant",
+            target_rps = tonumber(os.getenv("TARGET_RPS")) or 100,
+            payload_variant = os.getenv("PAYLOAD_VARIANT") or "standard",
+            output_format = os.getenv("OUTPUT_FORMAT") or "json"  -- Default to JSON for profiling
+        })
+        if error_tracker then error_tracker.init() end
+        benchmark_initialized = true
+    end
+    if error_tracker then error_tracker.setup_thread(thread) end
 end
 
 -- Request generation
@@ -86,6 +93,7 @@ end
 -- so counters updated here are NOT visible in done() which runs in main thread.
 -- Use wrk's summary parameter in done() for accurate, thread-aggregated counts.
 function response(status, headers, body)
+    if error_tracker then error_tracker.track_thread_response(status) end
     -- Pass headers and endpoint to track_response for cache metrics and per-endpoint tracking
     common.track_response(status, headers, last_endpoint)
 

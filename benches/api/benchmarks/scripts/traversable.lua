@@ -58,5 +58,7 @@ function request()
     end
 end
 
-response = common.create_response_handler("traversable")
-done = common.create_done_handler("traversable")
+local handlers = common.create_standard_handlers("traversable", {scenario_name = "traversable", output_format = "json"})
+function setup(thread) handlers.setup(thread) end
+response = handlers.response
+done = handlers.done

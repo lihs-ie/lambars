@@ -1,0 +1,173 @@
+# APIメトリクス status coverage 修正 Phase3 要件定義
+#
+# 概要:
+#   latestプロファイルで継続している status欠損・error_rate不整合・summary欠損を解消し、
+#   ベンチ結果を本番判断に使える品質へ引き上げる。
+#
+# 設計方針:
+#   1. requests/status/error_rate の整合を不変条件として強制する。
+#   2. 集計ロジックを単一路線化し、シナリオ差分による欠損を排除する。
+#   3. CIで fail-fast し、不正メトリクスのアーティファクト公開を禁止する。
+#
+# 参照:
+#   - profiling-results-downloaded-latest/api-profiling-all-5a75f9fd90703ef7c7d33efb49066069360691fc
+#   - profiling-results-downloaded-latest/api-profiling-all-5a75f9fd90703ef7c7d33efb49066069360691fc/api-profiling-summary.json
+#   - docs/internal/requirements/20260124_1204_api_metrics_integrity_gap.yaml
+
+version: "1.0.0"
+name: "api_metrics_status_coverage_phase3"
+description: |
+  latest結果では meta 36件中 full=2 / partial=2 / zero=32 で、
+  `http_status` 集計の欠損が依然として支配的。
+  さらに tasks_update 系で `error_rate` と `http_4xx/http_5xx` 由来の再計算値が不一致。
+  `api-profiling-summary.json` では p50/p95/p99 が null のまま残る。
+  Phase3ではこれら3問題を同時に解消し、計測信頼性を担保する。
+
+background:
+  problem: |
+    1) status coverage 欠損:
+       - 36件中 32件で status_sum=0
+       - 2件は coverage が 1 未満 (tasks_update, tasks_update_conflict)
+    2) error_rate 不整合:
+       - tasks_update: error_rate=0.537589 だが 7773/24003=0.323835
+       - tasks_update_conflict: error_rate=0.499889 だが 4500/15002=0.299960
+    3) summary 欠損:
+       - summary JSONの p50/p95/p99 が null で、summary.txt と整合しない。
+  motivation: |
+    パフォーマンス改善の優先順位付けと回帰判定を成立させるため、
+    メトリクスを「正しく比較できるデータ」にする。
+  prior_art:
+    - name: "Metrics Invariant Gate"
+      description: "収集後に不変条件検証を実施し、違反時はCIを即失敗させる手法。"
+
+requirements:
+  # ======================================================================
+  # 1. status coverage 完全性
+  # ======================================================================
+  - id: "REQ-MET-P3-001"
+    name: "全シナリオで status coverage を 100% にする"
+    description: |
+      全metaで `sum(results.http_status.*) == results.requests` を必須化する。
+      例外は明示的な no-http シナリオのみ許可し、許可対象を設定ファイルで固定する。
+
+    methods:
+      - name: "validate_status_coverage"
+        signature: "fn validate_status_coverage(meta: MetaV3, allow_no_http: bool) -> Result<(), MetricsInvariantError>"
+        description: |
+          coverage を検証し、違反時は scenario 名・requests・status_sum を返す。
+        examples:
+          - description: "coverage 検証"
+            code: |
+              let result = validate_status_coverage(meta, false);
+              assert!(result.is_ok());
+
+    implementations:
+      - type: "benchmarks/scripts/common.lua"
+        description: |
+          全HTTPレスポンスで status をカウントし、done handler で必ず出力する。
+      - type: "CI invariant checker"
+        description: |
+          coverage != 1.0 を検出した時点でCI失敗とする。
+
+  # ======================================================================
+  # 2. error_rate 単一計算式
+  # ======================================================================
+  - id: "REQ-MET-P3-002"
+    name: "error_rate 計算を単一ソース化する"
+    description: |
+      error_rate を以下で固定し、二重計算を禁止する:
+      `error_rate = (http_4xx + http_5xx + socket_errors.total) / requests`
+      requests=0 の場合は 0.0 とする。
+
+    methods:
+      - name: "compute_error_rate"
+        signature: "fn compute_error_rate(requests: u64, http_4xx: u64, http_5xx: u64, socket_errors_total: u64) -> f64"
+        description: |
+          error_rate の唯一の算出関数。meta生成時は必ずこの関数を経由する。
+        examples:
+          - description: "error_rate 一致検証"
+            code: |
+              let rate = compute_error_rate(24003, 7773, 0, 0);
+              assert!((rate - 0.323835).abs() < 1e-6);
+
+    implementations:
+      - type: "meta generator"
+        description: |
+          error_rate フィールドを直接代入せず、compute_error_rate の戻り値のみを書き込む。
+      - type: "validator"
+        description: |
+          meta読込時に再計算して差分閾値(1e-9)超過なら失敗とする。
+
+  # ======================================================================
+  # 3. summary latencies の欠損排除
+  # ======================================================================
+  - id: "REQ-MET-P3-003"
+    name: "api-profiling-summary.json の p50/p95/p99 欠損を解消する"
+    description: |
+      summary.txt に存在するレイテンシ値を summary JSON へ正規化して取り込み、
+      null のまま公開しない。
+      欠損許可は実測不能ケースのみで、理由コードを必須にする。
+
+    methods:
+      - name: "merge_summary_latencies"
+        signature: "fn merge_summary_latencies(summary_txt: ParsedSummaryTxt, meta: MetaV3) -> SummaryLatency"
+        description: |
+          summary.txt と meta を突合し、p50/p95/p99 を埋める。
+        examples:
+          - description: "tasks_eff の埋め込み"
+            code: |
+              let out = merge_summary_latencies(txt, meta);
+              assert!(out.p50.is_some());
+
+    implementations:
+      - type: "api-profiling-summary generator"
+        description: |
+          script別に null を出すのではなく、共通変換で単位(ms/us/s)を正規化して出力する。
+
+  # ======================================================================
+  # 4. CIゲートと可観測性
+  # ======================================================================
+  - id: "REQ-MET-P3-004"
+    name: "メトリクス不変条件をCIゲート化する"
+    description: |
+      coverage/error_rate/latency欠損の3系統を同時検証し、
+      1件でも違反したらジョブを失敗させる。
+      失敗時は scenario別レポートを artifact と summary に保存する。
+
+    methods:
+      - name: "check_metrics_invariants"
+        signature: "pnpm -s run check:metrics-invariants"
+        description: |
+          収集後のmeta/summary一式を検証し、違反一覧を出力する。
+        examples:
+          - description: "CIステップ"
+            code: |
+              pnpm -s run check:metrics-invariants
+
+    implementations:
+      - type: "GitHub Actions workflow"
+        description: |
+          profiling job の完了後に invariant check を追加し、通過時のみ artifact 公開する。
+
+# 非機能要件
+non_functional_requirements:
+  performance:
+    - "全36シナリオで coverage=1.0000（full=36, partial=0, zero=0）を達成する"
+    - "全シナリオで |error_rate - 再計算値| <= 1e-9 を達成する"
+    - "api-profiling-summary.json の p50/p95/p99 null 件数を 0 にする"
+    - "メトリクス検証処理の追加オーバーヘッドを1%未満に抑える"
+  compatibility:
+    - "meta v3 の既存キー構造を維持し、追加は後方互換で行う"
+  testing:
+    - "coverage欠損・error_rate不整合・latency欠損の3失敗ケースを再現する統合テストを追加する"
+    - "正常ケースで36/36通過するスナップショットテストを追加する"
+
+# 将来の拡張
+future_extensions:
+  - id: "MET-P3-FUTURE-001"
+    name: "サーバ側ログとの相互検証"
+    description: |
+      wrk集計とサーバ側アクセスログ/メトリクスを照合し、
+      status取りこぼしを二重系で検知する。
+    rationale: |
+      まずは既存パイプライン単体の整合を確実にすることが優先。

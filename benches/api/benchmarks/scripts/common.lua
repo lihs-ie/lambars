@@ -254,6 +254,7 @@ end
 function M.create_done_handler(script_name)
     return function(summary, latency, requests)
         M.print_summary(script_name, summary)
+        M.finalize_benchmark(summary, latency, requests)
     end
 end
 
@@ -292,7 +293,7 @@ function M.create_threaded_handlers(script_name)
         end,
         done = function(summary, latency, requests)
             M.print_summary(script_name, summary)
-            local aggregated = error_tracker.get_thread_aggregated_summary()
+            local aggregated = error_tracker.get_all_threads_aggregated_summary()
             local total = summary.requests or 0
 
             io.write(string.format("\n--- %s HTTP Status Distribution ---\n", script_name))
@@ -325,6 +326,73 @@ function M.create_threaded_handlers(script_name)
             else
                 io.write("  No requests completed\n")
             end
+        end
+    }
+end
+
+function M.create_standard_handlers(script_name, init_opts)
+    local error_tracker = try_require("error_tracker")
+    local initialized = false
+
+    local function ensure_initialized()
+        if initialized then return end
+        initialized = true
+        local opts = init_opts or {scenario_name = script_name, output_format = "json"}
+        M.init_benchmark(opts)
+        if error_tracker then error_tracker.init() end
+    end
+
+    return {
+        init = function(args)
+            ensure_initialized()
+        end,
+        setup = function(thread)
+            ensure_initialized()
+            if error_tracker then error_tracker.setup_thread(thread) end
+        end,
+        response = function(status, headers, body)
+            if error_tracker then error_tracker.track_thread_response(status) end
+            M.track_response(status, headers)
+            if status >= 400 and status ~= 404 then
+                io.stderr:write(string.format("[%s] Error %d\n", script_name, status))
+            end
+        end,
+        done = function(summary, latency, requests)
+            M.print_summary(script_name, summary)
+            if error_tracker then
+                local aggregated = error_tracker.get_all_threads_aggregated_summary()
+                local total = summary.requests or 0
+
+                io.write(string.format("\n--- %s HTTP Status Distribution ---\n", script_name))
+                if total > 0 then
+                    local status_labels = {
+                        {code = "200 OK", key = "status_200"},
+                        {code = "201 Created", key = "status_201"},
+                        {code = "207 Multi-Status", key = "status_207"},
+                        {code = "400 Bad Request", key = "status_400"},
+                        {code = "404 Not Found", key = "status_404"},
+                        {code = "409 Conflict", key = "status_409"},
+                        {code = "422 Unprocessable Entity", key = "status_422"},
+                        {code = "500 Internal Server Error", key = "status_500"},
+                        {code = "502 Bad Gateway", key = "status_502"},
+                        {code = "Other Status", key = "status_other"}
+                    }
+                    for _, label in ipairs(status_labels) do
+                        local count = aggregated[label.key]
+                        if count > 0 then
+                            io.write(string.format("  %s: %d (%.1f%%)\n", label.code, count, (count / total) * 100))
+                        end
+                    end
+                    local errors = aggregated.status_400 + aggregated.status_404 + aggregated.status_409 +
+                                   aggregated.status_422 + aggregated.status_500 + aggregated.status_502 +
+                                   aggregated.status_other
+                    io.write(string.format("Error Rate: %.2f%% (%d errors / %d requests)\n",
+                        (errors / total) * 100, errors, total))
+                else
+                    io.write("  No requests completed\n")
+                end
+            end
+            M.finalize_benchmark(summary, latency, requests)
         end
     }
 end

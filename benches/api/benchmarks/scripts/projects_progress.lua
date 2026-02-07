@@ -24,5 +24,7 @@ function request()
     return wrk.format("GET", "/projects/" .. project_id .. "/progress")
 end
 
-response = common.create_response_handler("projects_progress")
-done = common.create_done_handler("projects_progress")
+local handlers = common.create_standard_handlers("projects_progress", {scenario_name = "projects_progress", output_format = "json"})
+function setup(thread) handlers.setup(thread) end
+response = handlers.response
+done = handlers.done
