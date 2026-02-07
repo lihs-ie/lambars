@@ -379,7 +379,9 @@ local function set_error_metrics(http_error_counts, summary)
                                (summary.errors and summary.errors.read or 0) +
                                (summary.errors and summary.errors.write or 0) +
                                (summary.errors and summary.errors.timeout or 0)
-        tracked_requests = math.max(0, summary.requests - network_errors)
+        local excluded = M.results.meta.excluded_requests or 0
+        local executed = math.max(0, summary.requests - network_errors - excluded)
+        tracked_requests = math.max(executed, tracked_requests)
     end
     M.results.meta.tracked_requests = tracked_requests
 
