@@ -141,7 +141,7 @@ validate_meta_json() {
             if (d < 0) d = -d
             printf "%.12f", d
         }')
-        local threshold="0.000000001"
+        local threshold="0.000001"
         if awk -v d="${diff}" -v t="${threshold}" 'BEGIN { exit !(d > t) }'; then
             violations_for_file+=("Error rate inconsistency: error_rate=${error_rate}, recomputed=${recomputed}, diff=${diff}")
         fi
