@@ -1387,6 +1387,30 @@ format_latency_json() {
     awk -v val="${value}" 'BEGIN { printf "%.6f", val + 0 }'
 }
 
+# Compute error_rate from HTTP and socket errors
+# Returns "0.0" for requests=0, formatted rate string otherwise
+# Usage: compute_error_rate <requests> <http_4xx> <http_5xx> <socket_errors_total>
+compute_error_rate() {
+    local requests="${1:-0}"
+    local http_4xx="${2:-0}"
+    local http_5xx="${3:-0}"
+    local socket_errors_total="${4:-0}"
+
+    # requests=0 -> 0.0 (per requirement REQ-MET-P3-002 L80)
+    if [[ ! "${requests}" =~ ^[0-9]+$ ]] || (( 10#${requests} == 0 )); then
+        echo "0.0"
+        return
+    fi
+
+    local total_errors=$(( 10#${http_4xx:-0} + 10#${http_5xx:-0} + 10#${socket_errors_total:-0} ))
+    awk -v errors="${total_errors}" -v total="${requests}" 'BEGIN {
+        rate = errors / total
+        if (rate < 0) rate = 0
+        if (rate > 1) rate = 1
+        printf "%.6f", rate
+    }'
+}
+
 generate_meta_json() {
     local result_file="$1"
     local script_name="$2"
@@ -1396,27 +1420,30 @@ generate_meta_json() {
     # Parse wrk output for metrics
     # Note: Use anchored patterns to avoid matching percentages in other contexts
     # (e.g., "75.99%" in Latency line should not match "99%" pattern)
-    local rps avg_latency_raw p50_raw p90_raw p99_raw total_requests
+    local rps avg_latency_raw p50_raw p90_raw p95_raw p99_raw total_requests
     rps=$(grep "Requests/sec:" "${result_file}" 2>/dev/null | awk '{print $2}' || echo "0")
     avg_latency_raw=$(grep "Latency" "${result_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
     p50_raw=$(grep -E "^[[:space:]]+50[.0-9]*%" "${result_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
     p90_raw=$(grep -E "^[[:space:]]+90[.0-9]*%" "${result_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
+    p95_raw=$(grep -E "^[[:space:]]+95[.0-9]*%" "${result_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
     p99_raw=$(grep -E "^[[:space:]]+99[.0-9]*%" "${result_file}" 2>/dev/null | head -1 | awk '{print $2}' || echo "")
     total_requests=$(grep -m1 "requests in" "${result_file}" 2>/dev/null | awk '{print $1}' || echo "0")
     [[ ! "${total_requests}" =~ ^[0-9]+$ ]] && total_requests=0
 
     # v3: Convert latency strings to milliseconds numbers
-    local avg_latency_ms p50_ms p90_ms p99_ms
+    local avg_latency_ms p50_ms p90_ms p95_ms p99_ms
     avg_latency_ms=$(parse_latency_to_ms "${avg_latency_raw}")
     p50_ms=$(parse_latency_to_ms "${p50_raw}")
     p90_ms=$(parse_latency_to_ms "${p90_raw}")
+    p95_ms=$(parse_latency_to_ms "${p95_raw}")
     p99_ms=$(parse_latency_to_ms "${p99_raw}")
 
     # v3: Format for JSON (null for missing values)
-    local avg_latency_json p50_json p90_json p99_json
+    local avg_latency_json p50_json p90_json p95_json p99_json
     avg_latency_json=$(format_latency_json "${avg_latency_ms}")
     p50_json=$(format_latency_json "${p50_ms}")
     p90_json=$(format_latency_json "${p90_ms}")
+    p95_json=$(format_latency_json "${p95_ms}")
     p99_json=$(format_latency_json "${p99_ms}")
 
     # Parse socket errors breakdown
@@ -1556,86 +1583,12 @@ generate_meta_json() {
         [[ ! "${retries}" =~ ^[0-9]+$ ]] && retries=0
     fi
 
-    # v3: Calculate error_rate = HTTP errors (4xx+5xx) / total_requests
-    # http_status_total contains:
-    #   - lua_metrics 4xx+5xx breakdown if available
-    #   - wrk's "Non-2xx or 3xx responses" as fallback (also HTTP errors only)
+    # v3: Calculate error_rate using single-source formula (REQ-MET-P3-002)
+    # error_rate = (http_4xx + http_5xx + socket_errors) / requests
+    # http_4xx, http_5xx are already extracted from lua_metrics.json above
     # Socket errors are reported separately in errors.socket_errors
-    # Use 10# prefix to force decimal interpretation (avoid octal with leading zeros)
-
-    # error_rate 計算のフォールバック順序
-    error_rate="null"
-
-    # 0. 最初に http_4xx, http_5xx を lua_metrics.json から取得
-    # 注意: error_rate 計算より前に確定させる必要がある
-    # has_lua_http_metrics フラグで lua_metrics から取得できたかを追跡
-    # 両方のキーが存在し、かつ有効な数値である場合のみ true
-    local has_lua_http_metrics=false
-    if [[ -f "${lua_metrics_file}" ]] && command -v jq &> /dev/null; then
-        # jq で http_4xx, http_5xx の両方のキーが存在し数値であることを確認
-        # jq の出力を捨てて終了コードのみ利用（標準出力混入を防ぐ）
-        if jq -e 'has("http_4xx") and has("http_5xx") and (.http_4xx | type == "number") and (.http_5xx | type == "number")' "${lua_metrics_file}" >/dev/null 2>&1; then
-            http_4xx=$(jq -r '.http_4xx' "${lua_metrics_file}" 2>/dev/null)
-            http_5xx=$(jq -r '.http_5xx' "${lua_metrics_file}" 2>/dev/null)
-            # 追加のバリデーション: 整数であること
-            if [[ "${http_4xx}" =~ ^[0-9]+$ ]] && [[ "${http_5xx}" =~ ^[0-9]+$ ]]; then
-                has_lua_http_metrics=true
-            else
-                # 数値でない場合はリセットして wrk フォールバックへ
-                http_4xx=0
-                http_5xx=0
-            fi
-        fi
-    fi
-
-    # 1. lua_metrics.json の error_rate を最優先
-    # 注意: error_rate が数値型で、0-1 の範囲内であることを検証
-    if [[ -f "${lua_metrics_file}" ]] && command -v jq &> /dev/null; then
-        # error_rate が存在し、数値型で、0以上1以下であることを確認
-        if jq -e 'has("error_rate") and (.error_rate | type == "number") and (.error_rate >= 0) and (.error_rate <= 1)' "${lua_metrics_file}" >/dev/null 2>&1; then
-            local lua_error_rate
-            lua_error_rate=$(jq -r '.error_rate' "${lua_metrics_file}" 2>/dev/null)
-            if [[ -n "${lua_error_rate}" && "${lua_error_rate}" != "null" ]]; then
-                error_rate="${lua_error_rate}"
-                echo -e "${CYAN}Using error_rate from lua_metrics.json: ${error_rate}${NC}" >&2
-            fi
-        fi
-    fi
-
-    # 2. http_4xx + http_5xx から直接計算（lua_metrics に error_rate がない場合）
-    # 注意: has_lua_http_metrics=true の場合のみ計算（lua_metrics から取得できた場合）
-    # lua_metrics が無い/古い場合は step 3 (wrk) にフォールバック
-    if [[ "${error_rate}" == "null" && "${has_lua_http_metrics}" == "true" ]]; then
-        local errors_4xx_5xx
-        errors_4xx_5xx=$((${http_4xx:-0} + ${http_5xx:-0}))
-        if ((10#${total_requests:-0} > 0)); then
-            error_rate=$(awk -v errors="${errors_4xx_5xx}" -v total="${total_requests}" 'BEGIN {
-                rate = errors / total
-                if (rate < 0) rate = 0
-                if (rate > 1) rate = 1
-                printf "%.6f", rate
-            }')
-            echo -e "${CYAN}Calculated error_rate from http_4xx + http_5xx: ${error_rate}${NC}" >&2
-        fi
-    fi
-
-    # 3. wrk の値から計算（最終手段）
-    if [[ "${error_rate}" == "null" ]]; then
-        if ((10#${total_requests:-0} > 0 && 10#${http_status_total:-0} >= 0)); then
-            error_rate=$(awk -v errors="${http_status_total}" -v total="${total_requests}" 'BEGIN {
-                rate = errors / total
-                if (rate < 0) rate = 0
-                if (rate > 1) rate = 1
-                printf "%.6f", rate
-            }')
-            echo -e "${YELLOW}WARNING: Using wrk-based error_rate (less accurate): ${error_rate}${NC}" >&2
-        fi
-    fi
-
-    # error_rate が null のままの場合は "null" として保持
-    if [[ "${error_rate}" == "null" ]]; then
-        error_rate="null"
-    fi
+    error_rate=$(compute_error_rate "${total_requests}" "${http_4xx}" "${http_5xx}" "${socket_errors}")
+    echo -e "${CYAN}Computed error_rate: ${error_rate}${NC}" >&2
 
     # Get wrk output filename
     local wrk_output_filename
@@ -1682,6 +1635,11 @@ generate_meta_json() {
         # MERGED_P90 is already in milliseconds, format for JSON
         p90_json=$(format_latency_json "${MERGED_P90}")
         p90_ms="${MERGED_P90}"
+    fi
+    if [[ -n "${MERGED_P95:-}" ]]; then
+        # MERGED_P95 is already in milliseconds, format for JSON
+        p95_json=$(format_latency_json "${MERGED_P95}")
+        p95_ms="${MERGED_P95}"
     fi
     if [[ -n "${MERGED_P99:-}" ]]; then
         # MERGED_P99 is already in milliseconds, format for JSON
@@ -1992,6 +1950,7 @@ generate_meta_json() {
       "avg": $avg_latency,
       "p50": $p50,
       "p90": $p90,
+      "p95": $p95,
       "p99": $p99
     },
     "http_status": $http_status,
@@ -2007,7 +1966,8 @@ generate_meta_json() {
     },
     "http_4xx": $http_4xx,
     "http_5xx": $http_5xx,
-    "http_status_total": $http_status_total
+    "http_status_total": $http_status_total,
+    "error_rate_includes_409": true
   },
   "cache": {
     "hit_rate": $cache_hit_rate,
@@ -2037,6 +1997,21 @@ generate_meta_json() {
 }' > "${meta_file}"
 
     echo -e "${GREEN}meta.json generated (v3.0) using jq${NC}"
+
+    # Status coverage verification (REQ-MET-P3-001)
+    if command -v jq &> /dev/null && [[ -f "${meta_file}" ]]; then
+        local status_sum requests_count coverage
+        status_sum=$(jq '[.results.http_status | to_entries[] | .value] | add // 0' "${meta_file}" 2>/dev/null || echo "0")
+        requests_count=$(jq '.results.requests // 0' "${meta_file}" 2>/dev/null || echo "0")
+        if (( 10#${requests_count:-0} > 0 )); then
+            coverage=$(awk -v sum="${status_sum}" -v req="${requests_count}" 'BEGIN { printf "%.4f", sum / req }')
+            if [[ "${coverage}" != "1.0000" ]]; then
+                echo -e "${YELLOW}WARNING: Status coverage ${coverage} (${status_sum}/${requests_count}) - expected 1.0000${NC}" >&2
+            else
+                echo -e "${GREEN}Status coverage: ${coverage} (${status_sum}/${requests_count})${NC}" >&2
+            fi
+        fi
+    fi
 }
 
 # =============================================================================
@@ -2922,25 +2897,22 @@ merge_phase_results() {
         python3 "${SCRIPT_DIR}/scripts/merge_lua_metrics.py" \
             --output "${results_base_dir}/lua_metrics.json" \
             "${lua_metrics_files[@]}"
-
-        # Read error_rate from merged lua_metrics.json (REQ-PIPELINE-002)
-        if [[ -f "${results_base_dir}/lua_metrics.json" ]] && command -v jq &> /dev/null; then
-            local lua_error_rate
-            lua_error_rate=$(jq -r '.error_rate // empty' "${results_base_dir}/lua_metrics.json" 2>/dev/null)
-            if [[ -n "${lua_error_rate}" ]]; then
-                error_rate="${lua_error_rate}"
-                echo -e "${CYAN}Using error_rate from lua_metrics.json: ${error_rate}${NC}"
-            fi
-        fi
     else
         echo -e "${YELLOW}WARNING: No lua_metrics.json files found to merge${NC}"
     fi
 
-    # Fallback to wrk-based calculation if lua_metrics error_rate is unavailable
-    if [[ -z "${error_rate}" ]]; then
-        error_rate=$(format_error_rate_json "$(echo "scale=6; ${total_http_errors} / ${total_requests}" | bc 2>/dev/null || echo "0")" "${total_requests}")
-        echo -e "${YELLOW}WARNING: Using wrk-based error_rate (lua_metrics unavailable): ${error_rate}${NC}"
+    # Read http_4xx, http_5xx from merged lua_metrics.json
+    local merged_http_4xx=0 merged_http_5xx=0
+    if [[ -f "${results_base_dir}/lua_metrics.json" ]] && command -v jq &> /dev/null; then
+        merged_http_4xx=$(jq -r '.http_4xx // 0' "${results_base_dir}/lua_metrics.json" 2>/dev/null)
+        merged_http_5xx=$(jq -r '.http_5xx // 0' "${results_base_dir}/lua_metrics.json" 2>/dev/null)
+        [[ ! "${merged_http_4xx}" =~ ^[0-9]+$ ]] && merged_http_4xx=0
+        [[ ! "${merged_http_5xx}" =~ ^[0-9]+$ ]] && merged_http_5xx=0
     fi
+
+    # Compute error_rate using single-source formula (REQ-MET-P3-002)
+    error_rate=$(compute_error_rate "${total_requests}" "${merged_http_4xx}" "${merged_http_5xx}" "${total_socket_errors:-0}")
+    echo -e "${CYAN}Phase merge: computed error_rate: ${error_rate}${NC}"
 
     # Export merged values as environment variables for meta.json generation
     # IMPORTANT: error_rate must be read from lua_metrics.json BEFORE export
