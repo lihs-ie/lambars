@@ -254,6 +254,7 @@ end
 function M.create_done_handler(script_name)
     return function(summary, latency, requests)
         M.print_summary(script_name, summary)
+        M.finalize_benchmark(summary, latency, requests)
     end
 end
 
