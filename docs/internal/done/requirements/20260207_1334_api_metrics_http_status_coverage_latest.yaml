@@ -1,0 +1,101 @@
+# API メトリクス HTTP Status カバレッジ欠損(最新Run) 要件定義
+#
+# 概要:
+#   Run 21771580905 で多数シナリオの `http_status` 集計が 0 件となっており、
+#   本番可否判定に必要な失敗率評価が成立していない問題を解消する。
+#
+# 設計方針:
+#   1. requests と status 集計の整合を厳密に検証する。
+#   2. 解析不能データを CI で fail-fast する。
+#   3. 収集ロジックを全シナリオで共通化し、分岐実装を排除する。
+#
+# 参照:
+#   - .artifact_review/run-21771580905/api-profiling-summary.json
+#   - .artifact_review/run-21771580905/*/benchmark/meta/*.json
+#   - benches/api/benchmarks/scripts/common.lua
+#   - benches/api/benchmarks/scripts/profile_wrk.lua
+
+version: "1.0.0"
+name: "api_metrics_http_status_coverage_latest"
+description: |
+  最新Runでは 35シナリオ中、少なくとも 32シナリオで
+  `results.http_status` の総和が `results.requests` に一致せず、
+  多くは 0 件（coverage 0.0）だった。
+  この状態では error_rate の信頼性がなく、本番判断に使えない。
+
+background:
+  problem: |
+    status 集計が欠損しているため、
+    4xx/5xx 比率やエラー分布を厳密に評価できない。
+    特に `tasks_update` 系でも requests と status 総数が不一致で、
+    現行解析結果は過小/過大評価の可能性がある。
+  motivation: |
+    性能以前に計測の正しさを担保しなければ、
+    回帰検知も本番Go/No-Go判定も成立しない。
+  prior_art:
+    - name: "Schema-first observability"
+      description: "メトリクスをスキーマで拘束し、欠損をパイプラインで拒否する手法。"
+
+requirements:
+  - id: "REQ-MET-COVERAGE-001"
+    name: "status coverage = 100% を必須化する"
+    description: |
+      全シナリオで `sum(results.http_status.*) == results.requests` を満たすこと。
+      不一致時は benchmark 失敗として扱う。
+    methods:
+      - name: "validate_status_coverage"
+        signature: "fn validate_status_coverage(meta: MetaV3) -> Result<(), CoverageError>"
+        description: |
+          requests と status 総数の一致を検証し、違反時にシナリオ名付きで失敗させる。
+    implementations:
+      - type: "benchmarks post-processing"
+        description: "meta 生成直後にバリデーションを実行し、CIで gate する。"
+
+  - id: "REQ-MET-COMMON-HANDLER-002"
+    name: "response status 集計ロジックを単一実装へ統合する"
+    description: |
+      シナリオ個別スクリプトでの分岐実装を禁止し、
+      `common.lua` の共通 handler からのみ status を収集する。
+    methods:
+      - name: "create_response_handler"
+        signature: "create_response_handler(name) -> function(status, headers, body)"
+        description: |
+          全HTTPレスポンスで status を確実にカウントする共通関数。
+    implementations:
+      - type: "Lua benchmark scripts"
+        description: |
+          各スクリプトは共通ハンドラを必須利用する。
+          独自 response 関数を定義した場合は CI lint で失敗させる。
+
+  - id: "REQ-MET-SCHEMA-003"
+    name: "meta v3 スキーマ検証をCI必須にする"
+    description: |
+      `error_rate`, `latency_ms`, `http_status`, `requests` の必須性と型を固定。
+      欠損は `null` を許可するが、不整合（例: status coverage 0）は許可しない。
+    methods:
+      - name: "meta_schema_check"
+        signature: "pnpm -s run check:meta-schema"
+        description: "全meta.json を読み、JSON Schema + coverage ルールで検証する。"
+    implementations:
+      - type: "CI workflow"
+        description: |
+          profiling job 後に schema check step を追加し、
+          失敗時は artifact を保存して即 fail する。
+
+non_functional_requirements:
+  performance:
+    - "メトリクス収集オーバーヘッドは実行時間の 1% 未満"
+  compatibility:
+    - "既存の meta v3 フィールド構造を維持する"
+  testing:
+    - "意図的な欠損データで CI が失敗することを検証する"
+    - "全シナリオで coverage=1.0 を E2E テストで確認する"
+
+future_extensions:
+  - id: "MET-FUTURE-001"
+    name: "OpenTelemetry 連携"
+    description: |
+      wrk 集計だけでなく、サーバ側メトリクス（5xx, timeout, queue depth）を
+      OTLP に送信して相関分析可能にする。
+    rationale: |
+      まずは既存パイプラインの整合性修復が優先。

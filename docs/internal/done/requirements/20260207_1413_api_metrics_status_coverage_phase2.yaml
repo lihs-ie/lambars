@@ -1,0 +1,92 @@
+# API メトリクス status coverage 修正(Phase2) 要件定義
+#
+# 概要:
+#   Run 21774521752 でも `http_status` 集計欠損が継続しているため、
+#   メトリクス収集パイプラインを全シナリオ一律で再修正する。
+#
+# 設計方針:
+#   1. `requests` と `http_status` 総和の一致を必須不変条件にする。
+#   2. シナリオ個別の収集分岐を禁止し、共通ハンドラへ統一する。
+#   3. CI で欠損を fail-fast し、解析不能アーティファクトを残さない。
+#
+# 参照:
+#   - .artifact_review/run-21774521752/*/benchmark/meta/*.json
+#   - .artifact_review/run-21774521752/api-profiling-summary.json
+#   - benches/api/benchmarks/scripts/common.lua
+#   - benches/api/benchmarks/scripts/profile_wrk.lua
+
+version: "1.0.0"
+name: "api_metrics_status_coverage_phase2"
+description: |
+  最新Run(21774521752)で meta 36件中 `full=2 / partial=2 / zero=32`。
+  `tasks_update` 系は coverage 0.6014 / 0.5556、大半のシナリオは 0.0000。
+  これではエラーレート評価が成立せず、性能比較の信頼性も確保できない。
+
+background:
+  problem: |
+    status 集計がシナリオ依存で欠落しており、`requests` との整合が崩れている。
+    収集できているシナリオとできていないシナリオが混在し、
+    回帰判定に使えるデータセットになっていない。
+  motivation: |
+    ボトルネック分析の前提となる計測信頼性を確立する。
+  prior_art:
+    - name: "Schema + invariants gate"
+      description: "メトリクスの不変条件をCIゲートで強制する運用。"
+
+requirements:
+  - id: "REQ-MET2-COVERAGE-001"
+    name: "status coverage 100% を不変条件として強制する"
+    description: |
+      全metaで `sum(http_status.values()) == requests` を満たすこと。
+      不一致時はアーティファクト生成ジョブを失敗扱いにする。
+    methods:
+      - name: "validate_meta_invariants"
+        signature: "fn validate_meta_invariants(meta: MetaV3) -> Result<(), InvariantError>"
+        description: "coverage と error_rate の整合を同時に検証する。"
+    implementations:
+      - type: "benchmark post-process"
+        description: "meta出力直後に invariants チェックを実行し、違反時は exit 1。"
+
+  - id: "REQ-MET2-HANDLER-002"
+    name: "全wrkスクリプトを共通response handlerに統一する"
+    description: |
+      各シナリオの Lua スクリプトが必ず `common.lua` の status 集計を経由すること。
+      独自 `response` 実装でカウント漏れが起きないよう lint する。
+    methods:
+      - name: "create_response_handler"
+        signature: "create_response_handler(name) -> function(status, headers, body)"
+        description: "全シナリオのHTTPレスポンスを漏れなく集計する。"
+    implementations:
+      - type: "Lua scripts"
+        description: "recursive/health/tasks_* を含む全スクリプトで共通関数を使用する。"
+
+  - id: "REQ-MET2-CI-003"
+    name: "coverage集計結果をCIサマリーへ明示する"
+    description: |
+      `full/partial/zero` 件数と違反シナリオ名を CI summary に出力し、
+      修正漏れを可視化する。
+    methods:
+      - name: "summarize_status_coverage"
+        signature: "fn summarize_status_coverage(metas: &[MetaV3]) -> CoverageSummary"
+        description: "coverage統計と失敗シナリオ一覧を返す。"
+    implementations:
+      - type: "GitHub Actions step"
+        description: "summary markdown と artifacts に違反一覧を保存する。"
+
+non_functional_requirements:
+  performance:
+    - "メトリクス収集追加オーバーヘッドをベンチ実行時間の1%未満に抑える"
+  compatibility:
+    - "meta v3 スキーマを維持し、既存解析ツール互換を保つ"
+  testing:
+    - "欠損データを入力した場合にCIが失敗する統合テストを追加する"
+    - "全シナリオで coverage=1.0000 を確認するE2Eテストを追加する"
+
+future_extensions:
+  - id: "MET2-FUTURE-001"
+    name: "サーバ側ステータスメトリクスとの突合"
+    description: |
+      wrk集計とサーバ側 access log / metrics を付き合わせ、
+      収集漏れを二重検知する。
+    rationale: |
+      まずは現行パイプライン単体の整合修復を優先する。
