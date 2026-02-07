@@ -581,14 +581,34 @@ jobs:
                   try {
                     const meta = JSON.parse(fs.readFileSync(filePath, 'utf8'));
                     const results = meta.results || {};
+                    const latency = results.latency_ms || {};
                     scripts.push({
                       script: path.basename(file, '.json'),
                       rps: results.rps ?? null,
-                      p50: results.p50 ?? null,
-                      p95: results.p95 ?? null,
-                      p99: results.p99 ?? null,
+                      p50: latency.p50 ?? null,
+                      p95: latency.p95 ?? null,
+                      p99: latency.p99 ?? null,
                       error_rate: results.error_rate ?? null
                     });
+
+                    // Fallback: if latency values are null, try summary.txt
+                    const summaryTxtPath = path.join(dirPath, 'benchmark', 'summary.txt');
+                    if (fs.existsSync(summaryTxtPath)) {
+                      const summaryTxt = fs.readFileSync(summaryTxtPath, 'utf8');
+                      const parseLatency = (label) => {
+                        const match = summaryTxt.match(new RegExp(label + ':\\s*([\\d.]+)(us|ms|s)'));
+                        if (!match) return null;
+                        const val = parseFloat(match[1]);
+                        const unit = match[2];
+                        if (unit === 'us') return val / 1000;
+                        if (unit === 's') return val * 1000;
+                        return val; // ms
+                      };
+                      const entry = scripts[scripts.length - 1];
+                      if (entry.p50 === null) entry.p50 = parseLatency('P50');
+                      if (entry.p95 === null) entry.p95 = parseLatency('P95');
+                      if (entry.p99 === null) entry.p99 = parseLatency('P99');
+                    }
                   } catch (err) {
                     scripts.push({ script: path.basename(file, '.json'), error: String(err) });
                   }
@@ -610,6 +630,28 @@ jobs:
           );
           console.log(`summary scenarios: ${summary.scenarios.length}`);
           NODE
+
+      - name: Check metrics invariants
+        if: always()
+        run: |
+          chmod +x benches/api/benchmarks/validate_metrics_invariants.sh
+          REPORT_FILE="profiling-artifacts/invariant-report.txt"
+          if ! benches/api/benchmarks/validate_metrics_invariants.sh \
+              --all profiling-artifacts \
+              --report "${REPORT_FILE}"; then
+            echo "::error::Metrics invariant violations detected"
+            cat "${REPORT_FILE}" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi
+          echo "All metrics invariants passed" >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload invariant report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: metrics-invariant-report
+          path: profiling-artifacts/invariant-report.txt
+          if-no-files-found: ignore
 
       - name: Assemble Criterion profiling artifact
         run: |
