@@ -408,8 +408,7 @@ local function set_error_metrics(http_error_counts, summary)
         M.results.meta.success_rate = success_count / tracked_requests
 
         local total_http_errors = http_error_counts.count_4xx_total + http_error_counts.count_5xx_total
-        local non_conflict_errors = http_error_counts.count_4xx_excluding_409 + http_error_counts.count_5xx_total
-        M.results.error_rate = non_conflict_errors / tracked_requests
+        M.results.error_rate = total_http_errors / tracked_requests
         M.results.client_error_rate = http_error_counts.count_4xx_excluding_409 / tracked_requests
         M.results.conflict_count = http_error_counts.count_409
         M.results.conflict_rate = http_error_counts.count_409 / tracked_requests
@@ -465,6 +464,14 @@ end
             for status, count in pairs(M.results.http_status) do
                 if (tonumber(status) or status == "other") and type(count) == "number" then
                     M.results.status_distribution[status] = count
+                end
+            end
+        elseif next(M.status_counts) then
+            -- error_tracker aggregated is empty, fallback to thread-local status_counts
+            M.results.http_status = {}
+            for status, count in pairs(M.status_counts) do
+                if tonumber(status) and type(count) == "number" then
+                    M.results.http_status[tostring(status)] = count
                 end
             end
         end
@@ -670,7 +677,7 @@ function M.format_text()
     else
         table.insert(lines, string.format("Network error rate:  %.2f%% (socket errors)", (M.results.network_error_rate or 0) * 100))
     end
-    table.insert(lines, format_rate("Error rate (excl.409):", M.results.error_rate))
+    table.insert(lines, format_rate("Error rate:", M.results.error_rate))
     table.insert(lines, format_rate("Client error rate:  ", M.results.client_error_rate))
     table.insert(lines, format_count("Conflict count:     ", M.results.conflict_count))
     table.insert(lines, format_rate("Conflict rate:      ", M.results.conflict_rate))
