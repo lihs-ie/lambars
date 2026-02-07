@@ -80,7 +80,7 @@ function M.track_retry() M.state.retry_count = M.state.retry_count + 1 end
 function M.should_inject_error() return M.state.inject_error_rate and math.random() < M.state.inject_error_rate end
 function M.http_error_rate() return safe_rate(M.state.http_error_count) end
 function M.network_error_rate() return safe_rate(M.state.network_error_count) end
-function M.error_rate() return M.http_error_rate() end
+function M.error_rate() return M.total_error_rate() end
 function M.total_error_rate() return safe_rate(M.state.http_error_count + M.state.network_error_count) end
 function M.conflict_rate() return safe_rate(M.state.conflict_count) end
 function M.is_within_threshold() return not M.state.expected_error_rate or M.http_error_rate() <= M.state.expected_error_rate end
@@ -127,7 +127,7 @@ function M.get_summary()
         network_error_rate = M.network_error_rate(),
         conflict_count = M.state.conflict_count,
         conflict_rate = M.conflict_rate(),
-        error_rate = M.http_error_rate(),
+        error_rate = M.total_error_rate(),
         error_count = M.state.http_error_count + M.state.network_error_count,
         total_error_rate = M.total_error_rate(),
         timeout_count = M.state.timeout_count,

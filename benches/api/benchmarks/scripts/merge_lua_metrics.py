@@ -181,6 +181,9 @@ def merge_lua_metrics(input_files: List[Path], output_file: Path) -> None:
     http_5xx = sum(count for code, count in http_status.items()
                    if isinstance(count, (int, float)) and code.isdigit() and 500 <= int(code) < 600)
     total_errors = http_4xx + http_5xx
+    # error_rate = (4xx + 5xx) / total_requests
+    # Note: socket_errors (connect/timeout/read/write) are added by shell layer (run_benchmark.sh)
+    # and not included in this Lua-level calculation
     error_rate = total_errors / total_requests_sum if total_requests_sum > 0 else 0
     status_distribution = {code: count / total_requests_sum for code, count in http_status.items()
                            if isinstance(count, (int, float))} if total_requests_sum > 0 else {}
