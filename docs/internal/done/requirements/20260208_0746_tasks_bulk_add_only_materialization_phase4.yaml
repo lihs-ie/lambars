@@ -1,0 +1,145 @@
+# tasks_bulk Add-only materialization最適化 Phase4 要件定義
+#
+# 概要:
+#   `tasks_bulk` の最新プロファイルでは Add-only merge が 50% を占有し、
+#   依然として本番運用レベルに未達のため、add-only経路を再設計する。
+#
+# 設計方針:
+#   1. existing-miss で merge を実行しない zero-merge fast path を導入する。
+#   2. `drain(..).collect()` を廃止し、scratch/materialization の再利用を徹底する。
+#   3. 同期フルマージをやめ、delta segment + background compaction に移行する。
+#
+# 参照:
+#   - profiling-results-downloaded-latest/api-profiling-all-c1ccd9b4a85cb11a1a3908779c89f7c0f25e1307/tasks_bulk/benchmark/summary.txt
+#   - profiling-results-downloaded-latest/api-profiling-all-c1ccd9b4a85cb11a1a3908779c89f7c0f25e1307/tasks_bulk/stacks.folded
+#   - profiling-results-downloaded/tasks_bulk/benchmark/summary.txt
+#   - benches/api/src/api/query.rs
+
+version: "1.0.0"
+name: "tasks_bulk_add_only_materialization_phase4"
+description: |
+  2026-02-08 最新結果で tasks_bulk は 71.84 RPS / P99 25.49s。
+  直近履歴（64.78 RPS / P99 25.95s）よりは改善したが、目標 500 RPS には遠い。
+  ホットスポットは次の通り:
+  - SearchIndex::merge_posting_add_only_into: 50.39%
+  - SearchIndex::merge_bulk_ngram_index: 13.02%
+  - from_iter 系 materialization: 10.48%
+  - malloc/cfree: 7.81% (4.99% + 2.82%)
+
+background:
+  problem: |
+    20260207_1859 系の改善で old merge hotspot は緩和されたが、
+    新しい add-only merge と materialization が支配的になった。
+    また、write path の同期フルマージ構造が維持されており、
+    計算量の根本削減が不十分。
+  motivation: |
+    tasks_bulk を本番運用可能な水準まで引き上げる。
+    最低でも短期で 100+ RPS、次段で 200+ RPS を実現する。
+  prior_art:
+    - name: "20260207_2230_tasks_bulk_search_index_merge_hotspots"
+      description: "Add-only merge 主体へボトルネック遷移した分析。"
+    - name: "Append-or-Merge Union"
+      description: "単調増加時は concat、非単調時のみ two-pointer merge。"
+    - name: "LSM-style delta segment"
+      description: "書き込み時は追記、統合は非同期 compaction へ分離。"
+
+requirements:
+  - id: "REQ-TB4-001"
+    name: "existing-miss zero-merge fast path を導入する"
+    description: |
+      add-only 更新で既存 posting が存在しない key については
+      `merge_posting_add_only_into` を呼ばず、`add_list` から直接構築する。
+      これにより比較ループと clone を回避する。
+
+      対象コード:
+      - `benches/api/src/api/query.rs:6125` (`merge_index_delta_add_only`)
+      - `benches/api/src/api/query.rs:6175` (`merge_ngram_delta_add_only_individual`)
+      - `benches/api/src/api/query.rs:6211` (`merge_ngram_delta_add_only_bulk`)
+    methods:
+      - name: "build_collection_from_add_only"
+        signature: "fn build_collection_from_add_only(add: &[TaskId]) -> TaskIdCollection"
+        description: |
+          add_list が事前ソート済みである前提を利用し、mergeを経由せず構築する。
+    implementations:
+      - type: "SearchIndex add-only path"
+        description: |
+          `None => merge_posting_add_only_into(empty, ...)` を廃止し、
+          direct build へ置換する。
+
+  - id: "REQ-TB4-002"
+    name: "drain/collect materialization を廃止する"
+    description: |
+      `scratch.drain(..).collect()` による from_iter コストが 10.48% を占める。
+      scratch を move/replace で受け渡し、collect 経由の再構築をやめる。
+
+      対象コード:
+      - `benches/api/src/api/query.rs:6141`
+      - `benches/api/src/api/query.rs:6191`
+      - `benches/api/src/api/query.rs:6227`
+    methods:
+      - name: "take_scratch_owned"
+        signature: "fn take_scratch_owned(scratch: &mut Vec<TaskId>) -> Vec<TaskId>"
+        description: |
+          `std::mem::take` または swap で所有権移動し、collect を発生させない。
+      - name: "collection_from_sorted_owned"
+        signature: "fn collection_from_sorted_owned(sorted: Vec<TaskId>) -> TaskIdCollection"
+        description: "sorted Vec を再走査せずにコレクション化する。"
+    implementations:
+      - type: "TaskIdCollection construction path"
+        description: "from_iter 依存を排除し、再利用バッファ戦略へ変更する。"
+
+  - id: "REQ-TB4-003"
+    name: "bulk ngram merge に append-or-merge 判定を導入する"
+    description: |
+      `merge_bulk_ngram_index` は現在 13.02% を占有しており、
+      既存と追加が単調分離できるケースでも full merge している。
+      `max(existing) < min(add)` の場合は concat 経路を使い、
+      非単調ケースのみ two-pointer merge を実行する。
+
+      対象コード:
+      - `benches/api/src/api/query.rs:5363` (`merge_bulk_ngram_index`)
+    methods:
+      - name: "append_or_merge_sorted"
+        signature: "fn append_or_merge_sorted(existing: &TaskIdCollection, add: &TaskIdCollection) -> TaskIdCollection"
+        description: "境界比較で concat と merge を切り替える。"
+    implementations:
+      - type: "bulk ngram union"
+        description: "eager full merge の実行回数を削減する。"
+
+  - id: "REQ-TB4-004"
+    name: "delta segment + background compaction を実装する"
+    description: |
+      Phase3 で要求された設計変更（同期完全マージ回避）が未実装。
+      書き込みは delta segment 追記とし、compaction を別ワーカーへ分離する。
+      根本設計を immediate merge から staged merge へ変更する。
+    methods:
+      - name: "append_delta_segment"
+        signature: "fn append_delta_segment(&self, delta: SearchIndexDelta) -> Self"
+        description: "同期区間では segment 追記のみ実施する。"
+      - name: "compact_segments"
+        signature: "fn compact_segments(&self, policy: CompactionPolicy) -> Self"
+        description: "件数/サイズ閾値で段階統合する。"
+    implementations:
+      - type: "SearchIndex write path"
+        description: "base + delta segments の2層構造へ移行する。"
+
+non_functional_requirements:
+  performance:
+    - "tasks_bulk RPS: 71.84 -> 120以上（短期）/ 220以上（中期）"
+    - "tasks_bulk P99: 25.49s -> 16s以下（短期）/ 10s以下（中期）"
+    - "merge_posting_add_only_into 比率: 50.39% -> 30%以下"
+    - "from_iter 比率: 10.48% -> 4%以下"
+  compatibility:
+    - "`POST /tasks/bulk` の API 契約と 207 応答仕様を維持する"
+  testing:
+    - "旧/新 add-only merge の同値性 property test を追加する"
+    - "append-or-merge 分岐の境界条件テストを追加する"
+    - "segment compaction 導入後の検索結果同値性テストを追加する"
+
+future_extensions:
+  - id: "TB4-FUTURE-001"
+    name: "RoaringBitmap ハイブリッド化"
+    description: |
+      高 cardinality key で bitmap 表現へ自動切替し、union コストをさらに削減する。
+    rationale: |
+      先に add-only merge/materialization/segment 化の構造問題を解決する。
