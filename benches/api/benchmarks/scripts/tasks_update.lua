@@ -197,6 +197,10 @@ end
 
 function response(status, headers, body)
     if not status then return end
+
+    common.track_response(status, headers)
+    if error_tracker then error_tracker.track_thread_response(status) end
+
     if is_backoff_request then
         is_backoff_request = false
         return
@@ -210,9 +214,7 @@ function response(status, headers, body)
         return
     end
 
-    common.track_response(status, headers)
     request_categories.executed = request_categories.executed + 1
-    if error_tracker then error_tracker.track_thread_response(status) end
     if not last_request_is_update then return end
 
     if state == "retry_get" then

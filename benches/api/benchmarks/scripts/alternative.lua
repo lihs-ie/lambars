@@ -63,5 +63,7 @@ function request()
     end
 end
 
-response = common.create_response_handler("alternative")
-done = common.create_done_handler("alternative")
+local handlers = common.create_standard_handlers("alternative", {scenario_name = "alternative", output_format = "json"})
+function setup(thread) handlers.setup(thread) end
+response = handlers.response
+done = handlers.done

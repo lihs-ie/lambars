@@ -53,6 +53,7 @@ end
 
 -- Load common utilities
 local common = require("common")
+local error_tracker = pcall(require, "error_tracker") and require("error_tracker") or nil
 
 -- Configuration
 local config = {
@@ -111,6 +112,7 @@ local counters = {
     conflicts = 0
 }
 local last_endpoint = nil  -- Track endpoint for per-endpoint metrics
+local benchmark_initialized = false
 
 -- Operation types for write operations
 local write_operations = {"create", "update", "patch", "delete"}
@@ -216,7 +218,13 @@ end
 
 -- wrk setup hook
 function setup(thread)
+    if not benchmark_initialized then
+        common.init_benchmark({scenario_name = "contention", output_format = "json"})
+        if error_tracker then error_tracker.init() end
+        benchmark_initialized = true
+    end
     thread:set("id", thread.id)
+    if error_tracker then error_tracker.setup_thread(thread) end
 end
 
 -- wrk init hook
@@ -241,6 +249,7 @@ end
 
 -- wrk response hook
 function response(status, headers, body)
+    if error_tracker then error_tracker.track_thread_response(status) end
     -- Pass headers and endpoint to track_response for cache metrics and per-endpoint tracking
     common.track_response(status, headers, last_endpoint)
 
@@ -296,4 +305,6 @@ function done(summary, latency, requests)
 
     -- Print standard summary
     common.print_summary("contention", summary)
+
+    common.finalize_benchmark(summary, latency, requests)
 end

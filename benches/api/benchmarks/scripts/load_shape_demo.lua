@@ -47,6 +47,7 @@
 
 package.path = package.path .. ";scripts/?.lua"
 local common = require("common")
+local error_tracker = pcall(require, "error_tracker") and require("error_tracker") or nil
 
 -- Parse command line arguments (after --)
 local function parse_args()
@@ -87,27 +88,33 @@ local args = nil
 local counter = 0
 local request_types = {"create", "read", "update", "search"}
 local last_endpoint = nil  -- Track endpoint for per-endpoint metrics
+local benchmark_initialized = false
 
 -- Setup function (called once per thread)
 function setup(thread)
-    args = parse_args()
+    if not benchmark_initialized then
+        args = parse_args()
 
-    -- Initialize benchmark with parsed arguments
-    common.init_benchmark({
-        scenario_name = "load_shape_demo",
-        load_profile = args.profile,
-        target_rps = args.target_rps,
-        payload_variant = args.payload,
-        output_format = args.output_format,
-        -- Profile-specific options with sensible defaults
-        ramp_up_seconds = 20,
-        ramp_down_seconds = 20,
-        burst_multiplier = 3.0,
-        burst_duration_seconds = 5,
-        burst_interval_seconds = 20,
-        step_count = 4,
-        min_rps = 10
-    })
+        -- Initialize benchmark with parsed arguments
+        common.init_benchmark({
+            scenario_name = "load_shape_demo",
+            load_profile = args.profile,
+            target_rps = args.target_rps,
+            payload_variant = args.payload,
+            output_format = args.output_format,
+            -- Profile-specific options with sensible defaults
+            ramp_up_seconds = 20,
+            ramp_down_seconds = 20,
+            burst_multiplier = 3.0,
+            burst_duration_seconds = 5,
+            burst_interval_seconds = 20,
+            step_count = 4,
+            min_rps = 10
+        })
+        if error_tracker then error_tracker.init() end
+        benchmark_initialized = true
+    end
+    if error_tracker then error_tracker.setup_thread(thread) end
 end
 
 -- Request generation
@@ -149,6 +156,7 @@ end
 -- so counters updated here are NOT visible in done() which runs in main thread.
 -- Use wrk's summary parameter in done() for accurate, thread-aggregated counts.
 function response(status, headers, body)
+    if error_tracker then error_tracker.track_thread_response(status) end
     -- Pass headers and endpoint to track_response for cache metrics and per-endpoint tracking
     common.track_response(status, headers, last_endpoint)
 

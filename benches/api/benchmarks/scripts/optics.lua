@@ -78,5 +78,7 @@ function request()
     end
 end
 
-response = common.create_response_handler("optics")
-done = common.create_done_handler("optics")
+local handlers = common.create_standard_handlers("optics", {scenario_name = "optics", output_format = "json"})
+function setup(thread) handlers.setup(thread) end
+response = handlers.response
+done = handlers.done

@@ -61,5 +61,7 @@ function request()
     end
 end
 
-response = common.create_response_handler("applicative")
-done = common.create_done_handler("applicative")
+local handlers = common.create_standard_handlers("applicative", {scenario_name = "applicative", output_format = "json"})
+function setup(thread) handlers.setup(thread) end
+response = handlers.response
+done = handlers.done

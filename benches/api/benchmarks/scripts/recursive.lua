@@ -36,5 +36,7 @@ function request()
     end
 end
 
-response = common.create_response_handler("recursive")
-done = common.create_done_handler("recursive")
+local handlers = common.create_standard_handlers("recursive", {scenario_name = "recursive", output_format = "json"})
+function setup(thread) handlers.setup(thread) end
+response = handlers.response
+done = handlers.done

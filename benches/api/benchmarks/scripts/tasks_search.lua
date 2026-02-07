@@ -34,5 +34,7 @@ function request()
     return wrk.format("GET", path)
 end
 
-response = common.create_response_handler("tasks_search")
-done = common.create_done_handler("tasks_search")
+local handlers = common.create_standard_handlers("tasks_search", {scenario_name = "tasks_search", output_format = "json"})
+function setup(thread) handlers.setup(thread) end
+response = handlers.response
+done = handlers.done

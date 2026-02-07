@@ -78,5 +78,7 @@ function request()
     end
 end
 
-response = common.create_response_handler("bifunctor")
-done = common.create_done_handler("bifunctor")
+local handlers = common.create_standard_handlers("bifunctor", {scenario_name = "bifunctor", output_format = "json"})
+function setup(thread) handlers.setup(thread) end
+response = handlers.response
+done = handlers.done

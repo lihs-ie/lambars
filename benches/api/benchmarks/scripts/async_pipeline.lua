@@ -60,5 +60,7 @@ function request()
     end
 end
 
-response = common.create_response_handler("async_pipeline")
-done = common.create_done_handler("async_pipeline")
+local handlers = common.create_standard_handlers("async_pipeline", {scenario_name = "async_pipeline", output_format = "json"})
+function setup(thread) handlers.setup(thread) end
+response = handlers.response
+done = handlers.done
