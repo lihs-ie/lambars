@@ -1890,6 +1890,7 @@ generate_meta_json() {
         --argjson avg_latency "${avg_latency_json}" \
         --argjson p50 "${p50_json}" \
         --argjson p90 "${p90_json}" \
+        --argjson p95 "${p95_json}" \
         --argjson p99 "${p99_json}" \
         --argjson http_status "${http_status_json}" \
         --argjson retries "${retries}" \
