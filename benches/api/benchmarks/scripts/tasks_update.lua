@@ -2,7 +2,7 @@ package.path = package.path .. ";scripts/?.lua"
 local common = require("common")
 local test_ids = common.load_test_ids()
 
-local RETRY_COUNT = tonumber(os.getenv("RETRY_COUNT")) or 0
+local RETRY_COUNT = tonumber(os.getenv("RETRY_COUNT")) or 1
 local BACKOFF_BASE = 2
 local BACKOFF_MAX = tonumber(os.getenv("RETRY_BACKOFF_MAX")) or 16
 
@@ -47,13 +47,13 @@ function setup(thread)
 
     if error_tracker then error_tracker.setup_thread(thread) end
 
-    local total_threads = validate_and_clamp(tonumber(os.getenv("WRK_THREADS")), 1, 1, "WRK_THREADS")
+    local total_threads = validate_and_clamp(tonumber(os.getenv("THREADS") or os.getenv("WRK_THREADS")), 1, 1, "THREADS")
     local pool_size = validate_and_clamp(tonumber(os.getenv("ID_POOL_SIZE")), 1, 10, "ID_POOL_SIZE")
     local thread_id = tonumber(thread.id) or 0
 
     if pool_size < total_threads then
         io.stderr:write(string.format(
-            "[tasks_update] WARN: ID_POOL_SIZE (%d) < WRK_THREADS (%d), using pool_size=%d\n",
+            "[tasks_update] WARN: ID_POOL_SIZE (%d) < THREADS (%d), using pool_size=%d\n",
             pool_size, total_threads, pool_size))
         total_threads = pool_size
     end
@@ -243,7 +243,7 @@ function response(status, headers, body)
             reset_retry_state()
         elseif status == 409 then
             retry_attempt = retry_attempt + 1
-            if retry_attempt >= RETRY_COUNT then
+            if retry_attempt > RETRY_COUNT then
                 io.stderr:write(string.format("[tasks_update] Retry exhausted after %d attempts\n", RETRY_COUNT))
                 thread_retry_exhausted_count = thread_retry_exhausted_count + 1
                 reset_retry_state()
