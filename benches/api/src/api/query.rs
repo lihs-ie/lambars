@@ -1202,17 +1202,23 @@ pub type PrefixIndex = PersistentTreeMap<NgramKey, TaskIdCollection>;
 
 /// Configuration for [`NgramSegmentOverlay`] compaction behavior.
 ///
-/// Controls the maximum number of delta segments before compaction is triggered.
+/// Controls the maximum number of delta segments and the key-count threshold
+/// for the oldest segment before compaction is triggered.
 #[allow(dead_code)]
 #[derive(Clone, Debug)]
 struct SegmentOverlayConfig {
     /// Maximum number of delta segments (2..=6).
     max_segments: usize,
+    /// Maximum number of keys in the oldest segment before compaction is triggered.
+    max_segment_keys: usize,
 }
 
 impl Default for SegmentOverlayConfig {
     fn default() -> Self {
-        Self { max_segments: 4 }
+        Self {
+            max_segments: 4,
+            max_segment_keys: 50_000,
+        }
     }
 }
 
@@ -1234,6 +1240,8 @@ struct NgramSegmentOverlay {
     segments: Vec<NgramIndex>,
     /// Maximum number of delta segments before compaction.
     max_segments: usize,
+    /// Maximum number of keys in the oldest segment before compaction.
+    max_segment_keys: usize,
 }
 
 impl NgramSegmentOverlay {
@@ -1242,15 +1250,22 @@ impl NgramSegmentOverlay {
             base,
             segments: Vec::new(),
             max_segments: 4,
+            max_segment_keys: 50_000,
         }
     }
 
     #[allow(dead_code)]
-    const fn with_config(base: NgramIndex, config: &SegmentOverlayConfig) -> Self {
+    fn with_config(base: NgramIndex, config: &SegmentOverlayConfig) -> Self {
+        debug_assert!(
+            (2..=6).contains(&config.max_segments),
+            "max_segments must be in 2..=6, got {}",
+            config.max_segments
+        );
         Self {
             base,
             segments: Vec::new(),
-            max_segments: config.max_segments,
+            max_segments: config.max_segments.clamp(2, 6),
+            max_segment_keys: config.max_segment_keys,
         }
     }
 
@@ -1259,8 +1274,12 @@ impl NgramSegmentOverlay {
         1 + self.segments.len()
     }
 
-    const fn needs_compaction(&self) -> bool {
+    fn needs_compaction(&self) -> bool {
         self.segments.len() >= self.max_segments
+            || self
+                .segments
+                .first()
+                .is_some_and(|oldest| oldest.len() >= self.max_segment_keys)
     }
 
     /// Queries a key across base and all delta segments, merging posting lists.
@@ -1296,6 +1315,7 @@ impl NgramSegmentOverlay {
             base: self.base.clone(),
             segments: new_segments,
             max_segments: self.max_segments,
+            max_segment_keys: self.max_segment_keys,
         }
     }
 
@@ -1331,6 +1351,7 @@ impl NgramSegmentOverlay {
             base: merged,
             segments: Vec::new(),
             max_segments: self.max_segments,
+            max_segment_keys: self.max_segment_keys,
         }
     }
 
@@ -1344,6 +1365,7 @@ impl NgramSegmentOverlay {
             base: merged_base,
             segments: self.segments[1..].to_vec(),
             max_segments: self.max_segments,
+            max_segment_keys: self.max_segment_keys,
         }
     }
 
@@ -4472,8 +4494,12 @@ impl SearchIndex {
             tag_index: tag_index.persistent(),
             tag_all_suffix_index: tag_all_suffix_index.persistent(),
             tasks_by_id: tasks_by_id.persistent(),
-            title_full_ngram_index: NgramSegmentOverlay::new(finalize_ngram_index(title_full_ngram_batch)),
-            title_word_ngram_index: NgramSegmentOverlay::new(finalize_ngram_index(title_word_ngram_batch)),
+            title_full_ngram_index: NgramSegmentOverlay::new(finalize_ngram_index(
+                title_full_ngram_batch,
+            )),
+            title_word_ngram_index: NgramSegmentOverlay::new(finalize_ngram_index(
+                title_word_ngram_batch,
+            )),
             tag_ngram_index: NgramSegmentOverlay::new(finalize_ngram_index(tag_ngram_batch)),
             config,
         }
@@ -4662,11 +4688,7 @@ impl SearchIndex {
 
         // max_ngrams_per_token is only for index construction to bound memory usage;
         // for search, we need all query n-grams to ensure correct intersection.
-        let query_ngrams = generate_ngrams(
-            normalized_query,
-            self.config.ngram_size,
-            usize::MAX,
-        );
+        let query_ngrams = generate_ngrams(normalized_query, self.config.ngram_size, usize::MAX);
 
         if query_ngrams.is_empty() {
             return None;
@@ -5060,8 +5082,12 @@ impl SearchIndex {
             // Remove from infix index based on mode
             match self.config.infix_mode {
                 InfixMode::Ngram => {
-                    title_word_ngram_materialized =
-                        remove_ngrams(title_word_ngram_materialized, &word_key, task_id, &self.config);
+                    title_word_ngram_materialized = remove_ngrams(
+                        title_word_ngram_materialized,
+                        &word_key,
+                        task_id,
+                        &self.config,
+                    );
                 }
                 InfixMode::LegacyAllSuffix => {
                     title_word_all_suffix_index = Self::remove_id_from_all_suffixes(
@@ -5092,8 +5118,12 @@ impl SearchIndex {
             // Remove from infix index based on mode
             match self.config.infix_mode {
                 InfixMode::Ngram => {
-                    tag_ngram_materialized =
-                        remove_ngrams(tag_ngram_materialized, &normalized_tag, task_id, &self.config);
+                    tag_ngram_materialized = remove_ngrams(
+                        tag_ngram_materialized,
+                        &normalized_tag,
+                        task_id,
+                        &self.config,
+                    );
                 }
                 InfixMode::LegacyAllSuffix => {
                     tag_all_suffix_index = Self::remove_id_from_all_suffixes(
@@ -5270,8 +5300,12 @@ impl SearchIndex {
             // Add to infix index based on mode
             match self.config.infix_mode {
                 InfixMode::Ngram => {
-                    title_word_ngram_materialized =
-                        index_ngrams(title_word_ngram_materialized, word_str, task_id, &self.config);
+                    title_word_ngram_materialized = index_ngrams(
+                        title_word_ngram_materialized,
+                        word_str,
+                        task_id,
+                        &self.config,
+                    );
                 }
                 InfixMode::LegacyAllSuffix => {
                     title_word_all_suffix_index =
@@ -5303,8 +5337,12 @@ impl SearchIndex {
             // Add to infix index based on mode
             match self.config.infix_mode {
                 InfixMode::Ngram => {
-                    tag_ngram_materialized =
-                        index_ngrams(tag_ngram_materialized, normalized_tag_str, task_id, &self.config);
+                    tag_ngram_materialized = index_ngrams(
+                        tag_ngram_materialized,
+                        normalized_tag_str,
+                        task_id,
+                        &self.config,
+                    );
                 }
                 InfixMode::LegacyAllSuffix => {
                     tag_all_suffix_index =
@@ -5595,10 +5633,12 @@ impl SearchIndex {
             .build()
             .map_err(SearchIndexError::BulkBuildFailed)?;
 
-        let title_word_ngram_index =
-            self.title_word_ngram_index.append_and_compact(title_word_bulk);
-        let title_full_ngram_index =
-            self.title_full_ngram_index.append_and_compact(title_full_bulk);
+        let title_word_ngram_index = self
+            .title_word_ngram_index
+            .append_and_compact(title_word_bulk);
+        let title_full_ngram_index = self
+            .title_full_ngram_index
+            .append_and_compact(title_full_bulk);
         let tag_ngram_index = self.tag_ngram_index.append_and_compact(tag_bulk);
 
         // Use delta without n-gram collection (n-grams already built by bulk builders above)
@@ -5749,9 +5789,9 @@ impl SearchIndex {
                 title_word_ngram_index: self.title_word_ngram_index.append_and_compact(
                     build_ngram_from_mutable(delta.title_word_ngram_add.clone()),
                 ),
-                tag_ngram_index: self.tag_ngram_index.append_and_compact(
-                    build_ngram_from_mutable(delta.tag_ngram_add.clone()),
-                ),
+                tag_ngram_index: self
+                    .tag_ngram_index
+                    .append_and_compact(build_ngram_from_mutable(delta.tag_ngram_add.clone())),
                 title_full_all_suffix_index: Self::merge_index_delta_add_only(
                     &self.title_full_all_suffix_index,
                     &delta.title_full_all_suffix_add,
@@ -5862,15 +5902,15 @@ impl SearchIndex {
                 title_word_add,
             ),
             tag_index: Self::merge_index_delta_add_only_owned(&self.tag_index, tag_add),
-            title_full_ngram_index: self.title_full_ngram_index.append_and_compact(
-                build_ngram_from_mutable(title_full_ngram_add),
-            ),
-            title_word_ngram_index: self.title_word_ngram_index.append_and_compact(
-                build_ngram_from_mutable(title_word_ngram_add),
-            ),
-            tag_ngram_index: self.tag_ngram_index.append_and_compact(
-                build_ngram_from_mutable(tag_ngram_add),
-            ),
+            title_full_ngram_index: self
+                .title_full_ngram_index
+                .append_and_compact(build_ngram_from_mutable(title_full_ngram_add)),
+            title_word_ngram_index: self
+                .title_word_ngram_index
+                .append_and_compact(build_ngram_from_mutable(title_word_ngram_add)),
+            tag_ngram_index: self
+                .tag_ngram_index
+                .append_and_compact(build_ngram_from_mutable(tag_ngram_add)),
             title_full_all_suffix_index: Self::merge_index_delta_add_only_owned(
                 &self.title_full_all_suffix_index,
                 title_full_all_suffix_add,
@@ -6484,18 +6524,10 @@ impl SearchIndex {
 
         if add.len() <= 4 && existing_size_hint > 0 {
             let existing_vec: Vec<TaskId> = existing.cloned().collect();
-            Self::merge_posting_add_only_binary_search_insert(
-                &existing_vec,
-                add,
-                output,
-            );
+            Self::merge_posting_add_only_binary_search_insert(&existing_vec, add, output);
         } else if existing_size_hint > 0 && add.len().saturating_mul(8) < existing_size_hint {
             let existing_vec: Vec<TaskId> = existing.cloned().collect();
-            Self::merge_posting_add_only_galloping(
-                &existing_vec,
-                add,
-                output,
-            );
+            Self::merge_posting_add_only_galloping(&existing_vec, add, output);
         } else {
             Self::merge_posting_add_only_two_pointer(existing, add, output);
         }
@@ -6798,6 +6830,18 @@ impl SearchIndex {
                         result_vec.extend(add_list.iter().cloned());
                         entries_to_insert
                             .push((key.clone(), TaskIdCollection::from_sorted_vec(result_vec)));
+                    } else if let Some(existing_slice) = collection.as_sorted_slice() {
+                        Self::merge_posting_add_only_into_slice(
+                            existing_slice,
+                            add_list.as_slice(),
+                            &mut scratch,
+                        );
+                        if !scratch.is_empty() {
+                            let mut collected = Vec::with_capacity(scratch.len());
+                            collected.append(&mut scratch);
+                            entries_to_insert
+                                .push((key.clone(), TaskIdCollection::from_sorted_vec(collected)));
+                        }
                     } else {
                         Self::merge_posting_add_only_into(
                             collection.iter_sorted(),
@@ -6813,8 +6857,10 @@ impl SearchIndex {
                     }
                 }
                 None if !add_list.is_empty() => {
-                    entries_to_insert
-                        .push((key.clone(), TaskIdCollection::from_sorted_vec(add_list.clone())));
+                    entries_to_insert.push((
+                        key.clone(),
+                        TaskIdCollection::from_sorted_vec(add_list.clone()),
+                    ));
                 }
                 Some(_) | None => {}
             }
@@ -6935,6 +6981,18 @@ impl SearchIndex {
                         result_vec.extend(add_list);
                         entries_to_insert
                             .push((key, TaskIdCollection::from_sorted_vec(result_vec)));
+                    } else if let Some(existing_slice) = collection.as_sorted_slice() {
+                        Self::merge_posting_add_only_into_slice(
+                            existing_slice,
+                            add_list.as_slice(),
+                            &mut scratch,
+                        );
+                        if !scratch.is_empty() {
+                            let mut collected = Vec::with_capacity(scratch.len());
+                            collected.append(&mut scratch);
+                            entries_to_insert
+                                .push((key, TaskIdCollection::from_sorted_vec(collected)));
+                        }
                     } else {
                         Self::merge_posting_add_only_into(
                             collection.iter_sorted(),
@@ -20375,13 +20433,12 @@ mod merge_ngram_delta_optimization_tests {
         for (key, bulk_collection) in &bulk_materialized {
             let individual_collection = individual_materialized
                 .get(key.as_str())
-                .unwrap_or_else(|| {
-                    panic!("Key '{}' missing in individual result", key.as_str())
-                });
+                .unwrap_or_else(|| panic!("Key '{}' missing in individual result", key.as_str()));
             let bulk_ids: Vec<_> = bulk_collection.iter_sorted().cloned().collect();
             let individual_ids: Vec<_> = individual_collection.iter_sorted().cloned().collect();
             assert_eq!(
-                bulk_ids, individual_ids,
+                bulk_ids,
+                individual_ids,
                 "Posting list mismatch for ngram key '{}'",
                 key.as_str()
             );
@@ -20396,10 +20453,7 @@ mod merge_ngram_delta_optimization_tests {
         // Build initial index with some tasks
         let initial_tasks: Vec<Task> = (0..10)
             .map(|i| {
-                create_task_with_tags(
-                    &format!("Initial{i:04}"),
-                    vec![&format!("tag{}", i % 4)],
-                )
+                create_task_with_tags(&format!("Initial{i:04}"), vec![&format!("tag{}", i % 4)])
             })
             .collect();
         let add_changes: Vec<TaskChange> =
@@ -21408,10 +21462,7 @@ mod merge_posting_add_only_tests {
 
         let borrowed_tag_ngram = result_borrowed.tag_ngram_index.materialize();
         let owned_tag_ngram = result_owned.tag_ngram_index.materialize();
-        assert_eq!(
-            borrowed_tag_ngram.len(),
-            owned_tag_ngram.len()
-        );
+        assert_eq!(borrowed_tag_ngram.len(), owned_tag_ngram.len());
         for (key, borrowed_collection) in &borrowed_tag_ngram {
             let owned_collection = owned_tag_ngram
                 .get(key.as_str())
@@ -22002,7 +22053,10 @@ mod ngram_segment_overlay_tests {
     #[rstest]
     fn overlay_with_config_respects_max_segments() {
         let base = NgramIndex::new();
-        let config = SegmentOverlayConfig { max_segments: 2 };
+        let config = SegmentOverlayConfig {
+            max_segments: 2,
+            max_segment_keys: 50_000,
+        };
         let overlay = NgramSegmentOverlay::with_config(base, &config);
 
         assert_eq!(overlay.max_segments, 2);
@@ -22023,6 +22077,7 @@ mod ngram_segment_overlay_tests {
             base,
             segments: vec![segment_1, segment_2],
             max_segments: 4,
+            max_segment_keys: 50_000,
         };
 
         let key = NgramKey::new("abc");
@@ -22085,6 +22140,7 @@ mod ngram_segment_overlay_tests {
             base,
             segments: vec![segment_1, segment_2],
             max_segments: 4,
+            max_segment_keys: 50_000,
         };
 
         let compacted = overlay.compact_one();
@@ -22138,6 +22194,7 @@ mod ngram_segment_overlay_tests {
             base,
             segments: vec![segment_1, segment_2],
             max_segments: 4,
+            max_segment_keys: 50_000,
         };
 
         let materialized = overlay.materialize();
@@ -22183,7 +22240,10 @@ mod ngram_segment_overlay_tests {
     #[rstest]
     fn overlay_needs_compaction_at_threshold() {
         let base = NgramIndex::new();
-        let config = SegmentOverlayConfig { max_segments: 2 };
+        let config = SegmentOverlayConfig {
+            max_segments: 2,
+            max_segment_keys: 50_000,
+        };
         let overlay = NgramSegmentOverlay::with_config(base, &config);
 
         assert!(!overlay.needs_compaction());
@@ -22216,8 +22276,7 @@ mod ngram_segment_overlay_tests {
             TaskId::from_uuid(Uuid::from_u128(5)),
         ]);
 
-        let result =
-            super::merge_postings_multiway(&[&collection_1, &collection_2, &collection_3]);
+        let result = super::merge_postings_multiway(&[&collection_1, &collection_2, &collection_3]);
         let ids = sorted_ids(&result);
 
         let expected: Vec<TaskId> = [1, 2, 3, 4, 5]
@@ -22286,6 +22345,7 @@ mod ngram_segment_overlay_tests {
             base,
             segments: vec![segment],
             max_segments: 4,
+            max_segment_keys: 50_000,
         };
 
         // Add id=4 to "abc", remove id=1 from "abc"
@@ -22328,6 +22388,7 @@ mod ngram_segment_overlay_tests {
             base,
             segments: vec![segment],
             max_segments: 4,
+            max_segment_keys: 50_000,
         };
 
         let mut keys: Vec<String> = overlay.keys().map(|key| key.as_str().to_owned()).collect();
@@ -22361,7 +22422,10 @@ mod ngram_segment_overlay_tests {
         // Add initial tasks
         let task1 = create_overlay_test_task("callback function handler", &["important"]);
         let task2 = create_overlay_test_task("debug logging middleware", &["urgent"]);
-        let changes = vec![TaskChange::Add(task1.clone()), TaskChange::Add(task2.clone())];
+        let changes = vec![
+            TaskChange::Add(task1.clone()),
+            TaskChange::Add(task2.clone()),
+        ];
         let index_with_tasks = index.apply_changes(&changes);
 
         // Add more tasks to create overlay segments
@@ -22374,7 +22438,8 @@ mod ngram_segment_overlay_tests {
         all_tasks = all_tasks.push_back(task1);
         all_tasks = all_tasks.push_back(task2);
         all_tasks = all_tasks.push_back(task3);
-        let index_rebuilt = SearchIndex::build_with_config(&all_tasks, SearchIndexConfig::default());
+        let index_rebuilt =
+            SearchIndex::build_with_config(&all_tasks, SearchIndexConfig::default());
 
         // Search queries to test
         let queries = vec!["callback", "cal", "debug", "important", "urg"];
@@ -22382,19 +22447,25 @@ mod ngram_segment_overlay_tests {
         for query in queries {
             let result_overlay =
                 search_with_scope_indexed(&index_with_overlay, query, SearchScope::All);
-            let result_rebuilt =
-                search_with_scope_indexed(&index_rebuilt, query, SearchScope::All);
+            let result_rebuilt = search_with_scope_indexed(&index_rebuilt, query, SearchScope::All);
 
             // Compare task IDs (sorted for deterministic comparison)
-            let mut overlay_ids: Vec<_> =
-                result_overlay.tasks.iter().map(|t| t.task_id.clone()).collect();
+            let mut overlay_ids: Vec<_> = result_overlay
+                .tasks
+                .iter()
+                .map(|t| t.task_id.clone())
+                .collect();
             overlay_ids.sort();
-            let mut rebuilt_ids: Vec<_> =
-                result_rebuilt.tasks.iter().map(|t| t.task_id.clone()).collect();
+            let mut rebuilt_ids: Vec<_> = result_rebuilt
+                .tasks
+                .iter()
+                .map(|t| t.task_id.clone())
+                .collect();
             rebuilt_ids.sort();
 
             assert_eq!(
-                overlay_ids, rebuilt_ids,
+                overlay_ids,
+                rebuilt_ids,
                 "Search results differ for query '{}': overlay has {} tasks, rebuilt has {} tasks",
                 query,
                 overlay_ids.len(),
@@ -22417,10 +22488,7 @@ mod ngram_segment_overlay_tests {
         // Apply add-only changes
         let tasks: Vec<Task> = (0..5)
             .map(|i| {
-                create_overlay_test_task(
-                    &format!("TaskItem{i:04}"),
-                    &[&format!("tag{}", i % 3)],
-                )
+                create_overlay_test_task(&format!("TaskItem{i:04}"), &[&format!("tag{}", i % 3)])
             })
             .collect();
         let changes: Vec<TaskChange> = tasks.iter().cloned().map(TaskChange::Add).collect();
@@ -22499,8 +22567,7 @@ mod ngram_segment_overlay_tests {
         let queries = vec!["batch", "item", "category"];
         let mut pre_compaction_results: Vec<Vec<TaskId>> = Vec::new();
         for query in &queries {
-            let result =
-                search_with_scope_indexed(&current_index, query, SearchScope::All);
+            let result = search_with_scope_indexed(&current_index, query, SearchScope::All);
             let mut ids: Vec<_> = result.tasks.iter().map(|t| t.task_id.clone()).collect();
             ids.sort();
             pre_compaction_results.push(ids);
@@ -22514,9 +22581,7 @@ mod ngram_segment_overlay_tests {
             title_word_ngram_index: NgramSegmentOverlay::new(
                 current_index.title_word_ngram_index.materialize(),
             ),
-            tag_ngram_index: NgramSegmentOverlay::new(
-                current_index.tag_ngram_index.materialize(),
-            ),
+            tag_ngram_index: NgramSegmentOverlay::new(current_index.tag_ngram_index.materialize()),
             title_word_index: current_index.title_word_index.clone(),
             title_full_index: current_index.title_full_index.clone(),
             title_full_all_suffix_index: current_index.title_full_all_suffix_index.clone(),
@@ -22529,8 +22594,7 @@ mod ngram_segment_overlay_tests {
 
         // Verify search results are identical after compaction
         for (index, query) in queries.iter().enumerate() {
-            let result =
-                search_with_scope_indexed(&compacted_index, query, SearchScope::All);
+            let result = search_with_scope_indexed(&compacted_index, query, SearchScope::All);
             let mut ids: Vec<_> = result.tasks.iter().map(|t| t.task_id.clone()).collect();
             ids.sort();
             assert_eq!(
@@ -22552,6 +22616,7 @@ mod ngram_segment_overlay_tests {
             base,
             segments: vec![segment],
             max_segments: 4,
+            max_segment_keys: 50_000,
         };
 
         let updated = overlay.append_and_compact(NgramIndex::new());
@@ -22597,61 +22662,91 @@ mod adaptive_merge_tests {
     #[rstest]
     fn galloping_search_empty_slice() {
         let empty: Vec<TaskId> = vec![];
-        assert_eq!(SearchIndex::galloping_search_for_test(&empty, &task_id(5)), 0);
+        assert_eq!(
+            SearchIndex::galloping_search_for_test(&empty, &task_id(5)),
+            0
+        );
     }
 
     #[rstest]
     fn galloping_search_target_before_all() {
         let slice = task_ids(&[10, 20, 30]);
-        assert_eq!(SearchIndex::galloping_search_for_test(&slice, &task_id(5)), 0);
+        assert_eq!(
+            SearchIndex::galloping_search_for_test(&slice, &task_id(5)),
+            0
+        );
     }
 
     #[rstest]
     fn galloping_search_target_at_beginning() {
         let slice = task_ids(&[10, 20, 30]);
-        assert_eq!(SearchIndex::galloping_search_for_test(&slice, &task_id(10)), 0);
+        assert_eq!(
+            SearchIndex::galloping_search_for_test(&slice, &task_id(10)),
+            0
+        );
     }
 
     #[rstest]
     fn galloping_search_target_in_middle() {
         let slice = task_ids(&[10, 20, 30, 40, 50]);
-        assert_eq!(SearchIndex::galloping_search_for_test(&slice, &task_id(30)), 2);
+        assert_eq!(
+            SearchIndex::galloping_search_for_test(&slice, &task_id(30)),
+            2
+        );
     }
 
     #[rstest]
     fn galloping_search_target_at_end() {
         let slice = task_ids(&[10, 20, 30]);
-        assert_eq!(SearchIndex::galloping_search_for_test(&slice, &task_id(30)), 2);
+        assert_eq!(
+            SearchIndex::galloping_search_for_test(&slice, &task_id(30)),
+            2
+        );
     }
 
     #[rstest]
     fn galloping_search_target_after_all() {
         let slice = task_ids(&[10, 20, 30]);
-        assert_eq!(SearchIndex::galloping_search_for_test(&slice, &task_id(35)), 3);
+        assert_eq!(
+            SearchIndex::galloping_search_for_test(&slice, &task_id(35)),
+            3
+        );
     }
 
     #[rstest]
     fn galloping_search_target_between_elements() {
         let slice = task_ids(&[10, 20, 30, 40, 50]);
-        assert_eq!(SearchIndex::galloping_search_for_test(&slice, &task_id(25)), 2);
+        assert_eq!(
+            SearchIndex::galloping_search_for_test(&slice, &task_id(25)),
+            2
+        );
     }
 
     #[rstest]
     fn galloping_search_single_element_match() {
         let slice = task_ids(&[42]);
-        assert_eq!(SearchIndex::galloping_search_for_test(&slice, &task_id(42)), 0);
+        assert_eq!(
+            SearchIndex::galloping_search_for_test(&slice, &task_id(42)),
+            0
+        );
     }
 
     #[rstest]
     fn galloping_search_single_element_before() {
         let slice = task_ids(&[42]);
-        assert_eq!(SearchIndex::galloping_search_for_test(&slice, &task_id(10)), 0);
+        assert_eq!(
+            SearchIndex::galloping_search_for_test(&slice, &task_id(10)),
+            0
+        );
     }
 
     #[rstest]
     fn galloping_search_single_element_after() {
         let slice = task_ids(&[42]);
-        assert_eq!(SearchIndex::galloping_search_for_test(&slice, &task_id(100)), 1);
+        assert_eq!(
+            SearchIndex::galloping_search_for_test(&slice, &task_id(100)),
+            1
+        );
     }
 
     // =========================================================================
@@ -22687,7 +22782,10 @@ mod adaptive_merge_tests {
         let add = task_ids(&[4, 12]);
         let mut output = Vec::new();
         SearchIndex::merge_posting_add_only_galloping_for_test(&existing, &add, &mut output);
-        assert_eq!(output, task_ids(&[1, 3, 4, 5, 7, 9, 11, 12, 13, 15, 17, 19]));
+        assert_eq!(
+            output,
+            task_ids(&[1, 3, 4, 5, 7, 9, 11, 12, 13, 15, 17, 19])
+        );
     }
 
     #[rstest]
@@ -22798,7 +22896,10 @@ mod adaptive_merge_tests {
         let add = task_ids(&[4, 12]);
         let mut output = Vec::new();
         SearchIndex::merge_posting_add_only_into_for_test(&existing, &add, &mut output);
-        assert_eq!(output, task_ids(&[1, 3, 4, 5, 7, 9, 11, 12, 13, 15, 17, 19]));
+        assert_eq!(
+            output,
+            task_ids(&[1, 3, 4, 5, 7, 9, 11, 12, 13, 15, 17, 19])
+        );
     }
 
     #[rstest]
@@ -22827,7 +22928,10 @@ mod adaptive_merge_tests {
         let add = task_ids(&[2, 4, 6, 8, 10]);
         let mut output = Vec::new();
         SearchIndex::merge_posting_add_only_into_for_test(&existing, &add, &mut output);
-        assert_eq!(output, task_ids(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19]));
+        assert_eq!(
+            output,
+            task_ids(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19])
+        );
     }
 
     // =========================================================================
@@ -22851,10 +22955,7 @@ mod adaptive_merge_tests {
         // Verify the new entries are present
         for &value in &[1u128, 21, 41, 61, 81] {
             let target = task_id(value);
-            assert!(
-                result_vec.contains(&target),
-                "Expected {value} in result"
-            );
+            assert!(result_vec.contains(&target), "Expected {value} in result");
         }
     }
 
