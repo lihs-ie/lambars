@@ -1197,6 +1197,28 @@ type MutableIndex = std::collections::HashMap<NgramKey, Vec<TaskId>>;
 pub type PrefixIndex = PersistentTreeMap<NgramKey, TaskIdCollection>;
 
 // =============================================================================
+// Phase 7-B: merge_segment_into hit/miss instrumentation (test-only)
+// =============================================================================
+
+#[cfg(test)]
+thread_local! {
+    /// Number of keys in the last `merge_segment_into` call that hit an existing base key.
+    static MERGE_SEGMENT_HIT_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Number of keys in the last `merge_segment_into` call that missed (new key).
+    static MERGE_SEGMENT_MISS_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Returns `(hit_count, miss_count)` from the last `merge_segment_into` call.
+///
+/// Only available in `#[cfg(test)]`.
+#[cfg(test)]
+fn merge_segment_hit_miss_counts() -> (usize, usize) {
+    let hit = MERGE_SEGMENT_HIT_COUNT.with(std::cell::Cell::get);
+    let miss = MERGE_SEGMENT_MISS_COUNT.with(std::cell::Cell::get);
+    (hit, miss)
+}
+
+// =============================================================================
 // Phase 6: Segment Overlay for NgramIndex
 // =============================================================================
 
@@ -1407,36 +1429,150 @@ impl NgramSegmentOverlay {
     }
 
     fn merge_segment_into(base: NgramIndex, segment: &NgramIndex) -> NgramIndex {
+        #[cfg(test)]
+        let (mut hit_count, mut miss_count) = (0usize, 0usize);
+
         let mut transient = base.transient();
+        let mut scratch: Vec<TaskId> = Vec::new();
+
         for (key, segment_collection) in segment {
-            match transient.get(key) {
-                Some(existing) => {
-                    let merged = existing.merge(segment_collection);
-                    transient.insert(key.clone(), merged);
+            if let Some(existing) = transient.get(key) {
+                #[cfg(test)]
+                {
+                    hit_count += 1;
                 }
-                None => {
-                    transient.insert(key.clone(), segment_collection.clone());
+                let merged = Self::merge_posting_slice_or_fallback(
+                    existing,
+                    segment_collection,
+                    &mut scratch,
+                );
+                transient.insert(key.clone(), merged);
+            } else {
+                #[cfg(test)]
+                {
+                    miss_count += 1;
                 }
+                transient.insert(key.clone(), segment_collection.clone());
             }
         }
+
+        #[cfg(test)]
+        {
+            MERGE_SEGMENT_HIT_COUNT.with(|cell| cell.set(hit_count));
+            MERGE_SEGMENT_MISS_COUNT.with(|cell| cell.set(miss_count));
+        }
+
         transient.persistent()
+    }
+
+    /// Merges two `TaskIdCollection`s using slice-based fast paths when possible.
+    ///
+    /// Attempts to use `as_sorted_slice()` on both collections for zero-copy
+    /// access. When both are in Large state, uses disjoint concat or
+    /// `merge_posting_add_only_into_slice`. Falls back to `OrderedUniqueSet::merge`
+    /// for Small state collections.
+    fn merge_posting_slice_or_fallback(
+        existing: &TaskIdCollection,
+        segment_collection: &TaskIdCollection,
+        scratch: &mut Vec<TaskId>,
+    ) -> TaskIdCollection {
+        // Try slice-based fast path for Large state collections
+        match (
+            existing.as_sorted_slice(),
+            segment_collection.as_sorted_slice(),
+        ) {
+            (Some(existing_slice), Some(segment_slice)) => {
+                // Both Large: use disjoint concat or slice merge
+                let can_concat = existing_slice
+                    .last()
+                    .zip(segment_slice.first())
+                    .is_none_or(|(existing_max, segment_min)| segment_min > existing_max);
+
+                let can_concat_reversed = !can_concat
+                    && segment_slice
+                        .last()
+                        .zip(existing_slice.first())
+                        .is_some_and(|(segment_max, existing_min)| segment_max < existing_min);
+
+                if can_concat {
+                    let mut result =
+                        Vec::with_capacity(existing_slice.len() + segment_slice.len());
+                    result.extend_from_slice(existing_slice);
+                    result.extend_from_slice(segment_slice);
+                    TaskIdCollection::from_sorted_vec(result)
+                } else if can_concat_reversed {
+                    let mut result =
+                        Vec::with_capacity(existing_slice.len() + segment_slice.len());
+                    result.extend_from_slice(segment_slice);
+                    result.extend_from_slice(existing_slice);
+                    TaskIdCollection::from_sorted_vec(result)
+                } else {
+                    scratch.clear();
+                    scratch.reserve(existing_slice.len() + segment_slice.len());
+                    SearchIndex::merge_posting_add_only_into_slice(
+                        existing_slice,
+                        segment_slice,
+                        scratch,
+                    );
+                    TaskIdCollection::from_sorted_vec(std::mem::take(scratch))
+                }
+            }
+            (Some(existing_slice), None) => {
+                // Existing is Large, segment is Small: collect segment and merge
+                let segment_vec: Vec<TaskId> =
+                    segment_collection.iter_sorted().cloned().collect();
+                scratch.clear();
+                scratch.reserve(existing_slice.len() + segment_vec.len());
+                SearchIndex::merge_posting_add_only_into_slice(
+                    existing_slice,
+                    &segment_vec,
+                    scratch,
+                );
+                TaskIdCollection::from_sorted_vec(std::mem::take(scratch))
+            }
+            (None, Some(segment_slice)) => {
+                // Existing is Small, segment is Large: collect existing and merge
+                let existing_vec: Vec<TaskId> = existing.iter_sorted().cloned().collect();
+                scratch.clear();
+                scratch.reserve(existing_vec.len() + segment_slice.len());
+                SearchIndex::merge_posting_add_only_into_slice(
+                    &existing_vec,
+                    segment_slice,
+                    scratch,
+                );
+                TaskIdCollection::from_sorted_vec(std::mem::take(scratch))
+            }
+            (None, None) => {
+                // Both Small: use standard merge
+                existing.merge(segment_collection)
+            }
+        }
     }
 }
 
-/// Merges posting lists from multiple segments using sequential pair-wise merge.
+/// Merges posting lists from multiple segments using size-aware pair-wise merge.
 ///
 /// All input lists must be sorted and unique. Output is sorted and unique.
 /// For k <= 6 (base + max 4 segments), sequential merge is more efficient
 /// than a `BinaryHeap`-based k-way merge due to lower overhead.
+///
+/// When there are 3 or more lists, they are sorted by size (smallest first)
+/// so that each merge step operates on the smallest possible accumulator,
+/// minimising total comparisons.
 fn merge_postings_multiway(posting_lists: &[&TaskIdCollection]) -> TaskIdCollection {
     match posting_lists.len() {
         0 => TaskIdCollection::new(),
         1 => posting_lists[0].clone(),
         2 => posting_lists[0].merge(posting_lists[1]),
         _ => {
-            let mut result = posting_lists[0].clone();
-            for posting_list in &posting_lists[1..] {
-                result = result.merge(posting_list);
+            // Sort indices by posting list size (smallest first) to minimise
+            // total comparison count across sequential merges.
+            let mut indices: Vec<usize> = (0..posting_lists.len()).collect();
+            indices.sort_unstable_by_key(|&index| posting_lists[index].len());
+
+            let mut result = posting_lists[indices[0]].clone();
+            for &index in &indices[1..] {
+                result = result.merge(posting_lists[index]);
             }
             result
         }
@@ -22310,6 +22446,72 @@ mod ngram_segment_overlay_tests {
     }
 
     // -------------------------------------------------------------------------
+    // IMPL-P7-007: merge_postings_multiway size-aware merge
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn merge_postings_multiway_size_aware_produces_correct_result() {
+        // Create lists with varying sizes: large, small, medium
+        // The size-aware sort should order: small(1), medium(3), large(5)
+        let large = TaskIdCollection::from_sorted_vec(vec![
+            TaskId::from_uuid(Uuid::from_u128(1)),
+            TaskId::from_uuid(Uuid::from_u128(2)),
+            TaskId::from_uuid(Uuid::from_u128(3)),
+            TaskId::from_uuid(Uuid::from_u128(4)),
+            TaskId::from_uuid(Uuid::from_u128(5)),
+        ]);
+        let small = TaskIdCollection::from_sorted_vec(vec![
+            TaskId::from_uuid(Uuid::from_u128(10)),
+        ]);
+        let medium = TaskIdCollection::from_sorted_vec(vec![
+            TaskId::from_uuid(Uuid::from_u128(6)),
+            TaskId::from_uuid(Uuid::from_u128(7)),
+            TaskId::from_uuid(Uuid::from_u128(8)),
+        ]);
+
+        // Order: large, small, medium -> size-aware reorders to small, medium, large
+        let result =
+            super::merge_postings_multiway(&[&large, &small, &medium]);
+        let ids = sorted_ids(&result);
+
+        let expected: Vec<TaskId> = [1, 2, 3, 4, 5, 6, 7, 8, 10]
+            .iter()
+            .map(|value| TaskId::from_uuid(Uuid::from_u128(*value)))
+            .collect();
+        assert_eq!(ids, expected);
+    }
+
+    #[rstest]
+    fn merge_postings_multiway_size_aware_with_overlapping_ids() {
+        // Overlapping IDs across lists of different sizes
+        let list_a = TaskIdCollection::from_sorted_vec(vec![
+            TaskId::from_uuid(Uuid::from_u128(1)),
+            TaskId::from_uuid(Uuid::from_u128(3)),
+            TaskId::from_uuid(Uuid::from_u128(5)),
+            TaskId::from_uuid(Uuid::from_u128(7)),
+            TaskId::from_uuid(Uuid::from_u128(9)),
+        ]);
+        let list_b = TaskIdCollection::from_sorted_vec(vec![
+            TaskId::from_uuid(Uuid::from_u128(3)),
+        ]);
+        let list_c = TaskIdCollection::from_sorted_vec(vec![
+            TaskId::from_uuid(Uuid::from_u128(5)),
+            TaskId::from_uuid(Uuid::from_u128(9)),
+            TaskId::from_uuid(Uuid::from_u128(11)),
+        ]);
+
+        let result =
+            super::merge_postings_multiway(&[&list_a, &list_b, &list_c]);
+        let ids = sorted_ids(&result);
+
+        let expected: Vec<TaskId> = [1, 3, 5, 7, 9, 11]
+            .iter()
+            .map(|value| TaskId::from_uuid(Uuid::from_u128(*value)))
+            .collect();
+        assert_eq!(ids, expected);
+    }
+
+    // -------------------------------------------------------------------------
     // build_ngram_from_mutable
     // -------------------------------------------------------------------------
 
@@ -22626,6 +22828,112 @@ mod ngram_segment_overlay_tests {
         let key = NgramKey::new("abc");
         let ids = sorted_ids(&updated.query(&key).expect("abc present"));
         let expected: Vec<TaskId> = [1, 2]
+            .iter()
+            .map(|value| TaskId::from_uuid(Uuid::from_u128(*value)))
+            .collect();
+        assert_eq!(ids, expected);
+    }
+
+    // -------------------------------------------------------------------------
+    // IMPL-P7-005: merge_segment_into hit/miss instrumentation
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn merge_segment_hit_miss_all_hit() {
+        // base has "abc" and "def", segment has same keys -> all hits
+        let base = make_ngram_index(&[("abc", &[1, 2]), ("def", &[3])]);
+        let segment = make_ngram_index(&[("abc", &[4]), ("def", &[5])]);
+        let _result = NgramSegmentOverlay::merge_segment_into(base, &segment);
+
+        let (hit, miss) = super::merge_segment_hit_miss_counts();
+        assert_eq!(hit, 2, "all segment keys should hit existing base keys");
+        assert_eq!(miss, 0, "no misses expected");
+    }
+
+    #[rstest]
+    fn merge_segment_hit_miss_all_miss() {
+        // base has "abc", segment has "xyz" (no overlap) -> all misses
+        let base = make_ngram_index(&[("abc", &[1])]);
+        let segment = make_ngram_index(&[("xyz", &[2])]);
+        let _result = NgramSegmentOverlay::merge_segment_into(base, &segment);
+
+        let (hit, miss) = super::merge_segment_hit_miss_counts();
+        assert_eq!(hit, 0, "no hits expected");
+        assert_eq!(miss, 1, "one miss expected");
+    }
+
+    #[rstest]
+    fn merge_segment_hit_miss_mixed() {
+        // base has "abc", segment has "abc" (hit) + "xyz" (miss)
+        let base = make_ngram_index(&[("abc", &[1])]);
+        let segment = make_ngram_index(&[("abc", &[2]), ("xyz", &[3])]);
+        let _result = NgramSegmentOverlay::merge_segment_into(base, &segment);
+
+        let (hit, miss) = super::merge_segment_hit_miss_counts();
+        assert_eq!(hit + miss, 2, "total should be 2");
+        assert!(hit >= 1, "at least one hit expected for 'abc'");
+    }
+
+    #[rstest]
+    fn merge_segment_slice_merge_produces_correct_result() {
+        // Verify that the slice-based merge in merge_segment_into produces
+        // the same result as the original merge-based implementation
+        let base = make_ngram_index(&[("abc", &[1, 3, 5]), ("def", &[2, 4])]);
+        let segment = make_ngram_index(&[("abc", &[2, 4, 6]), ("ghi", &[7])]);
+        let result = NgramSegmentOverlay::merge_segment_into(base, &segment);
+
+        // abc: {1,3,5} U {2,4,6} = {1,2,3,4,5,6}
+        let key_abc = NgramKey::new("abc");
+        let abc_ids = sorted_ids(result.get(&key_abc).expect("abc present"));
+        let expected_abc: Vec<TaskId> = [1, 2, 3, 4, 5, 6]
+            .iter()
+            .map(|value| TaskId::from_uuid(Uuid::from_u128(*value)))
+            .collect();
+        assert_eq!(abc_ids, expected_abc);
+
+        // def: unchanged {2,4}
+        let key_def = NgramKey::new("def");
+        let def_ids = sorted_ids(result.get(&key_def).expect("def present"));
+        let expected_def: Vec<TaskId> = [2, 4]
+            .iter()
+            .map(|value| TaskId::from_uuid(Uuid::from_u128(*value)))
+            .collect();
+        assert_eq!(def_ids, expected_def);
+
+        // ghi: new key {7}
+        let key_ghi = NgramKey::new("ghi");
+        let ghi_ids = sorted_ids(result.get(&key_ghi).expect("ghi present"));
+        let expected_ghi: Vec<TaskId> =
+            vec![TaskId::from_uuid(Uuid::from_u128(7))];
+        assert_eq!(ghi_ids, expected_ghi);
+    }
+
+    #[rstest]
+    fn merge_segment_disjoint_concat_fast_path() {
+        // existing max < segment min -> disjoint concat
+        let base = make_ngram_index(&[("abc", &[1, 2, 3])]);
+        let segment = make_ngram_index(&[("abc", &[10, 11, 12])]);
+        let result = NgramSegmentOverlay::merge_segment_into(base, &segment);
+
+        let key = NgramKey::new("abc");
+        let ids = sorted_ids(result.get(&key).expect("abc present"));
+        let expected: Vec<TaskId> = [1, 2, 3, 10, 11, 12]
+            .iter()
+            .map(|value| TaskId::from_uuid(Uuid::from_u128(*value)))
+            .collect();
+        assert_eq!(ids, expected);
+    }
+
+    #[rstest]
+    fn merge_segment_disjoint_reversed_concat_fast_path() {
+        // segment max < existing min -> reversed disjoint concat
+        let base = make_ngram_index(&[("abc", &[10, 11, 12])]);
+        let segment = make_ngram_index(&[("abc", &[1, 2, 3])]);
+        let result = NgramSegmentOverlay::merge_segment_into(base, &segment);
+
+        let key = NgramKey::new("abc");
+        let ids = sorted_ids(result.get(&key).expect("abc present"));
+        let expected: Vec<TaskId> = [1, 2, 3, 10, 11, 12]
             .iter()
             .map(|value| TaskId::from_uuid(Uuid::from_u128(*value)))
             .collect();
