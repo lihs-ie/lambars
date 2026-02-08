@@ -194,11 +194,11 @@ pub struct AppState {
     pub applied_config: AppliedConfig,
     /// Counter for RCU retry events due to CAS failure (testing/monitoring).
     pub search_index_rcu_retries: Arc<AtomicUsize>,
-    /// Single-writer for search index updates (Phase 7-D).
+    /// Single-writer for search index updates.
     ///
     /// When `Some`, all index mutations are routed through the writer thread
-    /// to eliminate CAS retry overhead. When `None`, falls back to the legacy
-    /// RCU-based `ArcSwap::rcu` path for backward compatibility.
+    /// to eliminate CAS retry overhead. When `None`, falls back to the
+    /// RCU-based `ArcSwap::rcu` path.
     pub search_index_writer: Option<Arc<SearchIndexWriter>>,
 }
 
@@ -414,7 +414,6 @@ impl AppState {
 
         let search_index_arc = Arc::new(ArcSwap::from_pointee(search_index));
 
-        // Phase 7-D: Create single-writer for search index updates
         let search_index_writer = Arc::new(SearchIndexWriter::new(
             Arc::clone(&search_index_arc),
             SearchIndexWriterConfig::default(),
@@ -467,8 +466,10 @@ impl AppState {
     #[allow(clippy::needless_pass_by_value)] // Ownership needed for rcu retry via clone
     pub fn update_search_index(&self, change: TaskChange) {
         if let Some(writer) = &self.search_index_writer {
-            let _ = writer.send_change(change);
-            return;
+            if writer.send_change(change.clone()).is_ok() {
+                return;
+            }
+            tracing::error!("search_index_writer send failed; falling back to RCU path");
         }
         self.search_index.rcu(|current| {
             let updated = current.apply_change(change.clone());
@@ -515,13 +516,13 @@ impl AppState {
             return;
         }
 
-        // Phase 7-D: Route through single-writer if available
         if let Some(writer) = &self.search_index_writer {
-            let _ = writer.send_changes(changes.to_vec());
-            return;
+            if writer.send_changes(changes.to_vec()).is_ok() {
+                return;
+            }
+            tracing::error!("search_index_writer send failed; falling back to CAS path");
         }
 
-        // Legacy CAS-based path (fallback when writer is not configured)
         let change_count = changes.len();
         let total_start = std::time::Instant::now();
         let mut retry_count: u64 = 0;

@@ -1196,21 +1196,12 @@ type MutableIndex = std::collections::HashMap<NgramKey, Vec<TaskId>>;
 
 pub type PrefixIndex = PersistentTreeMap<NgramKey, TaskIdCollection>;
 
-// =============================================================================
-// Phase 7-B: merge_segment_into hit/miss instrumentation (test-only)
-// =============================================================================
-
 #[cfg(test)]
 thread_local! {
-    /// Number of keys in the last `merge_segment_into` call that hit an existing base key.
     static MERGE_SEGMENT_HIT_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    /// Number of keys in the last `merge_segment_into` call that missed (new key).
     static MERGE_SEGMENT_MISS_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// Returns `(hit_count, miss_count)` from the last `merge_segment_into` call.
-///
-/// Only available in `#[cfg(test)]`.
 #[cfg(test)]
 fn merge_segment_hit_miss_counts() -> (usize, usize) {
     let hit = MERGE_SEGMENT_HIT_COUNT.with(std::cell::Cell::get);
@@ -1342,10 +1333,6 @@ impl NgramSegmentOverlay {
     }
 
     /// Appends an add-only delta and compacts if needed.
-    ///
-    /// Combines `append_add_only` + `needs_compaction` + `compact_one` into a
-    /// single call, eliminating the repeated 4-line pattern in `apply_delta` /
-    /// `apply_delta_owned`.
     fn append_and_compact(&self, delta_ngram: NgramIndex) -> Self {
         if delta_ngram.is_empty() {
             return self.clone();
@@ -1472,22 +1459,19 @@ impl NgramSegmentOverlay {
 
     /// Merges two `TaskIdCollection`s using slice-based fast paths when possible.
     ///
-    /// Attempts to use `as_sorted_slice()` on both collections for zero-copy
-    /// access. When both are in Large state, uses disjoint concat or
+    /// When both collections are in Large state, uses disjoint concat or
     /// `merge_posting_add_only_into_slice`. Falls back to `OrderedUniqueSet::merge`
-    /// for Small state collections.
+    /// when both are Small.
     fn merge_posting_slice_or_fallback(
         existing: &TaskIdCollection,
         segment_collection: &TaskIdCollection,
         scratch: &mut Vec<TaskId>,
     ) -> TaskIdCollection {
-        // Try slice-based fast path for Large state collections
         match (
             existing.as_sorted_slice(),
             segment_collection.as_sorted_slice(),
         ) {
             (Some(existing_slice), Some(segment_slice)) => {
-                // Both Large: use disjoint concat or slice merge
                 let can_concat = existing_slice
                     .last()
                     .zip(segment_slice.first())
@@ -1518,36 +1502,29 @@ impl NgramSegmentOverlay {
 
                 TaskIdCollection::from_sorted_vec(std::mem::take(scratch))
             }
-            (Some(existing_slice), None) => {
-                // Existing is Large, segment is Small: collect segment and merge
-                let segment_vec: Vec<TaskId> =
+            (Some(left_slice), None) => {
+                let right_vec: Vec<TaskId> =
                     segment_collection.iter_sorted().cloned().collect();
-                scratch.clear();
-                scratch.reserve(existing_slice.len() + segment_vec.len());
-                SearchIndex::merge_posting_add_only_into_slice(
-                    existing_slice,
-                    &segment_vec,
-                    scratch,
-                );
-                TaskIdCollection::from_sorted_vec(std::mem::take(scratch))
+                Self::merge_slices_into(left_slice, &right_vec, scratch)
             }
-            (None, Some(segment_slice)) => {
-                // Existing is Small, segment is Large: collect existing and merge
-                let existing_vec: Vec<TaskId> = existing.iter_sorted().cloned().collect();
-                scratch.clear();
-                scratch.reserve(existing_vec.len() + segment_slice.len());
-                SearchIndex::merge_posting_add_only_into_slice(
-                    &existing_vec,
-                    segment_slice,
-                    scratch,
-                );
-                TaskIdCollection::from_sorted_vec(std::mem::take(scratch))
+            (None, Some(right_slice)) => {
+                let left_vec: Vec<TaskId> = existing.iter_sorted().cloned().collect();
+                Self::merge_slices_into(&left_vec, right_slice, scratch)
             }
-            (None, None) => {
-                // Both Small: use standard merge
-                existing.merge(segment_collection)
-            }
+            (None, None) => existing.merge(segment_collection),
         }
+    }
+
+    /// Merges two sorted slices into a `TaskIdCollection` using scratch buffer.
+    fn merge_slices_into(
+        left: &[TaskId],
+        right: &[TaskId],
+        scratch: &mut Vec<TaskId>,
+    ) -> TaskIdCollection {
+        scratch.clear();
+        scratch.reserve(left.len() + right.len());
+        SearchIndex::merge_posting_add_only_into_slice(left, right, scratch);
+        TaskIdCollection::from_sorted_vec(std::mem::take(scratch))
     }
 }
 
@@ -1566,8 +1543,6 @@ fn merge_postings_multiway(posting_lists: &[&TaskIdCollection]) -> TaskIdCollect
         1 => posting_lists[0].clone(),
         2 => posting_lists[0].merge(posting_lists[1]),
         _ => {
-            // Sort indices by posting list size (smallest first) to minimise
-            // total comparison count across sequential merges.
             let mut indices: Vec<usize> = (0..posting_lists.len()).collect();
             indices.sort_unstable_by_key(|&index| posting_lists[index].len());
 
@@ -7535,18 +7510,26 @@ impl SearchIndexWriter {
     ///
     /// Panics if the OS fails to spawn the writer thread.
     #[must_use]
+    #[allow(clippy::needless_pass_by_value)] // config is consumed to normalize and move into spawned thread
     pub fn new(
         search_index: Arc<arc_swap::ArcSwap<SearchIndex>>,
         config: SearchIndexWriterConfig,
     ) -> Self {
+        // Normalize boundary values to prevent zero-size batch or channel.
+        let normalized_config = SearchIndexWriterConfig {
+            batch_size: config.batch_size.max(1),
+            channel_capacity: config.channel_capacity.max(1),
+            ..config
+        };
+
         let (sender, receiver) = std::sync::mpsc::sync_channel::<Vec<TaskChange>>(
-            config.channel_capacity,
+            normalized_config.channel_capacity,
         );
 
         let handle = std::thread::Builder::new()
             .name("search-index-writer".to_string())
             .spawn(move || {
-                Self::writer_loop(receiver, search_index, &config);
+                Self::writer_loop(receiver, search_index, &normalized_config);
             })
             .expect("Failed to spawn search-index-writer thread");
 
@@ -7603,20 +7586,7 @@ impl SearchIndexWriter {
     ///
     /// Panics if the internal mutexes are poisoned.
     pub fn shutdown(&self) {
-        // Drop sender first to close the channel
-        {
-            let mut sender_guard = self.sender.lock().expect("SearchIndexWriter sender mutex poisoned");
-            sender_guard.take(); // Drop the sender, closing the channel
-        }
-
-        // Then join the writer thread
-        let handle = {
-            let mut handle_guard = self.handle.lock().expect("SearchIndexWriter handle mutex poisoned");
-            handle_guard.take()
-        };
-        if let Some(handle) = handle {
-            let _ = handle.join();
-        }
+        self.close_and_join();
     }
 
     /// The writer thread's main loop.
@@ -7637,11 +7607,20 @@ impl SearchIndexWriter {
                 break; // Channel closed, exit loop
             };
 
-            // Coalesce additional change sets within the timeout window
+            // Coalesce additional change sets within the timeout window.
+            // Use a fixed deadline from the first message arrival so that a
+            // continuous stream of small inputs cannot extend the batch window
+            // beyond `batch_timeout`.
             let mut coalesced_changes = first_changes;
+            let deadline = std::time::Instant::now() + batch_timeout;
 
             for _ in 1..config.batch_size {
-                match receiver.recv_timeout(batch_timeout) {
+                let now = std::time::Instant::now();
+                if now >= deadline {
+                    break;
+                }
+                let remaining = deadline.saturating_duration_since(now);
+                match receiver.recv_timeout(remaining) {
                     Ok(more_changes) => {
                         coalesced_changes.extend(more_changes);
                     }
@@ -7678,7 +7657,6 @@ impl SearchIndexWriter {
         let updated = current.apply_changes(changes);
         let apply_elapsed = apply_start.elapsed();
 
-        // Single-writer: no CAS needed, just store directly
         search_index.store(Arc::new(updated));
 
         let total_elapsed = total_start.elapsed();
@@ -7692,24 +7670,27 @@ impl SearchIndexWriter {
             "search_index_writer batch applied"
         );
     }
-}
 
-impl Drop for SearchIndexWriter {
-    fn drop(&mut self) {
-        // Drop sender to close the channel (causes writer thread to exit after draining)
+    /// Drops the sender to close the channel and joins the writer thread.
+    fn close_and_join(&self) {
         {
             let mut sender_guard = self.sender.lock().expect("SearchIndexWriter sender mutex poisoned");
             sender_guard.take();
         }
 
-        // Join the writer thread
         let handle = {
-            let mut guard = self.handle.lock().expect("SearchIndexWriter handle mutex poisoned");
-            guard.take()
+            let mut handle_guard = self.handle.lock().expect("SearchIndexWriter handle mutex poisoned");
+            handle_guard.take()
         };
         if let Some(handle) = handle {
             let _ = handle.join();
         }
+    }
+}
+
+impl Drop for SearchIndexWriter {
+    fn drop(&mut self) {
+        self.close_and_join();
     }
 }
 
@@ -14806,7 +14787,7 @@ mod add_remove_task_tests {
 }
 
 // =============================================================================
-// Phase 7: Compatibility Tests (Differential Testing)
+// Compatibility Tests (Differential Testing)
 // =============================================================================
 
 #[cfg(test)]

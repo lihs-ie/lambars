@@ -351,7 +351,6 @@ impl<T: Clone + Eq + Hash + Ord> OrderedUniqueSet<T> {
                 }
 
                 if vec.len() >= SMALL_THRESHOLD {
-                    // Transition to Large state: create sorted vec
                     let mut sorted: Vec<T> = vec.iter().cloned().collect();
                     sorted.push(element);
                     sorted.sort();
@@ -650,19 +649,15 @@ impl<T: Clone + Eq + Hash + Ord> OrderedUniqueSet<T> {
                 inner: SortedIteratorInner::Empty,
             },
             OrderedUniqueSetInner::Small(vec) => {
-                // Use SmallVec for temporary sorted storage to avoid heap allocation
                 let mut sorted: SmallVec<[&T; SMALL_THRESHOLD]> = vec.iter().collect();
                 sorted.sort_unstable();
                 OrderedUniqueSetSortedIterator {
                     inner: SortedIteratorInner::Small(sorted, 0),
                 }
             }
-            OrderedUniqueSetInner::Large(sorted_vec) => {
-                // For Large state, elements are already sorted - just iterate over slice
-                OrderedUniqueSetSortedIterator {
-                    inner: SortedIteratorInner::Large(sorted_vec.as_slice().iter()),
-                }
-            }
+            OrderedUniqueSetInner::Large(sorted_vec) => OrderedUniqueSetSortedIterator {
+                inner: SortedIteratorInner::Large(sorted_vec.as_slice().iter()),
+            },
         }
     }
 
@@ -838,10 +833,7 @@ impl<T: Clone + Eq + Hash + Ord> OrderedUniqueSet<T> {
                 result.sort();
                 result
             }
-            OrderedUniqueSetInner::Large(sorted_vec) => {
-                // Already sorted, just clone
-                sorted_vec.as_slice().to_vec()
-            }
+            OrderedUniqueSetInner::Large(sorted_vec) => sorted_vec.as_slice().to_vec(),
         }
     }
 
@@ -882,25 +874,7 @@ impl<T: Clone + Eq + Hash + Ord> OrderedUniqueSet<T> {
         if other.is_empty() {
             return self.clone();
         }
-
-        let left_owned;
-        let left_slice = if let OrderedUniqueSetInner::Large(sorted_vec) = &self.inner {
-            sorted_vec.as_slice()
-        } else {
-            left_owned = self.to_sorted_vec();
-            left_owned.as_slice()
-        };
-
-        let right_owned;
-        let right_slice = if let OrderedUniqueSetInner::Large(sorted_vec) = &other.inner {
-            sorted_vec.as_slice()
-        } else {
-            right_owned = other.to_sorted_vec();
-            right_owned.as_slice()
-        };
-
-        let result = merge_slices(left_slice, right_slice);
-        Self::from_sorted_vec(result)
+        self.with_sorted_slices(other, merge_slices)
     }
 
     /// Returns the set difference (self - other).
@@ -927,25 +901,7 @@ impl<T: Clone + Eq + Hash + Ord> OrderedUniqueSet<T> {
         if self.is_empty() || other.is_empty() {
             return self.clone();
         }
-
-        let left_owned;
-        let left_slice = if let OrderedUniqueSetInner::Large(sorted_vec) = &self.inner {
-            sorted_vec.as_slice()
-        } else {
-            left_owned = self.to_sorted_vec();
-            left_owned.as_slice()
-        };
-
-        let right_owned;
-        let right_slice = if let OrderedUniqueSetInner::Large(sorted_vec) = &other.inner {
-            sorted_vec.as_slice()
-        } else {
-            right_owned = other.to_sorted_vec();
-            right_owned.as_slice()
-        };
-
-        let result = difference_slices(left_slice, right_slice);
-        Self::from_sorted_vec(result)
+        self.with_sorted_slices(other, difference_slices)
     }
 
     /// Returns the set intersection (self & other).
@@ -972,7 +928,14 @@ impl<T: Clone + Eq + Hash + Ord> OrderedUniqueSet<T> {
         if self.is_empty() || other.is_empty() {
             return Self::new();
         }
+        self.with_sorted_slices(other, intersection_slices)
+    }
 
+    /// Applies a binary slice operation on two sets by extracting sorted slices.
+    ///
+    /// For Large state, zero-copy slice access is used.
+    /// For Small/Empty states, a temporary sorted Vec is materialized.
+    fn with_sorted_slices(&self, other: &Self, operation: fn(&[T], &[T]) -> Vec<T>) -> Self {
         let left_owned;
         let left_slice = if let OrderedUniqueSetInner::Large(sorted_vec) = &self.inner {
             sorted_vec.as_slice()
@@ -989,8 +952,7 @@ impl<T: Clone + Eq + Hash + Ord> OrderedUniqueSet<T> {
             right_owned.as_slice()
         };
 
-        let result = intersection_slices(left_slice, right_slice);
-        Self::from_sorted_vec(result)
+        Self::from_sorted_vec(operation(left_slice, right_slice))
     }
 }
 
@@ -1143,8 +1105,6 @@ fn merge_slices<T: Clone + Ord>(left: &[T], right: &[T]) -> Vec<T> {
         return left.to_vec();
     }
 
-    // Disjoint fast path: no overlap between ranges
-    // SAFETY: Both slices are non-empty (checked above), so last()/first() are safe.
     if left.last().unwrap() < right.first().unwrap() {
         let mut result = Vec::with_capacity(left.len() + right.len());
         result.extend_from_slice(left);
@@ -1158,7 +1118,6 @@ fn merge_slices<T: Clone + Ord>(left: &[T], right: &[T]) -> Vec<T> {
         return result;
     }
 
-    // General two-pointer merge with deduplication
     let mut result = Vec::with_capacity(left.len() + right.len());
     let mut left_index = 0;
     let mut right_index = 0;
@@ -1181,7 +1140,6 @@ fn merge_slices<T: Clone + Ord>(left: &[T], right: &[T]) -> Vec<T> {
         }
     }
 
-    // Tail: copy remaining elements in bulk
     if left_index < left.len() {
         result.extend_from_slice(&left[left_index..]);
     }
@@ -1213,7 +1171,6 @@ fn difference_slices<T: Clone + Ord>(left: &[T], right: &[T]) -> Vec<T> {
         return left.to_vec();
     }
 
-    // Disjoint fast path: if ranges don't overlap, left is entirely the result
     if left.last().unwrap() < right.first().unwrap()
         || right.last().unwrap() < left.first().unwrap()
     {
@@ -1240,7 +1197,6 @@ fn difference_slices<T: Clone + Ord>(left: &[T], right: &[T]) -> Vec<T> {
         }
     }
 
-    // Remaining left elements are all in the difference
     if left_index < left.len() {
         result.extend_from_slice(&left[left_index..]);
     }
@@ -1266,7 +1222,6 @@ fn intersection_slices<T: Clone + Ord>(left: &[T], right: &[T]) -> Vec<T> {
         return Vec::new();
     }
 
-    // Disjoint fast path: if ranges don't overlap, intersection is empty
     if left.last().unwrap() < right.first().unwrap()
         || right.last().unwrap() < left.first().unwrap()
     {
