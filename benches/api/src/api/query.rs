@@ -1977,41 +1977,12 @@ impl SearchIndexBulkBuilder {
 ///
 /// # Complexity
 ///
-#[cfg(test)]
 #[must_use]
 fn merge_sorted_posting_lists(
     existing: &TaskIdCollection,
     new_entries: &TaskIdCollection,
 ) -> TaskIdCollection {
     existing.merge(new_entries)
-}
-
-/// Merges two sorted posting lists using concat when `max(existing) < min(add)`,
-/// falling back to [`OrderedUniqueSet::merge`] otherwise.
-///
-/// # Preconditions
-///
-/// Both `existing` and `add` must be sorted ascending with no internal duplicates.
-#[must_use]
-fn append_or_merge_sorted(
-    existing: &TaskIdCollection,
-    add: &TaskIdCollection,
-) -> TaskIdCollection {
-    // Use O(1) accessors for Large state instead of O(n) iter_sorted().last()
-    let can_concat = match (existing.last_sorted(), add.first_sorted()) {
-        (Some(existing_max), Some(add_min)) => existing_max < add_min,
-        // Either side is empty, so concat is safe
-        (None, _) | (_, None) => true,
-    };
-
-    if can_concat {
-        let mut result = Vec::with_capacity(existing.len() + add.len());
-        result.extend(existing.iter_sorted().cloned());
-        result.extend(add.iter_sorted().cloned());
-        TaskIdCollection::from_sorted_vec(result)
-    } else {
-        existing.merge(add)
-    }
 }
 
 /// Keys added during an Update operation, used for remove entry cancellation.
@@ -5276,7 +5247,8 @@ impl SearchIndex {
     fn apply_changes_delta(&self, changes: &[TaskChange]) -> Self {
         let mut delta = SearchIndexDelta::from_changes(changes, &self.config, &self.tasks_by_id);
         delta.prepare_posting_lists();
-        self.apply_delta(&delta, changes)
+        // TB5-008: Use owned path to avoid add_list.clone() on miss path.
+        self.apply_delta_owned(delta, changes)
     }
 
     /// Applies changes using the bulk path (optimized for Add-only batches).
@@ -5363,7 +5335,8 @@ impl SearchIndex {
         let mut delta =
             SearchIndexDelta::from_changes_without_ngrams(changes, &self.config, &self.tasks_by_id);
         delta.prepare_posting_lists();
-        let base_result = self.apply_delta(&delta, changes);
+        // TB5-008: Use owned path to avoid add_list.clone() on miss path.
+        let base_result = self.apply_delta_owned(delta, changes);
 
         Ok(Self {
             title_word_ngram_index,
@@ -5411,7 +5384,7 @@ impl SearchIndex {
             let merged = existing_index.get(ngram_key.as_str()).map_or_else(
                 || bulk_posting_list.clone(),
                 |existing_posting_list| {
-                    append_or_merge_sorted(existing_posting_list, bulk_posting_list)
+                    merge_sorted_posting_lists(existing_posting_list, bulk_posting_list)
                 },
             );
             entries.push((ngram_key.clone(), merged));
@@ -5482,8 +5455,9 @@ impl SearchIndex {
         // Sort and deduplicate posting lists to satisfy merge preconditions
         delta.prepare_posting_lists();
 
+        // TB5-008: Use owned path to avoid add_list.clone() on miss path.
         let (result, merge_calls_total, merge_elapsed_ms) =
-            self.apply_delta_with_metrics(&delta, changes);
+            self.apply_delta_owned_with_metrics(delta, changes);
 
         metrics.merge_calls_total = merge_calls_total;
         metrics.merge_elapsed_ms = merge_elapsed_ms;
@@ -5613,7 +5587,89 @@ impl SearchIndex {
         }
     }
 
-    /// Applies a pre-computed `SearchIndexDelta` to this index with merge metrics collection.
+    /// Applies a pre-computed `SearchIndexDelta` to this index, consuming the delta.
+    ///
+    /// This is the owned variant of [`apply_delta`]. When the delta is add-only,
+    /// it uses `into_iter()` on each `MutableIndex` to avoid cloning posting lists
+    /// on the miss path. For non-add-only deltas, it falls back to `apply_delta`.
+    #[must_use]
+    #[allow(clippy::too_many_lines)]
+    pub fn apply_delta_owned(&self, delta: SearchIndexDelta, changes: &[TaskChange]) -> Self {
+        #[cfg(debug_assertions)]
+        delta.debug_assert_prepared();
+
+        if !delta.is_add_only() {
+            return self.apply_delta(&delta, changes);
+        }
+
+        // TB5-008: Destructure delta to consume add fields by value.
+        let SearchIndexDelta {
+            title_full_add,
+            title_full_remove: _,
+            title_word_add,
+            title_word_remove: _,
+            tag_add,
+            tag_remove: _,
+            title_full_ngram_add,
+            title_full_ngram_remove: _,
+            title_word_ngram_add,
+            title_word_ngram_remove: _,
+            tag_ngram_add,
+            tag_ngram_remove: _,
+            title_full_all_suffix_add,
+            title_full_all_suffix_remove: _,
+            title_word_all_suffix_add,
+            title_word_all_suffix_remove: _,
+            tag_all_suffix_add,
+            tag_all_suffix_remove: _,
+        } = delta;
+
+        Self {
+            tasks_by_id: self.update_tasks_by_id(changes),
+            title_full_index: Self::merge_index_delta_add_only_owned(
+                &self.title_full_index,
+                title_full_add,
+            ),
+            title_word_index: Self::merge_index_delta_add_only_owned(
+                &self.title_word_index,
+                title_word_add,
+            ),
+            tag_index: Self::merge_index_delta_add_only_owned(&self.tag_index, tag_add),
+            title_full_ngram_index: Self::merge_ngram_delta_add_only_owned(
+                &self.title_full_ngram_index,
+                title_full_ngram_add,
+                &self.config,
+            )
+            .into_index(),
+            title_word_ngram_index: Self::merge_ngram_delta_add_only_owned(
+                &self.title_word_ngram_index,
+                title_word_ngram_add,
+                &self.config,
+            )
+            .into_index(),
+            tag_ngram_index: Self::merge_ngram_delta_add_only_owned(
+                &self.tag_ngram_index,
+                tag_ngram_add,
+                &self.config,
+            )
+            .into_index(),
+            title_full_all_suffix_index: Self::merge_index_delta_add_only_owned(
+                &self.title_full_all_suffix_index,
+                title_full_all_suffix_add,
+            ),
+            title_word_all_suffix_index: Self::merge_index_delta_add_only_owned(
+                &self.title_word_all_suffix_index,
+                title_word_all_suffix_add,
+            ),
+            tag_all_suffix_index: Self::merge_index_delta_add_only_owned(
+                &self.tag_all_suffix_index,
+                tag_all_suffix_add,
+            ),
+            config: self.config.clone(),
+        }
+    }
+
+    /// Applies a pre-computed `SearchIndexDelta` to this index with merge metrics collection (borrowed).
     #[must_use]
     pub fn apply_delta_with_metrics(
         &self,
@@ -5623,6 +5679,21 @@ impl SearchIndex {
         const MERGE_CALLS_TOTAL: usize = 9;
         let start = std::time::Instant::now();
         let result = self.apply_delta(delta, changes);
+        (result, MERGE_CALLS_TOTAL, start.elapsed().as_millis())
+    }
+
+    /// Applies a pre-computed `SearchIndexDelta` to this index with merge metrics collection (owned).
+    ///
+    /// Uses `apply_delta_owned` to eliminate `add_list.clone()` on the miss path.
+    #[must_use]
+    pub fn apply_delta_owned_with_metrics(
+        &self,
+        delta: SearchIndexDelta,
+        changes: &[TaskChange],
+    ) -> (Self, usize, u128) {
+        const MERGE_CALLS_TOTAL: usize = 9;
+        let start = std::time::Instant::now();
+        let result = self.apply_delta_owned(delta, changes);
         (result, MERGE_CALLS_TOTAL, start.elapsed().as_millis())
     }
 
@@ -6155,20 +6226,41 @@ impl SearchIndex {
         for (key, add_list) in add {
             let key_str = key.as_str();
             match transient.get(key_str) {
-                Some(collection) => {
-                    Self::merge_posting_add_only_into(
-                        collection.iter_sorted(),
-                        add_list.as_slice(),
-                        &mut scratch,
-                    );
-                    if !scratch.is_empty() {
-                        // Move data out while preserving scratch capacity for reuse
-                        let mut collected = Vec::with_capacity(scratch.len());
-                        collected.append(&mut scratch);
-                        let collection =
-                            TaskIdCollection::from_sorted_vec(collected);
-                        transient.insert(key.clone(), collection);
+                Some(collection) if !add_list.is_empty() => {
+                    // TB5-011: concat fast-path -- when all add elements are
+                    // greater than the existing maximum, skip two-pointer merge.
+                    let can_concat = collection
+                        .last_sorted()
+                        .zip(add_list.first())
+                        .is_none_or(|(existing_max, add_min)| add_min > existing_max);
+
+                    if can_concat {
+                        let mut result_vec =
+                            Vec::with_capacity(collection.len() + add_list.len());
+                        result_vec.extend(collection.iter_sorted().cloned());
+                        result_vec.extend(add_list.iter().cloned());
+                        transient.insert(
+                            key.clone(),
+                            TaskIdCollection::from_sorted_vec(result_vec),
+                        );
+                    } else {
+                        Self::merge_posting_add_only_into(
+                            collection.iter_sorted(),
+                            add_list.as_slice(),
+                            &mut scratch,
+                        );
+                        if !scratch.is_empty() {
+                            let mut collected = Vec::with_capacity(scratch.len());
+                            collected.append(&mut scratch);
+                            transient.insert(
+                                key.clone(),
+                                TaskIdCollection::from_sorted_vec(collected),
+                            );
+                        }
                     }
+                }
+                Some(_collection) => {
+                    // add_list is empty -- nothing to merge
                 }
                 // TB4-001: Direct build from add_list without merge loop.
                 // clone() is required because MutableIndex is borrowed; the memcpy cost
@@ -6176,6 +6268,73 @@ impl SearchIndex {
                 None if !add_list.is_empty() => {
                     let collection = TaskIdCollection::from_sorted_vec(add_list.clone());
                     transient.insert(key.clone(), collection);
+                }
+                None => {}
+            }
+        }
+
+        transient.persistent()
+    }
+
+    /// Computes `existing ∪ add` for a `PrefixIndex` (add-only fast path, owned variant).
+    ///
+    /// Unlike [`merge_index_delta_add_only`], this method consumes the `MutableIndex`
+    /// via `into_iter()`, eliminating `add_list.clone()` on the miss path.
+    /// The hit path also benefits by taking `&add_list` without cloning.
+    fn merge_index_delta_add_only_owned(
+        index: &PrefixIndex,
+        add: MutableIndex,
+    ) -> PrefixIndex {
+        if add.is_empty() {
+            return index.clone();
+        }
+
+        let mut transient = index.clone().transient();
+        let mut scratch: Vec<TaskId> = Vec::new();
+
+        for (key, add_list) in add {
+            let key_str = key.as_str();
+            match transient.get(key_str) {
+                Some(collection) if !add_list.is_empty() => {
+                    // TB5-011: concat fast-path (owned) -- skip two-pointer
+                    // merge when all add elements exceed the existing maximum.
+                    let can_concat = collection
+                        .last_sorted()
+                        .zip(add_list.first())
+                        .is_none_or(|(existing_max, add_min)| add_min > existing_max);
+
+                    if can_concat {
+                        let mut result_vec =
+                            Vec::with_capacity(collection.len() + add_list.len());
+                        result_vec.extend(collection.iter_sorted().cloned());
+                        result_vec.extend(add_list);
+                        transient.insert(
+                            key,
+                            TaskIdCollection::from_sorted_vec(result_vec),
+                        );
+                    } else {
+                        Self::merge_posting_add_only_into(
+                            collection.iter_sorted(),
+                            add_list.as_slice(),
+                            &mut scratch,
+                        );
+                        if !scratch.is_empty() {
+                            let mut collected = Vec::with_capacity(scratch.len());
+                            collected.append(&mut scratch);
+                            transient.insert(
+                                key,
+                                TaskIdCollection::from_sorted_vec(collected),
+                            );
+                        }
+                    }
+                }
+                Some(_collection) => {
+                    // add_list is empty -- nothing to merge
+                }
+                // TB5-006: Owned variant - move add_list directly without clone.
+                None if !add_list.is_empty() => {
+                    let collection = TaskIdCollection::from_sorted_vec(add_list);
+                    transient.insert(key, collection);
                 }
                 None => {}
             }
@@ -6211,20 +6370,41 @@ impl SearchIndex {
         for (key, add_list) in add {
             let key_str = key.as_str();
             match result.get(key_str) {
-                Some(collection) => {
-                    Self::merge_posting_add_only_into(
-                        collection.iter_sorted(),
-                        add_list.as_slice(),
-                        &mut scratch,
-                    );
-                    if !scratch.is_empty() {
-                        // Move data out while preserving scratch capacity for reuse
-                        let mut collected = Vec::with_capacity(scratch.len());
-                        collected.append(&mut scratch);
-                        let collection =
-                            TaskIdCollection::from_sorted_vec(collected);
-                        result.insert(key.clone(), collection);
+                Some(collection) if !add_list.is_empty() => {
+                    // TB5-011: concat fast-path -- skip two-pointer merge
+                    // when all add elements exceed the existing maximum.
+                    let can_concat = collection
+                        .last_sorted()
+                        .zip(add_list.first())
+                        .is_none_or(|(existing_max, add_min)| add_min > existing_max);
+
+                    if can_concat {
+                        let mut result_vec =
+                            Vec::with_capacity(collection.len() + add_list.len());
+                        result_vec.extend(collection.iter_sorted().cloned());
+                        result_vec.extend(add_list.iter().cloned());
+                        result.insert(
+                            key.clone(),
+                            TaskIdCollection::from_sorted_vec(result_vec),
+                        );
+                    } else {
+                        Self::merge_posting_add_only_into(
+                            collection.iter_sorted(),
+                            add_list.as_slice(),
+                            &mut scratch,
+                        );
+                        if !scratch.is_empty() {
+                            let mut collected = Vec::with_capacity(scratch.len());
+                            collected.append(&mut scratch);
+                            result.insert(
+                                key.clone(),
+                                TaskIdCollection::from_sorted_vec(collected),
+                            );
+                        }
                     }
+                }
+                Some(_collection) => {
+                    // add_list is empty -- nothing to merge
                 }
                 // TB4-001: Direct build from add_list without merge loop.
                 // clone() is required because MutableIndex is borrowed; the memcpy cost
@@ -6253,20 +6433,41 @@ impl SearchIndex {
         for (key, add_list) in add {
             let key_str = key.as_str();
             match result.get(key_str) {
-                Some(collection) => {
-                    Self::merge_posting_add_only_into(
-                        collection.iter_sorted(),
-                        add_list.as_slice(),
-                        &mut scratch,
-                    );
-                    if !scratch.is_empty() {
-                        // Move data out while preserving scratch capacity for reuse
-                        let mut collected = Vec::with_capacity(scratch.len());
-                        collected.append(&mut scratch);
-                        let collection =
-                            TaskIdCollection::from_sorted_vec(collected);
-                        entries_to_insert.push((key.clone(), collection));
+                Some(collection) if !add_list.is_empty() => {
+                    // TB5-011: concat fast-path -- skip two-pointer merge
+                    // when all add elements exceed the existing maximum.
+                    let can_concat = collection
+                        .last_sorted()
+                        .zip(add_list.first())
+                        .is_none_or(|(existing_max, add_min)| add_min > existing_max);
+
+                    if can_concat {
+                        let mut result_vec =
+                            Vec::with_capacity(collection.len() + add_list.len());
+                        result_vec.extend(collection.iter_sorted().cloned());
+                        result_vec.extend(add_list.iter().cloned());
+                        entries_to_insert.push((
+                            key.clone(),
+                            TaskIdCollection::from_sorted_vec(result_vec),
+                        ));
+                    } else {
+                        Self::merge_posting_add_only_into(
+                            collection.iter_sorted(),
+                            add_list.as_slice(),
+                            &mut scratch,
+                        );
+                        if !scratch.is_empty() {
+                            let mut collected = Vec::with_capacity(scratch.len());
+                            collected.append(&mut scratch);
+                            entries_to_insert.push((
+                                key.clone(),
+                                TaskIdCollection::from_sorted_vec(collected),
+                            ));
+                        }
                     }
+                }
+                Some(_collection) => {
+                    // add_list is empty -- nothing to merge
                 }
                 // TB4-001: Direct build from add_list without merge loop.
                 // clone() is required because MutableIndex is borrowed; the memcpy cost
@@ -6292,6 +6493,179 @@ impl SearchIndex {
                 let fallback = Self::merge_ngram_delta_add_only_individual(index, add).into_index();
                 return MergeNgramDeltaResult::Fallback {
                     index: fallback,
+                    reason: MergeNgramDeltaFallbackReason::TooManyEntries {
+                        count: insert_count,
+                        limit: CHUNK_SIZE,
+                    },
+                };
+            }
+        }
+
+        MergeNgramDeltaResult::Ok(result.persistent())
+    }
+
+    /// Computes `existing ∪ add` for a `NgramIndex` (add-only fast path, owned variant).
+    ///
+    /// Unlike [`merge_ngram_delta_add_only`], this method consumes the `MutableIndex`
+    /// via `into_iter()`, eliminating `add_list.clone()` on the miss path.
+    fn merge_ngram_delta_add_only_owned(
+        index: &NgramIndex,
+        add: MutableIndex,
+        config: &SearchIndexConfig,
+    ) -> MergeNgramDeltaResult {
+        if add.is_empty() {
+            return MergeNgramDeltaResult::Ok(index.clone());
+        }
+
+        if config.use_merge_ngram_delta_bulk_insert {
+            Self::merge_ngram_delta_add_only_bulk_owned(index, add)
+        } else {
+            Self::merge_ngram_delta_add_only_individual_owned(index, add)
+        }
+    }
+
+    /// Owned variant of `merge_ngram_delta_add_only_individual`.
+    ///
+    /// Consumes the `MutableIndex` to avoid cloning posting lists on the miss path.
+    fn merge_ngram_delta_add_only_individual_owned(
+        index: &NgramIndex,
+        add: MutableIndex,
+    ) -> MergeNgramDeltaResult {
+        let mut result = index.clone().transient();
+        let mut scratch: Vec<TaskId> = Vec::new();
+
+        for (key, add_list) in add {
+            let key_str = key.as_str();
+            match result.get(key_str) {
+                Some(collection) if !add_list.is_empty() => {
+                    // TB5-011: concat fast-path (owned) -- skip two-pointer
+                    // merge when all add elements exceed the existing maximum.
+                    let can_concat = collection
+                        .last_sorted()
+                        .zip(add_list.first())
+                        .is_none_or(|(existing_max, add_min)| add_min > existing_max);
+
+                    if can_concat {
+                        let mut result_vec =
+                            Vec::with_capacity(collection.len() + add_list.len());
+                        result_vec.extend(collection.iter_sorted().cloned());
+                        result_vec.extend(add_list);
+                        result.insert(
+                            key,
+                            TaskIdCollection::from_sorted_vec(result_vec),
+                        );
+                    } else {
+                        Self::merge_posting_add_only_into(
+                            collection.iter_sorted(),
+                            add_list.as_slice(),
+                            &mut scratch,
+                        );
+                        if !scratch.is_empty() {
+                            let mut collected = Vec::with_capacity(scratch.len());
+                            collected.append(&mut scratch);
+                            result.insert(
+                                key,
+                                TaskIdCollection::from_sorted_vec(collected),
+                            );
+                        }
+                    }
+                }
+                Some(_collection) => {
+                    // add_list is empty -- nothing to merge
+                }
+                // TB5-007: Owned variant - move add_list directly without clone.
+                None if !add_list.is_empty() => {
+                    let collection = TaskIdCollection::from_sorted_vec(add_list);
+                    result.insert(key, collection);
+                }
+                None => {}
+            }
+        }
+
+        MergeNgramDeltaResult::Ok(result.persistent())
+    }
+
+    /// Owned variant of `merge_ngram_delta_add_only_bulk`.
+    ///
+    /// Consumes the `MutableIndex` to avoid cloning posting lists on the miss path.
+    /// On bulk insert failure, falls back to individual owned insertion from the
+    /// original index. This mirrors the non-owned bulk variant's fallback strategy.
+    fn merge_ngram_delta_add_only_bulk_owned(
+        index: &NgramIndex,
+        add: MutableIndex,
+    ) -> MergeNgramDeltaResult {
+        const CHUNK_SIZE: usize = MAX_BULK_INSERT - 1;
+
+        let mut result = index.clone().transient();
+        let mut entries_to_insert: Vec<(NgramKey, TaskIdCollection)> = Vec::new();
+        let mut scratch: Vec<TaskId> = Vec::new();
+
+        for (key, add_list) in add {
+            let key_str = key.as_str();
+            match result.get(key_str) {
+                Some(collection) if !add_list.is_empty() => {
+                    // TB5-011: concat fast-path (owned) -- skip two-pointer
+                    // merge when all add elements exceed the existing maximum.
+                    let can_concat = collection
+                        .last_sorted()
+                        .zip(add_list.first())
+                        .is_none_or(|(existing_max, add_min)| add_min > existing_max);
+
+                    if can_concat {
+                        let mut result_vec =
+                            Vec::with_capacity(collection.len() + add_list.len());
+                        result_vec.extend(collection.iter_sorted().cloned());
+                        result_vec.extend(add_list);
+                        entries_to_insert.push((
+                            key,
+                            TaskIdCollection::from_sorted_vec(result_vec),
+                        ));
+                    } else {
+                        Self::merge_posting_add_only_into(
+                            collection.iter_sorted(),
+                            add_list.as_slice(),
+                            &mut scratch,
+                        );
+                        if !scratch.is_empty() {
+                            let mut collected = Vec::with_capacity(scratch.len());
+                            collected.append(&mut scratch);
+                            entries_to_insert.push((
+                                key,
+                                TaskIdCollection::from_sorted_vec(collected),
+                            ));
+                        }
+                    }
+                }
+                Some(_collection) => {
+                    // add_list is empty -- nothing to merge
+                }
+                // TB5-007: Owned variant - move add_list directly without clone.
+                None if !add_list.is_empty() => {
+                    let collection = TaskIdCollection::from_sorted_vec(add_list);
+                    entries_to_insert.push((key, collection));
+                }
+                None => {}
+            }
+        }
+
+        let mut entries_iterator = entries_to_insert.into_iter();
+        loop {
+            let chunk_vec: Vec<_> = entries_iterator.by_ref().take(CHUNK_SIZE).collect();
+            if chunk_vec.is_empty() {
+                break;
+            }
+            let insert_count = chunk_vec.len();
+            if let Ok(updated) = result.insert_bulk_owned(chunk_vec) {
+                result = updated;
+            } else {
+                // Fallback: bulk insert failed. Rebuild from index using individual inserts.
+                // Re-insert all collected entries one by one into a fresh transient.
+                let mut fallback_result = index.clone().transient();
+                for (key, collection) in entries_iterator {
+                    fallback_result.insert(key, collection);
+                }
+                return MergeNgramDeltaResult::Fallback {
+                    index: fallback_result.persistent(),
                     reason: MergeNgramDeltaFallbackReason::TooManyEntries {
                         count: insert_count,
                         limit: CHUNK_SIZE,
@@ -6439,6 +6813,33 @@ impl SearchIndex {
         add: &MutableIndex,
     ) -> MergeNgramDeltaResult {
         Self::merge_ngram_delta_add_only_bulk(index, add)
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub fn merge_index_delta_add_only_owned_for_test(
+        index: &PrefixIndex,
+        add: MutableIndex,
+    ) -> PrefixIndex {
+        Self::merge_index_delta_add_only_owned(index, add)
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub fn merge_ngram_delta_add_only_individual_owned_for_test(
+        index: &NgramIndex,
+        add: MutableIndex,
+    ) -> MergeNgramDeltaResult {
+        Self::merge_ngram_delta_add_only_individual_owned(index, add)
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub fn merge_ngram_delta_add_only_bulk_owned_for_test(
+        index: &NgramIndex,
+        add: MutableIndex,
+    ) -> MergeNgramDeltaResult {
+        Self::merge_ngram_delta_add_only_bulk_owned(index, add)
     }
 }
 
@@ -6848,22 +7249,22 @@ pub async fn search_tasks(
 
     // Check cache first (optional optimization for repeated queries)
     // Cache stores page-specific results (with limit/offset applied), so no re-pagination needed.
-    if let Some(ref key) = cache_key {
-        if let Some(cached_result) = state.search_cache.get(key) {
-            tracing::debug!(
-                cache_hit = true,
-                hit_rate = %state.search_cache.stats().hit_rate(),
-                "Search cache hit"
-            );
-            // Convert cached SearchResult to response (no re-pagination needed as cache
-            // key includes limit/offset and results are already paginated)
-            let response: Vec<TaskResponse> = cached_result
-                .into_tasks()
-                .iter()
-                .map(TaskResponse::from)
-                .collect();
-            return Ok(JsonResponse(response));
-        }
+    if let Some(ref key) = cache_key
+        && let Some(cached_result) = state.search_cache.get(key)
+    {
+        tracing::debug!(
+            cache_hit = true,
+            hit_rate = %state.search_cache.stats().hit_rate(),
+            "Search cache hit"
+        );
+        // Convert cached SearchResult to response (no re-pagination needed as cache
+        // key includes limit/offset and results are already paginated)
+        let response: Vec<TaskResponse> = cached_result
+            .into_tasks()
+            .iter()
+            .map(TaskResponse::from)
+            .collect();
+        return Ok(JsonResponse(response));
     }
 
     // Cache miss - log metrics
@@ -9564,7 +9965,7 @@ mod tests {
     /// Test: `SearchCacheKey::from_raw` normalizes pagination parameters.
     ///
     /// This ensures that cache keys with `None` values are equivalent to
-    /// cache keys with explicit default values (limit=DEFAULT_SEARCH_LIMIT=20, offset=0).
+    /// cache keys with explicit default values (`limit=DEFAULT_SEARCH_LIMIT=20`, `offset=0`).
     #[rstest]
     fn test_search_cache_key_from_raw_normalizes_pagination() {
         // None values should be normalized to defaults
@@ -10421,7 +10822,7 @@ mod search_index_differential_update_tests {
 
     /// Tests that original index is unchanged after `apply_bulk` (immutability).
     ///
-    /// This test verifies TB-001's ImmutabilityPreserved law for bulk updates:
+    /// This test verifies TB-001's `ImmutabilityPreserved` law for bulk updates:
     /// `apply_bulk(x, changes) != mutate(x)` - the original index is never mutated.
     #[rstest]
     fn test_apply_bulk_immutability_preserved() {
@@ -18798,7 +19199,7 @@ mod merge_posting_streaming_tests {
     fn sorted_unique_u128_vec() -> impl Strategy<Value = Vec<u128>> {
         prop::collection::hash_set(1u128..1000, 0..30).prop_map(|set| {
             let mut vec: Vec<u128> = set.into_iter().collect();
-            vec.sort();
+            vec.sort_unstable();
             vec
         })
     }
@@ -19287,7 +19688,7 @@ mod merge_sorted_posting_lists_tests {
         }
     }
 
-    /// Ensures correctness across OrderedUniqueSet Small/Large state boundaries.
+    /// Ensures correctness across `OrderedUniqueSet` Small/Large state boundaries.
     #[rstest]
     fn merge_sorted_posting_lists_small_large_mixed() {
         let small = TaskIdCollection::from_sorted_vec(vec![
@@ -19681,7 +20082,7 @@ mod search_index_error_tests {
         let tasks: PersistentVector<Task> = vec![task.clone()].into_iter().collect();
         let index = SearchIndex::build_with_config(&tasks, SearchIndexConfig::default());
 
-        let changes = vec![TaskChange::Remove(task.task_id.clone())];
+        let changes = vec![TaskChange::Remove(task.task_id)];
 
         let result = index.apply_bulk(&changes);
 
@@ -19738,10 +20139,10 @@ mod search_index_error_tests {
         let empty_tasks: PersistentVector<Task> = PersistentVector::new();
         let index = SearchIndex::build_with_config(&empty_tasks, SearchIndexConfig::default());
 
-        let tasks: Vec<Task> = (0..5)
+        let changes: Vec<TaskChange> = (0..5)
             .map(|i| create_test_task(&format!("Task {i}")))
+            .map(TaskChange::Add)
             .collect();
-        let changes: Vec<TaskChange> = tasks.into_iter().map(TaskChange::Add).collect();
 
         // Via apply_bulk
         let via_bulk = index
@@ -19875,7 +20276,7 @@ mod merge_posting_add_only_tests {
         assert!(delta.is_add_only());
     }
 
-    /// Any single remove field is non-empty -> is_add_only returns false.
+    /// Any single remove field is non-empty -> `is_add_only` returns false.
     #[rstest]
     #[case::title_full_remove("title_full_remove")]
     #[case::title_word_remove("title_word_remove")]
@@ -19925,7 +20326,7 @@ mod merge_posting_add_only_tests {
         assert!(!delta.is_add_only());
     }
 
-    /// Add-only fast path produces the same result as sequential apply_change.
+    /// Add-only fast path produces the same result as sequential `apply_change`.
     #[rstest]
     fn apply_delta_add_only_equivalence() {
         use crate::domain::{Tag, Timestamp};
@@ -19935,9 +20336,9 @@ mod merge_posting_add_only_tests {
 
         let tasks: Vec<Task> = (0..20)
             .map(|i| {
-                Task::new(TaskId::generate(), &format!("Task {i}"), Timestamp::now())
+                Task::new(TaskId::generate(), format!("Task {i}"), Timestamp::now())
                     .add_tag(Tag::new("alpha"))
-                    .add_tag(Tag::new(&format!("tag{i}")))
+                    .add_tag(Tag::new(format!("tag{i}")))
             })
             .collect();
         let changes: Vec<TaskChange> = tasks.iter().cloned().map(TaskChange::Add).collect();
@@ -19949,7 +20350,7 @@ mod merge_posting_add_only_tests {
         let result_fast = index.apply_delta(&delta, &changes);
 
         let result_general = {
-            let mut sequential_index = index.clone();
+            let mut sequential_index = index;
             for change in &changes {
                 sequential_index = sequential_index.apply_change(change.clone());
             }
@@ -19982,6 +20383,282 @@ mod merge_posting_add_only_tests {
         }
     }
 
+    /// `apply_delta_owned` produces the same result as borrowed `apply_delta` for add-only deltas.
+    #[rstest]
+    fn apply_delta_owned_equivalence_with_borrowed() {
+        use crate::domain::{Tag, Timestamp};
+
+        let empty_tasks: PersistentVector<Task> = PersistentVector::new();
+        let index = SearchIndex::build_with_config(&empty_tasks, SearchIndexConfig::default());
+
+        let tasks: Vec<Task> = (0..20)
+            .map(|i| {
+                Task::new(TaskId::generate(), format!("Task {i}"), Timestamp::now())
+                    .add_tag(Tag::new("alpha"))
+                    .add_tag(Tag::new(format!("tag{i}")))
+            })
+            .collect();
+        let changes: Vec<TaskChange> = tasks.iter().cloned().map(TaskChange::Add).collect();
+
+        let mut delta = SearchIndexDelta::from_changes(&changes, &index.config, &index.tasks_by_id);
+        delta.prepare_posting_lists();
+        assert!(delta.is_add_only());
+
+        // Borrowed path
+        let result_borrowed = index.apply_delta(&delta, &changes);
+        // Owned path (clone delta since borrowed consumed reference)
+        let result_owned = index.apply_delta_owned(delta, &changes);
+
+        // Verify tasks_by_id match
+        assert_eq!(
+            result_borrowed.tasks_by_id.len(),
+            result_owned.tasks_by_id.len(),
+            "tasks_by_id length mismatch"
+        );
+        for (task_id, task) in &result_borrowed.tasks_by_id {
+            assert_eq!(
+                result_owned.tasks_by_id.get(task_id),
+                Some(task),
+                "Task {task_id:?} mismatch between borrowed and owned"
+            );
+        }
+
+        // Verify title_word_index match
+        for (key, borrowed_collection) in &result_borrowed.title_word_index {
+            let owned_collection = result_owned
+                .title_word_index
+                .get(key.as_str())
+                .expect("Key should exist in owned result");
+            assert_eq!(
+                borrowed_collection.len(),
+                owned_collection.len(),
+                "title_word_index posting list length mismatch for key '{}'",
+                key.as_str()
+            );
+        }
+
+        // Verify title_full_index match
+        for (key, borrowed_collection) in &result_borrowed.title_full_index {
+            let owned_collection = result_owned
+                .title_full_index
+                .get(key.as_str())
+                .expect("Key should exist in owned result");
+            assert_eq!(
+                borrowed_collection.len(),
+                owned_collection.len(),
+                "title_full_index posting list length mismatch for key '{}'",
+                key.as_str()
+            );
+        }
+
+        // Verify tag_index match
+        for (key, borrowed_collection) in &result_borrowed.tag_index {
+            let owned_collection = result_owned
+                .tag_index
+                .get(key.as_str())
+                .expect("Key should exist in owned result");
+            assert_eq!(
+                borrowed_collection.len(),
+                owned_collection.len(),
+                "tag_index posting list length mismatch for key '{}'",
+                key.as_str()
+            );
+        }
+    }
+
+    /// `merge_index_delta_add_only_owned` produces same result as non-owned variant.
+    #[rstest]
+    fn merge_index_delta_add_only_owned_equivalence() {
+        let index = PrefixIndex::new();
+        let mut add: MutableIndex = std::collections::HashMap::new();
+
+        let id_1 = TaskId::from_uuid(Uuid::from_u128(1));
+        let id_2 = TaskId::from_uuid(Uuid::from_u128(2));
+        let id_3 = TaskId::from_uuid(Uuid::from_u128(3));
+
+        add.insert(NgramKey::new("hello"), vec![id_1, id_2]);
+        add.insert(NgramKey::new("world"), vec![id_3]);
+
+        let result_borrowed = SearchIndex::merge_index_delta_add_only_for_test(&index, &add);
+        let result_owned = SearchIndex::merge_index_delta_add_only_owned_for_test(&index, add);
+
+        // Both should have same keys
+        assert_eq!(result_borrowed.len(), result_owned.len());
+
+        for (key, borrowed_collection) in &result_borrowed {
+            let owned_collection = result_owned
+                .get(key.as_str())
+                .expect("Key should exist in owned result");
+            assert_eq!(
+                borrowed_collection.len(),
+                owned_collection.len(),
+                "Posting list length mismatch for key '{}'",
+                key.as_str()
+            );
+        }
+    }
+
+    /// `merge_index_delta_add_only_owned` works correctly with existing keys (hit path).
+    #[rstest]
+    fn merge_index_delta_add_only_owned_hit_path() {
+        let id_1 = TaskId::from_uuid(Uuid::from_u128(1));
+        let id_2 = TaskId::from_uuid(Uuid::from_u128(2));
+        let id_3 = TaskId::from_uuid(Uuid::from_u128(3));
+
+        // Build index with existing entries
+        let mut initial_add: MutableIndex = std::collections::HashMap::new();
+        initial_add.insert(NgramKey::new("hello"), vec![id_1.clone()]);
+        let index = SearchIndex::merge_index_delta_add_only_for_test(
+            &PrefixIndex::new(),
+            &initial_add,
+        );
+
+        // Add new entries including one that hits existing key
+        let mut add: MutableIndex = std::collections::HashMap::new();
+        add.insert(NgramKey::new("hello"), vec![id_2, id_3]);
+        add.insert(NgramKey::new("world"), vec![id_1]);
+
+        let result_borrowed = SearchIndex::merge_index_delta_add_only_for_test(&index, &add);
+        let result_owned = SearchIndex::merge_index_delta_add_only_owned_for_test(&index, add);
+
+        assert_eq!(result_borrowed.len(), result_owned.len());
+
+        for (key, borrowed_collection) in &result_borrowed {
+            let owned_collection = result_owned
+                .get(key.as_str())
+                .expect("Key should exist in owned result");
+            assert_eq!(
+                borrowed_collection.len(),
+                owned_collection.len(),
+                "Posting list length mismatch for key '{}'",
+                key.as_str()
+            );
+        }
+    }
+
+    /// `merge_index_delta_add_only_owned` with empty add returns cloned index.
+    #[rstest]
+    fn merge_index_delta_add_only_owned_empty_add() {
+        let id_1 = TaskId::from_uuid(Uuid::from_u128(1));
+
+        let mut initial_add: MutableIndex = std::collections::HashMap::new();
+        initial_add.insert(NgramKey::new("hello"), vec![id_1]);
+        let index = SearchIndex::merge_index_delta_add_only_for_test(
+            &PrefixIndex::new(),
+            &initial_add,
+        );
+
+        let empty_add: MutableIndex = std::collections::HashMap::new();
+        let result = SearchIndex::merge_index_delta_add_only_owned_for_test(&index, empty_add);
+
+        assert_eq!(index.len(), result.len());
+    }
+
+    /// `merge_ngram_delta_add_only_individual_owned` produces same result as non-owned variant.
+    #[rstest]
+    fn merge_ngram_delta_add_only_individual_owned_equivalence() {
+        let index = NgramIndex::new();
+        let mut add: MutableIndex = std::collections::HashMap::new();
+
+        let id_1 = TaskId::from_uuid(Uuid::from_u128(1));
+        let id_2 = TaskId::from_uuid(Uuid::from_u128(2));
+
+        add.insert(NgramKey::new("hel"), vec![id_1.clone(), id_2]);
+        add.insert(NgramKey::new("ell"), vec![id_1]);
+
+        let result_borrowed =
+            SearchIndex::merge_ngram_delta_add_only_individual_for_test(&index, &add).into_index();
+        let result_owned =
+            SearchIndex::merge_ngram_delta_add_only_individual_owned_for_test(&index, add)
+                .into_index();
+
+        assert_eq!(result_borrowed.len(), result_owned.len());
+
+        for (key, borrowed_collection) in &result_borrowed {
+            let owned_collection = result_owned
+                .get(key.as_str())
+                .expect("Key should exist in owned result");
+            assert_eq!(
+                borrowed_collection.len(),
+                owned_collection.len(),
+                "Posting list length mismatch for n-gram key '{}'",
+                key.as_str()
+            );
+        }
+    }
+
+    /// `merge_ngram_delta_add_only_bulk_owned` produces same result as non-owned variant.
+    #[rstest]
+    fn merge_ngram_delta_add_only_bulk_owned_equivalence() {
+        let index = NgramIndex::new();
+        let mut add: MutableIndex = std::collections::HashMap::new();
+
+        let id_1 = TaskId::from_uuid(Uuid::from_u128(1));
+        let id_2 = TaskId::from_uuid(Uuid::from_u128(2));
+
+        add.insert(NgramKey::new("hel"), vec![id_1.clone(), id_2]);
+        add.insert(NgramKey::new("ell"), vec![id_1]);
+
+        let result_borrowed =
+            SearchIndex::merge_ngram_delta_add_only_bulk_for_test(&index, &add).into_index();
+        let result_owned =
+            SearchIndex::merge_ngram_delta_add_only_bulk_owned_for_test(&index, add).into_index();
+
+        assert_eq!(result_borrowed.len(), result_owned.len());
+
+        for (key, borrowed_collection) in &result_borrowed {
+            let owned_collection = result_owned
+                .get(key.as_str())
+                .expect("Key should exist in owned result");
+            assert_eq!(
+                borrowed_collection.len(),
+                owned_collection.len(),
+                "Posting list length mismatch for n-gram key '{}'",
+                key.as_str()
+            );
+        }
+    }
+
+    /// `apply_delta_owned` falls back to `apply_delta` for non-add-only deltas.
+    #[rstest]
+    fn apply_delta_owned_falls_back_for_non_add_only() {
+        use crate::domain::{Tag, Timestamp};
+
+        let empty_tasks: PersistentVector<Task> = PersistentVector::new();
+        let index = SearchIndex::build_with_config(&empty_tasks, SearchIndexConfig::default());
+
+        // Add some tasks first
+        let tasks: Vec<Task> = (0..5)
+            .map(|i| {
+                Task::new(TaskId::generate(), format!("Task {i}"), Timestamp::now())
+                    .add_tag(Tag::new("beta"))
+            })
+            .collect();
+        let add_changes: Vec<TaskChange> = tasks.iter().cloned().map(TaskChange::Add).collect();
+        let mut add_delta =
+            SearchIndexDelta::from_changes(&add_changes, &index.config, &index.tasks_by_id);
+        add_delta.prepare_posting_lists();
+        let index_with_tasks = index.apply_delta(&add_delta, &add_changes);
+
+        // Now create a delta with removes (non-add-only)
+        let remove_changes = vec![TaskChange::Remove(tasks[0].task_id.clone())];
+        let mut remove_delta = SearchIndexDelta::from_changes(
+            &remove_changes,
+            &index_with_tasks.config,
+            &index_with_tasks.tasks_by_id,
+        );
+        remove_delta.prepare_posting_lists();
+        assert!(!remove_delta.is_add_only());
+
+        let result_borrowed = index_with_tasks.apply_delta(&remove_delta, &remove_changes);
+        let result_owned = index_with_tasks.apply_delta_owned(remove_delta, &remove_changes);
+
+        assert_eq!(
+            result_borrowed.tasks_by_id.len(),
+            result_owned.tasks_by_id.len()
+        );
+    }
+
     proptest! {
         #[test]
         fn matches_streaming_with_empty_remove(
@@ -20001,92 +20678,6 @@ mod merge_posting_add_only_tests {
 
             prop_assert_eq!(result_add_only, result_streaming);
         }
-    }
-}
-
-#[cfg(test)]
-mod append_or_merge_sorted_tests {
-    use super::*;
-    use rstest::rstest;
-
-    fn make_task_id(id: u128) -> TaskId {
-        TaskId::from_uuid(uuid::Uuid::from_u128(id))
-    }
-
-    fn ids(values: &[u128]) -> Vec<TaskId> {
-        values.iter().map(|&v| make_task_id(v)).collect()
-    }
-
-    fn assert_sorted_eq(collection: &TaskIdCollection, expected_ids: &[u128]) {
-        let sorted = collection.to_sorted_vec();
-        assert_eq!(sorted, ids(expected_ids));
-    }
-
-    #[rstest]
-    fn disjoint_ranges_uses_concat() {
-        let existing = TaskIdCollection::from_sorted_vec(ids(&[1, 2, 3]));
-        let add = TaskIdCollection::from_sorted_vec(ids(&[4, 5, 6]));
-
-        let result = append_or_merge_sorted(&existing, &add);
-
-        assert_sorted_eq(&result, &[1, 2, 3, 4, 5, 6]);
-    }
-
-    #[rstest]
-    fn overlapping_uses_merge() {
-        let existing = TaskIdCollection::from_sorted_vec(ids(&[1, 3, 5]));
-        let add = TaskIdCollection::from_sorted_vec(ids(&[2, 4, 6]));
-
-        let result = append_or_merge_sorted(&existing, &add);
-
-        assert_sorted_eq(&result, &[1, 2, 3, 4, 5, 6]);
-    }
-
-    #[rstest]
-    fn adjacent_uses_concat() {
-        let existing = TaskIdCollection::from_sorted_vec(ids(&[1, 2]));
-        let add = TaskIdCollection::from_sorted_vec(ids(&[3, 4]));
-
-        let result = append_or_merge_sorted(&existing, &add);
-
-        assert_sorted_eq(&result, &[1, 2, 3, 4]);
-    }
-
-    #[rstest]
-    fn touching_boundary_uses_merge() {
-        let existing = TaskIdCollection::from_sorted_vec(ids(&[1, 2, 3]));
-        let add = TaskIdCollection::from_sorted_vec(ids(&[3, 4, 5]));
-
-        let result = append_or_merge_sorted(&existing, &add);
-
-        assert_sorted_eq(&result, &[1, 2, 3, 4, 5]);
-    }
-
-    #[rstest]
-    fn empty_existing() {
-        let existing = TaskIdCollection::new();
-        let add = TaskIdCollection::from_sorted_vec(ids(&[1, 2]));
-
-        let result = append_or_merge_sorted(&existing, &add);
-
-        assert_sorted_eq(&result, &[1, 2]);
-    }
-
-    #[rstest]
-    fn empty_add() {
-        let existing = TaskIdCollection::from_sorted_vec(ids(&[1, 2]));
-        let add = TaskIdCollection::new();
-
-        let result = append_or_merge_sorted(&existing, &add);
-
-        assert_sorted_eq(&result, &[1, 2]);
-    }
-
-    #[rstest]
-    fn both_empty() {
-        let result = append_or_merge_sorted(&TaskIdCollection::new(), &TaskIdCollection::new());
-
-        assert!(result.is_empty());
     }
 }
 
@@ -20196,43 +20787,358 @@ mod merge_delta_add_only_none_branch_tests {
 }
 
 #[cfg(test)]
-mod append_or_merge_sorted_property_tests {
+mod concat_fast_path_tests {
     use super::*;
     use proptest::prelude::*;
+    use rstest::rstest;
+    use uuid::Uuid;
 
-    fn make_task_id(id: u128) -> TaskId {
-        TaskId::from_uuid(uuid::Uuid::from_u128(id))
+    fn task_ids(values: &[u128]) -> Vec<TaskId> {
+        values
+            .iter()
+            .map(|&v| TaskId::from_uuid(Uuid::from_u128(v)))
+            .collect()
     }
 
-    /// Builds a sorted, deduplicated TaskIdCollection from arbitrary u128 values.
-    fn sorted_unique_collection(mut values: Vec<u128>) -> TaskIdCollection {
-        values.sort_unstable();
-        values.dedup();
-        let task_ids: Vec<TaskId> = values.into_iter().map(make_task_id).collect();
-        TaskIdCollection::from_sorted_vec(task_ids)
+    fn make_add_index(key: &str, ids: Vec<TaskId>) -> (NgramKey, MutableIndex) {
+        let ngram_key = NgramKey::new(key);
+        let mut add = std::collections::HashMap::new();
+        add.insert(ngram_key.clone(), ids);
+        (ngram_key, add)
     }
+
+    fn assert_collection_sorted_eq(actual: &TaskIdCollection, expected_ids: &[TaskId]) {
+        assert_eq!(
+            actual.iter_sorted().cloned().collect::<Vec<_>>(),
+            expected_ids,
+        );
+    }
+
+    /// Build a `PrefixIndex` containing the given (key, ids) entry.
+    fn prefix_index_with(key: &str, existing_ids: &[TaskId]) -> PrefixIndex {
+        let (_, add) = make_add_index(key, existing_ids.to_vec());
+        SearchIndex::merge_index_delta_add_only_for_test(&PersistentTreeMap::new(), &add)
+    }
+
+    /// Build an `NgramIndex` containing the given (key, ids) entry.
+    fn ngram_index_with(key: &str, existing_ids: &[TaskId]) -> NgramIndex {
+        let (_, add) = make_add_index(key, existing_ids.to_vec());
+        SearchIndex::merge_ngram_delta_add_only_individual_for_test(
+            &PersistentHashMap::new(),
+            &add,
+        )
+        .into_index()
+    }
+
+    // -------------------------------------------------------
+    // 1. concat_fast_path_disjoint: add_list is strictly greater than existing max
+    // -------------------------------------------------------
+
+    #[rstest]
+    fn concat_fast_path_disjoint_prefix_borrowed() {
+        let existing_ids = task_ids(&[1, 3, 5]);
+        let add_ids = task_ids(&[10, 20, 30]);
+        let index = prefix_index_with("key", &existing_ids);
+
+        let (key, add) = make_add_index("key", add_ids);
+        let result = SearchIndex::merge_index_delta_add_only_for_test(&index, &add);
+
+        assert_collection_sorted_eq(
+            result.get(key.as_str()).unwrap(),
+            &task_ids(&[1, 3, 5, 10, 20, 30]),
+        );
+    }
+
+    #[rstest]
+    fn concat_fast_path_disjoint_prefix_owned() {
+        let existing_ids = task_ids(&[1, 3, 5]);
+        let add_ids = task_ids(&[10, 20, 30]);
+        let index = prefix_index_with("key", &existing_ids);
+
+        let (key, add) = make_add_index("key", add_ids);
+        let result = SearchIndex::merge_index_delta_add_only_owned_for_test(&index, add);
+
+        assert_collection_sorted_eq(
+            result.get(key.as_str()).unwrap(),
+            &task_ids(&[1, 3, 5, 10, 20, 30]),
+        );
+    }
+
+    #[rstest]
+    fn concat_fast_path_disjoint_ngram_individual_borrowed() {
+        let existing_ids = task_ids(&[2, 4, 6]);
+        let add_ids = task_ids(&[100, 200]);
+        let index = ngram_index_with("abc", &existing_ids);
+
+        let (key, add) = make_add_index("abc", add_ids);
+        let result =
+            SearchIndex::merge_ngram_delta_add_only_individual_for_test(&index, &add).into_index();
+
+        assert_collection_sorted_eq(
+            result.get(key.as_str()).unwrap(),
+            &task_ids(&[2, 4, 6, 100, 200]),
+        );
+    }
+
+    #[rstest]
+    fn concat_fast_path_disjoint_ngram_individual_owned() {
+        let existing_ids = task_ids(&[2, 4, 6]);
+        let add_ids = task_ids(&[100, 200]);
+        let index = ngram_index_with("abc", &existing_ids);
+
+        let (key, add) = make_add_index("abc", add_ids);
+        let result =
+            SearchIndex::merge_ngram_delta_add_only_individual_owned_for_test(&index, add)
+                .into_index();
+
+        assert_collection_sorted_eq(
+            result.get(key.as_str()).unwrap(),
+            &task_ids(&[2, 4, 6, 100, 200]),
+        );
+    }
+
+    #[rstest]
+    fn concat_fast_path_disjoint_ngram_bulk_borrowed() {
+        let existing_ids = task_ids(&[2, 4, 6]);
+        let add_ids = task_ids(&[100, 200]);
+        let index = ngram_index_with("abc", &existing_ids);
+
+        let (key, add) = make_add_index("abc", add_ids);
+        let result =
+            SearchIndex::merge_ngram_delta_add_only_bulk_for_test(&index, &add).into_index();
+
+        assert_collection_sorted_eq(
+            result.get(key.as_str()).unwrap(),
+            &task_ids(&[2, 4, 6, 100, 200]),
+        );
+    }
+
+    #[rstest]
+    fn concat_fast_path_disjoint_ngram_bulk_owned() {
+        let existing_ids = task_ids(&[2, 4, 6]);
+        let add_ids = task_ids(&[100, 200]);
+        let index = ngram_index_with("abc", &existing_ids);
+
+        let (key, add) = make_add_index("abc", add_ids);
+        let result =
+            SearchIndex::merge_ngram_delta_add_only_bulk_owned_for_test(&index, add).into_index();
+
+        assert_collection_sorted_eq(
+            result.get(key.as_str()).unwrap(),
+            &task_ids(&[2, 4, 6, 100, 200]),
+        );
+    }
+
+    // -------------------------------------------------------
+    // 2. concat_fast_path_overlapping: add_list overlaps with existing -> fallback to merge
+    // -------------------------------------------------------
+
+    #[rstest]
+    fn concat_fast_path_overlapping_prefix_borrowed() {
+        let existing_ids = task_ids(&[1, 5, 10]);
+        let add_ids = task_ids(&[3, 7, 20]);
+        let index = prefix_index_with("key", &existing_ids);
+
+        let (key, add) = make_add_index("key", add_ids);
+        let result = SearchIndex::merge_index_delta_add_only_for_test(&index, &add);
+
+        assert_collection_sorted_eq(
+            result.get(key.as_str()).unwrap(),
+            &task_ids(&[1, 3, 5, 7, 10, 20]),
+        );
+    }
+
+    #[rstest]
+    fn concat_fast_path_overlapping_prefix_owned() {
+        let existing_ids = task_ids(&[1, 5, 10]);
+        let add_ids = task_ids(&[3, 7, 20]);
+        let index = prefix_index_with("key", &existing_ids);
+
+        let (key, add) = make_add_index("key", add_ids);
+        let result = SearchIndex::merge_index_delta_add_only_owned_for_test(&index, add);
+
+        assert_collection_sorted_eq(
+            result.get(key.as_str()).unwrap(),
+            &task_ids(&[1, 3, 5, 7, 10, 20]),
+        );
+    }
+
+    #[rstest]
+    fn concat_fast_path_overlapping_ngram_individual() {
+        let existing_ids = task_ids(&[1, 5, 10]);
+        let add_ids = task_ids(&[3, 7, 20]);
+        let index = ngram_index_with("abc", &existing_ids);
+
+        let (key, add) = make_add_index("abc", add_ids);
+        let result =
+            SearchIndex::merge_ngram_delta_add_only_individual_for_test(&index, &add).into_index();
+
+        assert_collection_sorted_eq(
+            result.get(key.as_str()).unwrap(),
+            &task_ids(&[1, 3, 5, 7, 10, 20]),
+        );
+    }
+
+    #[rstest]
+    fn concat_fast_path_overlapping_ngram_bulk() {
+        let existing_ids = task_ids(&[1, 5, 10]);
+        let add_ids = task_ids(&[3, 7, 20]);
+        let index = ngram_index_with("abc", &existing_ids);
+
+        let (key, add) = make_add_index("abc", add_ids);
+        let result =
+            SearchIndex::merge_ngram_delta_add_only_bulk_for_test(&index, &add).into_index();
+
+        assert_collection_sorted_eq(
+            result.get(key.as_str()).unwrap(),
+            &task_ids(&[1, 3, 5, 7, 10, 20]),
+        );
+    }
+
+    // -------------------------------------------------------
+    // 3. concat_fast_path_empty_existing: existing is empty -> concat condition is trivially true
+    // -------------------------------------------------------
+
+    #[rstest]
+    fn concat_fast_path_empty_existing_prefix() {
+        let add_ids = task_ids(&[10, 20]);
+        let (key, add) = make_add_index("key", add_ids.clone());
+
+        let result =
+            SearchIndex::merge_index_delta_add_only_for_test(&PersistentTreeMap::new(), &add);
+
+        assert_collection_sorted_eq(result.get(key.as_str()).unwrap(), &add_ids);
+    }
+
+    #[rstest]
+    fn concat_fast_path_empty_existing_ngram_individual() {
+        let add_ids = task_ids(&[10, 20]);
+        let (key, add) = make_add_index("abc", add_ids.clone());
+
+        let result = SearchIndex::merge_ngram_delta_add_only_individual_for_test(
+            &PersistentHashMap::new(),
+            &add,
+        )
+        .into_index();
+
+        assert_collection_sorted_eq(result.get(key.as_str()).unwrap(), &add_ids);
+    }
+
+    // -------------------------------------------------------
+    // 4. concat_fast_path_empty_add: add_list is empty -> no modification
+    // -------------------------------------------------------
+
+    #[rstest]
+    fn concat_fast_path_empty_add_prefix_borrowed() {
+        let existing_ids = task_ids(&[1, 3, 5]);
+        let index = prefix_index_with("key", &existing_ids);
+
+        let (key, add) = make_add_index("key", vec![]);
+        let result = SearchIndex::merge_index_delta_add_only_for_test(&index, &add);
+
+        // When add_list is empty, the new Some(_collection) arm is entered,
+        // which does nothing. The original collection should remain unchanged.
+        assert_collection_sorted_eq(result.get(key.as_str()).unwrap(), &existing_ids);
+    }
+
+    #[rstest]
+    fn concat_fast_path_empty_add_prefix_owned() {
+        let existing_ids = task_ids(&[1, 3, 5]);
+        let index = prefix_index_with("key", &existing_ids);
+
+        let (key, add) = make_add_index("key", vec![]);
+        let result = SearchIndex::merge_index_delta_add_only_owned_for_test(&index, add);
+
+        assert_collection_sorted_eq(result.get(key.as_str()).unwrap(), &existing_ids);
+    }
+
+    #[rstest]
+    fn concat_fast_path_empty_add_ngram_individual() {
+        let existing_ids = task_ids(&[1, 3, 5]);
+        let index = ngram_index_with("abc", &existing_ids);
+
+        let (key, add) = make_add_index("abc", vec![]);
+        let result =
+            SearchIndex::merge_ngram_delta_add_only_individual_for_test(&index, &add).into_index();
+
+        assert_collection_sorted_eq(result.get(key.as_str()).unwrap(), &existing_ids);
+    }
+
+    // -------------------------------------------------------
+    // 5. concat_fast_path_property_test: proptest to verify concat and merge equivalence
+    // -------------------------------------------------------
 
     proptest! {
-        /// Property: `append_or_merge_sorted(a, b)` produces the same result as `a.merge(b)`.
-        ///
-        /// This verifies that the concat fast-path and the merge fallback are
-        /// semantically equivalent to the canonical two-pointer merge.
         #[test]
-        fn append_or_merge_equivalent_to_merge(
-            existing_values in prop::collection::vec(1u128..5000, 0..64),
-            add_values in prop::collection::vec(1u128..5000, 0..64),
+        fn concat_fast_path_property_test(
+            existing_raw in prop::collection::vec(1u128..500, 1..30),
+            add_raw in prop::collection::vec(1u128..1000, 1..30),
         ) {
-            let existing = sorted_unique_collection(existing_values);
-            let add = sorted_unique_collection(add_values);
+            // Deduplicate and sort both collections
+            let existing: Vec<u128> = existing_raw
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            let add: Vec<u128> = add_raw
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect();
 
-            let result_optimized = append_or_merge_sorted(&existing, &add);
-            let result_canonical = existing.merge(&add);
+            let existing_ids = task_ids(&existing);
+            let add_ids = task_ids(&add);
 
-            prop_assert_eq!(
-                result_optimized.to_sorted_vec(),
-                result_canonical.to_sorted_vec(),
-                "append_or_merge_sorted must be equivalent to merge"
-            );
+            // Reference: merge_posting_add_only_into always produces correct results
+            let reference =
+                SearchIndex::merge_posting_add_only_for_test(&existing_ids, &add_ids);
+
+            // Test through merge_index_delta_add_only (which uses concat fast-path)
+            let index = prefix_index_with("key", &existing_ids);
+            let (key, add_index) = make_add_index("key", add_ids.clone());
+            let result = SearchIndex::merge_index_delta_add_only_for_test(&index, &add_index);
+            let actual: Vec<_> = result
+                .get(key.as_str())
+                .unwrap()
+                .iter_sorted()
+                .cloned()
+                .collect();
+
+            prop_assert_eq!(&actual, &reference);
+
+            // Also verify the owned variant
+            let (_, add_index_owned) = make_add_index("key", add_ids);
+            let result_owned =
+                SearchIndex::merge_index_delta_add_only_owned_for_test(&index, add_index_owned);
+            let actual_owned: Vec<_> = result_owned
+                .get(key.as_str())
+                .unwrap()
+                .iter_sorted()
+                .cloned()
+                .collect();
+
+            prop_assert_eq!(&actual_owned, &reference);
         }
+    }
+
+    // -------------------------------------------------------
+    // Edge case: add_list.first() == existing.last_sorted() (equal, not concat)
+    // -------------------------------------------------------
+
+    #[rstest]
+    fn concat_fast_path_equal_boundary_falls_back_to_merge() {
+        // When add_min == existing_max, can_concat is false (strict greater-than)
+        let existing_ids = task_ids(&[1, 3, 5]);
+        let add_ids = task_ids(&[5, 10, 20]); // 5 == existing max
+        let index = prefix_index_with("key", &existing_ids);
+
+        let (key, add) = make_add_index("key", add_ids);
+        let result = SearchIndex::merge_index_delta_add_only_for_test(&index, &add);
+
+        // Merge should deduplicate: [1, 3, 5, 10, 20]
+        assert_collection_sorted_eq(
+            result.get(key.as_str()).unwrap(),
+            &task_ids(&[1, 3, 5, 10, 20]),
+        );
     }
 }
