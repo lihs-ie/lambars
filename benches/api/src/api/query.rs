@@ -1238,7 +1238,7 @@ struct SegmentOverlayConfig {
 impl Default for SegmentOverlayConfig {
     fn default() -> Self {
         Self {
-            max_segments: 4,
+            max_segments: 3,
             max_segment_keys: 50_000,
         }
     }
@@ -1271,7 +1271,7 @@ impl NgramSegmentOverlay {
         Self {
             base,
             segments: Vec::new(),
-            max_segments: 4,
+            max_segments: 3,
             max_segment_keys: 50_000,
         }
     }
@@ -1382,7 +1382,8 @@ impl NgramSegmentOverlay {
             return self.clone();
         }
         let oldest = &self.segments[0];
-        let merged_base = Self::merge_segment_into(self.base.clone(), oldest);
+        let mut scratch: Vec<TaskId> = Vec::new();
+        let merged_base = Self::merge_segment_into(self.base.clone(), oldest, &mut scratch);
         Self {
             base: merged_base,
             segments: self.segments[1..].to_vec(),
@@ -1396,8 +1397,9 @@ impl NgramSegmentOverlay {
             return self.base.clone();
         }
         let mut result = self.base.clone();
+        let mut scratch: Vec<TaskId> = Vec::new();
         for segment in &self.segments {
-            result = Self::merge_segment_into(result, segment);
+            result = Self::merge_segment_into(result, segment, &mut scratch);
         }
         result
     }
@@ -1428,12 +1430,15 @@ impl NgramSegmentOverlay {
         self.base.is_empty() && self.segments.iter().all(NgramIndex::is_empty)
     }
 
-    fn merge_segment_into(base: NgramIndex, segment: &NgramIndex) -> NgramIndex {
+    fn merge_segment_into(
+        base: NgramIndex,
+        segment: &NgramIndex,
+        scratch: &mut Vec<TaskId>,
+    ) -> NgramIndex {
         #[cfg(test)]
         let (mut hit_count, mut miss_count) = (0usize, 0usize);
 
         let mut transient = base.transient();
-        let mut scratch: Vec<TaskId> = Vec::new();
 
         for (key, segment_collection) in segment {
             if let Some(existing) = transient.get(key) {
@@ -1444,7 +1449,7 @@ impl NgramSegmentOverlay {
                 let merged = Self::merge_posting_slice_or_fallback(
                     existing,
                     segment_collection,
-                    &mut scratch,
+                    scratch,
                 );
                 transient.insert(key.clone(), merged);
             } else {
@@ -1494,28 +1499,24 @@ impl NgramSegmentOverlay {
                         .zip(existing_slice.first())
                         .is_some_and(|(segment_max, existing_min)| segment_max < existing_min);
 
+                scratch.clear();
+                scratch.reserve(existing_slice.len() + segment_slice.len());
+
                 if can_concat {
-                    let mut result =
-                        Vec::with_capacity(existing_slice.len() + segment_slice.len());
-                    result.extend_from_slice(existing_slice);
-                    result.extend_from_slice(segment_slice);
-                    TaskIdCollection::from_sorted_vec(result)
+                    scratch.extend_from_slice(existing_slice);
+                    scratch.extend_from_slice(segment_slice);
                 } else if can_concat_reversed {
-                    let mut result =
-                        Vec::with_capacity(existing_slice.len() + segment_slice.len());
-                    result.extend_from_slice(segment_slice);
-                    result.extend_from_slice(existing_slice);
-                    TaskIdCollection::from_sorted_vec(result)
+                    scratch.extend_from_slice(segment_slice);
+                    scratch.extend_from_slice(existing_slice);
                 } else {
-                    scratch.clear();
-                    scratch.reserve(existing_slice.len() + segment_slice.len());
                     SearchIndex::merge_posting_add_only_into_slice(
                         existing_slice,
                         segment_slice,
                         scratch,
                     );
-                    TaskIdCollection::from_sorted_vec(std::mem::take(scratch))
                 }
+
+                TaskIdCollection::from_sorted_vec(std::mem::take(scratch))
             }
             (Some(existing_slice), None) => {
                 // Existing is Large, segment is Small: collect segment and merge
@@ -22843,7 +22844,8 @@ mod ngram_segment_overlay_tests {
         // base has "abc" and "def", segment has same keys -> all hits
         let base = make_ngram_index(&[("abc", &[1, 2]), ("def", &[3])]);
         let segment = make_ngram_index(&[("abc", &[4]), ("def", &[5])]);
-        let _result = NgramSegmentOverlay::merge_segment_into(base, &segment);
+        let mut scratch = Vec::new();
+        let _result = NgramSegmentOverlay::merge_segment_into(base, &segment, &mut scratch);
 
         let (hit, miss) = super::merge_segment_hit_miss_counts();
         assert_eq!(hit, 2, "all segment keys should hit existing base keys");
@@ -22855,7 +22857,8 @@ mod ngram_segment_overlay_tests {
         // base has "abc", segment has "xyz" (no overlap) -> all misses
         let base = make_ngram_index(&[("abc", &[1])]);
         let segment = make_ngram_index(&[("xyz", &[2])]);
-        let _result = NgramSegmentOverlay::merge_segment_into(base, &segment);
+        let mut scratch = Vec::new();
+        let _result = NgramSegmentOverlay::merge_segment_into(base, &segment, &mut scratch);
 
         let (hit, miss) = super::merge_segment_hit_miss_counts();
         assert_eq!(hit, 0, "no hits expected");
@@ -22867,7 +22870,8 @@ mod ngram_segment_overlay_tests {
         // base has "abc", segment has "abc" (hit) + "xyz" (miss)
         let base = make_ngram_index(&[("abc", &[1])]);
         let segment = make_ngram_index(&[("abc", &[2]), ("xyz", &[3])]);
-        let _result = NgramSegmentOverlay::merge_segment_into(base, &segment);
+        let mut scratch = Vec::new();
+        let _result = NgramSegmentOverlay::merge_segment_into(base, &segment, &mut scratch);
 
         let (hit, miss) = super::merge_segment_hit_miss_counts();
         assert_eq!(hit + miss, 2, "total should be 2");
@@ -22880,7 +22884,8 @@ mod ngram_segment_overlay_tests {
         // the same result as the original merge-based implementation
         let base = make_ngram_index(&[("abc", &[1, 3, 5]), ("def", &[2, 4])]);
         let segment = make_ngram_index(&[("abc", &[2, 4, 6]), ("ghi", &[7])]);
-        let result = NgramSegmentOverlay::merge_segment_into(base, &segment);
+        let mut scratch = Vec::new();
+        let result = NgramSegmentOverlay::merge_segment_into(base, &segment, &mut scratch);
 
         // abc: {1,3,5} U {2,4,6} = {1,2,3,4,5,6}
         let key_abc = NgramKey::new("abc");
@@ -22913,7 +22918,8 @@ mod ngram_segment_overlay_tests {
         // existing max < segment min -> disjoint concat
         let base = make_ngram_index(&[("abc", &[1, 2, 3])]);
         let segment = make_ngram_index(&[("abc", &[10, 11, 12])]);
-        let result = NgramSegmentOverlay::merge_segment_into(base, &segment);
+        let mut scratch = Vec::new();
+        let result = NgramSegmentOverlay::merge_segment_into(base, &segment, &mut scratch);
 
         let key = NgramKey::new("abc");
         let ids = sorted_ids(result.get(&key).expect("abc present"));
@@ -22929,11 +22935,213 @@ mod ngram_segment_overlay_tests {
         // segment max < existing min -> reversed disjoint concat
         let base = make_ngram_index(&[("abc", &[10, 11, 12])]);
         let segment = make_ngram_index(&[("abc", &[1, 2, 3])]);
-        let result = NgramSegmentOverlay::merge_segment_into(base, &segment);
+        let mut scratch = Vec::new();
+        let result = NgramSegmentOverlay::merge_segment_into(base, &segment, &mut scratch);
 
         let key = NgramKey::new("abc");
         let ids = sorted_ids(result.get(&key).expect("abc present"));
         let expected: Vec<TaskId> = [1, 2, 3, 10, 11, 12]
+            .iter()
+            .map(|value| TaskId::from_uuid(Uuid::from_u128(*value)))
+            .collect();
+        assert_eq!(ids, expected);
+    }
+
+    // -------------------------------------------------------------------------
+    // Phase7-C: scratch buffer reuse in merge_segment_into
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn merge_segment_into_with_external_scratch_produces_correct_result() {
+        let base = make_ngram_index(&[("abc", &[1, 3, 5]), ("def", &[2])]);
+        let segment = make_ngram_index(&[("abc", &[2, 4]), ("ghi", &[7])]);
+        let mut scratch = Vec::new();
+        let result = NgramSegmentOverlay::merge_segment_into(base, &segment, &mut scratch);
+
+        let key_abc = NgramKey::new("abc");
+        let abc_ids = sorted_ids(result.get(&key_abc).expect("abc present"));
+        let expected_abc: Vec<TaskId> = [1, 2, 3, 4, 5]
+            .iter()
+            .map(|value| TaskId::from_uuid(Uuid::from_u128(*value)))
+            .collect();
+        assert_eq!(abc_ids, expected_abc);
+
+        let key_def = NgramKey::new("def");
+        assert!(result.get(&key_def).is_some());
+
+        let key_ghi = NgramKey::new("ghi");
+        assert!(result.get(&key_ghi).is_some());
+    }
+
+    #[rstest]
+    fn merge_segment_into_scratch_reused_across_calls() {
+        let base_1 = make_ngram_index(&[("abc", &[1, 2])]);
+        let segment_1 = make_ngram_index(&[("abc", &[3, 4])]);
+        let base_2 = make_ngram_index(&[("def", &[10, 20])]);
+        let segment_2 = make_ngram_index(&[("def", &[30])]);
+
+        let mut scratch = Vec::new();
+        let result_1 = NgramSegmentOverlay::merge_segment_into(base_1, &segment_1, &mut scratch);
+        let result_2 = NgramSegmentOverlay::merge_segment_into(base_2, &segment_2, &mut scratch);
+
+        let key_abc = NgramKey::new("abc");
+        let abc_ids = sorted_ids(result_1.get(&key_abc).expect("abc present"));
+        let expected_abc: Vec<TaskId> = [1, 2, 3, 4]
+            .iter()
+            .map(|value| TaskId::from_uuid(Uuid::from_u128(*value)))
+            .collect();
+        assert_eq!(abc_ids, expected_abc);
+
+        let key_def = NgramKey::new("def");
+        let def_ids = sorted_ids(result_2.get(&key_def).expect("def present"));
+        let expected_def: Vec<TaskId> = [10, 20, 30]
+            .iter()
+            .map(|value| TaskId::from_uuid(Uuid::from_u128(*value)))
+            .collect();
+        assert_eq!(def_ids, expected_def);
+    }
+
+    #[rstest]
+    fn materialize_reuses_scratch_across_segments() {
+        let base = make_ngram_index(&[("abc", &[1])]);
+        let segment_1 = make_ngram_index(&[("abc", &[2])]);
+        let segment_2 = make_ngram_index(&[("abc", &[3])]);
+        let segment_3 = make_ngram_index(&[("abc", &[4])]);
+
+        let overlay = NgramSegmentOverlay {
+            base,
+            segments: vec![segment_1, segment_2, segment_3],
+            max_segments: 4,
+            max_segment_keys: 50_000,
+        };
+
+        let materialized = overlay.materialize();
+        let key = NgramKey::new("abc");
+        let ids = sorted_ids(materialized.get(&key).expect("abc present"));
+        let expected: Vec<TaskId> = [1, 2, 3, 4]
+            .iter()
+            .map(|value| TaskId::from_uuid(Uuid::from_u128(*value)))
+            .collect();
+        assert_eq!(ids, expected);
+    }
+
+    // -------------------------------------------------------------------------
+    // Phase7-C: compaction threshold adjustment (max_segments: 3)
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn default_max_segments_is_three() {
+        let base = NgramIndex::new();
+        let overlay = NgramSegmentOverlay::new(base);
+        assert_eq!(overlay.max_segments, 3);
+    }
+
+    #[rstest]
+    fn default_config_max_segments_is_three() {
+        let config = SegmentOverlayConfig::default();
+        assert_eq!(config.max_segments, 3);
+    }
+
+    #[rstest]
+    fn compaction_triggers_at_three_segments() {
+        let base = NgramIndex::new();
+        let overlay = NgramSegmentOverlay::new(base);
+
+        // Add 2 segments: should not need compaction
+        let delta_1 = make_ngram_index(&[("abc", &[1])]);
+        let with_one = overlay.append_add_only(delta_1);
+        assert!(!with_one.needs_compaction());
+
+        let delta_2 = make_ngram_index(&[("abc", &[2])]);
+        let with_two = with_one.append_add_only(delta_2);
+        assert!(!with_two.needs_compaction());
+
+        // Add 3rd segment: should trigger compaction
+        let delta_3 = make_ngram_index(&[("abc", &[3])]);
+        let with_three = with_two.append_add_only(delta_3);
+        assert!(with_three.needs_compaction());
+    }
+
+    #[rstest]
+    fn append_and_compact_compacts_at_three_segments() {
+        let base = make_ngram_index(&[("abc", &[1])]);
+        let overlay = NgramSegmentOverlay::new(base);
+
+        let delta_1 = make_ngram_index(&[("abc", &[2])]);
+        let with_one = overlay.append_and_compact(delta_1);
+        assert_eq!(with_one.segments.len(), 1);
+
+        let delta_2 = make_ngram_index(&[("abc", &[3])]);
+        let with_two = with_one.append_and_compact(delta_2);
+        assert_eq!(with_two.segments.len(), 2);
+
+        // 3rd append triggers compaction: folds oldest segment into base
+        let delta_3 = make_ngram_index(&[("abc", &[4])]);
+        let with_three = with_two.append_and_compact(delta_3);
+        // After compaction: oldest segment merged into base, remaining 2 segments
+        assert_eq!(with_three.segments.len(), 2);
+
+        // Verify all IDs are present
+        let key = NgramKey::new("abc");
+        let result = with_three.query(&key).expect("abc present");
+        let ids = sorted_ids(&result);
+        let expected: Vec<TaskId> = [1, 2, 3, 4]
+            .iter()
+            .map(|value| TaskId::from_uuid(Uuid::from_u128(*value)))
+            .collect();
+        assert_eq!(ids, expected);
+    }
+
+    // -------------------------------------------------------------------------
+    // Phase7-C: disjoint concat uses scratch buffer
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn merge_posting_slice_or_fallback_disjoint_uses_scratch() {
+        // existing max (3) < segment min (10) -> disjoint concat path
+        let existing = TaskIdCollection::from_sorted_vec(vec![
+            TaskId::from_uuid(Uuid::from_u128(1)),
+            TaskId::from_uuid(Uuid::from_u128(2)),
+            TaskId::from_uuid(Uuid::from_u128(3)),
+        ]);
+        let segment = TaskIdCollection::from_sorted_vec(vec![
+            TaskId::from_uuid(Uuid::from_u128(10)),
+            TaskId::from_uuid(Uuid::from_u128(11)),
+        ]);
+        let mut scratch: Vec<TaskId> = Vec::with_capacity(100);
+
+        let result = NgramSegmentOverlay::merge_posting_slice_or_fallback(
+            &existing, &segment, &mut scratch,
+        );
+
+        let ids = sorted_ids(&result);
+        let expected: Vec<TaskId> = [1, 2, 3, 10, 11]
+            .iter()
+            .map(|value| TaskId::from_uuid(Uuid::from_u128(*value)))
+            .collect();
+        assert_eq!(ids, expected);
+    }
+
+    #[rstest]
+    fn merge_posting_slice_or_fallback_reversed_disjoint_uses_scratch() {
+        // segment max (3) < existing min (10) -> reversed disjoint concat path
+        let existing = TaskIdCollection::from_sorted_vec(vec![
+            TaskId::from_uuid(Uuid::from_u128(10)),
+            TaskId::from_uuid(Uuid::from_u128(11)),
+        ]);
+        let segment = TaskIdCollection::from_sorted_vec(vec![
+            TaskId::from_uuid(Uuid::from_u128(1)),
+            TaskId::from_uuid(Uuid::from_u128(2)),
+            TaskId::from_uuid(Uuid::from_u128(3)),
+        ]);
+        let mut scratch: Vec<TaskId> = Vec::new();
+
+        let result = NgramSegmentOverlay::merge_posting_slice_or_fallback(
+            &existing, &segment, &mut scratch,
+        );
+
+        let ids = sorted_ids(&result);
+        let expected: Vec<TaskId> = [1, 2, 3, 10, 11]
             .iter()
             .map(|value| TaskId::from_uuid(Uuid::from_u128(*value)))
             .collect();
