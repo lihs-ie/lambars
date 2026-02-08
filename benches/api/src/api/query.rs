@@ -2256,6 +2256,13 @@ fn merge_sorted_posting_lists(
         result_vec.extend(existing.iter_sorted().cloned());
         result_vec.extend(new_entries.iter_sorted().cloned());
         TaskIdCollection::from_sorted_vec(result_vec)
+    } else if new_entries.len().saturating_mul(8) < existing.len() {
+        // TB6-012: galloping merge for small additions into large existing.
+        let existing_vec: Vec<TaskId> = existing.iter_sorted().cloned().collect();
+        let add_vec: Vec<TaskId> = new_entries.iter_sorted().cloned().collect();
+        let mut output = Vec::with_capacity(existing.len() + new_entries.len());
+        SearchIndex::merge_posting_add_only_galloping(&existing_vec, &add_vec, &mut output);
+        TaskIdCollection::from_sorted_vec(output)
     } else {
         existing.merge(new_entries)
     }
@@ -6431,9 +6438,109 @@ impl SearchIndex {
         output
     }
 
+    /// Exponential search (galloping) to find the insertion point for `target`
+    /// in `sorted_slice`.
+    ///
+    /// Returns the index where `target` would be inserted to maintain sort order.
+    /// More efficient than linear scan when the target is near the beginning of
+    /// the remaining slice; degrades to O(log n) binary search in the worst case.
+    #[inline]
+    fn galloping_search(sorted_slice: &[TaskId], target: &TaskId) -> usize {
+        let length = sorted_slice.len();
+        if length == 0 || target <= &sorted_slice[0] {
+            return 0;
+        }
+
+        // Exponential search: jump 1, 2, 4, 8, ... until overshoot
+        let mut bound = 1;
+        while bound < length && sorted_slice[bound] < *target {
+            bound *= 2;
+        }
+
+        // Binary search within [bound/2, min(bound, length))
+        let lower = bound / 2;
+        let upper = bound.min(length);
+        lower
+            + sorted_slice[lower..upper]
+                .binary_search(target)
+                .unwrap_or_else(|position| position)
+    }
+
+    /// Galloping merge for cases where `add` is much smaller than `existing`.
+    ///
+    /// Uses exponential search to skip large portions of `existing`, achieving
+    /// O(m log n) where m = `add.len()` and n = `existing.len()`, versus O(n + m)
+    /// for the standard two-pointer merge. This is beneficial when m << n.
+    fn merge_posting_add_only_galloping(
+        existing: &[TaskId],
+        add: &[TaskId],
+        output: &mut Vec<TaskId>,
+    ) {
+        output.clear();
+        output.reserve(existing.len() + add.len());
+
+        let mut existing_position = 0;
+        for add_item in add {
+            // Find where add_item belongs in remaining existing
+            if existing_position < existing.len() {
+                let remaining = &existing[existing_position..];
+                let skip = Self::galloping_search(remaining, add_item);
+
+                // Copy all existing items before the insertion point
+                output.extend_from_slice(&existing[existing_position..existing_position + skip]);
+                existing_position += skip;
+
+                // Skip duplicates
+                if existing_position < existing.len() && existing[existing_position] == *add_item {
+                    output.push(add_item.clone());
+                    existing_position += 1;
+                    continue;
+                }
+            }
+            output.push(add_item.clone());
+        }
+
+        // Copy remaining existing items
+        if existing_position < existing.len() {
+            output.extend_from_slice(&existing[existing_position..]);
+        }
+    }
+
+    /// Binary search insert for very small `add` lists (typically <= 4 elements).
+    ///
+    /// Collects `existing` into `output`, then inserts each `add` element at its
+    /// binary-searched position. For tiny `add` lists this avoids the overhead
+    /// of a full merge pass.
+    fn merge_posting_add_only_binary_search_insert(
+        existing: &[TaskId],
+        add: &[TaskId],
+        output: &mut Vec<TaskId>,
+    ) {
+        output.clear();
+        output.reserve(existing.len() + add.len());
+        output.extend_from_slice(existing);
+
+        for add_item in add {
+            match output.binary_search(add_item) {
+                Ok(_position) => {
+                    // Duplicate: already present, skip insertion
+                }
+                Err(position) => {
+                    output.insert(position, add_item.clone());
+                }
+            }
+        }
+    }
+
     /// Computes `existing ∪ add` in a single streaming pass into `output`.
     ///
     /// All inputs must be sorted and deduplicated. Clears `output` before writing.
+    ///
+    /// Adaptively selects the merge strategy based on the relative sizes of
+    /// `existing` and `add`:
+    /// - `add.len() <= 4`: binary search insert (avoids full merge for tiny additions)
+    /// - `add.len() * 8 < existing.len()`: galloping merge (exponential search skips)
+    /// - otherwise: standard two-pointer merge
     fn merge_posting_add_only_into<'a>(
         existing: impl Iterator<Item = &'a TaskId>,
         add: &[TaskId],
@@ -6452,6 +6559,44 @@ impl SearchIndex {
             );
         }
 
+        if add.is_empty() {
+            output.clear();
+            output.extend(existing.cloned());
+            return;
+        }
+
+        // Use size_hint to estimate existing size without a full traversal.
+        // OrderedUniqueSetSortedIterator implements ExactSizeIterator, so
+        // size_hint().0 is accurate.
+        let (existing_size_hint, _) = existing.size_hint();
+
+        if add.len() <= 4 && existing_size_hint > 0 {
+            let existing_vec: Vec<TaskId> = existing.cloned().collect();
+            Self::merge_posting_add_only_binary_search_insert(
+                &existing_vec,
+                add,
+                output,
+            );
+        } else if existing_size_hint > 0 && add.len().saturating_mul(8) < existing_size_hint {
+            let existing_vec: Vec<TaskId> = existing.cloned().collect();
+            Self::merge_posting_add_only_galloping(
+                &existing_vec,
+                add,
+                output,
+            );
+        } else {
+            Self::merge_posting_add_only_two_pointer(existing, add, output);
+        }
+    }
+
+    /// Standard two-pointer merge for `existing ∪ add`.
+    ///
+    /// Both inputs must be sorted and deduplicated. Runs in O(n + m) time.
+    fn merge_posting_add_only_two_pointer<'a>(
+        existing: impl Iterator<Item = &'a TaskId>,
+        add: &[TaskId],
+        output: &mut Vec<TaskId>,
+    ) {
         output.clear();
 
         let mut existing_iterator = existing.peekable();
@@ -6995,6 +7140,38 @@ impl SearchIndex {
         output: &mut Vec<TaskId>,
     ) {
         Self::merge_posting_add_only_into(existing.iter(), add, output);
+    }
+
+    #[cfg(test)]
+    pub fn galloping_search_for_test(sorted_slice: &[TaskId], target: &TaskId) -> usize {
+        Self::galloping_search(sorted_slice, target)
+    }
+
+    #[cfg(test)]
+    pub fn merge_posting_add_only_galloping_for_test(
+        existing: &[TaskId],
+        add: &[TaskId],
+        output: &mut Vec<TaskId>,
+    ) {
+        Self::merge_posting_add_only_galloping(existing, add, output);
+    }
+
+    #[cfg(test)]
+    pub fn merge_posting_add_only_binary_search_insert_for_test(
+        existing: &[TaskId],
+        add: &[TaskId],
+        output: &mut Vec<TaskId>,
+    ) {
+        Self::merge_posting_add_only_binary_search_insert(existing, add, output);
+    }
+
+    #[cfg(test)]
+    pub fn merge_posting_add_only_two_pointer_for_test(
+        existing: &[TaskId],
+        add: &[TaskId],
+        output: &mut Vec<TaskId>,
+    ) {
+        Self::merge_posting_add_only_two_pointer(existing.iter(), add, output);
     }
 
     #[cfg(test)]
@@ -22407,6 +22584,359 @@ mod ngram_segment_overlay_tests {
             assert_eq!(
                 pre_compaction_results[index], ids,
                 "Search results differ after compaction for query '{query}'"
+            );
+        }
+    }
+}
+
+// =============================================================================
+// TB6-009..013: Adaptive Merge (Galloping + Binary-search) Tests
+// =============================================================================
+
+#[cfg(test)]
+mod adaptive_merge_tests {
+    use super::*;
+    use proptest::prelude::*;
+    use rstest::rstest;
+    use uuid::Uuid;
+
+    fn task_ids(values: &[u128]) -> Vec<TaskId> {
+        values
+            .iter()
+            .map(|&value| TaskId::from_uuid(Uuid::from_u128(value)))
+            .collect()
+    }
+
+    fn task_id(value: u128) -> TaskId {
+        TaskId::from_uuid(Uuid::from_u128(value))
+    }
+
+    // =========================================================================
+    // galloping_search tests
+    // =========================================================================
+
+    #[rstest]
+    fn galloping_search_empty_slice() {
+        let empty: Vec<TaskId> = vec![];
+        assert_eq!(SearchIndex::galloping_search_for_test(&empty, &task_id(5)), 0);
+    }
+
+    #[rstest]
+    fn galloping_search_target_before_all() {
+        let slice = task_ids(&[10, 20, 30]);
+        assert_eq!(SearchIndex::galloping_search_for_test(&slice, &task_id(5)), 0);
+    }
+
+    #[rstest]
+    fn galloping_search_target_at_beginning() {
+        let slice = task_ids(&[10, 20, 30]);
+        assert_eq!(SearchIndex::galloping_search_for_test(&slice, &task_id(10)), 0);
+    }
+
+    #[rstest]
+    fn galloping_search_target_in_middle() {
+        let slice = task_ids(&[10, 20, 30, 40, 50]);
+        assert_eq!(SearchIndex::galloping_search_for_test(&slice, &task_id(30)), 2);
+    }
+
+    #[rstest]
+    fn galloping_search_target_at_end() {
+        let slice = task_ids(&[10, 20, 30]);
+        assert_eq!(SearchIndex::galloping_search_for_test(&slice, &task_id(30)), 2);
+    }
+
+    #[rstest]
+    fn galloping_search_target_after_all() {
+        let slice = task_ids(&[10, 20, 30]);
+        assert_eq!(SearchIndex::galloping_search_for_test(&slice, &task_id(35)), 3);
+    }
+
+    #[rstest]
+    fn galloping_search_target_between_elements() {
+        let slice = task_ids(&[10, 20, 30, 40, 50]);
+        assert_eq!(SearchIndex::galloping_search_for_test(&slice, &task_id(25)), 2);
+    }
+
+    #[rstest]
+    fn galloping_search_single_element_match() {
+        let slice = task_ids(&[42]);
+        assert_eq!(SearchIndex::galloping_search_for_test(&slice, &task_id(42)), 0);
+    }
+
+    #[rstest]
+    fn galloping_search_single_element_before() {
+        let slice = task_ids(&[42]);
+        assert_eq!(SearchIndex::galloping_search_for_test(&slice, &task_id(10)), 0);
+    }
+
+    #[rstest]
+    fn galloping_search_single_element_after() {
+        let slice = task_ids(&[42]);
+        assert_eq!(SearchIndex::galloping_search_for_test(&slice, &task_id(100)), 1);
+    }
+
+    // =========================================================================
+    // merge_posting_add_only_galloping tests
+    // =========================================================================
+
+    #[rstest]
+    fn galloping_merge_empty_both() {
+        let mut output = Vec::new();
+        SearchIndex::merge_posting_add_only_galloping_for_test(&[], &[], &mut output);
+        assert!(output.is_empty());
+    }
+
+    #[rstest]
+    fn galloping_merge_empty_existing() {
+        let add = task_ids(&[2, 4, 6]);
+        let mut output = Vec::new();
+        SearchIndex::merge_posting_add_only_galloping_for_test(&[], &add, &mut output);
+        assert_eq!(output, task_ids(&[2, 4, 6]));
+    }
+
+    #[rstest]
+    fn galloping_merge_empty_add() {
+        let existing = task_ids(&[1, 3, 5]);
+        let mut output = Vec::new();
+        SearchIndex::merge_posting_add_only_galloping_for_test(&existing, &[], &mut output);
+        assert_eq!(output, task_ids(&[1, 3, 5]));
+    }
+
+    #[rstest]
+    fn galloping_merge_small_add_into_large_existing() {
+        let existing = task_ids(&[1, 3, 5, 7, 9, 11, 13, 15, 17, 19]);
+        let add = task_ids(&[4, 12]);
+        let mut output = Vec::new();
+        SearchIndex::merge_posting_add_only_galloping_for_test(&existing, &add, &mut output);
+        assert_eq!(output, task_ids(&[1, 3, 4, 5, 7, 9, 11, 12, 13, 15, 17, 19]));
+    }
+
+    #[rstest]
+    fn galloping_merge_with_duplicates() {
+        let existing = task_ids(&[1, 3, 5, 7, 9]);
+        let add = task_ids(&[3, 7]);
+        let mut output = Vec::new();
+        SearchIndex::merge_posting_add_only_galloping_for_test(&existing, &add, &mut output);
+        assert_eq!(output, task_ids(&[1, 3, 5, 7, 9]));
+    }
+
+    #[rstest]
+    fn galloping_merge_add_all_at_end() {
+        let existing = task_ids(&[1, 2, 3]);
+        let add = task_ids(&[10, 20, 30]);
+        let mut output = Vec::new();
+        SearchIndex::merge_posting_add_only_galloping_for_test(&existing, &add, &mut output);
+        assert_eq!(output, task_ids(&[1, 2, 3, 10, 20, 30]));
+    }
+
+    #[rstest]
+    fn galloping_merge_add_all_at_beginning() {
+        let existing = task_ids(&[10, 20, 30]);
+        let add = task_ids(&[1, 2, 3]);
+        let mut output = Vec::new();
+        SearchIndex::merge_posting_add_only_galloping_for_test(&existing, &add, &mut output);
+        assert_eq!(output, task_ids(&[1, 2, 3, 10, 20, 30]));
+    }
+
+    // =========================================================================
+    // merge_posting_add_only_binary_search_insert tests
+    // =========================================================================
+
+    #[rstest]
+    fn binary_search_insert_empty_both() {
+        let mut output = Vec::new();
+        SearchIndex::merge_posting_add_only_binary_search_insert_for_test(&[], &[], &mut output);
+        assert!(output.is_empty());
+    }
+
+    #[rstest]
+    fn binary_search_insert_empty_existing() {
+        let add = task_ids(&[2, 4]);
+        let mut output = Vec::new();
+        SearchIndex::merge_posting_add_only_binary_search_insert_for_test(&[], &add, &mut output);
+        assert_eq!(output, task_ids(&[2, 4]));
+    }
+
+    #[rstest]
+    fn binary_search_insert_empty_add() {
+        let existing = task_ids(&[1, 3, 5]);
+        let mut output = Vec::new();
+        SearchIndex::merge_posting_add_only_binary_search_insert_for_test(
+            &existing,
+            &[],
+            &mut output,
+        );
+        assert_eq!(output, task_ids(&[1, 3, 5]));
+    }
+
+    #[rstest]
+    fn binary_search_insert_single_addition() {
+        let existing = task_ids(&[1, 3, 5, 7, 9]);
+        let add = task_ids(&[4]);
+        let mut output = Vec::new();
+        SearchIndex::merge_posting_add_only_binary_search_insert_for_test(
+            &existing,
+            &add,
+            &mut output,
+        );
+        assert_eq!(output, task_ids(&[1, 3, 4, 5, 7, 9]));
+    }
+
+    #[rstest]
+    fn binary_search_insert_four_additions() {
+        let existing = task_ids(&[10, 20, 30, 40, 50]);
+        let add = task_ids(&[15, 25, 35, 45]);
+        let mut output = Vec::new();
+        SearchIndex::merge_posting_add_only_binary_search_insert_for_test(
+            &existing,
+            &add,
+            &mut output,
+        );
+        assert_eq!(output, task_ids(&[10, 15, 20, 25, 30, 35, 40, 45, 50]));
+    }
+
+    #[rstest]
+    fn binary_search_insert_with_duplicates() {
+        let existing = task_ids(&[1, 3, 5, 7]);
+        let add = task_ids(&[3, 5]);
+        let mut output = Vec::new();
+        SearchIndex::merge_posting_add_only_binary_search_insert_for_test(
+            &existing,
+            &add,
+            &mut output,
+        );
+        assert_eq!(output, task_ids(&[1, 3, 5, 7]));
+    }
+
+    // =========================================================================
+    // Adaptive merge strategy switching tests
+    // =========================================================================
+
+    #[rstest]
+    fn adaptive_merge_uses_binary_search_for_tiny_add() {
+        // add.len() <= 4 should use binary search insert
+        let existing = task_ids(&[1, 3, 5, 7, 9, 11, 13, 15, 17, 19]);
+        let add = task_ids(&[4, 12]);
+        let mut output = Vec::new();
+        SearchIndex::merge_posting_add_only_into_for_test(&existing, &add, &mut output);
+        assert_eq!(output, task_ids(&[1, 3, 4, 5, 7, 9, 11, 12, 13, 15, 17, 19]));
+    }
+
+    #[rstest]
+    fn adaptive_merge_uses_galloping_for_sparse_add() {
+        // add.len() * 8 < existing.len() should use galloping
+        // existing.len() = 100, add.len() = 5 -> 5 * 8 = 40 < 100
+        // But add.len() = 5 > 4, so it won't use binary search insert
+        let existing: Vec<TaskId> = (0..100u128)
+            .map(|value| TaskId::from_uuid(Uuid::from_u128(value * 2)))
+            .collect();
+        let add = task_ids(&[1, 21, 41, 61, 81]);
+        let mut output = Vec::new();
+        SearchIndex::merge_posting_add_only_into_for_test(&existing, &add, &mut output);
+
+        // Verify correctness by comparing with two-pointer
+        let mut expected = Vec::new();
+        SearchIndex::merge_posting_add_only_two_pointer_for_test(&existing, &add, &mut expected);
+        assert_eq!(output, expected);
+    }
+
+    #[rstest]
+    fn adaptive_merge_uses_two_pointer_for_large_add() {
+        // add.len() * 8 >= existing.len() should use two-pointer
+        // existing.len() = 10, add.len() = 5 -> 5 * 8 = 40 >= 10
+        let existing = task_ids(&[1, 3, 5, 7, 9, 11, 13, 15, 17, 19]);
+        let add = task_ids(&[2, 4, 6, 8, 10]);
+        let mut output = Vec::new();
+        SearchIndex::merge_posting_add_only_into_for_test(&existing, &add, &mut output);
+        assert_eq!(output, task_ids(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19]));
+    }
+
+    // =========================================================================
+    // merge_sorted_posting_lists galloping path tests
+    // =========================================================================
+
+    #[rstest]
+    fn merge_sorted_posting_lists_uses_galloping_for_sparse_add() {
+        // Create existing with 100 elements, new_entries with 5
+        // 5 * 8 = 40 < 100, so galloping path should be used
+        let existing_values: Vec<u128> = (0..100).map(|value| value * 2).collect();
+        let existing = TaskIdCollection::from_sorted_vec(task_ids(&existing_values));
+        let new_entries = TaskIdCollection::from_sorted_vec(task_ids(&[1, 21, 41, 61, 81]));
+
+        let result = merge_sorted_posting_lists(&existing, &new_entries);
+
+        // Verify by checking that all elements from both sets are present
+        let result_vec: Vec<TaskId> = result.iter_sorted().cloned().collect();
+        assert_eq!(result_vec.len(), 105); // 100 + 5 new unique elements
+
+        // Verify the new entries are present
+        for &value in &[1u128, 21, 41, 61, 81] {
+            let target = task_id(value);
+            assert!(
+                result_vec.contains(&target),
+                "Expected {value} in result"
+            );
+        }
+    }
+
+    // =========================================================================
+    // Differential property test: all strategies produce the same result
+    // =========================================================================
+
+    proptest! {
+        #[test]
+        fn adaptive_merge_equivalence(
+            existing_values in prop::collection::vec(1u128..10000, 0..200),
+            add_values in prop::collection::vec(1u128..10000, 0..50),
+        ) {
+            // Deduplicate and sort inputs
+            let mut existing_sorted: Vec<u128> = existing_values;
+            existing_sorted.sort_unstable();
+            existing_sorted.dedup();
+            let existing = task_ids(&existing_sorted);
+
+            let mut add_sorted: Vec<u128> = add_values;
+            add_sorted.sort_unstable();
+            add_sorted.dedup();
+            let add = task_ids(&add_sorted);
+
+            // Reference: two-pointer merge
+            let mut two_pointer_output = Vec::new();
+            SearchIndex::merge_posting_add_only_two_pointer_for_test(
+                &existing, &add, &mut two_pointer_output,
+            );
+
+            // Galloping merge
+            let mut galloping_output = Vec::new();
+            SearchIndex::merge_posting_add_only_galloping_for_test(
+                &existing, &add, &mut galloping_output,
+            );
+            prop_assert_eq!(
+                &two_pointer_output,
+                &galloping_output,
+                "galloping merge differs from two-pointer merge"
+            );
+
+            // Binary search insert
+            let mut binary_search_output = Vec::new();
+            SearchIndex::merge_posting_add_only_binary_search_insert_for_test(
+                &existing, &add, &mut binary_search_output,
+            );
+            prop_assert_eq!(
+                &two_pointer_output,
+                &binary_search_output,
+                "binary search insert differs from two-pointer merge"
+            );
+
+            // Adaptive merge (should pick the right strategy automatically)
+            let mut adaptive_output = Vec::new();
+            SearchIndex::merge_posting_add_only_into_for_test(
+                &existing, &add, &mut adaptive_output,
+            );
+            prop_assert_eq!(
+                &two_pointer_output,
+                &adaptive_output,
+                "adaptive merge differs from two-pointer merge"
             );
         }
     }
