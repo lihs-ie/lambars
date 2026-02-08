@@ -6243,14 +6243,11 @@ impl SearchIndex {
                         .is_none_or(|(existing_max, add_min)| add_min > existing_max);
 
                     if can_concat {
-                        let mut result_vec =
-                            Vec::with_capacity(collection.len() + add_list.len());
+                        let mut result_vec = Vec::with_capacity(collection.len() + add_list.len());
                         result_vec.extend(collection.iter_sorted().cloned());
                         result_vec.extend(add_list.iter().cloned());
-                        transient.insert(
-                            key.clone(),
-                            TaskIdCollection::from_sorted_vec(result_vec),
-                        );
+                        transient
+                            .insert(key.clone(), TaskIdCollection::from_sorted_vec(result_vec));
                     } else {
                         Self::merge_posting_add_only_into(
                             collection.iter_sorted(),
@@ -6260,10 +6257,8 @@ impl SearchIndex {
                         if !scratch.is_empty() {
                             let mut collected = Vec::with_capacity(scratch.len());
                             collected.append(&mut scratch);
-                            transient.insert(
-                                key.clone(),
-                                TaskIdCollection::from_sorted_vec(collected),
-                            );
+                            transient
+                                .insert(key.clone(), TaskIdCollection::from_sorted_vec(collected));
                         }
                     }
                 }
@@ -6285,10 +6280,7 @@ impl SearchIndex {
     /// Unlike [`merge_index_delta_add_only`], this method consumes the `MutableIndex`
     /// via `into_iter()`, eliminating `add_list.clone()` on the miss path.
     /// The hit path also benefits by taking `&add_list` without cloning.
-    fn merge_index_delta_add_only_owned(
-        index: &PrefixIndex,
-        add: MutableIndex,
-    ) -> PrefixIndex {
+    fn merge_index_delta_add_only_owned(index: &PrefixIndex, add: MutableIndex) -> PrefixIndex {
         if add.is_empty() {
             return index.clone();
         }
@@ -6306,14 +6298,10 @@ impl SearchIndex {
                         .is_none_or(|(existing_max, add_min)| add_min > existing_max);
 
                     if can_concat {
-                        let mut result_vec =
-                            Vec::with_capacity(collection.len() + add_list.len());
+                        let mut result_vec = Vec::with_capacity(collection.len() + add_list.len());
                         result_vec.extend(collection.iter_sorted().cloned());
                         result_vec.extend(add_list);
-                        transient.insert(
-                            key,
-                            TaskIdCollection::from_sorted_vec(result_vec),
-                        );
+                        transient.insert(key, TaskIdCollection::from_sorted_vec(result_vec));
                     } else {
                         Self::merge_posting_add_only_into(
                             collection.iter_sorted(),
@@ -6323,10 +6311,7 @@ impl SearchIndex {
                         if !scratch.is_empty() {
                             let mut collected = Vec::with_capacity(scratch.len());
                             collected.append(&mut scratch);
-                            transient.insert(
-                                key,
-                                TaskIdCollection::from_sorted_vec(collected),
-                            );
+                            transient.insert(key, TaskIdCollection::from_sorted_vec(collected));
                         }
                     }
                 }
@@ -6375,14 +6360,10 @@ impl SearchIndex {
                         .is_none_or(|(existing_max, add_min)| add_min > existing_max);
 
                     if can_concat {
-                        let mut result_vec =
-                            Vec::with_capacity(collection.len() + add_list.len());
+                        let mut result_vec = Vec::with_capacity(collection.len() + add_list.len());
                         result_vec.extend(collection.iter_sorted().cloned());
                         result_vec.extend(add_list.iter().cloned());
-                        result.insert(
-                            key.clone(),
-                            TaskIdCollection::from_sorted_vec(result_vec),
-                        );
+                        result.insert(key.clone(), TaskIdCollection::from_sorted_vec(result_vec));
                     } else {
                         Self::merge_posting_add_only_into(
                             collection.iter_sorted(),
@@ -6392,10 +6373,8 @@ impl SearchIndex {
                         if !scratch.is_empty() {
                             let mut collected = Vec::with_capacity(scratch.len());
                             collected.append(&mut scratch);
-                            result.insert(
-                                key.clone(),
-                                TaskIdCollection::from_sorted_vec(collected),
-                            );
+                            result
+                                .insert(key.clone(), TaskIdCollection::from_sorted_vec(collected));
                         }
                     }
                 }
@@ -6432,14 +6411,11 @@ impl SearchIndex {
                         .is_none_or(|(existing_max, add_min)| add_min > existing_max);
 
                     if can_concat {
-                        let mut result_vec =
-                            Vec::with_capacity(collection.len() + add_list.len());
+                        let mut result_vec = Vec::with_capacity(collection.len() + add_list.len());
                         result_vec.extend(collection.iter_sorted().cloned());
                         result_vec.extend(add_list.iter().cloned());
-                        entries_to_insert.push((
-                            key.clone(),
-                            TaskIdCollection::from_sorted_vec(result_vec),
-                        ));
+                        entries_to_insert
+                            .push((key.clone(), TaskIdCollection::from_sorted_vec(result_vec)));
                     } else {
                         Self::merge_posting_add_only_into(
                             collection.iter_sorted(),
@@ -6449,10 +6425,8 @@ impl SearchIndex {
                         if !scratch.is_empty() {
                             let mut collected = Vec::with_capacity(scratch.len());
                             collected.append(&mut scratch);
-                            entries_to_insert.push((
-                                key.clone(),
-                                TaskIdCollection::from_sorted_vec(collected),
-                            ));
+                            entries_to_insert
+                                .push((key.clone(), TaskIdCollection::from_sorted_vec(collected)));
                         }
                     }
                 }
@@ -6530,14 +6504,10 @@ impl SearchIndex {
                         .is_none_or(|(existing_max, add_min)| add_min > existing_max);
 
                     if can_concat {
-                        let mut result_vec =
-                            Vec::with_capacity(collection.len() + add_list.len());
+                        let mut result_vec = Vec::with_capacity(collection.len() + add_list.len());
                         result_vec.extend(collection.iter_sorted().cloned());
                         result_vec.extend(add_list);
-                        result.insert(
-                            key,
-                            TaskIdCollection::from_sorted_vec(result_vec),
-                        );
+                        result.insert(key, TaskIdCollection::from_sorted_vec(result_vec));
                     } else {
                         Self::merge_posting_add_only_into(
                             collection.iter_sorted(),
@@ -6547,10 +6517,7 @@ impl SearchIndex {
                         if !scratch.is_empty() {
                             let mut collected = Vec::with_capacity(scratch.len());
                             collected.append(&mut scratch);
-                            result.insert(
-                                key,
-                                TaskIdCollection::from_sorted_vec(collected),
-                            );
+                            result.insert(key, TaskIdCollection::from_sorted_vec(collected));
                         }
                     }
                 }
@@ -6590,14 +6557,11 @@ impl SearchIndex {
                         .is_none_or(|(existing_max, add_min)| add_min > existing_max);
 
                     if can_concat {
-                        let mut result_vec =
-                            Vec::with_capacity(collection.len() + add_list.len());
+                        let mut result_vec = Vec::with_capacity(collection.len() + add_list.len());
                         result_vec.extend(collection.iter_sorted().cloned());
                         result_vec.extend(add_list);
-                        entries_to_insert.push((
-                            key,
-                            TaskIdCollection::from_sorted_vec(result_vec),
-                        ));
+                        entries_to_insert
+                            .push((key, TaskIdCollection::from_sorted_vec(result_vec)));
                     } else {
                         Self::merge_posting_add_only_into(
                             collection.iter_sorted(),
@@ -6607,10 +6571,8 @@ impl SearchIndex {
                         if !scratch.is_empty() {
                             let mut collected = Vec::with_capacity(scratch.len());
                             collected.append(&mut scratch);
-                            entries_to_insert.push((
-                                key,
-                                TaskIdCollection::from_sorted_vec(collected),
-                            ));
+                            entries_to_insert
+                                .push((key, TaskIdCollection::from_sorted_vec(collected)));
                         }
                     }
                 }
@@ -6642,9 +6604,7 @@ impl SearchIndex {
                     // the rejected entries plus remaining entries.
                     let rejected_entries = error.into_items();
                     let mut fallback_result = snapshot.transient();
-                    for (key, collection) in
-                        rejected_entries.into_iter().chain(entries_iterator)
-                    {
+                    for (key, collection) in rejected_entries.into_iter().chain(entries_iterator) {
                         fallback_result.insert(key, collection);
                     }
                     return MergeNgramDeltaResult::Fallback {
@@ -19716,6 +19676,56 @@ mod merge_sorted_posting_lists_tests {
             );
         }
     }
+
+    /// Concat fast-path: all new entries are strictly greater than existing max.
+    #[rstest]
+    fn merge_sorted_posting_lists_concat_fast_path() {
+        let existing = TaskIdCollection::from_sorted_vec(vec![
+            make_task_id(1),
+            make_task_id(3),
+            make_task_id(5),
+        ]);
+        let new_entries =
+            TaskIdCollection::from_sorted_vec(vec![make_task_id(10), make_task_id(20)]);
+
+        let merged = merge_sorted_posting_lists(&existing, &new_entries);
+
+        assert_eq!(
+            merged.to_sorted_vec(),
+            vec![
+                make_task_id(1),
+                make_task_id(3),
+                make_task_id(5),
+                make_task_id(10),
+                make_task_id(20),
+            ]
+        );
+    }
+
+    /// Equal boundary (`existing_max == add_min`) should NOT use concat fast-path.
+    #[rstest]
+    fn merge_sorted_posting_lists_equal_boundary_falls_back_to_merge() {
+        let existing = TaskIdCollection::from_sorted_vec(vec![
+            make_task_id(1),
+            make_task_id(3),
+            make_task_id(5),
+        ]);
+        let new_entries =
+            TaskIdCollection::from_sorted_vec(vec![make_task_id(5), make_task_id(10)]);
+
+        let merged = merge_sorted_posting_lists(&existing, &new_entries);
+
+        // Duplicate id(5) should be deduplicated by merge
+        assert_eq!(
+            merged.to_sorted_vec(),
+            vec![
+                make_task_id(1),
+                make_task_id(3),
+                make_task_id(5),
+                make_task_id(10)
+            ]
+        );
+    }
 }
 
 // =============================================================================
@@ -20409,8 +20419,7 @@ mod merge_posting_add_only_tests {
                 .title_word_index
                 .get(key.as_str())
                 .expect("Key should exist in owned result");
-            let borrowed_elements: Vec<_> =
-                borrowed_collection.iter_sorted().cloned().collect();
+            let borrowed_elements: Vec<_> = borrowed_collection.iter_sorted().cloned().collect();
             let owned_elements: Vec<_> = owned_collection.iter_sorted().cloned().collect();
             assert_eq!(
                 borrowed_elements,
@@ -20425,8 +20434,7 @@ mod merge_posting_add_only_tests {
                 .title_full_index
                 .get(key.as_str())
                 .expect("Key should exist in owned result");
-            let borrowed_elements: Vec<_> =
-                borrowed_collection.iter_sorted().cloned().collect();
+            let borrowed_elements: Vec<_> = borrowed_collection.iter_sorted().cloned().collect();
             let owned_elements: Vec<_> = owned_collection.iter_sorted().cloned().collect();
             assert_eq!(
                 borrowed_elements,
@@ -20441,13 +20449,140 @@ mod merge_posting_add_only_tests {
                 .tag_index
                 .get(key.as_str())
                 .expect("Key should exist in owned result");
-            let borrowed_elements: Vec<_> =
-                borrowed_collection.iter_sorted().cloned().collect();
+            let borrowed_elements: Vec<_> = borrowed_collection.iter_sorted().cloned().collect();
             let owned_elements: Vec<_> = owned_collection.iter_sorted().cloned().collect();
             assert_eq!(
                 borrowed_elements,
                 owned_elements,
                 "tag_index posting list content mismatch for key '{}'",
+                key.as_str()
+            );
+        }
+
+        // Verify ngram indexes (title_full_ngram, title_word_ngram, tag_ngram)
+        assert_eq!(
+            result_borrowed.title_full_ngram_index.len(),
+            result_owned.title_full_ngram_index.len(),
+            "title_full_ngram_index length mismatch"
+        );
+        for (key, borrowed_collection) in &result_borrowed.title_full_ngram_index {
+            let owned_collection = result_owned
+                .title_full_ngram_index
+                .get(key.as_str())
+                .expect("Key should exist in owned title_full_ngram_index");
+            assert_eq!(
+                borrowed_collection
+                    .iter_sorted()
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                owned_collection.iter_sorted().cloned().collect::<Vec<_>>(),
+                "title_full_ngram_index posting list mismatch for key '{}'",
+                key.as_str()
+            );
+        }
+
+        assert_eq!(
+            result_borrowed.title_word_ngram_index.len(),
+            result_owned.title_word_ngram_index.len(),
+            "title_word_ngram_index length mismatch"
+        );
+        for (key, borrowed_collection) in &result_borrowed.title_word_ngram_index {
+            let owned_collection = result_owned
+                .title_word_ngram_index
+                .get(key.as_str())
+                .expect("Key should exist in owned title_word_ngram_index");
+            assert_eq!(
+                borrowed_collection
+                    .iter_sorted()
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                owned_collection.iter_sorted().cloned().collect::<Vec<_>>(),
+                "title_word_ngram_index posting list mismatch for key '{}'",
+                key.as_str()
+            );
+        }
+
+        assert_eq!(
+            result_borrowed.tag_ngram_index.len(),
+            result_owned.tag_ngram_index.len(),
+            "tag_ngram_index length mismatch"
+        );
+        for (key, borrowed_collection) in &result_borrowed.tag_ngram_index {
+            let owned_collection = result_owned
+                .tag_ngram_index
+                .get(key.as_str())
+                .expect("Key should exist in owned tag_ngram_index");
+            assert_eq!(
+                borrowed_collection
+                    .iter_sorted()
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                owned_collection.iter_sorted().cloned().collect::<Vec<_>>(),
+                "tag_ngram_index posting list mismatch for key '{}'",
+                key.as_str()
+            );
+        }
+
+        // Verify all_suffix indexes (title_full_all_suffix, title_word_all_suffix, tag_all_suffix)
+        assert_eq!(
+            result_borrowed.title_full_all_suffix_index.len(),
+            result_owned.title_full_all_suffix_index.len(),
+            "title_full_all_suffix_index length mismatch"
+        );
+        for (key, borrowed_collection) in &result_borrowed.title_full_all_suffix_index {
+            let owned_collection = result_owned
+                .title_full_all_suffix_index
+                .get(key.as_str())
+                .expect("Key should exist in owned title_full_all_suffix_index");
+            assert_eq!(
+                borrowed_collection
+                    .iter_sorted()
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                owned_collection.iter_sorted().cloned().collect::<Vec<_>>(),
+                "title_full_all_suffix_index posting list mismatch for key '{}'",
+                key.as_str()
+            );
+        }
+
+        assert_eq!(
+            result_borrowed.title_word_all_suffix_index.len(),
+            result_owned.title_word_all_suffix_index.len(),
+            "title_word_all_suffix_index length mismatch"
+        );
+        for (key, borrowed_collection) in &result_borrowed.title_word_all_suffix_index {
+            let owned_collection = result_owned
+                .title_word_all_suffix_index
+                .get(key.as_str())
+                .expect("Key should exist in owned title_word_all_suffix_index");
+            assert_eq!(
+                borrowed_collection
+                    .iter_sorted()
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                owned_collection.iter_sorted().cloned().collect::<Vec<_>>(),
+                "title_word_all_suffix_index posting list mismatch for key '{}'",
+                key.as_str()
+            );
+        }
+
+        assert_eq!(
+            result_borrowed.tag_all_suffix_index.len(),
+            result_owned.tag_all_suffix_index.len(),
+            "tag_all_suffix_index length mismatch"
+        );
+        for (key, borrowed_collection) in &result_borrowed.tag_all_suffix_index {
+            let owned_collection = result_owned
+                .tag_all_suffix_index
+                .get(key.as_str())
+                .expect("Key should exist in owned tag_all_suffix_index");
+            assert_eq!(
+                borrowed_collection
+                    .iter_sorted()
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                owned_collection.iter_sorted().cloned().collect::<Vec<_>>(),
+                "tag_all_suffix_index posting list mismatch for key '{}'",
                 key.as_str()
             );
         }
@@ -20475,8 +20610,7 @@ mod merge_posting_add_only_tests {
             let owned_collection = result_owned
                 .get(key.as_str())
                 .expect("Key should exist in owned result");
-            let borrowed_elements: Vec<_> =
-                borrowed_collection.iter_sorted().cloned().collect();
+            let borrowed_elements: Vec<_> = borrowed_collection.iter_sorted().cloned().collect();
             let owned_elements: Vec<_> = owned_collection.iter_sorted().cloned().collect();
             assert_eq!(
                 borrowed_elements,
@@ -20496,10 +20630,8 @@ mod merge_posting_add_only_tests {
 
         let mut initial_add: MutableIndex = std::collections::HashMap::new();
         initial_add.insert(NgramKey::new("hello"), vec![id_1.clone()]);
-        let index = SearchIndex::merge_index_delta_add_only_for_test(
-            &PrefixIndex::new(),
-            &initial_add,
-        );
+        let index =
+            SearchIndex::merge_index_delta_add_only_for_test(&PrefixIndex::new(), &initial_add);
 
         let mut add: MutableIndex = std::collections::HashMap::new();
         add.insert(NgramKey::new("hello"), vec![id_2, id_3]);
@@ -20514,8 +20646,7 @@ mod merge_posting_add_only_tests {
             let owned_collection = result_owned
                 .get(key.as_str())
                 .expect("Key should exist in owned result");
-            let borrowed_elements: Vec<_> =
-                borrowed_collection.iter_sorted().cloned().collect();
+            let borrowed_elements: Vec<_> = borrowed_collection.iter_sorted().cloned().collect();
             let owned_elements: Vec<_> = owned_collection.iter_sorted().cloned().collect();
             assert_eq!(
                 borrowed_elements,
@@ -20533,10 +20664,8 @@ mod merge_posting_add_only_tests {
 
         let mut initial_add: MutableIndex = std::collections::HashMap::new();
         initial_add.insert(NgramKey::new("hello"), vec![id_1]);
-        let index = SearchIndex::merge_index_delta_add_only_for_test(
-            &PrefixIndex::new(),
-            &initial_add,
-        );
+        let index =
+            SearchIndex::merge_index_delta_add_only_for_test(&PrefixIndex::new(), &initial_add);
 
         let empty_add: MutableIndex = std::collections::HashMap::new();
         let result = SearchIndex::merge_index_delta_add_only_owned_for_test(&index, empty_add);
@@ -20568,8 +20697,7 @@ mod merge_posting_add_only_tests {
             let owned_collection = result_owned
                 .get(key.as_str())
                 .expect("Key should exist in owned result");
-            let borrowed_elements: Vec<_> =
-                borrowed_collection.iter_sorted().cloned().collect();
+            let borrowed_elements: Vec<_> = borrowed_collection.iter_sorted().cloned().collect();
             let owned_elements: Vec<_> = owned_collection.iter_sorted().cloned().collect();
             assert_eq!(
                 borrowed_elements,
@@ -20603,8 +20731,7 @@ mod merge_posting_add_only_tests {
             let owned_collection = result_owned
                 .get(key.as_str())
                 .expect("Key should exist in owned result");
-            let borrowed_elements: Vec<_> =
-                borrowed_collection.iter_sorted().cloned().collect();
+            let borrowed_elements: Vec<_> = borrowed_collection.iter_sorted().cloned().collect();
             let owned_elements: Vec<_> = owned_collection.iter_sorted().cloned().collect();
             assert_eq!(
                 borrowed_elements,
@@ -20647,10 +20774,184 @@ mod merge_posting_add_only_tests {
         let result_borrowed = index_with_tasks.apply_delta(&remove_delta, &remove_changes);
         let result_owned = index_with_tasks.apply_delta_owned(remove_delta, &remove_changes);
 
+        // Verify tasks_by_id full equivalence
         assert_eq!(
             result_borrowed.tasks_by_id.len(),
-            result_owned.tasks_by_id.len()
+            result_owned.tasks_by_id.len(),
+            "tasks_by_id length mismatch in fallback path"
         );
+        for (task_id, task) in &result_borrowed.tasks_by_id {
+            assert_eq!(
+                result_owned.tasks_by_id.get(task_id),
+                Some(task),
+                "Task {task_id:?} mismatch in fallback path"
+            );
+        }
+
+        // Verify all 9 indexes: prefix indexes
+        assert_eq!(
+            result_borrowed.title_full_index.len(),
+            result_owned.title_full_index.len()
+        );
+        for (key, borrowed_collection) in &result_borrowed.title_full_index {
+            let owned_collection = result_owned
+                .title_full_index
+                .get(key.as_str())
+                .expect("Key should exist in owned title_full_index (fallback)");
+            assert_eq!(
+                borrowed_collection
+                    .iter_sorted()
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                owned_collection.iter_sorted().cloned().collect::<Vec<_>>(),
+            );
+        }
+
+        assert_eq!(
+            result_borrowed.title_word_index.len(),
+            result_owned.title_word_index.len()
+        );
+        for (key, borrowed_collection) in &result_borrowed.title_word_index {
+            let owned_collection = result_owned
+                .title_word_index
+                .get(key.as_str())
+                .expect("Key should exist in owned title_word_index (fallback)");
+            assert_eq!(
+                borrowed_collection
+                    .iter_sorted()
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                owned_collection.iter_sorted().cloned().collect::<Vec<_>>(),
+            );
+        }
+
+        assert_eq!(
+            result_borrowed.tag_index.len(),
+            result_owned.tag_index.len()
+        );
+        for (key, borrowed_collection) in &result_borrowed.tag_index {
+            let owned_collection = result_owned
+                .tag_index
+                .get(key.as_str())
+                .expect("Key should exist in owned tag_index (fallback)");
+            assert_eq!(
+                borrowed_collection
+                    .iter_sorted()
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                owned_collection.iter_sorted().cloned().collect::<Vec<_>>(),
+            );
+        }
+
+        // Verify ngram indexes
+        assert_eq!(
+            result_borrowed.title_full_ngram_index.len(),
+            result_owned.title_full_ngram_index.len()
+        );
+        for (key, borrowed_collection) in &result_borrowed.title_full_ngram_index {
+            let owned_collection = result_owned
+                .title_full_ngram_index
+                .get(key.as_str())
+                .expect("Key should exist in owned title_full_ngram_index (fallback)");
+            assert_eq!(
+                borrowed_collection
+                    .iter_sorted()
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                owned_collection.iter_sorted().cloned().collect::<Vec<_>>(),
+            );
+        }
+
+        assert_eq!(
+            result_borrowed.title_word_ngram_index.len(),
+            result_owned.title_word_ngram_index.len()
+        );
+        for (key, borrowed_collection) in &result_borrowed.title_word_ngram_index {
+            let owned_collection = result_owned
+                .title_word_ngram_index
+                .get(key.as_str())
+                .expect("Key should exist in owned title_word_ngram_index (fallback)");
+            assert_eq!(
+                borrowed_collection
+                    .iter_sorted()
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                owned_collection.iter_sorted().cloned().collect::<Vec<_>>(),
+            );
+        }
+
+        assert_eq!(
+            result_borrowed.tag_ngram_index.len(),
+            result_owned.tag_ngram_index.len()
+        );
+        for (key, borrowed_collection) in &result_borrowed.tag_ngram_index {
+            let owned_collection = result_owned
+                .tag_ngram_index
+                .get(key.as_str())
+                .expect("Key should exist in owned tag_ngram_index (fallback)");
+            assert_eq!(
+                borrowed_collection
+                    .iter_sorted()
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                owned_collection.iter_sorted().cloned().collect::<Vec<_>>(),
+            );
+        }
+
+        // Verify all_suffix indexes
+        assert_eq!(
+            result_borrowed.title_full_all_suffix_index.len(),
+            result_owned.title_full_all_suffix_index.len()
+        );
+        for (key, borrowed_collection) in &result_borrowed.title_full_all_suffix_index {
+            let owned_collection = result_owned
+                .title_full_all_suffix_index
+                .get(key.as_str())
+                .expect("Key should exist in owned title_full_all_suffix_index (fallback)");
+            assert_eq!(
+                borrowed_collection
+                    .iter_sorted()
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                owned_collection.iter_sorted().cloned().collect::<Vec<_>>(),
+            );
+        }
+
+        assert_eq!(
+            result_borrowed.title_word_all_suffix_index.len(),
+            result_owned.title_word_all_suffix_index.len()
+        );
+        for (key, borrowed_collection) in &result_borrowed.title_word_all_suffix_index {
+            let owned_collection = result_owned
+                .title_word_all_suffix_index
+                .get(key.as_str())
+                .expect("Key should exist in owned title_word_all_suffix_index (fallback)");
+            assert_eq!(
+                borrowed_collection
+                    .iter_sorted()
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                owned_collection.iter_sorted().cloned().collect::<Vec<_>>(),
+            );
+        }
+
+        assert_eq!(
+            result_borrowed.tag_all_suffix_index.len(),
+            result_owned.tag_all_suffix_index.len()
+        );
+        for (key, borrowed_collection) in &result_borrowed.tag_all_suffix_index {
+            let owned_collection = result_owned
+                .tag_all_suffix_index
+                .get(key.as_str())
+                .expect("Key should exist in owned tag_all_suffix_index (fallback)");
+            assert_eq!(
+                borrowed_collection
+                    .iter_sorted()
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                owned_collection.iter_sorted().cloned().collect::<Vec<_>>(),
+            );
+        }
     }
 
     proptest! {
@@ -20817,11 +21118,8 @@ mod concat_fast_path_tests {
     /// Build an `NgramIndex` containing the given (key, ids) entry.
     fn ngram_index_with(key: &str, existing_ids: &[TaskId]) -> NgramIndex {
         let (_, add) = make_add_index(key, existing_ids.to_vec());
-        SearchIndex::merge_ngram_delta_add_only_individual_for_test(
-            &PersistentHashMap::new(),
-            &add,
-        )
-        .into_index()
+        SearchIndex::merge_ngram_delta_add_only_individual_for_test(&PersistentHashMap::new(), &add)
+            .into_index()
     }
 
     // -------------------------------------------------------
@@ -20881,9 +21179,8 @@ mod concat_fast_path_tests {
         let index = ngram_index_with("abc", &existing_ids);
 
         let (key, add) = make_add_index("abc", add_ids);
-        let result =
-            SearchIndex::merge_ngram_delta_add_only_individual_owned_for_test(&index, add)
-                .into_index();
+        let result = SearchIndex::merge_ngram_delta_add_only_individual_owned_for_test(&index, add)
+            .into_index();
 
         assert_collection_sorted_eq(
             result.get(key.as_str()).unwrap(),
