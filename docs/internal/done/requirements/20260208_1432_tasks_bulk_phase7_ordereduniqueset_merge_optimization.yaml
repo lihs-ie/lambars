@@ -1,0 +1,354 @@
+# tasks_bulk Phase7 OrderedUniqueSet::merge 最適化 要件定義
+#
+# 作成日: 2026-02-08
+# 根拠:
+#   - bottleneck-finder スキルのワークフロー/チェックリスト
+#   - Phase6 後プロファイリング結果 (ユーザー提示値)
+#   - 実装参照:
+#     - src/persistent/ordered_unique_set.rs
+#     - benches/api/src/api/query.rs
+#     - benches/api/src/api/handlers.rs
+
+version: "1.0.0"
+name: "tasks_bulk_phase7_ordereduniqueset_merge_optimization"
+file_name_proposal: "20260208_1432_tasks_bulk_phase7_ordereduniqueset_merge_optimization.yaml"
+created_at: "2026-02-08T14:32:00+09:00"
+status: "pending"
+priority: "P0"
+category: "performance"
+
+analysis_method:
+  skill: "bottleneck-finder"
+  workflow_applied:
+    - "Phase 1: 問題の定量化"
+    - "Phase 3: 分析と優先付け (80/20)"
+    - "Phase 4: 改善要件と検証条件の定義"
+  checklist_evaluation:
+    algorithm_data_structure:
+      status: "要改善"
+      findings:
+        - "`OrderedUniqueSet::merge` は理論計算量 O(n+m) だが、呼び出し回数が極端に多く実効支配率 60.67%"
+        - "`iter_sorted().peekable()` + `map(Clone::clone)` による反復オーバーヘッドがホットパス化"
+        - "`merge_postings_multiway` が逐次 pair-wise merge のため、キーあたりの再走査回数が増える"
+    memory:
+      status: "要改善"
+      findings:
+        - "アロケーション総コスト 13.59% (malloc/cfree/realloc/page alloc)"
+        - "merge ごとの新規 `Vec` + `Arc<Vec<_>>` 生成/破棄で allocator 負荷が累積"
+        - "`Arc::drop_slow` が 1.0% -> 2.47% へ増加"
+    concurrency:
+      status: "要改善"
+      findings:
+        - "`save_tasks_bulk_optimized` は DB 保存のみ並列、検索インデックス更新は `update_search_index_batch` 内で同期計算"
+        - "CAS 失敗時に `apply_changes` を再計算するため、実効的な CPU 増幅が起きる"
+    compiler_optimization:
+      status: "要改善"
+      findings:
+        - "`Cloned<I>::next` 2.36% は hot path に clone adapter が残っている兆候"
+        - "LTO/codegen-units=1 は既に有効で、主因はビルド設定より実装側ホットループ"
+
+context:
+  benchmark: "tasks_bulk"
+  current:
+    rps: 82.94
+    p99_seconds: 24.82
+  target:
+    rps: 500.0
+    p99_seconds: 8.0
+  gap:
+    rps_multiplier_required: 6.03
+    rps_achievement_rate_pct: 16.6
+  hotspots:
+    - function: "OrderedUniqueSet::merge"
+      cpu_pct: 60.67
+      samples_billion: 40.4
+    - function: "malloc"
+      cpu_pct: 6.71
+      samples_billion: 4.5
+    - function: "cfree"
+      cpu_pct: 3.45
+      samples_billion: 2.3
+    - function: "Arc::drop_slow"
+      cpu_pct: 2.47
+      samples_billion: 1.6
+    - function: "Cloned<I>::next"
+      cpu_pct: 2.36
+      samples_billion: 1.6
+    - function: "Vec::extend_desugared"
+      cpu_pct: 1.59
+      samples_billion: 1.1
+    - function: "RawVecInner::finish_grow"
+      cpu_pct: 1.43
+      samples_billion: 0.951
+    - function: "realloc"
+      cpu_pct: 1.01
+      samples_billion: 0.673
+
+performance_shift_from_phase5:
+  - metric: "merge hotpath"
+    before: "merge_posting_add_only_into 42.0% + merge_bulk_ngram_index 21.0%"
+    after: "OrderedUniqueSet::merge 60.67%"
+    interpretation: "ホットスポットが統合されたが、merge 演算自体の総コストは増幅"
+  - metric: "malloc/cfree"
+    before_pct: 12.0
+    after_pct: 10.16
+    interpretation: "Phase6 施策で一定改善したが、依然として 10% 超"
+  - metric: "Arc::drop_slow"
+    before_pct: 1.0
+    after_pct: 2.47
+    interpretation: "短命 Arc オブジェクト増加を示唆"
+
+target_components:
+  - path: "src/persistent/ordered_unique_set.rs"
+    focus:
+      - "OrderedUniqueSet::merge"
+      - "OrderedUniqueSet::iter_sorted"
+      - "OrderedUniqueSet::from_sorted_vec"
+      - "OrderedUniqueSet::as_sorted_slice"
+  - path: "benches/api/src/api/query.rs"
+    focus:
+      - "NgramSegmentOverlay::merge_segment_into"
+      - "merge_postings_multiway"
+      - "apply_changes_bulk"
+      - "merge_sorted_posting_lists"
+      - "merge_posting_add_only_into_slice"
+
+bottlenecks:
+  - id: "BOT-P7-001"
+    priority: "P0"
+    component: "src/persistent/ordered_unique_set.rs"
+    function: "OrderedUniqueSet::merge"
+    cpu_pct: 60.67
+    why_bottleneck: |
+      two-pointer 自体の計算量は適切だが、実装が iterator/peekable ベースで、
+      比較ループ内の分岐・peek・clone adapter 呼び出しが多い。
+      さらに呼び出し元 (`merge_segment_into`, `merge_postings_multiway`) が
+      キー単位で大量に merge を起動するため、定数因子の重さが全体支配になっている。
+    concrete_causes:
+      - "`iter_sorted().peekable()` による抽象化コスト"
+      - "`result.extend(left.map(Clone::clone))` / `right.map(...)` が `Cloned<I>::next` と `Vec::extend_desugared` を誘発"
+      - "disjoint (max(left) < min(right)) の concat fast path が `OrderedUniqueSet::merge` 側にない"
+      - "multiway merge が逐次 pair-wise で同一データを複数回走査"
+    required_improvements:
+      - "`merge` を slice index ベース実装へ置換し、peekable/map clone を排除"
+      - "`as_sorted_slice()` 利用時の `concat-fast-path` を `merge` 本体に導入"
+      - "`merge_many` (k-way) API を追加し、query 側 multi-segment 統合で pair-wise 回数を削減"
+      - "merge 結果構築を `Vec::with_capacity` + tail `extend_from_slice` へ統一"
+    algorithms:
+      - name: "Slice Two-Pointer Union"
+        description: "`&[T]` 同士を index で走査し、比較・push・tail copy を最小命令で実行"
+      - name: "Disjoint Concat Fast Path"
+        description: "`left_last < right_first` または逆方向なら比較ループを省略して連結"
+      - name: "K-way Tournament Merge"
+        description: "segment 数が 3 以上のとき、pair-wise ではなく tournament/tree merge で再走査削減"
+
+  - id: "BOT-P7-002"
+    priority: "P0"
+    component: "benches/api/src/api/query.rs"
+    function: "merge_segment_into / merge_postings_multiway"
+    cpu_pct: 60.67
+    why_bottleneck: |
+      Phase6 の LSM-style overlay 導入後、segment 統合時に
+      `existing.merge(segment_collection)` がキーごとに繰り返される。
+      Add-only 優位のデータ分布でも一般 union 経路を通るため、
+      既存最適化 (galloping/binary/concat) が十分活用されていない。
+    concrete_causes:
+      - "`merge_segment_into` が常に `OrderedUniqueSet::merge` 呼び出し"
+      - "`merge_postings_multiway` が 3 本以上で sequential merge"
+      - "overlay compaction 周期中に同キー merge の再計算が発生"
+    required_improvements:
+      - "`merge_segment_into` で `as_sorted_slice` + add-only 判定を先行し `merge_posting_add_only_into_slice` を優先利用"
+      - "segment 統合処理に key hit/miss 分割を導入 (miss は move で挿入)"
+      - "compaction 時は merge order をサイズ昇順にして総比較回数を削減"
+    algorithms:
+      - name: "Add-only Specialized Union"
+        description: "追加リスト主体キーでは add-only merge (galloping/concat) を使う"
+      - name: "Hit/Miss Partition Merge"
+        description: "existing hit のみ重い merge、miss は clone/move で O(1) 挿入"
+
+  - id: "BOT-P7-003"
+    priority: "P1"
+    component: "src/persistent/ordered_unique_set.rs + benches/api/src/api/query.rs"
+    function: "allocation path"
+    cpu_pct: 13.59
+    why_bottleneck: |
+      merge 結果を毎回新規 `Vec` と `Arc<Vec<_>>` に materialize するため、
+      malloc/cfree/realloc とページ確保コストが合算で 13.59% を占有している。
+      `Arc::drop_slow` 増加は短命共有オブジェクトの増加を示す。
+    allocation_breakdown:
+      malloc_pct: 6.71
+      cfree_pct: 3.45
+      do_anonymous_page_pct: 1.47
+      realloc_pct: 1.03
+      alloc_anon_folio_pct: 0.94
+    concrete_causes:
+      - "merge ごとの短命 result Vec + Arc 生成"
+      - "`Vec::extend_desugared` の要素単位拡張コスト"
+      - "`RawVecInner::finish_grow` / `realloc` は scratch/entry バッファ増加時に発生"
+    required_improvements:
+      - "key ループで再利用可能な scratch allocator を導入し、merge 出力 Vec の再確保回数を抑制"
+      - "`merge` 実装で clone 単位を削減し、tail は `extend_from_slice` を優先"
+      - "`Arc<Vec<_>>` 生成頻度を減らすため、compaction 粒度とセグメント閾値を再調整"
+    algorithms:
+      - name: "Reusable Scratch Buffer"
+        description: "`Vec::clear()` + 必要時のみ `reserve` で容量再利用"
+      - name: "Capacity Bucketing"
+        description: "キーの posting list 長に応じてバケット化し、過剰 realloc を抑制"
+
+  - id: "BOT-P7-004"
+    priority: "P1"
+    component: "benches/api/src/api/handlers.rs + benches/api/src/api/query.rs"
+    function: "update_search_index_batch / Arc reference counting"
+    cpu_pct: 2.47
+    why_bottleneck: |
+      `tasks_bulk` では DB 書き込みは並列化されるが、インデックス更新は
+      `update_search_index_batch` で同期的に `apply_changes` を実行する。
+      複数要求が競合すると CAS リトライごとに全計算を再実行し、
+      Arc 増減 (`Arc::drop_slow`) のコストを増幅する。
+    concurrency_assessment:
+      tasks_bulk_execution: "保存処理は並列、検索インデックス merge は単一バッチ内逐次"
+      risk: "高並行時に同時計算 + CAS リトライで CPU 浪費"
+    required_improvements:
+      - "検索インデックス更新を single-writer queue 化し、書き込み競合を排除"
+      - "micro-batch で `apply_changes` 回数を削減"
+      - "retry_count / merge_cpu_ms / arc_drop_samples を常時メトリクス化"
+    algorithms:
+      - name: "Single-Writer Apply Pipeline"
+        description: "MPSC キューで変更を集約し、1 スレッドで順序保証付き適用"
+      - name: "Time/Size-based Micro Batching"
+        description: "件数または時間閾値でまとめて apply し、計算 amortize"
+
+  - id: "BOT-P7-005"
+    priority: "P2"
+    component: "src/persistent/ordered_unique_set.rs"
+    function: "compiler hot loop"
+    cpu_pct: 2.36
+    why_bottleneck: |
+      `Cloned<I>::next` が独立ホットスポット化しており、
+      merge hot path で iterator adapter が最適化限界に達している。
+    required_improvements:
+      - "hot loop を monomorphic な slice ループへ寄せ、adapter 依存を削減"
+      - "小さなヘルパー (`cmp+emit`) に `#[inline(always)]` を限定導入して再測定"
+      - "必要時のみ PGO を検証し、改善が確認できる場合に限定採用"
+
+requirements:
+  - id: "REQ-P7-001"
+    priority: "P0"
+    title: "OrderedUniqueSet::merge を slice 専用ホットパスへ置換"
+    scope:
+      - "src/persistent/ordered_unique_set.rs"
+    changes:
+      - "Large/Large では `as_sorted_slice` 経由の index merge を優先"
+      - "disjoint concat fast path を merge 本体へ統合"
+      - "`map(Clone::clone)` / `peekable` 非依存の実装へ移行"
+    success_criteria:
+      - "`OrderedUniqueSet::merge` CPU 比率: 60.67% -> 35% 以下"
+      - "`Cloned<I>::next` CPU 比率: 2.36% -> 0.8% 以下"
+
+  - id: "REQ-P7-002"
+    priority: "P0"
+    title: "query 側 merge 呼び出し回数と再走査回数を削減"
+    scope:
+      - "benches/api/src/api/query.rs"
+    changes:
+      - "`merge_segment_into` に add-only 最適化ルートを追加"
+      - "`merge_postings_multiway` を size-aware merge に置換"
+      - "key hit/miss 分割で miss key の重い merge を回避"
+    success_criteria:
+      - "`merge` 呼び出し回数 (profiling counter) を 40% 以上削減"
+      - "tasks_bulk RPS: 82.94 -> 180 以上"
+
+  - id: "REQ-P7-003"
+    priority: "P1"
+    title: "アロケーションと Arc CoW/Drop コストの削減"
+    scope:
+      - "src/persistent/ordered_unique_set.rs"
+      - "benches/api/src/api/query.rs"
+    changes:
+      - "scratch buffer 再利用と容量バケット戦略を導入"
+      - "merge 後の不要な中間 Vec 生成を排除"
+      - "セグメント compaction 閾値を再調整し短命 Arc を削減"
+    success_criteria:
+      - "allocation 総コスト: 13.59% -> 8.0% 以下"
+      - "`Arc::drop_slow`: 2.47% -> 1.2% 以下"
+      - "`RawVecInner::finish_grow`: 1.43% -> 0.7% 以下"
+
+  - id: "REQ-P7-004"
+    priority: "P1"
+    title: "tasks_bulk の検索インデックス更新を single-writer 化"
+    scope:
+      - "benches/api/src/api/handlers.rs"
+      - "benches/api/src/api/query.rs"
+    changes:
+      - "`update_search_index_batch` の同期再計算をキュー処理へ移行"
+      - "CAS retry ベースから順序保証 single-writer モデルへ変更"
+    success_criteria:
+      - "CAS retry に起因する再計算を 90% 以上削減"
+      - "高並行時の P99 を 20% 以上改善"
+
+  - id: "REQ-P7-005"
+    priority: "P2"
+    title: "コンパイラ最適化の最終詰め"
+    scope:
+      - "src/persistent/ordered_unique_set.rs"
+      - "benches/api/Cargo.toml"
+    changes:
+      - "inline 指示の局所最適化と副作用検証"
+      - "PGO の A/B 計測（改善時のみ採用）"
+    success_criteria:
+      - "CPU hotspot の上位 5 から iterator adapter 起因項目を除外"
+
+performance_roadmap:
+  phase_p0:
+    target:
+      rps_min: 180
+      p99_seconds_max: 16.0
+    required_hotspot_shift:
+      ordereduniqueset_merge_pct_max: 35.0
+      allocation_total_pct_max: 10.0
+  phase_p1:
+    target:
+      rps_min: 300
+      p99_seconds_max: 11.0
+    required_hotspot_shift:
+      ordereduniqueset_merge_pct_max: 25.0
+      allocation_total_pct_max: 8.0
+      arc_drop_slow_pct_max: 1.2
+  phase_p2:
+    target:
+      rps_min: 500
+      p99_seconds_max: 8.0
+    note: |
+      6.03x 改善は merge 単体最適化のみでは到達困難。
+      write-path 実行モデル (single-writer + micro-batch) まで含めた
+      計算回数削減が必須。
+
+functional_architecture_constraints:
+  referential_transparency:
+    - "merge/compaction の純粋計算部分は入力依存のみで決定"
+    - "時刻・乱数・グローバル状態を参照しない"
+  purity:
+    - "`OrderedUniqueSet` と merge ロジックは副作用なし"
+    - "実行境界 (queue publish / atomic swap) を関数外側に隔離"
+  immutability:
+    - "公開 API は不変を維持し、内部最適化は局所可変バッファで完結"
+  error_model:
+    - "フォールバック/失敗は `Result` / enum で表現し、panic 制御フローを避ける"
+
+validation_plan:
+  benchmark:
+    - "同一条件で tasks_bulk の before/after を計測 (RPS, P50/P95/P99, CPU flamegraph)"
+  profiling:
+    - "Top10 hotspot 比率と allocation breakdown を再取得"
+    - "`merge` 呼び出し回数、CAS retry 回数、segment compaction 回数を追加計測"
+  correctness:
+    - "旧 merge 実装との同値性プロパティテスト (順序・重複排除・集合等価)"
+    - "apply_changes_bulk と delta path の同値性回帰"
+
+risks_and_mitigations:
+  - risk: "k-way merge 導入で実装複雑度が増加"
+    mitigation: "2-way/3-way 境界ごとに段階導入し、property test で同値性保証"
+  - risk: "single-writer 化でスループットは改善するが遅延分布が悪化する可能性"
+    mitigation: "time/size 閾値を可変化し、SLO (P99<=8s) 基準でチューニング"
+  - risk: "過度な inline 指示でコードサイズ増加"
+    mitigation: "対象を hot helper に限定し、binary size と perf の両方を比較"
