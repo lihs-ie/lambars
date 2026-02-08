@@ -1,0 +1,101 @@
+# tasks_bulk マージパイプライン最適化 Phase3 要件定義
+#
+# 概要:
+#   最新プロファイルで継続している `tasks_bulk` の極端な高遅延を解消するため、
+#   SearchIndex の posting list マージ経路を再設計する。
+#
+# 設計方針:
+#   1. posting list の全量Vec化を廃止し、streaming mergeへ置換する。
+#   2. Add-only 更新を専用アルゴリズムで処理し、不要分岐を削減する。
+#   3. 不変APIを維持しつつ、内部はtransient/scratch再利用で割り当てを抑える。
+#
+# 参照:
+#   - profiling-results-downloaded-latest/api-profiling-all-a4f891384d96a988c90a4241af943f4e4006751d/tasks_bulk/benchmark/summary.txt
+#   - profiling-results-downloaded-latest/api-profiling-all-a4f891384d96a988c90a4241af943f4e4006751d/tasks_bulk/stacks.folded
+#   - benches/api/src/api/query.rs
+
+version: "1.0.0"
+name: "tasks_bulk_merge_pipeline_phase3"
+description: |
+  tasks_bulk は target 500 RPS に対し 69.61 RPS（達成率 13.92%）、
+  Avg 16.11s / P99 25.59s で本番運用不可。
+  ホットパスは以下:
+  - SearchIndex::compute_merged_posting_list_sorted: 38.11%
+  - SearchIndex::merge_bulk_ngram_index: 20.73%
+  - OrderedUniqueSet::to_sorted_vec: 13.03%
+
+background:
+  problem: |
+    keyごとに posting list を Vec 化し、再マージ・再確保しているため、
+    CPUとメモリ帯域の固定費が増大している。
+    既存改善後も計算構造が変わっておらず、ボトルネックが維持されている。
+  motivation: |
+    /tasks/bulk を本番で使用可能なレベルへ戻す。
+  prior_art:
+    - name: "Two-pointer streaming merge"
+      description: "ソート済み列のunion/diffを1パスで処理する。"
+    - name: "Delta segment compaction"
+      description: "書き込み時コストを分散し、読込側で遅延統合する。"
+
+requirements:
+  - id: "REQ-TB3-001"
+    name: "posting list マージをstreaming実装に置換する"
+    description: |
+      `to_sorted_vec` 前提を廃止し、`iter_sorted()` を直接入力にした
+      two-pointer merge + tombstone filtering を導入する。
+    methods:
+      - name: "merge_posting_streaming"
+        signature: "fn merge_posting_streaming(existing: &TaskIdCollection, add: &[TaskId], remove: &[TaskId], scratch: &mut Vec<TaskId>) -> TaskIdCollection"
+        description: |
+          中間Vec再生成を1回に限定し、scratchを再利用する。
+    implementations:
+      - type: "SearchIndex::merge_ngram_delta"
+        description: "Vec変換経路を削除し、iterator直結のマージへ統一する。"
+
+  - id: "REQ-TB3-002"
+    name: "Add-only fast path を導入する"
+    description: |
+      removeが空のケースは専用unionアルゴリズムで処理し、
+      remove分岐と比較コストを除去する。
+    methods:
+      - name: "merge_add_only"
+        signature: "fn merge_add_only(existing: &TaskIdCollection, add: &[TaskId], scratch: &mut Vec<TaskId>) -> TaskIdCollection"
+        description: "remove iterator を生成しない高速経路。"
+    implementations:
+      - type: "SearchIndex apply path"
+        description: "delta作成時にAdd-only判定して強制的にfast pathへ分岐する。"
+
+  - id: "REQ-TB3-003"
+    name: "delta segment + background compaction を導入する"
+    description: |
+      リクエスト同期での完全マージを避けるため、
+      書き込みはdelta追記、読み込みは必要時統合へ設計変更する。
+    methods:
+      - name: "append_delta_segment"
+        signature: "fn append_delta_segment(&self, delta: SearchIndexDelta) -> Self"
+        description: "更新を即時フルマージせず追記する。"
+      - name: "compact_segments"
+        signature: "fn compact_segments(&self, max_segments: usize) -> Self"
+        description: "閾値超過時に段階統合する。"
+    implementations:
+      - type: "SearchIndex layout"
+        description: "base + delta segments の二層構造へ変更する。"
+
+non_functional_requirements:
+  performance:
+    - "tasks_bulk RPS: 69.61 -> 250以上（短期）/ 450以上（最終）"
+    - "tasks_bulk P99: 25.59s -> 5s以下（短期）/ 1s以下（最終）"
+    - "compute_merged_posting_list_sorted比率: 38.11% -> 15%以下"
+  compatibility:
+    - "`POST /tasks/bulk` のAPI契約（207含む）を維持する"
+  testing:
+    - "旧実装との同値性 property test を追加する"
+    - "1e4データ規模の回帰ベンチをCI必須にする"
+
+future_extensions:
+  - id: "TB3-FUTURE-001"
+    name: "bitmap posting list 適応化"
+    description: |
+      高cardinalityキーに RoaringBitmap 表現を選択し、union/diff を高速化する。
+    rationale: |
+      まずは現行構造でアルゴリズムボトルネックを除去する。

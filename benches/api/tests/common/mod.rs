@@ -69,6 +69,7 @@ pub fn create_test_app_state() -> AppState {
         cache_ttl_seconds: 60,
         applied_config: AppliedConfig::default(),
         search_index_rcu_retries: Arc::new(AtomicUsize::new(0)),
+        search_index_writer: None,
     }
 }
 
@@ -120,6 +121,7 @@ pub fn create_test_app_state_with_fail_injection(
         cache_ttl_seconds: 60,
         applied_config: AppliedConfig::default(),
         search_index_rcu_retries: Arc::new(AtomicUsize::new(0)),
+        search_index_writer: None,
     }
 }
 

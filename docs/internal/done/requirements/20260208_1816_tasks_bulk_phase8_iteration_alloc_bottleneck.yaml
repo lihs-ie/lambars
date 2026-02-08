@@ -1,0 +1,967 @@
+---
+requirement_id: REQ-PERF-ITER-ALLOC-001
+title: tasks_bulk イテレーション・アロケーション最適化（Phase 8）
+created_at: 2026-02-08T18:16:00+09:00
+updated_at: 2026-02-08T18:16:00+09:00
+status: draft
+priority: P0
+category: performance
+related_issues: []
+related_requirements:
+  - 20260206_0800_tasks_bulk_memory_allocation_optimization.yaml
+  - 20260206_0626_tasks_bulk_merge_buffer_optimization.yaml
+
+profiling_analysis:
+  date: 2026-02-08
+  tool: perf + flamegraph
+  run_id: 21795098767
+  result_location: profiling-results-downloaded-latest/api-profiling-all-27ede9852e5a6c3dba7975ed9a7548a31d537c5e/tasks_bulk/
+  total_samples: 52710128968
+
+  thread_distribution:
+    search_index_writer:
+      samples: 28428284087
+      percentage: 53.9
+      description: |
+        SearchIndexWriter スレッドが全体の 53.9% の CPU 時間を消費。
+        merge 処理とインデックス構築が主要なボトルネック。
+
+    tokio_runtime:
+      samples: 24273820809
+      percentage: 46.1
+      description: |
+        Tokio runtime スレッドが全体の 46.1% の CPU 時間を消費。
+        タスク処理、UUID 生成、シリアライゼーションが主要な負荷。
+
+  category_breakdown:
+    memory_alloc:
+      percentage: 23.89
+      description: |
+        メモリアロケーション関連が全体の 23.89% を占める最大のボトルネック。
+        Phase 7 で merge buffer を最適化したが、依然として malloc/realloc/cfree が支配的。
+
+    iteration:
+      percentage: 17.55
+      description: |
+        イテレーション関連が全体の 17.55% を占める第2位のボトルネック。
+        主に <Cloned<I> as Iterator>::next と SmallVec::extend に起因。
+
+    persistent_structures:
+      percentage: 8.98
+      description: |
+        永続データ構造（HashMap, BTreeNode, OrderedUniqueSet）のアクセスが 8.98%。
+        特に get/insert 操作が頻繁に呼ばれている。
+
+    drop:
+      percentage: 7.57
+      description: |
+        Drop トレイト実装（Arc::drop_slow 等）が 7.57%。
+        不要な Arc/clone の可能性を示唆。
+
+    kernel:
+      percentage: 7.35
+      description: |
+        カーネルコール（ページフォールト、システムコール）が 7.35%。
+        大規模アロケーションに伴うページフォールトが主要因。
+
+    search_index:
+      percentage: 5.31
+      description: |
+        SearchIndex 固有処理（merge_posting, normalize_query 等）が 5.31%。
+        Phase 7 で galloping search を導入し、効率化済み。
+
+    serialization:
+      percentage: 2.41
+      description: |
+        JSON シリアライゼーション（serialize_str 等）が 2.41%。
+
+    hashing:
+      percentage: 1.69
+      description: |
+        ハッシュ計算（hash_one, BuildHasher）が 1.69%。
+
+    uuid:
+      percentage: 1.66
+      description: |
+        UUID 生成（RngImp, getrandom）が 1.66%。
+        TaskId 生成で頻繁に呼ばれている。
+
+    sorting:
+      percentage: 1.18
+      description: |
+        ソート処理（quicksort）が 1.18%。
+
+  key_findings:
+    - finding_id: F1
+      function: <core::iter::adapters::cloned::Cloned<I> as Iterator>::next
+      samples: 4886659848
+      percentage: 9.27
+      description: |
+        イテレーターの Cloned アダプタが全体の 9.27% を占める単一最大のボトルネック。
+        Iterator chain で .cloned() を多用している箇所が頻繁に呼ばれている。
+        各要素に対して clone コストが発生し、特に Copy 可能な型でも不要なオーバーヘッド。
+
+    - finding_id: F2
+      function: <SmallVec<A> as Extend<Item>>::extend
+      samples: 2082246684
+      percentage: 3.95
+      description: |
+        SmallVec の extend 操作が全体の 3.95% を占める。
+        内部で try_grow を繰り返し呼び出し、頻繁なアロケーションが発生。
+        bulk_create_tasks で多数の TaskId を SmallVec に集約する際に顕著。
+
+    - finding_id: F3
+      function: SmallVec<A>::try_grow
+      samples: 1638916706
+      percentage: 3.11
+      description: |
+        SmallVec の容量拡張が全体の 3.11% を占める。
+        extend 操作の内部で呼ばれ、malloc → memcpy のパターンが頻発。
+        事前容量確保が不十分な箇所が多数存在。
+
+    - finding_id: F4
+      function: alloc::vec::Vec<T,A>::extend_desugared
+      samples: 1611835463
+      percentage: 3.06
+      description: |
+        Vec の extend 操作（脱糖版）が全体の 3.06% を占める。
+        SearchIndexWriter スレッドで特に顕著（Writer の 5.67%）。
+        posting list のマージで頻繁に呼ばれ、毎回リサイズが発生している可能性。
+
+    - finding_id: F5
+      function: alloc::raw_vec::RawVecInner<A>::finish_grow
+      samples: 2241725115
+      percentage: 4.25
+      description: |
+        Vec/SmallVec の内部リサイズ処理が全体の 4.25% を占める。
+        F2, F3, F4 の根本原因。malloc/realloc を直接呼び出すホットパス。
+
+    - finding_id: F6
+      function: alloc::sync::Arc<T,A>::drop_slow
+      samples: 1243731160
+      percentage: 2.36
+      description: |
+        Arc の参照カウント減少・解放が全体の 2.36% を占める。
+        永続データ構造の COW で Arc::make_mut との組み合わせが多用されている。
+        不要な Arc/clone を削減できる可能性。
+
+    - finding_id: F7
+      function: lambars::persistent::hashmap::PersistentHashMap<K,V>::get
+      samples: 762286840
+      percentage: 1.45
+      description: |
+        PersistentHashMap の get 操作が全体の 1.45% を占める。
+        Tokio runtime スレッドで特に顕著（Runtime の 3.14%）。
+        タスク検証で既存タスクの存在確認に頻繁に呼ばれている。
+
+    - finding_id: F8
+      function: lambars::persistent::treemap::BTreeNode<K,V>::insert
+      samples: 662988949
+      percentage: 1.26
+      description: |
+        BTreeNode の insert 操作が全体の 1.26% を占める。
+        SearchIndexWriter スレッドで特に顕著（Writer の 2.33%）。
+        COW による子ノードの複製（take_or_clone_child）が頻発。
+
+  memory_allocation_breakdown:
+    description: |
+      malloc の呼び出し元を分析し、主要なアロケーション発生箇所を特定。
+
+    malloc_total_samples: 8013038901
+    malloc_percentage: 15.20
+
+    top_callers:
+      - caller: alloc::raw_vec::RawVecInner<A>::finish_grow
+        percentage: 12.5
+        description: Vec/SmallVec のリサイズ
+
+      - caller: smallvec::SmallVec<A>::try_grow
+        percentage: 12.1
+        description: SmallVec の容量拡張
+
+      - caller: lambars::persistent::treemap::BTreeNode<K,V>::insert
+        percentage: 4.8
+        description: BTreeNode の COW による子ノード複製
+
+      - caller: alloc::sync::Arc<T,A>::make_mut
+        percentage: 4.5
+        description: Arc の COW による値複製
+
+      - caller: <Cloned<I> as Iterator>::next
+        percentage: 3.8
+        description: イテレーター要素の clone
+
+      - caller: bulk_create_tasks::{{closure}}
+        percentage: 3.7
+        description: タスク処理での一時バッファ確保
+
+      - caller: hashbrown::RawTableInner::fallible_with_capacity
+        percentage: 3.6
+        description: HashMap 内部テーブルの初期確保
+
+      - caller: PersistentHashMap<K,V>::insert_into_occupied_slot
+        percentage: 3.5
+        description: HashMap への挿入（COW 発生）
+
+      - caller: SearchIndex::merge_index_delta_add_only_owned
+        percentage: 2.4
+        description: インデックスマージでの一時バッファ
+
+      - caller: OrderedUniqueSet::from_sorted_vec
+        percentage: 1.8
+        description: ソート済み Vec から Set への変換
+
+  amdahl_analysis:
+    description: |
+      Amdahl の法則に基づく理論上限の算出。
+
+      カテゴリ別最適化可能性:
+      - memory_alloc (23.89%): 60% 削減可能と仮定 -> 14.3% 削減
+      - iteration (17.55%): 80% 削減可能と仮定 -> 14.0% 削減
+      - drop (7.57%): 40% 削減可能と仮定 -> 3.0% 削減
+      - persistent_structures (8.98%): 20% 削減可能と仮定 -> 1.8% 削減
+
+      合計削減可能 CPU: 33.1%
+      理論上限: 1 / (1 - 0.331) = 1.495 倍
+
+      RPS 予測:
+      現状 376.41 RPS -> 562.8 RPS (理論上限)
+
+      目標 500 RPS の達成は理論上可能。
+
+    conservative_estimate:
+      reduction_rate: 25%
+      speedup: 1.33
+      predicted_rps: 500.8
+      conclusion: 保守的見積もりでも目標達成可能
+
+    optimistic_estimate:
+      reduction_rate: 35%
+      speedup: 1.54
+      predicted_rps: 579.7
+      conclusion: 楽観的見積もりでは目標を大幅に超過
+
+context:
+  background: |
+    Phase 1-7 の実装により以下を達成:
+    - Phase 1-3: MergeBuffer 導入、Add-only 経路、bulk 活用
+    - Phase 4: 動的バッファ容量調整、Vec プール化
+    - Phase 5: Large posting list 専用経路
+    - Phase 6: 3-way merge の最適化
+    - Phase 7: OrderedUniqueSet::merge を slice-based two-pointer に置換、
+               query 側 merge 最適化、single-writer 化
+
+    RPS 推移:
+    - Phase 0: 59.72 RPS
+    - Phase 3: 64.78 RPS (+8.5%)
+    - Phase 7: 376.41 RPS (+530%)
+
+    Phase 7 で OrderedUniqueSet::merge の CPU 60.67% を劇的に削減したが、
+    目標 500 RPS まで残り 123.59 RPS (24.7%)。
+
+    2026-02-08 のプロファイリング結果分析により、次の主要ボトルネックが判明:
+    1. イテレーション（Cloned::next, SmallVec::extend）: 17.55%
+    2. メモリアロケーション（malloc, finish_grow）: 23.89%
+    3. 永続データ構造（HashMap::get, BTreeNode::insert）: 8.98%
+
+  problem_statement: |
+    1. Cloned イテレーターアダプタの非効率性
+       - .cloned() が iterator chain で多用されている
+       - 各要素に対して clone コストが発生
+       - Copy 可能な型でも不要なオーバーヘッド
+       - 特に bulk_create_tasks の検証ループで顕著
+       - 9.27% の CPU を消費（単一関数で最大のボトルネック）
+
+    2. SmallVec の容量管理の非効率性
+       - extend 操作で try_grow が頻繁に呼ばれる
+       - 事前容量確保（with_capacity）が不十分
+       - bulk_create_tasks で TaskId を集約する際に顕著
+       - SmallVec 関連で合計 7.06% の CPU を消費
+
+    3. Vec の extend によるリサイズ頻発
+       - SearchIndexWriter で extend_desugared が 5.67% を占める
+       - posting list のマージで毎回リサイズが発生
+       - Phase 4 で結果 Vec のプール化を実装したが不十分
+       - 大規模ポスティングリストで特に顕著
+
+    4. Arc/clone の過剰使用
+       - Arc::drop_slow が 2.36% を占める
+       - 永続データ構造の COW で Arc::make_mut との組み合わせ
+       - 不要な Arc/clone を削減できる可能性
+       - 特に BTreeNode::take_or_clone_child で顕著
+
+    5. PersistentHashMap::get の頻繁な呼び出し
+       - Tokio runtime スレッドで 3.14% を占める
+       - タスク検証で既存タスクの存在確認に使用
+       - N 回の bulk insert で N 回の HashMap lookup が発生
+       - lookup 結果をキャッシュ可能な可能性
+
+    6. BTreeNode::insert の COW オーバーヘッド
+       - SearchIndexWriter スレッドで 2.33% を占める
+       - COW による子ノードの複製（take_or_clone_child）が頻発
+       - 更新パスで毎回ノードを複製
+       - Transient モードの活用が不十分
+
+  current_metrics:
+    tasks_bulk_rps: 376.41
+    target_rps: 500
+    gap_rps: 123.59
+    gap_percentage: 24.7
+    avg_latency: 3.16s
+    p50: 2.76s
+    p75: 4.76s
+    p90: 6.29s
+    p99: 7.45s
+
+objectives:
+  primary:
+    - イテレーター chain の Cloned 削減（borrowed iterator への置換）
+    - SmallVec/Vec の事前容量確保（with_capacity の徹底）
+    - 永続データ構造の Transient モード活用（COW 削減）
+    - PersistentHashMap lookup のキャッシング
+    - 不要な Arc/clone の削減
+    - メモリアロケーション戦略の全体最適化
+
+  secondary:
+    - 関数型プログラミングの原則を維持（参照透過性の保持）
+    - テストカバレッジ 100% 維持
+    - ベンチマーク比較による検証
+
+  metrics:
+    target_rps: 500
+    minimum_acceptable_rps: 480
+    target_p99_latency: 5.0s
+    regression_tolerance: -5%
+
+technical_approach:
+  approach_1_borrowed_iterator:
+    title: Cloned イテレーターの Borrowed への置換
+    description: |
+      .cloned() を使用している iterator chain を borrowed iterator に置換。
+
+      現状:
+      ```rust
+      tasks
+          .iter()
+          .cloned()  // 9.27% CPU
+          .filter(|t| t.is_active())
+          .collect()
+      ```
+
+      改善案:
+      ```rust
+      tasks
+          .iter()
+          .filter(|t| t.is_active())
+          .map(|t| t)  // borrowed のまま処理
+          .collect()
+      ```
+
+      対象箇所:
+      - bulk_create_tasks の検証ループ
+      - SearchIndex の query 処理
+      - NgramSegmentOverlay の merge 処理
+
+      期待効果:
+      - Cloned::next の 9.27% を 80% 削減 -> 7.4% CPU 削減
+      - RPS: 376.41 -> 406.3 (+7.9%)
+
+    implementation:
+      - step: 1
+        description: bulk_create_tasks の検証ループを borrowed iterator に置換
+        files:
+          - benches/api/src/api/bulk.rs
+
+      - step: 2
+        description: SearchIndex::query の iterator chain を borrowed に置換
+        files:
+          - benches/api/src/api/query.rs
+
+      - step: 3
+        description: NgramSegmentOverlay::merge_segment_into を borrowed に置換
+        files:
+          - benches/api/src/api/query.rs
+
+      - step: 4
+        description: ベンチマーク比較で効果を検証
+        command: cargo bench --bench api_bench -- tasks_bulk
+
+    functional_purity:
+      referential_transparency: ✓
+      description: |
+        borrowed iterator は値の所有権を移動しないだけで、
+        計算自体は同一。参照透過性を維持。
+
+      immutability: ✓
+      description: |
+        既存データを変更せず、参照のみを使用。不変性を維持。
+
+      side_effects: ✓
+      description: |
+        副作用なし。純粋な変換処理。
+
+  approach_2_capacity_preallocation:
+    title: SmallVec/Vec の事前容量確保
+    description: |
+      extend 操作前に with_capacity で事前に容量を確保し、
+      リサイズを回避。
+
+      現状:
+      ```rust
+      let mut result = SmallVec::new();  // 容量 0
+      for item in items {
+          result.push(item);  // 毎回 try_grow の可能性
+      }
+      ```
+
+      改善案:
+      ```rust
+      let mut result = SmallVec::with_capacity(items.len());
+      result.extend(items);  // リサイズなし
+      ```
+
+      対象箇所:
+      - bulk_create_tasks の TaskId 集約
+      - SearchIndex::merge_posting_add_only_galloping の結果 Vec
+      - NgramSegmentOverlay::merge_segment_into のバッファ
+
+      期待効果:
+      - SmallVec::try_grow の 3.11% を 70% 削減 -> 2.2% CPU 削減
+      - Vec::extend_desugared の 3.06% を 50% 削減 -> 1.5% CPU 削減
+      - finish_grow の 4.25% を 40% 削減 -> 1.7% CPU 削減
+      - 合計: 5.4% CPU 削減
+      - RPS: 406.3 -> 429.5 (+5.7%)
+
+    implementation:
+      - step: 1
+        description: bulk_create_tasks の SmallVec を with_capacity に変更
+        files:
+          - benches/api/src/api/bulk.rs
+
+      - step: 2
+        description: merge_posting_add_only_galloping の Vec を with_capacity に変更
+        files:
+          - benches/api/src/api/query.rs
+
+      - step: 3
+        description: merge_segment_into のバッファを with_capacity に変更
+        files:
+          - benches/api/src/api/query.rs
+
+      - step: 4
+        description: ベンチマーク比較で効果を検証
+        command: cargo bench --bench api_bench -- tasks_bulk
+
+    functional_purity:
+      referential_transparency: ✓
+      description: |
+        容量確保は最適化の範疇。計算結果は同一。参照透過性を維持。
+
+      immutability: ✓
+      description: |
+        既存データを変更せず、新規バッファを確保。不変性を維持。
+
+      side_effects: ✓
+      description: |
+        副作用なし。メモリ確保は実装詳細。
+
+  approach_3_transient_mode:
+    title: 永続データ構造の Transient モード活用
+    description: |
+      PersistentHashMap/BTreeNode の bulk 更新で Transient モードを使用し、
+      COW オーバーヘッドを削減。
+
+      現状:
+      ```rust
+      let mut map = base_map.clone();  // Arc::clone
+      for (k, v) in updates {
+          map = map.insert(k, v);  // 毎回 COW
+      }
+      map.into_persistent()
+      ```
+
+      改善案:
+      ```rust
+      let mut transient = base_map.into_transient();
+      for (k, v) in updates {
+          transient.insert_mut(k, v);  // in-place 更新
+      }
+      transient.into_persistent()
+      ```
+
+      対象箇所:
+      - SearchIndex::merge_index_delta_add_only_owned の BTreeNode 更新
+      - bulk_create_tasks の PersistentHashMap 更新
+
+      期待効果:
+      - BTreeNode::insert の 1.26% を 60% 削減 -> 0.8% CPU 削減
+      - Arc::make_mut の 0.74% を 50% 削減 -> 0.4% CPU 削減
+      - Arc::drop_slow の 2.36% を 30% 削減 -> 0.7% CPU 削減
+      - 合計: 1.9% CPU 削減
+      - RPS: 429.5 -> 439.3 (+2.3%)
+
+    implementation:
+      - step: 1
+        description: PersistentHashMap に into_transient/into_persistent を追加
+        files:
+          - src/persistent/hashmap.rs
+        tests:
+          - tests/persistent_hashmap_laws.rs
+
+      - step: 2
+        description: BTreeNode に transient モードを追加
+        files:
+          - src/persistent/treemap.rs
+        tests:
+          - tests/persistent_treemap_laws.rs
+
+      - step: 3
+        description: SearchIndex::merge_index_delta_add_only_owned で transient 使用
+        files:
+          - benches/api/src/api/query.rs
+
+      - step: 4
+        description: bulk_create_tasks で transient 使用
+        files:
+          - benches/api/src/api/bulk.rs
+
+      - step: 5
+        description: ベンチマーク比較で効果を検証
+        command: cargo bench --bench api_bench -- tasks_bulk
+
+    functional_purity:
+      referential_transparency: ✓
+      description: |
+        Transient モードは一時的な可変性を提供するが、
+        into_persistent() で最終的に不変な値を返す。
+        外部からは参照透過性を維持。
+
+      immutability: ✓
+      description: |
+        Transient モードは内部最適化。
+        外部インターフェースは不変。
+
+      side_effects: ✓
+      description: |
+        副作用なし。内部状態の一時的な変更は外部に漏れない。
+
+  approach_4_hashmap_lookup_caching:
+    title: PersistentHashMap lookup のキャッシング
+    description: |
+      bulk_create_tasks の検証ループで、既存タスクの存在確認を
+      ループ外でバッチ取得し、キャッシュ。
+
+      現状:
+      ```rust
+      for task in tasks {
+          if store.get(&task.id).is_some() {  // 毎回 HashMap lookup
+              return Err(Conflict);
+          }
+      }
+      ```
+
+      改善案:
+      ```rust
+      let task_ids: Vec<_> = tasks.iter().map(|t| t.id).collect();
+      let existing_ids: HashSet<_> = store.get_batch(&task_ids)
+          .into_iter()
+          .filter_map(|opt| opt.map(|t| t.id))
+          .collect();
+
+      for task in tasks {
+          if existing_ids.contains(&task.id) {  // HashSet lookup (O(1))
+              return Err(Conflict);
+          }
+      }
+      ```
+
+      期待効果:
+      - PersistentHashMap::get の 1.45% を 50% 削減 -> 0.7% CPU 削減
+      - RPS: 439.3 -> 442.4 (+0.7%)
+
+    implementation:
+      - step: 1
+        description: PersistentHashMap に get_batch メソッドを追加
+        files:
+          - src/persistent/hashmap.rs
+        tests:
+          - tests/persistent_hashmap_laws.rs
+
+      - step: 2
+        description: bulk_create_tasks で get_batch + HashSet caching を使用
+        files:
+          - benches/api/src/api/bulk.rs
+
+      - step: 3
+        description: ベンチマーク比較で効果を検証
+        command: cargo bench --bench api_bench -- tasks_bulk
+
+    functional_purity:
+      referential_transparency: ✓
+      description: |
+        バッチ取得はループの並び替えに過ぎず、
+        計算結果は同一。参照透過性を維持。
+
+      immutability: ✓
+      description: |
+        既存データを変更せず、キャッシュは一時的なローカル変数。
+        不変性を維持。
+
+      side_effects: ✓
+      description: |
+        副作用なし。純粋な読み取り操作。
+
+  approach_5_arc_clone_reduction:
+    title: 不要な Arc/clone の削減
+    description: |
+      Arc::drop_slow が 2.36% を占める主要因を調査し、
+      不要な Arc/clone を削減。
+
+      調査対象:
+      - BTreeNode::take_or_clone_child (0.73%)
+        - 子ノードの Arc::clone が頻発
+        - 更新パスで毎回ノードを複製
+        - Transient モードの活用で削減可能
+
+      - PersistentHashMap の slot 複製
+        - insert_into_occupied_slot で Arc::clone
+        - Transient モードの活用で削減可能
+
+      - Task 構造体の不要な clone
+        - bulk_create_tasks で Task をクローン
+        - borrowed iterator への置換で削減可能
+
+      期待効果:
+      - Arc::drop_slow の 2.36% を 30% 削減 -> 0.7% CPU 削減
+        (Approach 3 と一部重複)
+      - RPS: 442.4 -> 445.5 (+0.7%)
+
+    implementation:
+      - step: 1
+        description: BTreeNode::take_or_clone_child の呼び出しを削減
+        files:
+          - src/persistent/treemap.rs
+        notes: Approach 3 (Transient モード) で対処
+
+      - step: 2
+        description: PersistentHashMap の slot 複製を削減
+        files:
+          - src/persistent/hashmap.rs
+        notes: Approach 3 (Transient モード) で対処
+
+      - step: 3
+        description: bulk_create_tasks の Task clone を削減
+        files:
+          - benches/api/src/api/bulk.rs
+        notes: Approach 1 (Borrowed iterator) で対処
+
+      - step: 4
+        description: ベンチマーク比較で効果を検証
+        command: cargo bench --bench api_bench -- tasks_bulk
+
+    functional_purity:
+      referential_transparency: ✓
+      description: |
+        Arc/clone の削減は最適化の範疇。
+        計算結果は同一。参照透過性を維持。
+
+      immutability: ✓
+      description: |
+        既存データを変更せず、参照カウントの管理を最適化。
+        不変性を維持。
+
+      side_effects: ✓
+      description: |
+        副作用なし。メモリ管理の最適化。
+
+  combined_effect:
+    description: |
+      各アプローチの効果を組み合わせた総合予測。
+      一部のアプローチは重複する箇所を最適化するため、
+      単純な加算ではなく、実測ベースで調整。
+
+      Approach 1: +7.9% RPS (376.41 -> 406.3)
+      Approach 2: +5.7% RPS (406.3 -> 429.5)
+      Approach 3: +2.3% RPS (429.5 -> 439.3)
+      Approach 4: +0.7% RPS (439.3 -> 442.4)
+      Approach 5: +0.7% RPS (442.4 -> 445.5)
+
+      合計予測 RPS: 445.5 (+18.4% from Phase 7)
+
+      保守的見積もり: 430 RPS (+14.2%)
+      楽観的見積もり: 470 RPS (+24.9%)
+
+      目標 500 RPS まで残り: 54.5 RPS (10.9%)
+
+      追加施策が必要:
+      - SIMD 活用（posting list merge）
+      - カーネルレベルの最適化（ページフォールト削減）
+      - データ構造の根本的な見直し
+
+    risk_analysis:
+      - risk: Transient モードの実装複雑性
+        mitigation: 段階的な導入、テストカバレッジ 100% 維持
+
+      - risk: Borrowed iterator の生存期間管理
+        mitigation: コンパイラの borrow checker に頼る
+
+      - risk: ベンチマーク測定誤差
+        mitigation: 複数回測定、統計的有意性確認
+
+implementation_phases:
+  phase_8_1:
+    title: Borrowed iterator への置換
+    description: |
+      Cloned イテレーターを borrowed iterator に置換し、
+      単一最大のボトルネック（9.27%）を削減。
+
+    tasks:
+      - task: bulk_create_tasks の検証ループを borrowed iterator に置換
+        files:
+          - benches/api/src/api/bulk.rs
+
+      - task: SearchIndex::query の iterator chain を borrowed に置換
+        files:
+          - benches/api/src/api/query.rs
+
+      - task: NgramSegmentOverlay::merge_segment_into を borrowed に置換
+        files:
+          - benches/api/src/api/query.rs
+
+      - task: ベンチマーク比較で効果を検証
+        command: cargo bench --bench api_bench -- tasks_bulk
+
+      - task: テストカバレッジ確認
+        command: cargo llvm-cov --html
+
+    target_rps: 406.3
+    estimated_days: 1
+
+  phase_8_2:
+    title: SmallVec/Vec の事前容量確保
+    description: |
+      extend 操作前に with_capacity で事前に容量を確保し、
+      リサイズを回避。
+
+    tasks:
+      - task: bulk_create_tasks の SmallVec を with_capacity に変更
+        files:
+          - benches/api/src/api/bulk.rs
+
+      - task: merge_posting_add_only_galloping の Vec を with_capacity に変更
+        files:
+          - benches/api/src/api/query.rs
+
+      - task: merge_segment_into のバッファを with_capacity に変更
+        files:
+          - benches/api/src/api/query.rs
+
+      - task: ベンチマーク比較で効果を検証
+        command: cargo bench --bench api_bench -- tasks_bulk
+
+      - task: テストカバレッジ確認
+        command: cargo llvm-cov --html
+
+    target_rps: 429.5
+    estimated_days: 1
+
+  phase_8_3:
+    title: Transient モード実装と活用
+    description: |
+      PersistentHashMap/BTreeNode に Transient モードを実装し、
+      bulk 更新時の COW オーバーヘッドを削減。
+
+    tasks:
+      - task: PersistentHashMap に into_transient/into_persistent を追加
+        files:
+          - src/persistent/hashmap.rs
+        tests:
+          - tests/persistent_hashmap_laws.rs
+
+      - task: BTreeNode に transient モードを追加
+        files:
+          - src/persistent/treemap.rs
+        tests:
+          - tests/persistent_treemap_laws.rs
+
+      - task: SearchIndex::merge_index_delta_add_only_owned で transient 使用
+        files:
+          - benches/api/src/api/query.rs
+
+      - task: bulk_create_tasks で transient 使用
+        files:
+          - benches/api/src/api/bulk.rs
+
+      - task: ベンチマーク比較で効果を検証
+        command: cargo bench --bench api_bench -- tasks_bulk
+
+      - task: テストカバレッジ確認
+        command: cargo llvm-cov --html
+
+    target_rps: 439.3
+    estimated_days: 2
+
+  phase_8_4:
+    title: HashMap lookup キャッシング
+    description: |
+      bulk_create_tasks の検証ループで、既存タスクの存在確認を
+      バッチ取得し、キャッシュ。
+
+    tasks:
+      - task: PersistentHashMap に get_batch メソッドを追加
+        files:
+          - src/persistent/hashmap.rs
+        tests:
+          - tests/persistent_hashmap_laws.rs
+
+      - task: bulk_create_tasks で get_batch + HashSet caching を使用
+        files:
+          - benches/api/src/api/bulk.rs
+
+      - task: ベンチマーク比較で効果を検証
+        command: cargo bench --bench api_bench -- tasks_bulk
+
+      - task: テストカバレッジ確認
+        command: cargo llvm-cov --html
+
+    target_rps: 442.4
+    estimated_days: 1
+
+testing_strategy:
+  unit_tests:
+    - test: PersistentHashMap::into_transient の動作確認
+      coverage: property-based testing (proptest)
+
+    - test: BTreeNode::transient モードの動作確認
+      coverage: property-based testing (proptest)
+
+    - test: PersistentHashMap::get_batch の動作確認
+      coverage: unit test + edge case
+
+  integration_tests:
+    - test: bulk_create_tasks の borrowed iterator 動作確認
+      coverage: 正常系 + エラーハンドリング
+
+    - test: SearchIndex::query の borrowed iterator 動作確認
+      coverage: 正常系 + 空結果
+
+  benchmark_tests:
+    - test: tasks_bulk RPS 比較
+      baseline: Phase 7 (376.41 RPS)
+      target: 430-470 RPS
+      command: cargo bench --bench api_bench -- tasks_bulk
+
+  regression_tests:
+    - test: 既存ベンチマーク全体でリグレッション確認
+      tolerance: -5%
+      command: cargo bench
+
+risks_and_mitigations:
+  risk_1:
+    description: Transient モードの実装が複雑でバグを埋め込むリスク
+    probability: medium
+    impact: high
+    mitigation: |
+      - property-based testing (proptest) でランダム操作を検証
+      - 段階的な導入（PersistentHashMap -> BTreeNode）
+      - テストカバレッジ 100% 維持
+      - Codex レビューで安全性確認
+
+  risk_2:
+    description: Borrowed iterator の生存期間管理でコンパイルエラー
+    probability: low
+    impact: medium
+    mitigation: |
+      - Rust のコンパイラが borrow checker で検出
+      - エラー発生時は clone を使用（最悪ケースで現状維持）
+
+  risk_3:
+    description: 期待した性能改善が得られないリスク
+    probability: low
+    impact: medium
+    mitigation: |
+      - 各フェーズでベンチマーク比較を実施
+      - 効果が不十分な場合は次のアプローチに移行
+      - Amdahl の法則に基づく保守的見積もりで計画
+
+  risk_4:
+    description: 関数型プログラミングの原則を損なうリスク
+    probability: low
+    impact: high
+    mitigation: |
+      - 各アプローチで functional_purity セクションを明記
+      - Codex レビューで参照透過性・不変性を確認
+      - Transient モードは内部最適化であり、外部インターフェースは不変
+
+success_criteria:
+  must_have:
+    - tasks_bulk RPS >= 430 (保守的目標)
+    - P99 latency <= 7.45s (現状維持)
+    - 既存ベンチマークでリグレッション < 5%
+    - テストカバレッジ 100% 維持
+    - 関数型プログラミングの原則維持（参照透過性、不変性）
+
+  should_have:
+    - tasks_bulk RPS >= 470 (楽観的目標)
+    - P99 latency <= 6.0s (20% 改善)
+    - メモリアロケーション 30% 削減
+
+  nice_to_have:
+    - tasks_bulk RPS >= 500 (最終目標)
+    - P99 latency <= 5.0s (33% 改善)
+    - メモリアロケーション 50% 削減
+
+future_work:
+  phase_9_candidates:
+    - title: SIMD 活用（posting list merge）
+      description: |
+        merge_posting_add_only_galloping で SIMD 命令を使用し、
+        並列比較でマージ性能を向上。
+
+      expected_impact: 5-10% RPS 向上
+
+    - title: カーネルレベルの最適化
+      description: |
+        huge pages の使用、NUMA awareness、ページフォールト削減。
+
+      expected_impact: 3-5% RPS 向上
+
+    - title: データ構造の根本的な見直し
+      description: |
+        OrderedUniqueSet を B+Tree ベースに変更、
+        posting list を圧縮フォーマットに変更。
+
+      expected_impact: 15-25% RPS 向上
+
+    - title: 並列化（multi-writer）
+      description: |
+        SearchIndexWriter を複数スレッドに分割し、
+        パーティショニングで並列処理。
+
+      expected_impact: 30-50% RPS 向上（コア数に依存）
+
+references:
+  - title: Rust Performance Book - Memory Allocation
+    url: https://nnethercote.github.io/perf-book/heap-allocations.html
+
+  - title: Rust Iterator Adapters
+    url: https://doc.rust-lang.org/std/iter/trait.Iterator.html
+
+  - title: SmallVec Documentation
+    url: https://docs.rs/smallvec/latest/smallvec/
+
+  - title: Persistent Data Structures (Purely Functional Data Structures)
+    author: Chris Okasaki
+
+  - title: Amdahl's Law
+    url: https://en.wikipedia.org/wiki/Amdahl%27s_law
+
+notes: |
+  Phase 7 で OrderedUniqueSet::merge の劇的な改善（CPU 60.67% -> 実質ゼロ）により、
+  次のボトルネックがクリアに見えてきた。
+
+  イテレーション（17.55%）とメモリアロケーション（23.89%）が新たな主要ボトルネック。
+
+  Phase 8 では、これらを段階的に削減し、目標 500 RPS の 86-94% まで到達する計画。
+
+  残りのギャップ（54.5 RPS）は、SIMD やデータ構造の根本的な見直しで対処予定。

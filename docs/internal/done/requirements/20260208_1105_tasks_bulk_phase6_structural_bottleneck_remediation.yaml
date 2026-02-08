@@ -1,0 +1,263 @@
+# tasks_bulk Phase6 構造的ボトルネック改善 要件定義
+#
+# 概要:
+#   Phase5 (IMPL-TB5-005/006/007/008/011) 実装後の残存ボトルネックを予測し、
+#   500 RPS 達成に必要な次段階 (Phase6) の要件を定義する。
+#
+# 参照:
+#   - .codex/skills/bottleneck-finder/SKILL.md
+#   - docs/internal/done/requirements/20260208_0916_tasks_bulk_add_only_bulk_merge_phase5.yaml
+#   - docs/internal/done/plans/20260208_tasks_bulk_add_only_bulk_merge_phase5_detail.yaml
+#   - benches/api/src/api/query.rs
+
+version: "1.0.0"
+name: "tasks_bulk_phase6_structural_bottleneck_remediation"
+description: |
+  tasks_bulk は Phase5 適用前プロファイルで 65.24 RPS / P99 25.92s、
+  目標 500 RPS に対して達成率 13.05% に留まる。
+  Phase5 で add-only concat fast-path、owned API、append_or_merge_sorted リバートを実施済みだが、
+  同期フルマージ構造が残る限り 500 RPS 到達は困難である。
+
+context:
+  baseline:
+    benchmark: "tasks_bulk"
+    baseline_commit: "350bef30"
+    baseline_metrics:
+      rps: 65.24
+      p99_seconds: 25.92
+      target_rps: 500
+  phase5_completed_changes:
+    - id: "IMPL-TB5-005"
+      summary: "append_or_merge_sorted を撤去し merge_sorted_posting_lists に回帰"
+    - id: "IMPL-TB5-006/007/008"
+      summary: "apply_delta_owned 導入で add_list.clone() を削減"
+    - id: "IMPL-TB5-011"
+      summary: "concat fast-path を 7 箇所に追加"
+  baseline_hotspots_pre_phase5:
+    - function: "merge_posting_add_only_into"
+      cpu_pct: 42.0
+      samples_billion: 27.8
+    - function: "merge_bulk_ngram_index"
+      cpu_pct: 21.0
+      samples_billion: 13.9
+    - function: "malloc/cfree"
+      cpu_pct: 12.0
+    - function: "Cloned<I>::next"
+      cpu_pct: 2.3
+    - function: "Arc::drop_slow"
+      cpu_pct: 1.0
+
+analysis_method:
+  skill: "bottleneck-finder"
+  checklist_source: ".codex/skills/bottleneck-finder/SKILL.md#ボトルネックチェックリスト"
+  checklist_evaluation:
+    algorithm_data_structure:
+      status: "要改善"
+      findings:
+        - "concat fast-path で単調追加の一部は改善されたが、重複時は依然 two-pointer 全走査"
+        - "merge_bulk_ngram_index が同期フルマージを維持し O(n+m) を高頻度実行"
+    memory:
+      status: "要改善"
+      findings:
+        - "owned API で clone は減ったが、chunk collect と merge 出力 Vec 再確保が継続"
+        - "malloc/cfree が依然 2 桁% の支配要因"
+    concurrency:
+      status: "要改善"
+      findings:
+        - "single-writer ではなく要求スレッド上で重い統合作業を実行し tail latency を増幅"
+    io:
+      status: "問題なし"
+      findings:
+        - "主要ボトルネックは CPU/メモリであり I/O 待機は支配的でない"
+    compiler_optimization:
+      status: "監視"
+      findings:
+        - "LTO/PGO は補助施策。主要課題はアルゴリズムと write-path 構造"
+
+phase5_effect_projection:
+  assumptions:
+    - "TB5-011 により merge_posting_add_only_into のうち 50-65% が concat fast-path に乗る"
+    - "TB5-005 により merge_bulk_ngram_index は 21% -> 13-15% に低下"
+    - "TB5-006/007/008 により malloc/cfree は 12% -> 9-10% に低下"
+  predicted_residual_hotspots:
+    - function: "merge_posting_add_only_into"
+      cpu_pct_after_phase5_estimate: "14-21%"
+      reason: "非 concat（重複あり）ケースの two-pointer merge が残る"
+    - function: "merge_bulk_ngram_index"
+      cpu_pct_after_phase5_estimate: "13-15%"
+      reason: "同期フルマージ構造は不変"
+    - function: "malloc/cfree"
+      cpu_pct_after_phase5_estimate: "9-10%"
+      reason: "短命 Vec 生成とマージ結果 materialize が継続"
+  throughput_projection:
+    amdahl_removed_fraction_estimate: "0.30-0.38"
+    speedup_estimate: "1.43x-1.61x"
+    rps_estimate_from_65_24: "93-105"
+    conclusion: "Phase5 単体では 500 RPS 到達不可"
+
+root_cause_assessment:
+  structural_change_required: true
+  rationale:
+    - "500 / 65.24 = 7.66x の改善が必要"
+    - "Phase5 で主要ホットスポットを部分削減しても理論上 100 RPS 前後が上限"
+    - "同期フルマージ write-path を継続する限り、計算量と割り当てコストが線形に増加"
+
+next_approaches:
+  - id: "APP-TB6-001"
+    priority: "P0"
+    title: "Segment Overlay + 非同期 Compaction"
+    target_components:
+      - "benches/api/src/api/query.rs:5377 (merge_bulk_ngram_index)"
+      - "benches/api/src/api/query.rs:5608 (apply_delta_owned)"
+      - "SearchIndex write architecture (base + delta segments)"
+    expected_impact:
+      rps_gain_estimate: "+70%〜+140% (Phase5後比)"
+      p99_reduction_estimate: "-40%〜-65%"
+      hotspot_changes:
+        - "merge_bulk_ngram_index: 13-15% -> 5-8%"
+        - "malloc/cfree: 9-10% -> 6-8%"
+    risk:
+      level: "high"
+      details:
+        - "検索時に複数 segment を跨ぐため read path 複雑化"
+        - "compaction ポリシーが不適切だと read amplification が増加"
+    mitigation:
+      - "segment 数上限と compaction budget を明示"
+      - "同値性 property test と read latency ガードを追加"
+
+  - id: "APP-TB6-002"
+    priority: "P1"
+    title: "非 concat add-only 向け適応マージ（Galloping/Branchless）"
+    target_components:
+      - "benches/api/src/api/query.rs:6172 (merge_posting_add_only_into)"
+      - "benches/api/src/api/query.rs:1981 (merge_sorted_posting_lists)"
+    expected_impact:
+      rps_gain_estimate: "+20%〜+40% (Phase5後比)"
+      p99_reduction_estimate: "-15%〜-30%"
+      hotspot_changes:
+        - "merge_posting_add_only_into: 14-21% -> 8-12%"
+    risk:
+      level: "medium"
+      details:
+        - "実装複雑化で境界条件バグ（重複排除/順序保持）リスク"
+        - "データ分布によって効果がぶれる"
+    mitigation:
+      - "入力分布別ベンチ（high-overlap/low-overlap）を追加"
+      - "旧 merge 実装との differential test を常設"
+
+  - id: "APP-TB6-003"
+    priority: "P1"
+    title: "insert_bulk_drain + chunk バッファ再利用"
+    target_components:
+      - "benches/api/src/api/query.rs:5896"
+      - "benches/api/src/api/query.rs:6445"
+      - "benches/api/src/api/query.rs:6589"
+      - "TransientHashMap bulk insert API"
+    expected_impact:
+      rps_gain_estimate: "+10%〜+25% (Phase5後比)"
+      p99_reduction_estimate: "-8%〜-20%"
+      hotspot_changes:
+        - "malloc/cfree: 9-10% -> 5-7%"
+    risk:
+      level: "medium"
+      details:
+        - "API 追加で呼び出し側の所有権設計を再調整する必要"
+        - "効果は allocator 支配度に依存"
+    mitigation:
+      - "insert_bulk_owned と併存可能な段階導入"
+      - "alloc count を計測する perf gate を追加"
+
+requirements:
+  - id: "REQ-TB6-001"
+    priority: "P0"
+    component: "SearchIndex write architecture"
+    bottleneck: "merge_bulk_ngram_index の同期フルマージ"
+    why_bottleneck: |
+      バッチごとに base index 全体へ O(n+m) マージを同期実行し、
+      リクエストスレッドで CPU/アロケーションを消費するため。
+    required_improvements:
+      - "write を append-only delta segment へ分離"
+      - "統合を背景 compaction に移管"
+      - "segment 数/サイズ閾値に基づく compaction policy を導入"
+    algorithms:
+      - name: "LSM-style Segment Overlay"
+        description: "base + delta を段階統合し、書き込み時の即時フルマージを回避する"
+      - name: "Budgeted Compaction"
+        description: "1 リクエストあたり固定予算で compaction を進める"
+
+  - id: "REQ-TB6-002"
+    priority: "P1"
+    component: "posting list add-only merge"
+    bottleneck: "非 concat ケースでの two-pointer 全走査"
+    why_bottleneck: |
+      重複を含む posting list では concat fast-path が使えず、
+      長大リストで比較回数と分岐ミスが増えるため。
+    required_improvements:
+      - "overlap 率に応じて merge 戦略を切替"
+      - "small add は binary-search 挿入、large add は galloping merge を適用"
+    algorithms:
+      - name: "Adaptive Galloping Merge"
+        description: "片側が疎な場合に指数探索で比較回数を削減"
+      - name: "Binary-search Assisted Insert"
+        description: "add が小さい場合に局所挿入で全走査を回避"
+
+  - id: "REQ-TB6-003"
+    priority: "P1"
+    component: "chunk build / allocator hot path"
+    bottleneck: "take(...).collect() と短命 Vec 多発による malloc/cfree"
+    why_bottleneck: |
+      chunk 単位の一時 Vec を繰り返し確保・解放しており、
+      allocator lock/page fault を誘発して tail latency を悪化させるため。
+    required_improvements:
+      - "insert_bulk_drain(&mut Vec) を追加してバッファ再利用を可能化"
+      - "chunk 生成を clear/extend ベースに変更"
+    algorithms:
+      - name: "Drain-and-Reuse Buffer"
+        description: "所有権を保ったまま Vec 内容のみ排出し、容量を再利用"
+      - name: "Capacity-planned Chunking"
+        description: "CHUNK_SIZE に一致する容量を固定化し再確保を抑止"
+
+current_performance_issues:
+  - "RPS 65.24 (目標 500) で 7.66x の乖離"
+  - "P99 25.92s で API 応答が秒単位に高止まり"
+  - "同期フルマージ + materialization により CPU/メモリが write path に集中"
+
+expected_improvement:
+  phase6_p0_only:
+    rps_target: "150-220"
+    p99_target_seconds: "8-14"
+  phase6_p0_p1:
+    rps_target: "220-320"
+    p99_target_seconds: "4-8"
+  long_term_with_pipeline_rearchitecture:
+    rps_target: "500"
+    conditions:
+      - "single-writer pipeline 化（計算と適用の分離）"
+      - "segment-aware read 最適化"
+      - "compaction の非同期化と backpressure 制御"
+
+implementation_priority:
+  - priority: "P0"
+    item: "REQ-TB6-001 Segment Overlay + Compaction"
+    reason: "最大ホットスポット群を同時に削減し、構造的上限を引き上げるため"
+  - priority: "P1"
+    item: "REQ-TB6-002 Adaptive Add-only Merge"
+    reason: "Phase5 後に残る merge_posting_add_only_into の残差を直接削減できるため"
+  - priority: "P1"
+    item: "REQ-TB6-003 insert_bulk_drain + chunk 再利用"
+    reason: "malloc/cfree の残差を低リスクで削減し P99 を押し下げるため"
+
+acceptance_criteria:
+  performance:
+    - "同一条件3回計測の中央値で tasks_bulk RPS >= 220 (Phase6 P0+P1 完了時)"
+    - "同一条件3回計測の中央値で tasks_bulk P99 <= 8s"
+    - "merge_bulk_ngram_index の CPU 比率 <= 8%"
+    - "merge_posting_add_only_into の CPU 比率 <= 12%"
+    - "malloc/cfree の CPU 比率 <= 7%"
+  correctness:
+    - "旧実装との検索結果同値性（property test）"
+    - "segment compaction 前後で順序・重複排除・idempotency が一致"
+  fp_architecture:
+    - "計算（delta 作成）と実行（適用/compaction）を分離"
+    - "破壊的更新は局所化し、公開 API は不変データを返す"
+    - "失敗系は Result で表現し、例外的制御フローを導入しない"

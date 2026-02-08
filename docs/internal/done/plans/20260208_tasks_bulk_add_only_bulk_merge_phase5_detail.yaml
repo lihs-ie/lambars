@@ -1,0 +1,612 @@
+meta:
+  file_name: "20260208_tasks_bulk_add_only_bulk_merge_phase5_detail.yaml"
+  title: "tasks_bulk Add-only/Bulk-Ngram 残ボトルネック改善 Phase5 詳細実装計画"
+  date: "2026-02-08"
+  requirement: "docs/internal/requirements/20260208_0916_tasks_bulk_add_only_bulk_merge_phase5.yaml"
+  branch: "perf/tasks-bulk-search-index-merge"
+  revision: "v2 - Codex レビュー指摘反映"
+
+codex_review:
+  date: "2026-02-08"
+  findings:
+    - severity: "high"
+      issue: |
+        REQ-TB5-002 の要件定義 (zero-copy segment/link 再設計) と
+        実装計画 (existing.merge(add) へリバート) が不整合。
+      resolution: |
+        REQ-TB5-002 を REQ-TB5-002A (Phase4 リバート) に分離し、
+        元の zero-copy 要件は REQ-TB5-004 と共に Phase6 へ正式移管する。
+
+    - severity: "high"
+      issue: |
+        IMPL-TB5-001/002 の drain_into_chunk_buffer は
+        insert_bulk_owned が Vec を消費するため再利用効果が限定的。
+      resolution: |
+        chunk バッファ再利用 (IMPL-TB5-001/002/003/004) を計画から削除し、
+        代わりに TransientHashMap に insert_bulk_drain(&mut Vec) API を
+        将来追加する方針を Phase6 の issue に記載する。
+        現時点では Vec::with_capacity(CHUNK_SIZE) の再確保コストは
+        malloc/cfree 9.84% の一部に過ぎず、優先度を下げる。
+
+    - severity: "high"
+      issue: |
+        41.17% ホットスポット merge_posting_add_only_into の
+        hit-path に対する直接対策が不足している。
+      resolution: |
+        新タスク IMPL-TB5-011 を追加し、hit-path の最適化を行う。
+        具体的には /parallel-exploration で以下の候補を探索する:
+        A) add が全て existing の最大値より大きい場合の concat fast-path
+        B) SmallVec iter_sorted の O(n log n) ソート回避
+        C) add が1要素の場合の binary search 挿入 fast-path
+
+    - severity: "medium"
+      issue: |
+        merge_bulk_ngram_index のフォールバックにデータ欠落リスクがある。
+        エラー時に existing_index から再構築し、前チャンク反映分を失う。
+      resolution: |
+        RISK-005 として追加。ただし CHUNK_SIZE = MAX_BULK_INSERT - 1 で
+        通常発火しないため、Phase5 では対応しない。
+        Phase6 の issue に記載する。
+
+    - severity: "medium"
+      issue: |
+        実装順序は IMPL-TB5-005 (21.62% ホットスポット) を先行すべき。
+      resolution: |
+        Phase 5a の実装順を IMPL-TB5-005 先行に変更。
+
+    - severity: "medium"
+      issue: |
+        apply_delta_owned は構造体分解でフィールド move する設計が妥当。
+      resolution: |
+        IMPL-TB5-008 の設計に SearchIndexDelta 分解パターンを採用する。
+
+    - severity: "low"
+      issue: |
+        append_or_merge_sorted のテスト全削除ではなく、
+        merge 同値性を検証する property test に転換すべき。
+      resolution: |
+        IMPL-TB5-005 の test_strategy に
+        merge_bulk_ngram_index の merge 同値性 property test を追加。
+
+    - severity: "low"
+      issue: |
+        計画の説明で「merge結果もArcで共有される」は不正確。
+        OrderedUniqueSet::merge は新規 Vec + 新 Arc を生成する。
+      resolution: |
+        記述を修正。
+
+# =============================================================================
+# 現状分析
+# =============================================================================
+current_state:
+  benchmark:
+    rps: 65.24
+    p99_latency: "25.92s"
+    target_rps_short_term: 100
+    target_rps_mid_term: 200
+
+  hotspots:
+    - name: "merge_posting_add_only_into"
+      cpu_percentage: 41.17
+      location: "benches/api/src/api/query.rs:6091-6143"
+      description: |
+        add-only merge の two-pointer アルゴリズム。
+        add-only 経路の hit path で呼ばれ、existing.iter_sorted() と
+        add slice を走査して output Vec に clone する。
+        ボトルネック要因: 全要素 clone + 毎回 Vec allocation。
+
+    - name: "merge_bulk_ngram_index"
+      cpu_percentage: 21.62
+      location: "benches/api/src/api/query.rs:5392-5460"
+      description: |
+        apply_changes_bulk で bulk builder から構築した NgramIndex を
+        既存 NgramIndex に統合する関数。
+        Phase4 で導入した append_or_merge_sorted が逆効果:
+        - concat path で iter_sorted() を2回呼び出し (境界チェック + extend)
+        - cloned() による全要素コピー
+        - 毎回新 Vec allocation
+        元の existing.merge(add) の single-pass two-pointer より遅い。
+
+    - name: "malloc/cfree"
+      cpu_percentage: 9.84
+      description: |
+        短命 Vec の alloc/dealloc。主な発生源:
+        1. merge_posting_add_only_into の output Vec
+        2. merge_bulk_ngram_index の append_or_merge_sorted の result Vec
+        3. merge_ngram_delta_add_only_bulk の take(CHUNK_SIZE).collect() chunk Vec
+        4. add_list.clone() による miss path の Vec 生成
+
+  code_structure:
+    apply_delta:
+      location: "benches/api/src/api/query.rs:5513-5614"
+      description: |
+        is_add_only() 判定で add-only 分岐 / add+remove 分岐に振り分ける。
+        add-only 分岐:
+          - PrefixIndex: merge_index_delta_add_only (6回呼出)
+          - NgramIndex: merge_ngram_delta_add_only (3回呼出)
+
+    apply_changes_bulk:
+      location: "benches/api/src/api/query.rs:5294-5381"
+      description: |
+        bulk (Add-only) 専用経路。
+        SearchIndexBulkBuilder で NgramIndex を構築し、
+        merge_bulk_ngram_index で既存と統合する。
+        PrefixIndex は SearchIndexDelta を通じて apply_delta 経由。
+
+    merge_index_delta_add_only:
+      location: "benches/api/src/api/query.rs:6147-6185"
+      description: |
+        PrefixIndex の add-only merge。
+        - hit path: merge_posting_add_only_into + from_sorted_vec
+        - miss path: add_list.clone() + from_sorted_vec (所有権移譲未実施)
+
+    merge_ngram_delta_add_only:
+      location: "benches/api/src/api/query.rs:6188-6304"
+      description: |
+        NgramIndex の add-only merge。individual / bulk の2経路。
+        - bulk path: merge_posting_add_only_into + chunk insert_bulk_owned
+        - miss path: add_list.clone() + from_sorted_vec (所有権移譲未実施)
+
+    merge_bulk_ngram_index:
+      location: "benches/api/src/api/query.rs:5392-5460"
+      description: |
+        apply_changes_bulk 専用。bulk builder 出力 NgramIndex を既存に統合。
+        - hit path: append_or_merge_sorted (Phase4 で導入、逆効果)
+        - miss path: bulk_posting_list.clone()
+
+    mutable_index:
+      type_alias: "HashMap<NgramKey, Vec<TaskId>>"
+      location: "benches/api/src/api/query.rs:1195"
+      description: |
+        SearchIndexDelta 内部の add/remove データ。
+        現在は &MutableIndex で借用されており、所有権移譲ができない。
+
+# =============================================================================
+# 実装方針
+# =============================================================================
+implementation_strategy:
+  overview: |
+    Codex レビューを反映し、以下の優先順で実装する:
+    1. REQ-TB5-002A (append_or_merge_sorted リバート) - 21.62% ホットスポット直接対策
+    2. REQ-TB5-001 (所有権消費 API) - miss path の clone 排除
+    3. REQ-TB5-NEW (hit-path 最適化) - 41.17% ホットスポット直接対策
+    4. REQ-TB5-003 は効果限定的のため優先度を下げ、Phase6 の insert_bulk_drain と合わせて検討
+    5. REQ-TB5-004 (segment overlay) - Phase6 に分離
+
+    REQ-TB5-003 (chunk バッファ再利用) の判断:
+    Codex 指摘の通り、insert_bulk_owned が Vec を消費するため、
+    drain_into_chunk_buffer による再利用効果は限定的。
+    TransientHashMap に insert_bulk_drain(&mut Vec) API を追加するまで、
+    chunk バッファ再利用は保留する。
+
+  rationale: |
+    - IMPL-TB5-005 (append_or_merge_sorted リバート) が 21.62% 直接削減で最優先
+    - IMPL-TB5-011 (hit-path 最適化) が 41.17% の直接対策として追加
+    - IMPL-TB5-006/007/008 (所有権消費) は miss path clone 排除 + malloc 削減
+    - chunk バッファ再利用は API 制約で効果薄のため Phase6 に移動
+
+  req_tb5_002_decision: |
+    Phase4 の append_or_merge_sorted を撤去し、元の existing.merge(add) に戻す。
+    理由:
+    1. append_or_merge_sorted の concat path は iter_sorted() + cloned() で
+       実質的に 2回パスしている (境界チェック + extend)
+    2. existing.merge(add) は single-pass two-pointer で O(n+m)
+    3. 境界チェック (last_sorted < first_sorted) は O(1) だが、
+       concat 時の全コピーが merge の two-pointer と同等以上のコスト
+    4. Codex 指摘: merge 結果は新規 Vec + 新 Arc を生成する (共有ではない)
+
+    注意: REQ-TB5-002 の元の要件 (zero-copy segment/link 再設計) は
+    REQ-TB5-002A (リバート) として分離し、元の zero-copy 要件は
+    Phase6 へ正式移管する。
+
+  req_tb5_004_disposition: |
+    REQ-TB5-004 (segment overlay + background compaction) は Phase6 として
+    別要件定義で管理する。以下も Phase6 に含める:
+    1. REQ-TB5-002 の元の zero-copy segment/link 再設計
+    2. REQ-TB5-003 の insert_bulk_drain API 追加 + chunk バッファ再利用
+    3. merge_bulk_ngram_index フォールバックのデータ欠落修正
+
+# =============================================================================
+# タスク一覧
+# =============================================================================
+task_list:
+  # ---------------------------------------------------------------------------
+  # REQ-TB5-002A: append_or_merge_sorted を撤去 (最優先)
+  # ---------------------------------------------------------------------------
+  - id: "IMPL-TB5-005"
+    name: "append_or_merge_sorted を existing.merge(add) に戻す"
+    requirement: "REQ-TB5-002A"
+    type: "Rust"
+    priority: "P0 - 21.62% ホットスポット直接対策"
+    description: |
+      merge_bulk_ngram_index 内の append_or_merge_sorted 呼び出し (line 5414) を
+      existing.merge(add) に戻す。
+
+      現状 (line 5411-5416):
+        let merged = existing_index.get(ngram_key.as_str()).map_or_else(
+            || bulk_posting_list.clone(),
+            |existing_posting_list| {
+                append_or_merge_sorted(existing_posting_list, bulk_posting_list)
+            },
+        );
+
+      変更後:
+        let merged = existing_index.get(ngram_key.as_str()).map_or_else(
+            || bulk_posting_list.clone(),
+            |existing_posting_list| {
+                existing_posting_list.merge(bulk_posting_list)
+            },
+        );
+
+      理由:
+        append_or_merge_sorted の concat path は:
+        1. last_sorted() + first_sorted() で境界チェック (O(1))
+        2. Vec::with_capacity + iter_sorted().cloned() で全コピー (O(n+m))
+        3. from_sorted_vec で新 TaskIdCollection 構築 (O(n+m))
+        合計: O(n+m) + 2回の iteration
+
+        existing.merge(add) (OrderedUniqueSet::merge) は:
+        1. iter_sorted().peekable() で two-pointer merge (O(n+m))
+        2. from_sorted_vec で新 TaskIdCollection 構築 (O(n+m))
+        合計: O(n+m) + 1回の iteration (single-pass)
+
+      append_or_merge_sorted 関数自体は他から呼ばれていないため、
+      関数ごと削除する。
+
+      Codex 指摘対応: テストモジュール (line 20008-20234) を単純削除せず、
+      merge_bulk_ngram_index の merge 同値性 property test に転換する。
+
+    file: "benches/api/src/api/query.rs"
+    estimated_lines: -200 (削除) + 30 (同値性テスト)
+    dependencies: []
+    test_strategy: |
+      - merge_bulk_ngram_index の既存テストが全てパスすること
+      - apply_changes_bulk の結合テストが全てパスすること
+      - 新規: merge_bulk_ngram_index が key ごとの
+        existing_posting_list.merge(bulk_posting_list) と同値である
+        ことを検証する property test を追加
+    risk: |
+      中 - Phase4 で導入した最適化を撤去するが、
+      プロファイリングで逆効果が確認済みのため正当化される。
+
+  # ---------------------------------------------------------------------------
+  # REQ-TB5-001: Add-only delta を所有権で消費する API
+  # ---------------------------------------------------------------------------
+  - id: "IMPL-TB5-006"
+    name: "merge_index_delta_add_only_owned 関数の実装"
+    requirement: "REQ-TB5-001"
+    type: "Rust"
+    priority: "P1 - miss path clone 排除"
+    description: |
+      PrefixIndex の add-only merge で MutableIndex を所有権で消費する
+      新関数を実装する。
+
+      現状の merge_index_delta_add_only (line 6147-6185):
+        - add: &MutableIndex (借用)
+        - miss path (line 6177): add_list.clone() で Vec<TaskId> をコピー
+
+      新関数 merge_index_delta_add_only_owned:
+        fn merge_index_delta_add_only_owned(
+            index: &PrefixIndex,
+            add: MutableIndex,  // 所有権で受け取る
+        ) -> PrefixIndex
+
+        - add.into_iter() で (NgramKey, Vec<TaskId>) を所有権で取得
+        - hit path: add_list を &[TaskId] として借用し merge_posting_add_only_into で処理
+        - miss path: add_list を move で TaskIdCollection::from_sorted_vec(add_list)
+          とし、clone を排除。key も move で transient.insert(key, collection)。
+
+    file: "benches/api/src/api/query.rs"
+    estimated_lines: 60
+    dependencies: []
+    test_strategy: |
+      - 新旧関数の出力同値性 property test
+      - 空 add での no-op 確認
+      - miss path only のケースで clone が発生しないことの確認
+    risk: |
+      低 - 新関数の追加のみで既存関数に変更なし
+
+  - id: "IMPL-TB5-007"
+    name: "merge_ngram_delta_add_only_owned 関数の実装"
+    requirement: "REQ-TB5-001"
+    type: "Rust"
+    priority: "P1 - miss path clone 排除"
+    description: |
+      NgramIndex の add-only merge で MutableIndex を所有権で消費する
+      新関数を実装する。
+
+      パターンは IMPL-TB5-006 と同一:
+        fn merge_ngram_delta_add_only_owned(
+            index: &NgramIndex,
+            add: MutableIndex,  // 所有権で受け取る
+            config: &SearchIndexConfig,
+        ) -> MergeNgramDeltaResult
+
+      Codex 指摘: IMPL-TB5-006 を待たず並列実装可能。
+      個別/バルク両経路で into_iter() を使用し、
+      key.clone() と add_list.clone() を排除する。
+
+    file: "benches/api/src/api/query.rs"
+    estimated_lines: 80
+    dependencies: []
+    test_strategy: |
+      - 新旧関数の出力同値性 property test
+      - individual / bulk 両経路のテスト
+    risk: "低 - 新関数の追加のみ"
+
+  - id: "IMPL-TB5-008"
+    name: "apply_delta_owned の新設と呼び出し元の更新"
+    requirement: "REQ-TB5-001"
+    type: "Rust"
+    priority: "P1 - 所有権消費経路の統合"
+    description: |
+      SearchIndexDelta を所有権で消費する apply_delta_owned を新設し、
+      apply_changes_delta / apply_changes_bulk の add-only 分岐から呼び出す。
+
+      Codex 指摘反映: 構造体分解パターンを使用してフィールドを move する。
+
+      新関数:
+        pub fn apply_delta_owned(
+            &self,
+            delta: SearchIndexDelta,  // 所有権で受け取る
+            changes: &[TaskChange],
+        ) -> Self
+
+      内部実装 (Codex 推奨パターン):
+        if !delta.is_add_only() {
+            return self.apply_delta(&delta, changes);
+        }
+
+        let SearchIndexDelta {
+            title_full_add,
+            title_word_add,
+            tag_add,
+            title_full_ngram_add,
+            title_word_ngram_add,
+            tag_ngram_add,
+            title_full_all_suffix_add,
+            title_word_all_suffix_add,
+            tag_all_suffix_add,
+            ..
+        } = delta;
+
+        Self {
+            tasks_by_id: self.update_tasks_by_id(changes),
+            title_full_index: Self::merge_index_delta_add_only_owned(
+                &self.title_full_index, title_full_add),
+            // ... 他フィールドも同様に move
+            config: self.config.clone(),
+        }
+
+      呼び出し元の変更:
+        1. apply_changes_delta: delta を move で渡す
+        2. apply_changes_bulk: delta を move で渡す
+        3. apply_delta (借用版) は維持
+        4. apply_delta_with_metrics は借用版を維持
+
+    file: "benches/api/src/api/query.rs"
+    estimated_lines: 50
+    dependencies: ["IMPL-TB5-006", "IMPL-TB5-007"]
+    test_strategy: |
+      - 既存の apply_delta テストが全てパスすること
+      - add-only 経路と add+remove 経路の両方で正確性確認
+      - debug_assert_prepared の呼び出し確認
+    risk: |
+      中 - apply_delta のシグネチャ変更は影響範囲が広い。
+      apply_delta (借用版) を残すことで後方互換性を維持する。
+
+  # ---------------------------------------------------------------------------
+  # REQ-TB5-NEW: merge_posting_add_only_into hit-path 最適化
+  # ---------------------------------------------------------------------------
+  - id: "IMPL-TB5-011"
+    name: "merge_posting_add_only_into の hit-path 最適化"
+    requirement: "REQ-TB5-NEW (Codex 指摘で追加)"
+    type: "Rust"
+    priority: "P0 - 41.17% ホットスポット直接対策"
+    description: |
+      merge_posting_add_only_into (line 6091-6143) は全体の 41.17% を占める
+      最大ホットスポット。現在の実装は常に two-pointer merge で全要素を
+      output Vec に clone している。
+
+      /parallel-exploration で以下の候補を探索する:
+
+      候補A: concat fast-path
+        add の全要素が existing の最大値より大きい場合、
+        merge ではなく concat で処理する。
+        条件: add.first() > existing.last_sorted() (O(1) チェック)
+        効果: 新規タスク追加時に高頻度で発火が期待される。
+
+      候補B: single-element binary-search 挿入
+        add が 1 要素の場合、binary search で挿入位置を特定し、
+        既存 Vec に挿入する。two-pointer の全走査を回避。
+        条件: add.len() == 1
+        効果: 個別タスク追加時に発火。
+
+      候補C: scratch Vec の capacity 再利用
+        現在 output.clear() で len をリセットするが capacity は維持される。
+        既に実装済みだが、初回 allocation サイズが不足している可能性。
+        reserve_exact(existing.len() + add.len()) で初回確保を最適化。
+
+      注意: TaskId は Uuid(16バイト) + Clone なので、clone のコスト自体は
+      低い。真のボトルネックは反復回数と cache miss の可能性がある。
+
+    file: "benches/api/src/api/query.rs"
+    estimated_lines: 40
+    dependencies: []
+    test_strategy: |
+      - 各 fast-path の条件が正しく発火することの確認
+      - 全 fast-path で既存 two-pointer と同一結果の同値性 property test
+      - perf-gate でのベンチマーク比較
+    risk: |
+      中 - fast-path の条件判定が不正確な場合、結果が破損する。
+      debug_assert! による前提条件の検証が必須。
+
+  # ---------------------------------------------------------------------------
+  # REQ-TB5-004 / REQ-TB5-003: Phase6 分離
+  # ---------------------------------------------------------------------------
+  - id: "IMPL-TB5-009"
+    name: "Phase6 issue ファイル作成 (segment overlay + chunk drain + zero-copy)"
+    requirement: "REQ-TB5-004, REQ-TB5-002 (zero-copy), REQ-TB5-003"
+    type: "Document"
+    priority: "P2"
+    description: |
+      以下を Phase6 として別 issue ファイルに集約する:
+
+      1. REQ-TB5-004: segment overlay + background compaction
+      2. REQ-TB5-002 の元の zero-copy segment/link 再設計
+      3. REQ-TB5-003: insert_bulk_drain API 追加 + chunk バッファ再利用
+      4. Codex 指摘: merge_bulk_ngram_index フォールバックのデータ欠落修正
+
+      作業内容:
+        1. docs/internal/issues/ に issue ファイルを作成
+        2. 上記 4 点の内容を転記
+        3. Phase5 の効果測定結果を前提条件として記載
+        4. 必要に応じて GitHub Issue を作成
+
+    file: "docs/internal/issues/"
+    estimated_lines: 80
+    dependencies: []
+    test_strategy: "N/A (ドキュメント)"
+    risk: "なし"
+
+  # ---------------------------------------------------------------------------
+  # 検証・ベンチマーク
+  # ---------------------------------------------------------------------------
+  - id: "IMPL-TB5-010"
+    name: "Phase5 perf-gate ベンチマーク検証"
+    requirement: "全 REQ"
+    type: "Benchmark"
+    priority: "P0 - ゲート"
+    description: |
+      Phase5 の全実装完了後、/perf-gate スキルでベンチマーク比較を実施する。
+
+      検証項目:
+        - tasks_bulk RPS: 65.24 -> 80+ (短期目標の中間)
+        - merge_posting_add_only_into CPU%: 41.17% -> 35% 以下
+        - merge_bulk_ngram_index CPU%: 21.62% -> 15% 以下
+        - malloc/cfree CPU%: 9.84% -> 7% 以下
+
+    file: "N/A"
+    estimated_lines: 0
+    dependencies: ["IMPL-TB5-005", "IMPL-TB5-008", "IMPL-TB5-011"]
+    test_strategy: |
+      /perf-gate スキルによる before/after 比較
+    risk: |
+      中 - 目標未達の場合は Phase6 (segment overlay) の前倒しを検討する。
+
+# =============================================================================
+# 実装順序 (Codex 指摘反映: IMPL-TB5-005 先行、chunk バッファ削除)
+# =============================================================================
+implementation_order:
+  description: |
+    Codex レビュー反映後の実装順序:
+
+  phases:
+    - phase: "5a"
+      title: "ホットスポット直接対策 (21.62% + 41.17%)"
+      tasks: ["IMPL-TB5-005", "IMPL-TB5-011"]
+      rationale: |
+        IMPL-TB5-005 (append_or_merge_sorted リバート) は 21.62% ホットスポットへの
+        直接対策で、最も確実な改善が見込める。先行実施する。
+        IMPL-TB5-011 (hit-path 最適化) は 41.17% への直接対策。
+        /parallel-exploration で候補を探索してから実装する。
+
+        実装順: IMPL-TB5-005 -> IMPL-TB5-011
+
+    - phase: "5b"
+      title: "所有権消費 API (apply_delta_owned)"
+      tasks: ["IMPL-TB5-006", "IMPL-TB5-007", "IMPL-TB5-008"]
+      rationale: |
+        IMPL-TB5-006 と IMPL-TB5-007 は並行実装可能 (Codex 指摘)。
+        IMPL-TB5-008 は両方の完了後に実施。
+
+        実装順: IMPL-TB5-006 + IMPL-TB5-007 (並行) -> IMPL-TB5-008
+
+    - phase: "5c"
+      title: "検証と Phase6 準備"
+      tasks: ["IMPL-TB5-009", "IMPL-TB5-010"]
+      rationale: |
+        全実装完了後のベンチマーク検証と、Phase6 の準備。
+
+# =============================================================================
+# 依存関係グラフ (Codex レビュー反映)
+# =============================================================================
+dependency_graph: |
+  Phase 5a:
+    IMPL-TB5-005 (append_or_merge_sorted リバート) [独立、先行]
+    IMPL-TB5-011 (hit-path 最適化) [IMPL-TB5-005 後、/parallel-exploration 結果に依存]
+
+  Phase 5b:
+    IMPL-TB5-006 (merge_index_delta_add_only_owned) [独立]
+    IMPL-TB5-007 (merge_ngram_delta_add_only_owned) [独立、006 と並行可]
+    IMPL-TB5-008 (apply_delta_owned) [006 + 007 完了後]
+
+  Phase 5c:
+    IMPL-TB5-009 (Phase6 issue) [独立]
+    IMPL-TB5-010 (perf-gate) [005 + 008 + 011 完了後]
+
+# =============================================================================
+# リスク評価 (Codex レビュー反映)
+# =============================================================================
+risks:
+  - id: "RISK-001"
+    name: "insert_bulk_owned のバッファ再利用制約"
+    severity: "low"
+    status: "Phase6 に移動"
+    description: |
+      insert_bulk_owned は Vec<(K, V)> を消費するため、
+      drain_into_chunk_buffer で充填した Vec を take で渡す必要がある。
+      Codex 指摘: 効果が限定的なため Phase6 で insert_bulk_drain API と
+      合わせて対応する。
+
+  - id: "RISK-002"
+    name: "apply_delta_owned の影響範囲"
+    severity: "medium"
+    description: |
+      apply_delta_owned は SearchIndexDelta を所有権で消費するため、
+      呼び出し元で delta の再利用ができなくなる。
+    mitigation: |
+      apply_delta (借用版) を残しつつ、apply_delta_owned を追加する。
+      呼び出し元で delta が不要な場合のみ owned 版を使用する。
+      apply_delta_with_metrics は借用版を維持する。
+
+  - id: "RISK-003"
+    name: "append_or_merge_sorted 撤去の副作用"
+    severity: "low"
+    description: |
+      append_or_merge_sorted テスト削除でリグレッション監視が弱まるリスク。
+    mitigation: |
+      Codex 指摘: 関数削除後も merge_bulk_ngram_index の merge 同値性を
+      検証する property test に転換して維持する。
+
+  - id: "RISK-004"
+    name: "Phase5 の RPS 目標未達"
+    severity: "medium"
+    description: |
+      REQ-TB5-001/002A だけでは RPS 100 に到達しない可能性がある。
+    mitigation: |
+      Phase 5a 完了後に perf-gate を実施し、効果を測定する。
+      不足の場合は Phase6 (segment overlay) を前倒しする。
+
+  - id: "RISK-005"
+    name: "merge_bulk_ngram_index フォールバックのデータ欠落"
+    severity: "medium"
+    status: "Phase6 で対応"
+    description: |
+      Codex 指摘: エラー時に existing_index から再構築し、
+      前チャンク反映分を失う設計。
+      現状 CHUNK_SIZE = MAX_BULK_INSERT - 1 で通常発火しない。
+    mitigation: |
+      Phase6 の issue に記載し、エラー時に「それまでの成功分 + 失敗分」を
+      保持した再試行戦略に修正する。
+
+  - id: "RISK-006"
+    name: "hit-path 最適化の条件判定バグ"
+    severity: "medium"
+    description: |
+      IMPL-TB5-011 の fast-path 条件判定が不正確な場合、
+      posting list の結果が破損する。
+    mitigation: |
+      - debug_assert! による前提条件の検証
+      - 全 fast-path と既存 two-pointer の同値性 property test
+      - /parallel-exploration での候補比較

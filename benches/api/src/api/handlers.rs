@@ -38,7 +38,8 @@ use super::dto::{
 };
 use super::error::ApiErrorResponse;
 use super::query::{
-    SearchCache, SearchIndex, SearchIndexConfig, TaskChange, measure_search_index_build,
+    SearchCache, SearchIndex, SearchIndexConfig, SearchIndexWriter, SearchIndexWriterConfig,
+    TaskChange, measure_search_index_build,
 };
 use crate::domain::{EventId, Priority, Tag, Task, TaskId, Timestamp, create_task_created_event};
 use crate::infrastructure::{
@@ -193,6 +194,12 @@ pub struct AppState {
     pub applied_config: AppliedConfig,
     /// Counter for RCU retry events due to CAS failure (testing/monitoring).
     pub search_index_rcu_retries: Arc<AtomicUsize>,
+    /// Single-writer for search index updates.
+    ///
+    /// When `Some`, all index mutations are routed through the writer thread
+    /// to eliminate CAS retry overhead. When `None`, falls back to the
+    /// RCU-based `ArcSwap::rcu` path.
+    pub search_index_writer: Option<Arc<SearchIndexWriter>>,
 }
 
 impl Clone for AppState {
@@ -215,6 +222,7 @@ impl Clone for AppState {
             cache_ttl_seconds: self.cache_ttl_seconds,
             applied_config: self.applied_config.clone(),
             search_index_rcu_retries: Arc::clone(&self.search_index_rcu_retries),
+            search_index_writer: self.search_index_writer.as_ref().map(Arc::clone),
         }
     }
 }
@@ -404,13 +412,20 @@ impl AppState {
         // Load cache configuration for metadata (CACHE-REQ-021)
         let cache_config = crate::infrastructure::CacheConfig::from_env();
 
+        let search_index_arc = Arc::new(ArcSwap::from_pointee(search_index));
+
+        let search_index_writer = Arc::new(SearchIndexWriter::new(
+            Arc::clone(&search_index_arc),
+            SearchIndexWriterConfig::default(),
+        ));
+
         Ok(Self {
             task_repository: repositories.task_repository,
             project_repository: repositories.project_repository,
             event_store: repositories.event_store,
             config,
             bulk_config,
-            search_index: Arc::new(ArcSwap::from_pointee(search_index)),
+            search_index: search_index_arc,
             search_cache: Arc::new(SearchCache::with_default_config()),
             secondary_source: external_sources.secondary_source,
             external_source: external_sources.external_source,
@@ -422,6 +437,7 @@ impl AppState {
             cache_ttl_seconds: cache_config.ttl_seconds,
             applied_config,
             search_index_rcu_retries: Arc::new(AtomicUsize::new(0)),
+            search_index_writer: Some(search_index_writer),
         })
     }
 
@@ -449,6 +465,12 @@ impl AppState {
     /// This ensures no updates are lost even under concurrent modifications.
     #[allow(clippy::needless_pass_by_value)] // Ownership needed for rcu retry via clone
     pub fn update_search_index(&self, change: TaskChange) {
+        if let Some(writer) = &self.search_index_writer {
+            if writer.send_change(change.clone()).is_ok() {
+                return;
+            }
+            tracing::error!("search_index_writer send failed; falling back to RCU path");
+        }
         self.search_index.rcu(|current| {
             let updated = current.apply_change(change.clone());
             Arc::new(updated)
@@ -492,6 +514,13 @@ impl AppState {
     pub fn update_search_index_batch(&self, changes: &[TaskChange]) {
         if changes.is_empty() {
             return;
+        }
+
+        if let Some(writer) = &self.search_index_writer {
+            if writer.send_changes(changes.to_vec()).is_ok() {
+                return;
+            }
+            tracing::error!("search_index_writer send failed; falling back to CAS path");
         }
 
         let change_count = changes.len();
@@ -1209,6 +1238,7 @@ mod tests {
             cache_ttl_seconds: 60,
             applied_config: AppliedConfig::default(),
             search_index_rcu_retries: Arc::new(AtomicUsize::new(0)),
+            search_index_writer: None,
         }
     }
 
@@ -1243,6 +1273,7 @@ mod tests {
             cache_ttl_seconds: 60,
             applied_config: AppliedConfig::default(),
             search_index_rcu_retries: Arc::new(AtomicUsize::new(0)),
+            search_index_writer: None,
         }
     }
 
