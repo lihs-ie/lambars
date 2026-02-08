@@ -3141,6 +3141,7 @@ mod tests {
                 cache_ttl_seconds: 60,
                 applied_config: AppliedConfig::default(),
                 search_index_rcu_retries: Arc::new(AtomicUsize::new(0)),
+                search_index_writer: None,
             }
         }
 

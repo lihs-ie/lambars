@@ -7418,6 +7418,302 @@ pub enum TaskChange {
 }
 
 // =============================================================================
+// SearchIndexWriter - Single-Writer Pattern for Index Updates
+// =============================================================================
+
+/// Configuration for [`SearchIndexWriter`].
+///
+/// Controls the micro-batch behavior of the writer thread that coalesces
+/// individual change sets into larger batches before applying them to the
+/// search index.
+#[derive(Debug, Clone)]
+pub struct SearchIndexWriterConfig {
+    /// Maximum number of change sets to coalesce into a single batch.
+    ///
+    /// When this many change sets have been received (or the timeout fires),
+    /// the writer thread applies them all in a single `apply_changes` call.
+    pub batch_size: usize,
+
+    /// Maximum time (in milliseconds) to wait for additional change sets
+    /// before flushing the current batch.
+    ///
+    /// This ensures latency stays bounded even under low throughput.
+    pub batch_timeout_milliseconds: u64,
+
+    /// Bounded channel capacity (provides backpressure to senders).
+    ///
+    /// When the channel is full, `send_changes` will block until the writer
+    /// thread consumes an entry.
+    pub channel_capacity: usize,
+}
+
+impl Default for SearchIndexWriterConfig {
+    fn default() -> Self {
+        Self {
+            batch_size: 8,
+            batch_timeout_milliseconds: 5,
+            channel_capacity: 32,
+        }
+    }
+}
+
+/// Single-writer for search index updates.
+///
+/// Instead of multiple request threads competing via CAS (compare-and-swap)
+/// retries, all index mutations are funneled through a bounded channel to
+/// a dedicated writer thread. This eliminates:
+///
+/// - **CAS retry waste**: No more recomputing `apply_changes` on contention.
+/// - **Short-lived `Arc` churn**: The writer thread is the sole producer of
+///   new `Arc<SearchIndex>` values, reducing `Arc::drop_slow` overhead.
+///
+/// # Architecture
+///
+/// ```text
+/// Request threads  ──send_changes()──►  [bounded channel]  ──►  Writer thread
+///                                                                   │
+///                                          micro-batch coalesce     │
+///                                                                   │
+///                                          apply_changes()          │
+///                                                                   │
+///                                          ArcSwap::store()  ◄─────┘
+///                                                │
+///                                    Read threads (lock-free load)
+/// ```
+///
+/// # Read Path
+///
+/// Reads remain lock-free. Callers load the latest index snapshot via
+/// `ArcSwap::load()` as before.
+///
+/// # Shutdown
+///
+/// Call [`shutdown`](Self::shutdown) to close the channel and wait for
+/// the writer thread to drain all remaining change sets.
+pub struct SearchIndexWriter {
+    /// Bounded channel sender for submitting change sets.
+    ///
+    /// Wrapped in `Mutex<Option<..>>` so that [`shutdown`](Self::shutdown) can
+    /// explicitly drop the sender to close the channel, causing the writer
+    /// thread to drain remaining items and exit.
+    sender: std::sync::Mutex<Option<std::sync::mpsc::SyncSender<Vec<TaskChange>>>>,
+
+    /// Writer thread handle (taken on shutdown / drop).
+    handle: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
+}
+
+impl std::fmt::Debug for SearchIndexWriter {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SearchIndexWriter")
+            .field("sender", &"Mutex<Option<SyncSender<Vec<TaskChange>>>>")
+            .field("handle", &"Mutex<Option<JoinHandle<()>>>")
+            .finish()
+    }
+}
+
+impl SearchIndexWriter {
+    /// Creates a new `SearchIndexWriter` with the given shared index and configuration.
+    ///
+    /// Spawns a dedicated writer thread that:
+    /// 1. Receives change sets from the bounded channel
+    /// 2. Coalesces them into micro-batches (up to `config.batch_size` sets
+    ///    or `config.batch_timeout_milliseconds` timeout)
+    /// 3. Applies the coalesced changes to the current index via `apply_changes`
+    /// 4. Stores the new index snapshot in the `ArcSwap`
+    ///
+    /// # Arguments
+    ///
+    /// * `search_index` - Shared `ArcSwap<SearchIndex>` for lock-free reads.
+    /// * `config` - Writer configuration (batch size, timeout, channel capacity).
+    ///
+    /// # Returns
+    ///
+    /// A new `SearchIndexWriter` ready to accept change sets via [`send_changes`](Self::send_changes).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the OS fails to spawn the writer thread.
+    #[must_use]
+    pub fn new(
+        search_index: Arc<arc_swap::ArcSwap<SearchIndex>>,
+        config: SearchIndexWriterConfig,
+    ) -> Self {
+        let (sender, receiver) = std::sync::mpsc::sync_channel::<Vec<TaskChange>>(
+            config.channel_capacity,
+        );
+
+        let handle = std::thread::Builder::new()
+            .name("search-index-writer".to_string())
+            .spawn(move || {
+                Self::writer_loop(receiver, search_index, &config);
+            })
+            .expect("Failed to spawn search-index-writer thread");
+
+        Self {
+            sender: std::sync::Mutex::new(Some(sender)),
+            handle: std::sync::Mutex::new(Some(handle)),
+        }
+    }
+
+    /// Sends a batch of task changes to the writer thread for index update.
+    ///
+    /// This method blocks if the bounded channel is full (backpressure).
+    /// Empty change sets are silently ignored.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if the writer thread has shut down (channel disconnected)
+    /// or if [`shutdown`](Self::shutdown) has already been called.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal sender mutex is poisoned.
+    pub fn send_changes(&self, changes: Vec<TaskChange>) -> Result<(), std::sync::mpsc::SendError<Vec<TaskChange>>> {
+        if changes.is_empty() {
+            return Ok(());
+        }
+        let guard = self.sender.lock().expect("SearchIndexWriter sender mutex poisoned");
+        match guard.as_ref() {
+            Some(sender) => sender.send(changes),
+            None => Err(std::sync::mpsc::SendError(changes)),
+        }
+    }
+
+    /// Sends a single task change to the writer thread for index update.
+    ///
+    /// Convenience wrapper around [`send_changes`](Self::send_changes) for
+    /// single-change call sites.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if the writer thread has shut down (channel disconnected).
+    pub fn send_change(&self, change: TaskChange) -> Result<(), std::sync::mpsc::SendError<Vec<TaskChange>>> {
+        self.send_changes(vec![change])
+    }
+
+    /// Shuts down the writer thread gracefully.
+    ///
+    /// 1. Drops the sender to close the channel.
+    /// 2. Waits for the writer thread to drain all remaining change sets and exit.
+    ///
+    /// This method is idempotent: calling it multiple times is safe.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal mutexes are poisoned.
+    pub fn shutdown(&self) {
+        // Drop sender first to close the channel
+        {
+            let mut sender_guard = self.sender.lock().expect("SearchIndexWriter sender mutex poisoned");
+            sender_guard.take(); // Drop the sender, closing the channel
+        }
+
+        // Then join the writer thread
+        let handle = {
+            let mut handle_guard = self.handle.lock().expect("SearchIndexWriter handle mutex poisoned");
+            handle_guard.take()
+        };
+        if let Some(handle) = handle {
+            let _ = handle.join();
+        }
+    }
+
+    /// The writer thread's main loop.
+    ///
+    /// Receives change sets from the channel, coalesces them into micro-batches,
+    /// and applies them to the search index.
+    #[allow(clippy::needless_pass_by_value)] // Receiver and Arc are moved into the spawned thread
+    fn writer_loop(
+        receiver: std::sync::mpsc::Receiver<Vec<TaskChange>>,
+        search_index: Arc<arc_swap::ArcSwap<SearchIndex>>,
+        config: &SearchIndexWriterConfig,
+    ) {
+        let batch_timeout = std::time::Duration::from_millis(config.batch_timeout_milliseconds);
+
+        loop {
+            // Block until the first change set arrives (or channel closes)
+            let Ok(first_changes) = receiver.recv() else {
+                break; // Channel closed, exit loop
+            };
+
+            // Coalesce additional change sets within the timeout window
+            let mut coalesced_changes = first_changes;
+
+            for _ in 1..config.batch_size {
+                match receiver.recv_timeout(batch_timeout) {
+                    Ok(more_changes) => {
+                        coalesced_changes.extend(more_changes);
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                        // Channel closed; apply what we have and exit
+                        if !coalesced_changes.is_empty() {
+                            Self::apply_coalesced_changes(
+                                &search_index,
+                                &coalesced_changes,
+                            );
+                        }
+                        return;
+                    }
+                }
+            }
+
+            // Apply the coalesced batch
+            if !coalesced_changes.is_empty() {
+                Self::apply_coalesced_changes(&search_index, &coalesced_changes);
+            }
+        }
+    }
+
+    /// Applies coalesced changes to the search index (single-writer, no CAS needed).
+    fn apply_coalesced_changes(
+        search_index: &arc_swap::ArcSwap<SearchIndex>,
+        changes: &[TaskChange],
+    ) {
+        let total_start = std::time::Instant::now();
+
+        let current = search_index.load();
+        let apply_start = std::time::Instant::now();
+        let updated = current.apply_changes(changes);
+        let apply_elapsed = apply_start.elapsed();
+
+        // Single-writer: no CAS needed, just store directly
+        search_index.store(Arc::new(updated));
+
+        let total_elapsed = total_start.elapsed();
+
+        tracing::info!(
+            target: "search_index_writer",
+            change_count = changes.len(),
+            apply_changes_us = apply_elapsed.as_micros(),
+            total_us = total_elapsed.as_micros(),
+            total_ms = total_elapsed.as_millis(),
+            "search_index_writer batch applied"
+        );
+    }
+}
+
+impl Drop for SearchIndexWriter {
+    fn drop(&mut self) {
+        // Drop sender to close the channel (causes writer thread to exit after draining)
+        {
+            let mut sender_guard = self.sender.lock().expect("SearchIndexWriter sender mutex poisoned");
+            sender_guard.take();
+        }
+
+        // Join the writer thread
+        let handle = {
+            let mut guard = self.handle.lock().expect("SearchIndexWriter handle mutex poisoned");
+            guard.take()
+        };
+        if let Some(handle) = handle {
+            let _ = handle.join();
+        }
+    }
+}
+
+// =============================================================================
 // GET /tasks - List Tasks
 // =============================================================================
 
@@ -23535,5 +23831,467 @@ mod adaptive_merge_tests {
                 "adaptive merge differs from two-pointer merge"
             );
         }
+    }
+}
+
+// =============================================================================
+// SearchIndexWriter Tests
+// =============================================================================
+
+#[cfg(test)]
+mod search_index_writer_tests {
+    use super::*;
+    use crate::domain::{Task, TaskId, Timestamp};
+    use arc_swap::ArcSwap;
+    use lambars::persistent::PersistentVector;
+    use rstest::rstest;
+    use std::sync::Arc;
+
+    /// Helper: creates a shared `ArcSwap<SearchIndex>` from an empty index.
+    fn create_empty_search_index() -> Arc<ArcSwap<SearchIndex>> {
+        Arc::new(ArcSwap::from_pointee(SearchIndex::build(
+            &PersistentVector::new(),
+        )))
+    }
+
+    /// Helper: creates a task with the given title.
+    fn create_task(title: &str) -> Task {
+        Task::new(TaskId::generate(), title, Timestamp::now())
+    }
+
+    // -------------------------------------------------------------------------
+    // Basic Functionality Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn test_writer_applies_single_add_change() {
+        let search_index = create_empty_search_index();
+        let writer = SearchIndexWriter::new(
+            Arc::clone(&search_index),
+            SearchIndexWriterConfig::default(),
+        );
+
+        let task = create_task("Writer Test Task");
+        let task_id = task.task_id.clone();
+
+        writer
+            .send_change(TaskChange::Add(task))
+            .expect("send_change should succeed");
+
+        // Shutdown to ensure all changes are applied
+        writer.shutdown();
+
+        // Verify the task is in the index
+        let index = search_index.load();
+        let result = index.search_by_title("Writer Test");
+        assert!(result.is_some(), "Task should be findable after writer applies change");
+        let search_result = result.unwrap();
+        let tasks = search_result.tasks();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks.iter().next().unwrap().task_id, task_id);
+    }
+
+    #[rstest]
+    fn test_writer_applies_batch_changes() {
+        let search_index = create_empty_search_index();
+        let writer = SearchIndexWriter::new(
+            Arc::clone(&search_index),
+            SearchIndexWriterConfig::default(),
+        );
+
+        let task1 = create_task("Alpha Task");
+        let task2 = create_task("Beta Task");
+        let task3 = create_task("Gamma Task");
+        let task1_id = task1.task_id.clone();
+        let task2_id = task2.task_id.clone();
+        let task3_id = task3.task_id.clone();
+
+        writer
+            .send_changes(vec![
+                TaskChange::Add(task1),
+                TaskChange::Add(task2),
+                TaskChange::Add(task3),
+            ])
+            .expect("send_changes should succeed");
+
+        writer.shutdown();
+
+        let index = search_index.load();
+        let alpha = index.search_by_title("Alpha").expect("Alpha should be findable");
+        let beta = index.search_by_title("Beta").expect("Beta should be findable");
+        let gamma = index.search_by_title("Gamma").expect("Gamma should be findable");
+
+        assert_eq!(alpha.tasks().iter().next().unwrap().task_id, task1_id);
+        assert_eq!(beta.tasks().iter().next().unwrap().task_id, task2_id);
+        assert_eq!(gamma.tasks().iter().next().unwrap().task_id, task3_id);
+    }
+
+    #[rstest]
+    fn test_writer_empty_changes_are_silently_ignored() {
+        let search_index = create_empty_search_index();
+        let writer = SearchIndexWriter::new(
+            Arc::clone(&search_index),
+            SearchIndexWriterConfig::default(),
+        );
+
+        // Sending empty changes should not error
+        writer
+            .send_changes(vec![])
+            .expect("empty changes should succeed");
+
+        writer.shutdown();
+
+        // Index should still be empty
+        let index = search_index.load();
+        assert!(index.search_by_title("anything").is_none());
+    }
+
+    #[rstest]
+    fn test_writer_handles_mixed_operations() {
+        let search_index = create_empty_search_index();
+        let writer = SearchIndexWriter::new(
+            Arc::clone(&search_index),
+            SearchIndexWriterConfig::default(),
+        );
+
+        // Add initial tasks
+        let task_to_keep = create_task("Keep Me");
+        let task_to_remove = create_task("Remove Me");
+        let task_to_update = create_task("Update Me");
+        let keep_id = task_to_keep.task_id.clone();
+        let remove_id = task_to_remove.task_id.clone();
+
+        // Clone tasks that need to survive the initial Add batch
+        let task_to_update_clone_for_add = task_to_update.clone();
+
+        writer
+            .send_changes(vec![
+                TaskChange::Add(task_to_keep),
+                TaskChange::Add(task_to_remove),
+                TaskChange::Add(task_to_update_clone_for_add),
+            ])
+            .expect("initial adds should succeed");
+
+        // Wait for initial adds to be applied, then send mixed ops
+        // Use a small sleep to ensure the writer processes the first batch
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        let updated_task = task_to_update.clone().with_description("Updated description");
+        writer
+            .send_changes(vec![
+                TaskChange::Remove(remove_id),
+                TaskChange::Update {
+                    old: task_to_update,
+                    new: updated_task,
+                },
+            ])
+            .expect("mixed ops should succeed");
+
+        writer.shutdown();
+
+        let index = search_index.load();
+
+        // Keep Me should still exist
+        let keep_result = index.search_by_title("Keep");
+        assert!(keep_result.is_some(), "Kept task should be findable");
+        let keep_search = keep_result.unwrap();
+        assert_eq!(
+            keep_search.tasks().iter().next().unwrap().task_id,
+            keep_id
+        );
+
+        // Remove Me should be gone
+        assert!(
+            index.search_by_title("Remove").is_none(),
+            "Removed task should not be findable"
+        );
+
+        // Update Me should still be findable (title unchanged)
+        let update_result = index.search_by_title("Update");
+        assert!(update_result.is_some(), "Updated task should be findable");
+    }
+
+    // -------------------------------------------------------------------------
+    // Shutdown Semantics Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn test_writer_shutdown_is_idempotent() {
+        let search_index = create_empty_search_index();
+        let writer = SearchIndexWriter::new(
+            Arc::clone(&search_index),
+            SearchIndexWriterConfig::default(),
+        );
+
+        writer.shutdown();
+        writer.shutdown(); // Second call should not panic
+    }
+
+    #[rstest]
+    fn test_writer_send_after_shutdown_returns_error() {
+        let search_index = create_empty_search_index();
+        let writer = SearchIndexWriter::new(
+            Arc::clone(&search_index),
+            SearchIndexWriterConfig::default(),
+        );
+
+        writer.shutdown();
+
+        let task = create_task("Post Shutdown Task");
+        let result = writer.send_change(TaskChange::Add(task));
+        assert!(result.is_err(), "send after shutdown should return error");
+    }
+
+    #[rstest]
+    fn test_writer_drop_drains_pending_changes() {
+        let search_index = create_empty_search_index();
+
+        {
+            let writer = SearchIndexWriter::new(
+                Arc::clone(&search_index),
+                SearchIndexWriterConfig {
+                    batch_size: 8,
+                    batch_timeout_milliseconds: 5,
+                    channel_capacity: 32,
+                },
+            );
+
+            let task = create_task("Drop Drain Task");
+            writer
+                .send_change(TaskChange::Add(task))
+                .expect("send should succeed");
+
+            // Writer is dropped here, which should drain pending changes
+        }
+
+        let index = search_index.load();
+        let result = index.search_by_title("Drop Drain");
+        assert!(
+            result.is_some(),
+            "Task should be present after writer is dropped (graceful drain)"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Micro-Batch Coalescing Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn test_writer_coalesces_multiple_sends_into_batch() {
+        let search_index = create_empty_search_index();
+        let writer = SearchIndexWriter::new(
+            Arc::clone(&search_index),
+            SearchIndexWriterConfig {
+                batch_size: 8,
+                batch_timeout_milliseconds: 100, // Long timeout to encourage coalescing
+                channel_capacity: 32,
+            },
+        );
+
+        // Send many small change sets rapidly
+        for index in 0..20 {
+            let task = create_task(&format!("Coalesce Task {index}"));
+            writer
+                .send_change(TaskChange::Add(task))
+                .expect("send should succeed");
+        }
+
+        writer.shutdown();
+
+        // Verify all 20 tasks were applied
+        let final_index = search_index.load();
+        let all_tasks = final_index.all_tasks();
+        assert_eq!(
+            all_tasks.len(),
+            20,
+            "All 20 tasks should be present after coalescing"
+        );
+    }
+
+    #[rstest]
+    fn test_writer_flushes_on_timeout_even_with_small_batch() {
+        let search_index = create_empty_search_index();
+        let writer = SearchIndexWriter::new(
+            Arc::clone(&search_index),
+            SearchIndexWriterConfig {
+                batch_size: 100, // Very large batch size
+                batch_timeout_milliseconds: 10, // Short timeout
+                channel_capacity: 32,
+            },
+        );
+
+        // Send only 1 change (well below batch_size of 100)
+        let task = create_task("Timeout Flush Task");
+        let task_id = task.task_id.clone();
+        writer
+            .send_change(TaskChange::Add(task))
+            .expect("send should succeed");
+
+        // Wait for timeout to trigger flush
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        let index = search_index.load();
+        let result = index.search_by_title("Timeout Flush");
+        assert!(
+            result.is_some(),
+            "Task should be flushed after timeout even though batch_size not reached"
+        );
+        let timeout_search = result.unwrap();
+        assert_eq!(
+            timeout_search.tasks().iter().next().unwrap().task_id,
+            task_id
+        );
+
+        writer.shutdown();
+    }
+
+    // -------------------------------------------------------------------------
+    // Concurrency Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn test_writer_concurrent_senders_no_lost_changes() {
+        use std::collections::HashSet;
+
+        let search_index = create_empty_search_index();
+        let writer = Arc::new(SearchIndexWriter::new(
+            Arc::clone(&search_index),
+            SearchIndexWriterConfig {
+                batch_size: 8,
+                batch_timeout_milliseconds: 5,
+                channel_capacity: 64,
+            },
+        ));
+
+        let thread_count = 8;
+        let tasks_per_thread = 50;
+        let total_expected = thread_count * tasks_per_thread;
+
+        let barrier = Arc::new(std::sync::Barrier::new(thread_count));
+        let all_task_ids: Arc<std::sync::Mutex<Vec<TaskId>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let handles: Vec<_> = (0..thread_count)
+            .map(|thread_index| {
+                let writer = Arc::clone(&writer);
+                let barrier = Arc::clone(&barrier);
+                let all_task_ids = Arc::clone(&all_task_ids);
+
+                std::thread::spawn(move || {
+                    barrier.wait();
+
+                    for task_index in 0..tasks_per_thread {
+                        let title = format!("Concurrent_T{thread_index}_I{task_index}");
+                        let task = create_task(&title);
+                        let task_id = task.task_id.clone();
+
+                        {
+                            let mut guard = all_task_ids.lock().unwrap();
+                            guard.push(task_id);
+                        }
+
+                        writer
+                            .send_change(TaskChange::Add(task))
+                            .expect("send should succeed");
+                    }
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle.join().expect("Thread should complete without panic");
+        }
+
+        writer.shutdown();
+
+        // Verify all tasks are present
+        let final_index = search_index.load();
+        let all_tasks_in_index = final_index.all_tasks();
+        let actual_ids: HashSet<TaskId> = all_tasks_in_index
+            .iter()
+            .map(|task| task.task_id.clone())
+            .collect();
+
+        let expected_ids: HashSet<TaskId> = all_task_ids
+            .lock()
+            .unwrap()
+            .iter()
+            .cloned()
+            .collect();
+
+        assert_eq!(
+            actual_ids.len(),
+            total_expected,
+            "Expected {total_expected} tasks but found {}",
+            actual_ids.len()
+        );
+
+        let missing: Vec<&TaskId> = expected_ids
+            .iter()
+            .filter(|id| !actual_ids.contains(*id))
+            .collect();
+
+        assert!(
+            missing.is_empty(),
+            "Missing {} tasks in search index",
+            missing.len()
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Configuration Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn test_writer_config_default_values() {
+        let config = SearchIndexWriterConfig::default();
+        assert_eq!(config.batch_size, 8);
+        assert_eq!(config.batch_timeout_milliseconds, 5);
+        assert_eq!(config.channel_capacity, 32);
+    }
+
+    #[rstest]
+    fn test_writer_with_custom_config() {
+        let search_index = create_empty_search_index();
+        let writer = SearchIndexWriter::new(
+            Arc::clone(&search_index),
+            SearchIndexWriterConfig {
+                batch_size: 4,
+                batch_timeout_milliseconds: 1,
+                channel_capacity: 16,
+            },
+        );
+
+        // Send a few tasks to verify it works with custom config
+        for index in 0..10 {
+            let task = create_task(&format!("Custom Config Task {index}"));
+            writer
+                .send_change(TaskChange::Add(task))
+                .expect("send should succeed");
+        }
+
+        writer.shutdown();
+
+        let final_index = search_index.load();
+        let all_tasks = final_index.all_tasks();
+        assert_eq!(all_tasks.len(), 10);
+    }
+
+    // -------------------------------------------------------------------------
+    // Debug Trait Test
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn test_writer_debug_output() {
+        let search_index = create_empty_search_index();
+        let writer = SearchIndexWriter::new(
+            Arc::clone(&search_index),
+            SearchIndexWriterConfig::default(),
+        );
+
+        let debug_output = format!("{writer:?}");
+        assert!(debug_output.contains("SearchIndexWriter"));
+
+        writer.shutdown();
     }
 }
