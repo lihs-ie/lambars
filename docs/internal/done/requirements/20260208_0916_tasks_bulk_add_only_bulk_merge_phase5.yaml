@@ -1,0 +1,144 @@
+# tasks_bulk Add-only/Bulk-Ngram 残ボトルネック改善 Phase5 要件定義
+#
+# 概要:
+#   Phase4 修正後も `tasks_bulk` が低スループットのため、
+#   Add-only merge と bulk ngram merge の残ボトルネックを再設計する。
+#
+# 設計方針:
+#   1. add-only 更新データを所有権で消費し、clone/memcpy を削減する。
+#   2. bulk ngram merge の eager materialization を排除する。
+#   3. 同期フルマージを段階的に廃止し、segment overlay + compaction に移行する。
+#
+# 参照:
+#   - profiling-results-downloaded-latest/api-profiling-all-350bef30f47e520f398207f9834862b7bef5fdb5/tasks_bulk/benchmark/summary.txt
+#   - profiling-results-downloaded-latest/api-profiling-all-350bef30f47e520f398207f9834862b7bef5fdb5/tasks_bulk/stacks.folded
+#   - docs/internal/requirements/20260207_2230_tasks_bulk_search_index_merge_hotspots.yaml
+#   - benches/api/src/api/query.rs
+
+version: "1.0.0"
+name: "tasks_bulk_add_only_bulk_merge_phase5"
+description: |
+  最新計測 (2026-02-08, commit 350bef...) で tasks_bulk は 65.24 RPS / P99 25.92s。
+  直近基準 (2026-02-07, 71.84 RPS / P99 25.49s) から悪化しており、
+  目標 500 RPS に対して 13.05% の達成率に留まる。
+
+  主要ホットスポット:
+  - SearchIndex::merge_posting_add_only_into: 41.17%
+  - SearchIndex::merge_bulk_ngram_index: 21.62%
+  - malloc/cfree: 9.84%
+
+  補足:
+  - from_iter は 0.18% まで低下しており、materialization 一部改善は確認できる。
+  - 一方で merge_bulk_ngram_index が増大し、全体性能が相殺されている。
+
+background:
+  problem: |
+    Phase4 の existing-miss 直構築と append-or-merge は導入済みだが、
+    次の課題が残存している:
+    1. add-only miss path は `add_list.clone()` 依存で、所有権移譲最適化が未完了
+       - benches/api/src/api/query.rs:6177
+       - benches/api/src/api/query.rs:6233
+       - benches/api/src/api/query.rs:6275
+    2. bulk ngram merge は keyごとに posting list を再構築し続ける eager 統合
+       - benches/api/src/api/query.rs:5392
+       - benches/api/src/api/query.rs:5414
+    3. segment overlay/compaction は未実装（同期統合のまま）
+    4. chunk 処理で `take(...).collect()` を継続しており、短命 Vec が残る
+       - benches/api/src/api/query.rs:6284
+  motivation: |
+    tasks_bulk の write-path を本番運用可能な構造へ移行し、
+    短期で RPS 100+、中期で 200+ を達成する。
+  prior_art:
+    - name: "Partitioned Add-only Merge"
+      description: "existing-hit/miss 分離 + miss 直接構築"
+    - name: "Owned Delta Drain"
+      description: "差分を `into_iter()` で消費し clone を回避"
+    - name: "LSM-style Segment Overlay"
+      description: "書き込み時追記、背景 compaction で統合"
+
+requirements:
+  - id: "REQ-TB5-001"
+    name: "Add-only delta を所有権で消費する API を導入する"
+    description: |
+      現状は `&MutableIndex` を参照して `add_list.clone()` しており、
+      miss path で不要なメモリコピーが残る。
+      add-only 経路専用に所有権消費 API を追加し、`clone` を排除する。
+    methods:
+      - name: "merge_index_delta_add_only_owned"
+        signature: "fn merge_index_delta_add_only_owned(index: &PrefixIndex, add: MutableIndex) -> PrefixIndex"
+        description: |
+          `add.into_iter()` で key と Vec<TaskId> を受け取り、
+          miss path では move で `TaskIdCollection` を構築する。
+      - name: "merge_ngram_delta_add_only_owned"
+        signature: "fn merge_ngram_delta_add_only_owned(index: &NgramIndex, add: MutableIndex, config: &SearchIndexConfig) -> MergeNgramDeltaResult"
+        description: "ngram add-only も同様に所有権移譲を前提にする。"
+    implementations:
+      - type: "SearchIndex::apply_delta add-only branch"
+        description: "add-only 時のみ所有権経路を選択し clone を回避する。"
+
+  - id: "REQ-TB5-002"
+    name: "append_or_merge_sorted を zero-copy 指向へ再設計する"
+    description: |
+      現実装は concat 判定後に `Vec` へ全コピーしており、
+      merge_bulk_ngram_index の CPU 比率上昇を招いている。
+      posting list を segment 参照で保持し、即時フルコピーを避ける。
+    methods:
+      - name: "append_or_link_sorted"
+        signature: "fn append_or_link_sorted(existing: &TaskIdCollection, add: &TaskIdCollection) -> TaskIdCollection"
+        description: |
+          concat 条件成立時は segment link を返し、
+          materialization は compaction 時まで遅延する。
+    implementations:
+      - type: "TaskIdCollection internal representation"
+        description: "single-vec 前提を見直し、linked/segmented 表現を許容する。"
+
+  - id: "REQ-TB5-003"
+    name: "chunk 処理を再利用バッファ化する"
+    description: |
+      `entries_iterator.by_ref().take(CHUNK_SIZE).collect()` を廃止し、
+      固定バッファの clear/reuse で chunk を回す。
+      これにより短命 Vec の割り当てを減らす。
+    methods:
+      - name: "drain_into_chunk_buffer"
+        signature: "fn drain_into_chunk_buffer<I, T>(iter: &mut I, cap: usize, buf: &mut Vec<T>) -> bool where I: Iterator<Item = T>"
+        description: "次チャンクが存在する限り `buf` を再利用する。"
+    implementations:
+      - type: "merge_ngram_delta_add_only_bulk / merge_ngram_delta_bulk"
+        description: "両経路で共通の chunk 生成 helper を利用する。"
+
+  - id: "REQ-TB5-004"
+    name: "segment overlay + background compaction を実装する"
+    description: |
+      依然として同期フルマージ主体のため、write latency が高止まりしている。
+      write-path を append-only segment へ移し、統合は別フェーズに分離する。
+    methods:
+      - name: "append_delta_segment"
+        signature: "fn append_delta_segment(&self, delta: SearchIndexDelta) -> Self"
+        description: "同期リクエストでは delta 追記のみを行う。"
+      - name: "compact_delta_segments"
+        signature: "fn compact_delta_segments(&self, policy: CompactionPolicy) -> Self"
+        description: "しきい値で段階 compaction する。"
+    implementations:
+      - type: "SearchIndex write architecture"
+        description: "base + delta segments の2層構造へ移行する。"
+
+non_functional_requirements:
+  performance:
+    - "tasks_bulk RPS: 65.24 -> 100以上（短期）/ 200以上（中期）"
+    - "tasks_bulk P99: 25.92s -> 18s以下（短期）/ 10s以下（中期）"
+    - "merge_posting_add_only_into 比率: 41.17% -> 28%以下"
+    - "merge_bulk_ngram_index 比率: 21.62% -> 10%以下"
+  compatibility:
+    - "`POST /tasks/bulk` のAPI契約と 207 応答互換を維持する"
+  testing:
+    - "旧/新 add-only merge の同値性 property test を追加する"
+    - "segment compaction 前後の検索結果同値性テストを追加する"
+    - "同一条件で tasks_bulk before/after を3回測定し中央値を記録する"
+
+future_extensions:
+  - id: "TB5-FUTURE-001"
+    name: "RoaringBitmap ハイブリッド posting list"
+    description: |
+      高 cardinality key を bitmap 化し、union/contains を高速化する。
+    rationale: |
+      先に add-only と bulk merge の構造的コストを解消する必要がある。

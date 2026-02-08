@@ -523,6 +523,97 @@ impl<T: Clone + Eq + Hash + Ord> OrderedUniqueSet<T> {
         matches!(self.inner, OrderedUniqueSetInner::Large(_))
     }
 
+    /// Returns a reference to the smallest element in sorted order, or `None` if empty.
+    ///
+    /// # Complexity
+    ///
+    /// - Empty: O(1)
+    /// - Small state (n <= 8): O(n) linear scan
+    /// - Large state (n > 8): O(1) direct slice access
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::OrderedUniqueSet;
+    ///
+    /// let collection = OrderedUniqueSet::new().insert(3).insert(1).insert(2);
+    /// assert_eq!(collection.first_sorted(), Some(&1));
+    ///
+    /// let empty: OrderedUniqueSet<i32> = OrderedUniqueSet::new();
+    /// assert_eq!(empty.first_sorted(), None);
+    /// ```
+    #[inline]
+    #[must_use]
+    pub fn first_sorted(&self) -> Option<&T> {
+        match &self.inner {
+            OrderedUniqueSetInner::Empty => None,
+            OrderedUniqueSetInner::Small(vec) => vec.iter().min(),
+            OrderedUniqueSetInner::Large(sorted_vec) => sorted_vec.as_slice().first(),
+        }
+    }
+
+    /// Returns a reference to the largest element in sorted order, or `None` if empty.
+    ///
+    /// # Complexity
+    ///
+    /// - Empty: O(1)
+    /// - Small state (n <= 8): O(n) linear scan
+    /// - Large state (n > 8): O(1) direct slice access
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::OrderedUniqueSet;
+    ///
+    /// let collection = OrderedUniqueSet::new().insert(3).insert(1).insert(2);
+    /// assert_eq!(collection.last_sorted(), Some(&3));
+    ///
+    /// let empty: OrderedUniqueSet<i32> = OrderedUniqueSet::new();
+    /// assert_eq!(empty.last_sorted(), None);
+    /// ```
+    #[inline]
+    #[must_use]
+    pub fn last_sorted(&self) -> Option<&T> {
+        match &self.inner {
+            OrderedUniqueSetInner::Empty => None,
+            OrderedUniqueSetInner::Small(vec) => vec.iter().max(),
+            OrderedUniqueSetInner::Large(sorted_vec) => sorted_vec.as_slice().last(),
+        }
+    }
+
+    /// Returns a reference to the underlying sorted slice if in `Large` state.
+    ///
+    /// This method provides zero-copy access to the sorted elements when the
+    /// collection is in the `Large` state (more than 8 elements). Returns `None`
+    /// for `Empty` and `Small` states, where elements are not stored as a sorted
+    /// contiguous slice.
+    ///
+    /// # Complexity
+    ///
+    /// O(1) in all cases.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use lambars::persistent::OrderedUniqueSet;
+    ///
+    /// let small = OrderedUniqueSet::new().insert(1).insert(2);
+    /// assert!(small.as_sorted_slice().is_none());
+    ///
+    /// let large = OrderedUniqueSet::from_sorted_iter(1..=20);
+    /// let slice = large.as_sorted_slice().unwrap();
+    /// assert_eq!(slice.len(), 20);
+    /// assert_eq!(slice[0], 1);
+    /// ```
+    #[inline]
+    #[must_use]
+    pub fn as_sorted_slice(&self) -> Option<&[T]> {
+        match &self.inner {
+            OrderedUniqueSetInner::Large(sorted_vec) => Some(sorted_vec.as_slice()),
+            _ => None,
+        }
+    }
+
     /// Returns an iterator over references to the elements in sorted order.
     ///
     /// Elements are sorted according to their `Ord` implementation.
@@ -1673,5 +1764,119 @@ mod tests {
         // Original collections unchanged
         assert_eq!(set1.to_sorted_vec(), vec![1, 2, 3, 4, 5]);
         assert_eq!(set2.to_sorted_vec(), vec![3, 4, 5, 6, 7]);
+    }
+
+    // =========================================================================
+    // first_sorted / last_sorted tests
+    // =========================================================================
+
+    #[rstest]
+    fn first_sorted_empty_returns_none() {
+        let empty: OrderedUniqueSet<i32> = OrderedUniqueSet::new();
+        assert_eq!(empty.first_sorted(), None);
+    }
+
+    #[rstest]
+    fn last_sorted_empty_returns_none() {
+        let empty: OrderedUniqueSet<i32> = OrderedUniqueSet::new();
+        assert_eq!(empty.last_sorted(), None);
+    }
+
+    #[rstest]
+    fn first_sorted_small_returns_minimum() {
+        let collection = OrderedUniqueSet::new().insert(3).insert(1).insert(2);
+        assert!(!collection.is_large_state());
+        assert_eq!(collection.first_sorted(), Some(&1));
+    }
+
+    #[rstest]
+    fn last_sorted_small_returns_maximum() {
+        let collection = OrderedUniqueSet::new().insert(3).insert(1).insert(2);
+        assert!(!collection.is_large_state());
+        assert_eq!(collection.last_sorted(), Some(&3));
+    }
+
+    #[rstest]
+    fn first_sorted_large_returns_minimum() {
+        let collection = (1..=20).fold(OrderedUniqueSet::new(), |set, value| set.insert(value));
+        assert!(collection.is_large_state());
+        assert_eq!(collection.first_sorted(), Some(&1));
+    }
+
+    #[rstest]
+    fn last_sorted_large_returns_maximum() {
+        let collection = (1..=20).fold(OrderedUniqueSet::new(), |set, value| set.insert(value));
+        assert!(collection.is_large_state());
+        assert_eq!(collection.last_sorted(), Some(&20));
+    }
+
+    #[rstest]
+    fn first_sorted_single_element() {
+        let collection = OrderedUniqueSet::new().insert(42);
+        assert_eq!(collection.first_sorted(), Some(&42));
+    }
+
+    #[rstest]
+    fn last_sorted_single_element() {
+        let collection = OrderedUniqueSet::new().insert(42);
+        assert_eq!(collection.last_sorted(), Some(&42));
+    }
+
+    #[rstest]
+    fn first_last_sorted_consistent_with_iter_sorted() {
+        let collection = OrderedUniqueSet::from_sorted_iter([5, 10, 15, 20, 25]);
+        let sorted: Vec<&i32> = collection.iter_sorted().collect();
+        assert_eq!(collection.first_sorted(), sorted.first().copied());
+        assert_eq!(collection.last_sorted(), sorted.last().copied());
+    }
+
+    #[rstest]
+    fn first_last_sorted_large_consistent_with_iter_sorted() {
+        let collection = OrderedUniqueSet::from_sorted_iter(1..=100);
+        assert!(collection.is_large_state());
+        let sorted: Vec<&i32> = collection.iter_sorted().collect();
+        assert_eq!(collection.first_sorted(), sorted.first().copied());
+        assert_eq!(collection.last_sorted(), sorted.last().copied());
+    }
+
+    // =========================================================================
+    // as_sorted_slice tests
+    // =========================================================================
+
+    #[rstest]
+    fn as_sorted_slice_empty_returns_none() {
+        let empty: OrderedUniqueSet<i32> = OrderedUniqueSet::new();
+        assert!(empty.as_sorted_slice().is_none());
+    }
+
+    #[rstest]
+    fn as_sorted_slice_small_returns_none() {
+        let small = OrderedUniqueSet::new().insert(1).insert(2).insert(3);
+        assert!(!small.is_large_state());
+        assert!(small.as_sorted_slice().is_none());
+    }
+
+    #[rstest]
+    fn as_sorted_slice_large_returns_sorted_slice() {
+        let large = OrderedUniqueSet::from_sorted_iter(1..=20);
+        assert!(large.is_large_state());
+        let slice = large
+            .as_sorted_slice()
+            .expect("should return Some for Large state");
+        assert_eq!(slice.len(), 20);
+        assert_eq!(slice[0], 1);
+        assert_eq!(slice[19], 20);
+    }
+
+    #[rstest]
+    fn as_sorted_slice_consistent_with_iter_sorted() {
+        let collection = OrderedUniqueSet::from_sorted_iter(1..=50);
+        assert!(collection.is_large_state());
+        let slice = collection.as_sorted_slice().unwrap();
+        let from_iterator: Vec<&i32> = collection.iter_sorted().collect();
+        assert_eq!(slice.len(), from_iterator.len());
+        for (slice_element, iterator_element) in slice.iter().zip(from_iterator.iter()) {
+            assert_eq!(slice_element, *iterator_element);
+        }
     }
 }

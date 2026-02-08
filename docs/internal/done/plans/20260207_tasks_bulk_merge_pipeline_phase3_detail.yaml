@@ -1,0 +1,532 @@
+meta:
+  file_name: "20260207_tasks_bulk_merge_pipeline_phase3_detail.yaml"
+  title: "tasks_bulk マージパイプライン Phase3 詳細実装計画"
+  date: "2026-02-07"
+  requirement: "docs/internal/requirements/20260207_1859_tasks_bulk_merge_pipeline_phase3.yaml"
+  branch: "perf/tasks-bulk-search-index-merge"
+  revision: "v2 - Codex レビュー指摘反映"
+
+# =============================================================================
+# Codex レビュー (v1 -> v2)
+# =============================================================================
+codex_review:
+  date: "2026-02-07"
+  findings:
+    - severity: "critical"
+      issue: "Phase3-C の background compaction は実質 foreground。読取時整合性が未定義"
+      resolution: |
+        Phase3-C に不変条件を明記:
+        - delta segment は prepared 済み（sorted/dedup）で不変
+        - read は base + segments を seq 昇順で適用
+        - compaction は新しい SearchIndex を生成して CAS で publish
+    - severity: "high"
+      issue: "依存グラフが tasks 定義と不一致（BENCH-001->BENCH-002 は誤り）"
+      resolution: "依存グラフを修正。BENCH-002 は独立タスクとして分離"
+    - severity: "high"
+      issue: "as_sorted_slice: Option は内部表現の漏洩。iter_sorted() で十分"
+      resolution: "LIB-001 を廃止。iter_sorted() を直接使用する設計に変更"
+    - severity: "high"
+      issue: "scratch バッファ API が FP 境界を崩す"
+      resolution: |
+        外側は純粋関数（Vec を返す）、内側のみ _into 形式（&mut Vec）に分離。
+        公開境界では参照透過性を維持。
+    - severity: "medium"
+      issue: "merge_sorted_posting_lists -> OrderedUniqueSet::merge() 置換は安全だが性能ベンチ必要"
+      resolution: "置換を実施。Small/Large 混在のベンチマークを追加"
+    - severity: "medium"
+      issue: "リスク評価不足（segment 順序不整合、prepared 不変条件破れ、read amplification、CAS リトライ）"
+      resolution: "リスクセクションに追記"
+
+# =============================================================================
+# 概要
+# =============================================================================
+overview: |
+  tasks_bulk のホットパスを3段階で最適化する。
+
+  Phase3-A: Streaming merge (REQ-TB3-001)
+    - to_sorted_vec() 前提を廃止し iter_sorted() 直結のマージに置換
+    - merge_sorted_posting_lists を OrderedUniqueSet::merge() に置換
+    - merge_index_delta / merge_ngram_delta の to_sorted_vec 呼び出しを廃止
+
+  Phase3-B: Add-only fast path (REQ-TB3-002)
+    - delta.is_add_only() 判定で remove 分岐を完全スキップ
+    - merge_index_delta_add_only / merge_ngram_delta_add_only 専用関数を追加
+
+  Phase3-C: Delta segment + foreground compaction (REQ-TB3-003)
+    - SearchIndex に delta segments 二層構造を導入
+    - 閾値超過時のみ foreground compaction し CAS で publish
+
+# =============================================================================
+# 依存関係グラフ (Codex v2: 修正済み)
+# =============================================================================
+dependency_graph: |
+  BENCH-001 (merge_posting_streaming / merge_posting_streaming_into)
+    -> BENCH-003 (merge_index_delta streaming)
+    -> BENCH-004 (merge_ngram_delta streaming)
+  BENCH-002 (merge_sorted_posting_lists -> OrderedUniqueSet::merge)  # 独立
+  BENCH-003 + BENCH-004 -> BENCH-005 (Add-only fast path)
+  BENCH-005 -> BENCH-006 (Delta segment layout)
+  BENCH-006 -> BENCH-007 (compact_segments)
+
+# =============================================================================
+# Phase3-A: Streaming merge (REQ-TB3-001)
+# =============================================================================
+phase_3a:
+  title: "Streaming merge - to_sorted_vec 廃止"
+
+  tasks:
+    # Codex v2: LIB-001 (as_sorted_slice) は廃止。iter_sorted() を直接使用。
+
+    - id: "BENCH-001"
+      name: "merge_posting_streaming / merge_posting_streaming_into 関数の実装"
+      category: "rust-benchmark"
+      file: "benches/api/src/api/query.rs"
+      dependencies: []
+      description: |
+        既存の compute_merged_posting_list_sorted をイテレータベースに改修する。
+        to_sorted_vec() での Vec 化を廃止し、iter_sorted() から直接イテレータを取得して
+        マージする。
+
+        Codex v2 指摘反映: 外側は純粋関数、内側のみ scratch バッファを使用。
+
+        外側（純粋関数）:
+          fn merge_posting_streaming<'a>(
+              existing: impl Iterator<Item = &'a TaskId>,
+              add: &[TaskId],
+              remove: &[TaskId],
+          ) -> Vec<TaskId>
+
+        内側（scratch 再利用、非公開）:
+          fn merge_posting_streaming_into<'a>(
+              existing: impl Iterator<Item = &'a TaskId>,
+              add: &[TaskId],
+              remove: &[TaskId],
+              output: &mut Vec<TaskId>,
+          )
+
+        内部アルゴリズムは既存の compute_merged_posting_list_sorted と同等:
+        - existing と add の union をドライバとする
+        - remove はフィルタ（追従のみ）
+        - union が尽きたら終了（remove 残余走査なし）
+
+        呼び出し元の merge_index_delta 等ではループ内で _into 版を使い scratch を再利用。
+        外部テストでは純粋関数版でテスト。
+
+      changes:
+        - location: "compute_merged_posting_list_sorted の近く"
+          description: |
+            新規関数 merge_posting_streaming と merge_posting_streaming_into を追加。
+            既存の compute_merged_posting_list_sorted は呼び出し元更新後に削除。
+
+      test_cases:
+        - name: "merge_posting_streaming_all_empty"
+          description: "全入力が空 -> 空の Vec"
+        - name: "merge_posting_streaming_existing_only"
+          description: "existing のみ -> existing の内容"
+        - name: "merge_posting_streaming_add_only"
+          description: "add のみ -> add の内容"
+        - name: "merge_posting_streaming_remove_only"
+          description: "existing + remove（全削除）-> 空"
+        - name: "merge_posting_streaming_union_no_remove"
+          description: "existing + add（重複あり/なし）-> union"
+        - name: "merge_posting_streaming_union_with_remove"
+          description: "3-way merge の正しい結果"
+        - name: "merge_posting_streaming_remove_longer_than_union"
+          description: "remove が union より長い場合に残余走査しない"
+        - name: "merge_posting_streaming_into_reuse"
+          description: "2回連続呼び出しで output が正しく clear される"
+        - name: "merge_posting_streaming_equivalence_with_sorted"
+          description: |
+            proptest: compute_merged_posting_list_sorted と同一結果
+
+    - id: "BENCH-002"
+      name: "merge_sorted_posting_lists を OrderedUniqueSet::merge() に置換"
+      category: "rust-benchmark"
+      file: "benches/api/src/api/query.rs"
+      dependencies: []
+      description: |
+        merge_sorted_posting_lists (L1992-2043) 内の to_sorted_vec() 2回呼び出しを廃止し、
+        OrderedUniqueSet::merge() メソッドに置換する。
+
+        Codex v2 確認済み: union 用途では意味論が一致するため安全に置換可能。
+
+        現在:
+          let existing_sorted = existing.to_sorted_vec();
+          let new_sorted = new_entries.to_sorted_vec();
+          // 50行の two-pointer merge on Vec
+
+        変更後:
+          existing.merge(new_entries)
+
+        Small/Large 混在ケースの性能ベンチマークを追加する。
+
+      changes:
+        - location: "fn merge_sorted_posting_lists (L1992-2043)"
+          description: |
+            関数本体を existing.merge(new_entries) に置換。
+            50行 -> 1行に簡素化。
+
+      test_cases:
+        - name: "既存の merge_sorted_posting_lists_tests モジュール (L18886+)"
+          description: "全テストが変更なしでパスすることを確認"
+        - name: "merge_sorted_posting_lists_small_large_mixed"
+          description: "Small + Large 混在でも正しく union される"
+
+    - id: "BENCH-003"
+      name: "merge_index_delta の to_sorted_vec 廃止"
+      category: "rust-benchmark"
+      file: "benches/api/src/api/query.rs"
+      dependencies: ["BENCH-001"]
+      description: |
+        merge_index_delta (L5654-5689) 内の to_sorted_vec() 呼び出しを
+        iter_sorted() + merge_posting_streaming_into に置換する。
+
+        現在 (L5670-5672):
+          let existing: Vec<TaskId> = transient
+              .get(key_str)
+              .map(TaskIdCollection::to_sorted_vec)
+              .unwrap_or_default();
+
+        変更後:
+          existing を Option<&TaskIdCollection> として取得し、
+          merge_posting_streaming_into に iter_sorted() を渡す。
+          scratch バッファは関数先頭で一度確保し、ループ内で再利用する。
+
+      changes:
+        - location: "fn merge_index_delta (L5654-5689)"
+          description: |
+            1. scratch: Vec<TaskId> を関数先頭で確保
+            2. ループ内で:
+               a. existing を Option<&TaskIdCollection> として取得
+               b. 空イテレータ: std::iter::empty()
+               c. merge_posting_streaming_into(
+                    existing.map_or_else(|| std::iter::empty(), |c| c.iter_sorted()),
+                    add, remove, &mut scratch
+                  )
+               d. scratch の内容で TaskIdCollection::from_sorted_vec を構築
+                  （std::mem::take(&mut scratch) で所有権移動、新 Vec を再確保）
+
+      test_cases:
+        - name: "既存の merge_index_delta 経路のテスト"
+          description: "apply_delta / apply_changes 系テスト (L17800+) が全てパス"
+
+    - id: "BENCH-004"
+      name: "merge_ngram_delta_individual/bulk の to_sorted_vec 廃止"
+      category: "rust-benchmark"
+      file: "benches/api/src/api/query.rs"
+      dependencies: ["BENCH-001"]
+      description: |
+        merge_ngram_delta_individual (L5736-5765) と
+        merge_ngram_delta_bulk (L5776-5841) 内の to_sorted_vec() を
+        iter_sorted() + merge_posting_streaming_into に置換する。
+
+        同様のパターンで:
+        1. scratch バッファを関数先頭で確保
+        2. existing を Option<&TaskIdCollection> として取得
+        3. merge_posting_streaming_into で scratch に結果を書き込み
+        4. std::mem::take(&mut scratch) で Vec を消費し from_sorted_vec に渡す
+
+      changes:
+        - location: "fn merge_ngram_delta_individual (L5736-5765)"
+          description: "to_sorted_vec() を iter_sorted() に置換"
+        - location: "fn merge_ngram_delta_bulk (L5776-5841)"
+          description: "to_sorted_vec() を iter_sorted() に置換"
+
+      test_cases:
+        - name: "既存の merge_ngram_delta 経路のテスト"
+          description: "apply_delta / apply_changes 系テスト全般がパス"
+
+# =============================================================================
+# Phase3-B: Add-only fast path (REQ-TB3-002)
+# =============================================================================
+phase_3b:
+  title: "Add-only fast path"
+
+  tasks:
+    - id: "BENCH-005"
+      name: "Add-only fast path の導入"
+      category: "rust-benchmark"
+      file: "benches/api/src/api/query.rs"
+      dependencies: ["BENCH-003", "BENCH-004"]
+      description: |
+        delta.is_add_only() が true の場合、remove 処理を完全にスキップする
+        専用マージパスを導入する。
+
+        Codex v2 指摘反映: 外側は純粋関数、内側のみ _into 形式。
+
+        具体的な変更:
+        1. merge_posting_add_only / merge_posting_add_only_into 関数の追加
+           外側:
+             fn merge_posting_add_only<'a>(
+                 existing: impl Iterator<Item = &'a TaskId>,
+                 add: &[TaskId],
+             ) -> Vec<TaskId>
+           内側:
+             fn merge_posting_add_only_into<'a>(
+                 existing: impl Iterator<Item = &'a TaskId>,
+                 add: &[TaskId],
+                 output: &mut Vec<TaskId>,
+             )
+           - remove イテレータ生成・比較を完全に省略
+           - existing と add の two-pointer union のみ
+
+        2. apply_delta 内で分岐
+           - delta.is_add_only() の場合: merge_index_delta_add_only / merge_ngram_delta_add_only
+           - それ以外: 既存の merge_index_delta / merge_ngram_delta
+
+        3. merge_index_delta_add_only 関数の追加
+           - remove 引数を受け取らない
+           - merge_posting_add_only_into を使用
+
+        4. merge_ngram_delta_add_only 関数の追加
+           - merge_ngram_delta と同様だが remove = empty を前提
+           - merge_bulk_ngram_index の経路も add-only に最適化
+
+        5. SearchIndexConfig にフラグ追加は不要
+           (delta.is_add_only() は実行時にデータから自動判定)
+
+      changes:
+        - location: "merge_posting_streaming の近く"
+          description: "merge_posting_add_only / merge_posting_add_only_into を追加"
+        - location: "fn merge_index_delta"
+          description: "merge_index_delta_add_only を追加"
+        - location: "fn merge_ngram_delta"
+          description: "merge_ngram_delta_add_only を追加"
+        - location: "fn apply_delta"
+          description: "delta.is_add_only() で分岐"
+
+      test_cases:
+        - name: "merge_posting_add_only_empty_both"
+          description: "existing 空 + add 空 -> 空"
+        - name: "merge_posting_add_only_existing_only"
+          description: "add が空 -> existing のコピー"
+        - name: "merge_posting_add_only_add_only"
+          description: "existing が空 -> add のコピー"
+        - name: "merge_posting_add_only_union_disjoint"
+          description: "重複なし union"
+        - name: "merge_posting_add_only_union_overlap"
+          description: "重複あり union（dedup）"
+        - name: "apply_delta_add_only_path_selected"
+          description: "is_add_only delta で add-only パスが使われる"
+        - name: "apply_delta_mixed_path_selected"
+          description: "remove がある delta で通常パスが使われる"
+        - name: "add_only_equivalence"
+          description: |
+            proptest: add-only パスと通常パス（remove 空）で同一結果
+
+# =============================================================================
+# Phase3-C: Delta segment + foreground compaction (REQ-TB3-003)
+# Codex v2: "background" -> "foreground"、読取時整合性の不変条件を追記
+# =============================================================================
+phase_3c:
+  title: "Delta segment + foreground compaction"
+  note: |
+    Phase3-C はアーキテクチャ変更が大きいため、Phase3-A/B の効果を測定した後に着手する。
+    perf-gate の結果次第で Phase3-C の必要性を再評価する。
+
+  # Codex v2: 不変条件の明記
+  invariants:
+    - "delta segment は prepared 済み（sorted/dedup）で不変（Arc で共有）"
+    - "read は base + segments を seq 昇順で適用し、tombstone を正しく処理"
+    - "compaction は新しい SearchIndex を生成して CAS/RCU で publish"
+    - "SearchIndex は不変スナップショットとして ArcSwap で管理"
+
+  tasks:
+    - id: "BENCH-006"
+      name: "Delta segment 二層構造の導入"
+      category: "rust-benchmark"
+      file: "benches/api/src/api/query.rs"
+      dependencies: ["BENCH-005"]
+      description: |
+        SearchIndex に delta segments を保持するフィールドを追加し、
+        リクエスト同期での完全マージを回避する。
+
+        Codex v2 指摘反映:
+        - Vec<SearchIndexDelta> -> Vec<PreparedDeltaSegment>
+        - PreparedDeltaSegment は seq: u64 + delta: Arc<SearchIndexDelta>
+        - 読取時は seq 昇順で base に fold 適用
+
+        構造変更:
+        1. PreparedDeltaSegment 構造体を追加
+           ```rust
+           #[derive(Clone)]
+           struct PreparedDeltaSegment {
+               seq: u64,
+               delta: Arc<SearchIndexDelta>,
+           }
+           ```
+        2. SearchIndex に delta_segments: Vec<PreparedDeltaSegment> を追加
+        3. append_delta_segment メソッド: delta をマージせず seq 付きで追記
+        4. 読み取り時: base + delta segments を seq 昇順で fold 適用
+        5. SearchIndexConfig に max_delta_segments: usize フラグを追加
+           (閾値超過時に foreground compaction をトリガー)
+
+        不変性の維持:
+        - append_delta_segment は Self を返す（新しい SearchIndex インスタンス）
+        - 既存の SearchIndex は変更されない
+        - CAS/RCU で publish するため concurrent read は常に一貫したスナップショット
+
+      changes:
+        - location: "struct SearchIndex 近辺"
+          description: "PreparedDeltaSegment 構造体を追加"
+        - location: "struct SearchIndex"
+          description: "delta_segments: Vec<PreparedDeltaSegment> フィールドを追加"
+        - location: "SearchIndexConfig"
+          description: "max_delta_segments: usize を追加（デフォルト: 0 = 無効）"
+        - location: "impl SearchIndex"
+          description: "append_delta_segment メソッドを追加"
+        - location: "apply_delta / apply_changes"
+          description: |
+            max_delta_segments > 0 の場合:
+            - apply_delta の代わりに append_delta_segment を使用
+            - delta_segments.len() >= max_delta_segments の場合のみ compaction
+
+      test_cases:
+        - name: "append_delta_segment_adds_to_segments"
+          description: "delta が segments に seq 付きで追加される"
+        - name: "append_delta_segment_preserves_base"
+          description: "base インデックスは変更されない"
+        - name: "append_delta_segment_returns_new_instance"
+          description: "不変性: 元の SearchIndex は変更されない"
+        - name: "append_delta_segment_monotonic_seq"
+          description: "seq は単調増加する"
+        - name: "search_with_delta_segments"
+          description: "delta segments がある状態で検索結果が正しい"
+        - name: "search_with_delta_segments_remove_tombstone"
+          description: "remove を含む segment が正しく tombstone を適用"
+
+    - id: "BENCH-007"
+      name: "compact_segments メソッドの実装"
+      category: "rust-benchmark"
+      file: "benches/api/src/api/query.rs"
+      dependencies: ["BENCH-006"]
+      description: |
+        蓄積された delta segments を base にマージする foreground compaction メソッド。
+        結果は新しい SearchIndex として生成し、CAS/RCU で publish する。
+
+        シグネチャ:
+          fn compact_segments(&self, max_segments: usize) -> Self
+
+        アルゴリズム:
+        1. delta_segments.len() <= max_segments なら self.clone() を返す
+        2. 超過分の segments を seq 昇順に base にマージ
+        3. マージには既存の apply_delta を使用
+        4. 結果の SearchIndex は delta_segments が空（= 完全マージ済み）
+
+        呼び出しタイミング:
+        - apply_changes_with_metrics 内で、delta 追記後に閾値チェック
+        - 閾値超過時に compact_segments を同期呼び出し
+
+      changes:
+        - location: "impl SearchIndex"
+          description: "compact_segments メソッドを追加"
+        - location: "apply_changes_with_metrics"
+          description: "compact_segments の呼び出しを追加"
+
+      test_cases:
+        - name: "compact_segments_below_threshold_noop"
+          description: "閾値以下なら何もしない"
+        - name: "compact_segments_merges_seq_ascending"
+          description: "seq 昇順に segment をマージ"
+        - name: "compact_segments_result_equals_full_merge"
+          description: "compaction 結果 = 全 delta を一括マージした結果"
+        - name: "compact_segments_preserves_search_results"
+          description: "compaction 前後で検索結果が同一"
+        - name: "compact_segments_clears_segments"
+          description: "compaction 後 delta_segments は空"
+
+# =============================================================================
+# 実装順序（推奨）
+# =============================================================================
+implementation_order:
+  phase_3a:
+    order: 1
+    tasks: ["BENCH-001", "BENCH-002", "BENCH-003", "BENCH-004"]
+    description: |
+      Streaming merge の実装。最も CPU 消費の大きい to_sorted_vec 廃止が目的。
+      BENCH-001 と BENCH-002 は並列可能。
+      BENCH-003 と BENCH-004 は BENCH-001 完了後に並列可能。
+    gate: "perf-gate 実施 (tasks_bulk ベンチマーク)"
+
+  phase_3b:
+    order: 2
+    tasks: ["BENCH-005"]
+    description: |
+      Add-only fast path。tasks_bulk は大半が Add 操作のため効果大。
+    gate: "perf-gate 実施 (tasks_bulk ベンチマーク)"
+
+  phase_3c:
+    order: 3
+    tasks: ["BENCH-006", "BENCH-007"]
+    description: |
+      Delta segment + foreground compaction。Phase3-A/B の効果測定後に着手判断。
+    gate: "perf-gate 実施後、ユーザーと着手判断"
+
+# =============================================================================
+# パフォーマンス目標
+# =============================================================================
+performance_targets:
+  phase_3a:
+    - metric: "to_sorted_vec CPU%"
+      before: "13.03%"
+      target: "< 1% (ほぼ消滅)"
+    - metric: "compute_merged_posting_list_sorted CPU%"
+      before: "38.11%"
+      target: "< 25% (iter_sorted の軽量化で改善)"
+    - metric: "merge_bulk_ngram_index CPU%"
+      before: "20.73%"
+      target: "< 12% (to_sorted_vec 2回呼び出し廃止)"
+
+  phase_3b:
+    - metric: "tasks_bulk Add-only RPS"
+      before: "69.61 RPS"
+      target: "> 150 RPS (remove 分岐削除の効果)"
+
+  phase_3c:
+    - metric: "tasks_bulk P99 latency"
+      before: "25.59s"
+      target: "< 5s (書き込み時の完全マージ回避)"
+
+# =============================================================================
+# リスク (Codex v2: 不足リスクを追記)
+# =============================================================================
+risks:
+  - risk: "iter_sorted() の Small state で毎回 O(n log n) ソートが発生"
+    impact: "Small state の posting list が多い場合にリグレッション"
+    mitigation: |
+      実際のワークロードでは posting list は Large state が大半のため影響小。
+      Small state (n <= 8) のソートコストは固定かつ微小。
+
+  - risk: "merge_sorted_posting_lists を merge() に置換した際の挙動差異"
+    impact: "微妙な dedup 挙動の違い"
+    mitigation: |
+      既存テスト + proptest で同値性を検証。
+      OrderedUniqueSet::merge() は two-pointer で厳密な union を実装済み。
+      Small/Large 混在ケースのベンチマークを追加して性能回帰を検出。
+
+  # Codex v2 追記: Phase3-C 固有のリスク
+  - risk: "セグメント順序不整合による remove tombstone 取りこぼし"
+    impact: "削除されたはずの TaskId が検索結果に含まれる"
+    mitigation: |
+      PreparedDeltaSegment に seq: u64 を持たせ、常に seq 昇順で適用。
+      debug_assert! で seq の単調増加を検証。
+
+  - risk: "prepared (sorted/dedup) 不変条件の破れ"
+    impact: "マージ結果の不正"
+    mitigation: |
+      delta は append 前に必ず prepare_posting_lists() 済みであることを前提とする。
+      debug_assert! で prepared 状態を検証。
+      Arc で共有するため、一度 prepared された delta は変更不可。
+
+  - risk: "セグメント増加時の read amplification"
+    impact: "検索レイテンシの増大"
+    mitigation: |
+      max_delta_segments を小さく保つ（デフォルト: 3-5）。
+      閾値超過時は即座に foreground compaction を実行。
+
+  - risk: "CAS リトライ増大時の write tail latency"
+    impact: "高並行度で書き込みが遅延"
+    mitigation: |
+      compaction コストが大きいほどリトライ時の再計算が重くなる。
+      max_delta_segments を十分小さくして compaction 頻度を抑制。
+      ArcSwap の rcu は軽量な CAS のため、リトライコストは compaction 自体に支配される。

@@ -4829,6 +4829,82 @@ impl<K: Clone + Hash + Eq, V: Clone> TransientHashMap<K, V> {
         Ok(self)
     }
 
+    /// Inserts all entries from the buffer, draining it while preserving capacity.
+    ///
+    /// Unlike [`insert_bulk_owned`](Self::insert_bulk_owned), this method takes `&mut Vec`
+    /// and drains its contents, allowing the caller to reuse the buffer's allocated capacity
+    /// for subsequent batches. This is particularly useful in streaming or batched processing
+    /// scenarios where the same buffer is filled and drained repeatedly.
+    ///
+    /// # Arguments
+    ///
+    /// * `buffer` - A mutable reference to a `Vec` of key-value pairs. After this call,
+    ///   the buffer will be empty but retain its allocated capacity.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BulkInsertError::TooManyEntries`] if `buffer.len()` exceeds
+    /// [`MAX_BULK_INSERT`] (100,000). In this case, the buffer is **not** drained
+    /// and its contents remain intact for the caller to handle (e.g., by chunking).
+    ///
+    /// # Complexity
+    ///
+    /// O(N * log32 M) where N is the number of items and M is the resulting map size.
+    ///
+    /// # Examples
+    ///
+    /// ## Basic Usage
+    ///
+    /// ```rust
+    /// use lambars::persistent::TransientHashMap;
+    ///
+    /// let mut transient: TransientHashMap<i32, i32> = TransientHashMap::new();
+    /// let mut buffer: Vec<(i32, i32)> = (0..100).map(|i| (i, i * 2)).collect();
+    ///
+    /// transient.insert_bulk_drain(&mut buffer).unwrap();
+    /// assert_eq!(transient.len(), 100);
+    /// assert!(buffer.is_empty());           // Contents drained
+    /// assert!(buffer.capacity() >= 100);    // Capacity preserved
+    /// ```
+    ///
+    /// ## Buffer Reuse Pattern
+    ///
+    /// ```rust
+    /// use lambars::persistent::TransientHashMap;
+    ///
+    /// let mut transient: TransientHashMap<i32, i32> = TransientHashMap::new();
+    /// let mut buffer: Vec<(i32, i32)> = Vec::with_capacity(1000);
+    ///
+    /// // First batch
+    /// buffer.extend((0..100).map(|i| (i, i)));
+    /// transient.insert_bulk_drain(&mut buffer).unwrap();
+    ///
+    /// // Second batch (reuses the same buffer capacity)
+    /// buffer.extend((100..200).map(|i| (i, i)));
+    /// transient.insert_bulk_drain(&mut buffer).unwrap();
+    ///
+    /// assert_eq!(transient.len(), 200);
+    /// assert_eq!(buffer.capacity(), 1000);  // Original capacity preserved
+    /// ```
+    pub fn insert_bulk_drain(&mut self, buffer: &mut Vec<(K, V)>) -> Result<(), BulkInsertError> {
+        if buffer.len() > MAX_BULK_INSERT {
+            return Err(BulkInsertError::TooManyEntries {
+                count: buffer.len(),
+                limit: MAX_BULK_INSERT,
+            });
+        }
+
+        if !buffer.is_empty() {
+            self.reserve(buffer.len());
+        }
+
+        for (key, value) in buffer.drain(..) {
+            self.insert_without_cow(key, value);
+        }
+
+        Ok(())
+    }
+
     /// Performs a bulk insert with detailed metrics collection.
     ///
     /// This method is similar to [`insert_bulk`](Self::insert_bulk) but returns
@@ -7022,6 +7098,145 @@ mod transient_hashmap_tests {
         assert_eq!(via_owned.len(), via_bulk.len());
         for (key, value) in &via_owned {
             assert_eq!(via_bulk.get(key), Some(value));
+        }
+    }
+
+    // =========================================================================
+    // insert_bulk_drain Tests
+    // =========================================================================
+
+    #[rstest]
+    fn test_insert_bulk_drain_basic() {
+        let mut transient: TransientHashMap<String, i32> = TransientHashMap::new();
+        let mut buffer = vec![
+            ("a".to_string(), 1),
+            ("b".to_string(), 2),
+            ("c".to_string(), 3),
+        ];
+
+        let result = transient.insert_bulk_drain(&mut buffer);
+        assert!(result.is_ok());
+        assert_eq!(transient.len(), 3);
+        assert_eq!(transient.get("a"), Some(&1));
+        assert_eq!(transient.get("b"), Some(&2));
+        assert_eq!(transient.get("c"), Some(&3));
+        assert!(buffer.is_empty());
+    }
+
+    #[rstest]
+    fn test_insert_bulk_drain_empty_buffer() {
+        let mut transient: TransientHashMap<String, i32> = TransientHashMap::new();
+        let mut buffer: Vec<(String, i32)> = Vec::new();
+
+        let result = transient.insert_bulk_drain(&mut buffer);
+        assert!(result.is_ok());
+        assert_eq!(transient.len(), 0);
+    }
+
+    #[rstest]
+    fn test_insert_bulk_drain_preserves_capacity() {
+        let mut transient: TransientHashMap<i32, i32> = TransientHashMap::new();
+        let mut buffer: Vec<(i32, i32)> = Vec::with_capacity(500);
+        buffer.extend((0..100).map(|i| (i, i * 2)));
+
+        let original_capacity = buffer.capacity();
+        transient.insert_bulk_drain(&mut buffer).unwrap();
+
+        assert!(buffer.is_empty());
+        assert_eq!(buffer.capacity(), original_capacity);
+        assert_eq!(transient.len(), 100);
+    }
+
+    #[rstest]
+    fn test_insert_bulk_drain_reuse_buffer() {
+        let mut transient: TransientHashMap<i32, i32> = TransientHashMap::new();
+        let mut buffer: Vec<(i32, i32)> = Vec::with_capacity(200);
+
+        // First batch: 0..50
+        buffer.extend((0..50).map(|i| (i, i)));
+        transient.insert_bulk_drain(&mut buffer).unwrap();
+        assert!(buffer.is_empty());
+        assert_eq!(transient.len(), 50);
+
+        // Second batch: 50..100 (reuses the same buffer)
+        buffer.extend((50..100).map(|i| (i, i)));
+        transient.insert_bulk_drain(&mut buffer).unwrap();
+        assert!(buffer.is_empty());
+        assert_eq!(transient.len(), 100);
+
+        // Third batch: 100..150 (reuses the same buffer again)
+        buffer.extend((100..150).map(|i| (i, i)));
+        transient.insert_bulk_drain(&mut buffer).unwrap();
+        assert!(buffer.is_empty());
+        assert_eq!(transient.len(), 150);
+
+        // Verify capacity is preserved throughout
+        assert_eq!(buffer.capacity(), 200);
+
+        // Verify all entries are correctly inserted
+        for i in 0..150 {
+            assert_eq!(transient.get(&i), Some(&i));
+        }
+    }
+
+    #[rstest]
+    fn test_insert_bulk_drain_error_handling() {
+        let mut transient: TransientHashMap<i32, i32> = TransientHashMap::new();
+        let mut buffer: Vec<(i32, i32)> = (0..150_000).map(|i| (i, i * 2)).collect();
+
+        match transient.insert_bulk_drain(&mut buffer) {
+            Ok(()) => panic!("Should have returned an error"),
+            Err(BulkInsertError::TooManyEntries { count, limit }) => {
+                assert_eq!(count, 150_000);
+                assert_eq!(limit, MAX_BULK_INSERT);
+            }
+        }
+
+        // Buffer should NOT be drained on error
+        assert_eq!(buffer.len(), 150_000);
+        assert_eq!(transient.len(), 0);
+    }
+
+    #[rstest]
+    fn test_insert_bulk_drain_updates_existing_keys() {
+        let mut transient: TransientHashMap<String, i32> = TransientHashMap::new();
+        transient.insert("a".to_string(), 1);
+
+        let mut buffer = vec![
+            ("a".to_string(), 10), // Update existing
+            ("b".to_string(), 20), // New entry
+        ];
+
+        transient.insert_bulk_drain(&mut buffer).unwrap();
+        assert_eq!(transient.len(), 2);
+        assert_eq!(transient.get("a"), Some(&10)); // Updated
+        assert_eq!(transient.get("b"), Some(&20)); // Inserted
+    }
+
+    #[rstest]
+    fn test_insert_bulk_drain_equivalence_with_insert_bulk_owned() {
+        let items: Vec<(String, i32)> = vec![
+            ("x".to_string(), 10),
+            ("y".to_string(), 20),
+            ("z".to_string(), 30),
+        ];
+
+        // Via insert_bulk_owned
+        let via_owned = TransientHashMap::new()
+            .insert_bulk_owned(items.clone())
+            .unwrap()
+            .persistent();
+
+        // Via insert_bulk_drain
+        let mut via_drain = TransientHashMap::new();
+        let mut buffer = items;
+        via_drain.insert_bulk_drain(&mut buffer).unwrap();
+        let via_drain = via_drain.persistent();
+
+        // Both should produce equivalent maps
+        assert_eq!(via_owned.len(), via_drain.len());
+        for (key, value) in &via_owned {
+            assert_eq!(via_drain.get(key), Some(value));
         }
     }
 
