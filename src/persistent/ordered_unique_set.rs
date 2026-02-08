@@ -862,7 +862,7 @@ impl<T: Clone + Eq + Hash + Ord> OrderedUniqueSet<T> {
     /// # Complexity
     ///
     /// O(n + m) where n and m are the sizes of the two sets.
-    /// Uses a two-pointer merge algorithm for sorted sequences.
+    /// Uses an index-based two-pointer merge algorithm with a disjoint fast path.
     ///
     /// # Examples
     ///
@@ -883,30 +883,23 @@ impl<T: Clone + Eq + Hash + Ord> OrderedUniqueSet<T> {
             return self.clone();
         }
 
-        let mut left = self.iter_sorted().peekable();
-        let mut right = other.iter_sorted().peekable();
-        let mut result = Vec::with_capacity(self.len() + other.len());
+        let left_owned;
+        let left_slice = if let OrderedUniqueSetInner::Large(sorted_vec) = &self.inner {
+            sorted_vec.as_slice()
+        } else {
+            left_owned = self.to_sorted_vec();
+            left_owned.as_slice()
+        };
 
-        while let (Some(left_element), Some(right_element)) = (left.peek(), right.peek()) {
-            match (*left_element).cmp(*right_element) {
-                Ordering::Less => {
-                    result.push((*left_element).clone());
-                    left.next();
-                }
-                Ordering::Greater => {
-                    result.push((*right_element).clone());
-                    right.next();
-                }
-                Ordering::Equal => {
-                    result.push((*left_element).clone());
-                    left.next();
-                    right.next();
-                }
-            }
-        }
+        let right_owned;
+        let right_slice = if let OrderedUniqueSetInner::Large(sorted_vec) = &other.inner {
+            sorted_vec.as_slice()
+        } else {
+            right_owned = other.to_sorted_vec();
+            right_owned.as_slice()
+        };
 
-        result.extend(left.map(Clone::clone));
-        result.extend(right.map(Clone::clone));
+        let result = merge_slices(left_slice, right_slice);
         Self::from_sorted_vec(result)
     }
 
@@ -917,7 +910,7 @@ impl<T: Clone + Eq + Hash + Ord> OrderedUniqueSet<T> {
     /// # Complexity
     ///
     /// O(n + m) where n and m are the sizes of the two sets.
-    /// Uses a two-pointer algorithm for sorted sequences.
+    /// Uses an index-based two-pointer algorithm with a disjoint fast path.
     ///
     /// # Examples
     ///
@@ -935,27 +928,23 @@ impl<T: Clone + Eq + Hash + Ord> OrderedUniqueSet<T> {
             return self.clone();
         }
 
-        let mut left = self.iter_sorted().peekable();
-        let mut right = other.iter_sorted().peekable();
-        let mut result = Vec::with_capacity(self.len());
+        let left_owned;
+        let left_slice = if let OrderedUniqueSetInner::Large(sorted_vec) = &self.inner {
+            sorted_vec.as_slice()
+        } else {
+            left_owned = self.to_sorted_vec();
+            left_owned.as_slice()
+        };
 
-        while let (Some(left_element), Some(right_element)) = (left.peek(), right.peek()) {
-            match (*left_element).cmp(*right_element) {
-                Ordering::Less => {
-                    result.push((*left_element).clone());
-                    left.next();
-                }
-                Ordering::Greater => {
-                    right.next();
-                }
-                Ordering::Equal => {
-                    left.next();
-                    right.next();
-                }
-            }
-        }
+        let right_owned;
+        let right_slice = if let OrderedUniqueSetInner::Large(sorted_vec) = &other.inner {
+            sorted_vec.as_slice()
+        } else {
+            right_owned = other.to_sorted_vec();
+            right_owned.as_slice()
+        };
 
-        result.extend(left.map(Clone::clone));
+        let result = difference_slices(left_slice, right_slice);
         Self::from_sorted_vec(result)
     }
 
@@ -966,7 +955,7 @@ impl<T: Clone + Eq + Hash + Ord> OrderedUniqueSet<T> {
     /// # Complexity
     ///
     /// O(n + m) where n and m are the sizes of the two sets.
-    /// Uses a two-pointer algorithm for sorted sequences.
+    /// Uses an index-based two-pointer algorithm with a disjoint fast path.
     ///
     /// # Examples
     ///
@@ -984,26 +973,23 @@ impl<T: Clone + Eq + Hash + Ord> OrderedUniqueSet<T> {
             return Self::new();
         }
 
-        let mut left = self.iter_sorted().peekable();
-        let mut right = other.iter_sorted().peekable();
-        let mut result = Vec::with_capacity(self.len().min(other.len()));
+        let left_owned;
+        let left_slice = if let OrderedUniqueSetInner::Large(sorted_vec) = &self.inner {
+            sorted_vec.as_slice()
+        } else {
+            left_owned = self.to_sorted_vec();
+            left_owned.as_slice()
+        };
 
-        while let (Some(left_element), Some(right_element)) = (left.peek(), right.peek()) {
-            match (*left_element).cmp(*right_element) {
-                Ordering::Less => {
-                    left.next();
-                }
-                Ordering::Greater => {
-                    right.next();
-                }
-                Ordering::Equal => {
-                    result.push((*left_element).clone());
-                    left.next();
-                    right.next();
-                }
-            }
-        }
+        let right_owned;
+        let right_slice = if let OrderedUniqueSetInner::Large(sorted_vec) = &other.inner {
+            sorted_vec.as_slice()
+        } else {
+            right_owned = other.to_sorted_vec();
+            right_owned.as_slice()
+        };
 
+        let result = intersection_slices(left_slice, right_slice);
         Self::from_sorted_vec(result)
     }
 }
@@ -1133,6 +1119,181 @@ impl<'a, T: Clone + Eq + Hash + Ord> IntoIterator for &'a OrderedUniqueSet<T> {
     fn into_iter(self) -> Self::IntoIter {
         self.iter()
     }
+}
+
+/// Merges two sorted, deduplicated slices into a new sorted, deduplicated `Vec`.
+///
+/// Uses an index-based two-pointer algorithm with an integrated disjoint fast path.
+/// When the ranges do not overlap (`left.last() < right.first()` or vice versa),
+/// the comparison loop is skipped entirely and elements are concatenated directly.
+///
+/// # Preconditions
+///
+/// Both `left` and `right` must be sorted in strictly ascending order (no duplicates).
+///
+/// # Complexity
+///
+/// O(n + m) where n = `left.len()`, m = `right.len()`.
+/// Disjoint case: two `extend_from_slice` calls (no per-element comparison).
+fn merge_slices<T: Clone + Ord>(left: &[T], right: &[T]) -> Vec<T> {
+    if left.is_empty() {
+        return right.to_vec();
+    }
+    if right.is_empty() {
+        return left.to_vec();
+    }
+
+    // Disjoint fast path: no overlap between ranges
+    // SAFETY: Both slices are non-empty (checked above), so last()/first() are safe.
+    if left.last().unwrap() < right.first().unwrap() {
+        let mut result = Vec::with_capacity(left.len() + right.len());
+        result.extend_from_slice(left);
+        result.extend_from_slice(right);
+        return result;
+    }
+    if right.last().unwrap() < left.first().unwrap() {
+        let mut result = Vec::with_capacity(left.len() + right.len());
+        result.extend_from_slice(right);
+        result.extend_from_slice(left);
+        return result;
+    }
+
+    // General two-pointer merge with deduplication
+    let mut result = Vec::with_capacity(left.len() + right.len());
+    let mut left_index = 0;
+    let mut right_index = 0;
+
+    while left_index < left.len() && right_index < right.len() {
+        match left[left_index].cmp(&right[right_index]) {
+            Ordering::Less => {
+                result.push(left[left_index].clone());
+                left_index += 1;
+            }
+            Ordering::Greater => {
+                result.push(right[right_index].clone());
+                right_index += 1;
+            }
+            Ordering::Equal => {
+                result.push(left[left_index].clone());
+                left_index += 1;
+                right_index += 1;
+            }
+        }
+    }
+
+    // Tail: copy remaining elements in bulk
+    if left_index < left.len() {
+        result.extend_from_slice(&left[left_index..]);
+    }
+    if right_index < right.len() {
+        result.extend_from_slice(&right[right_index..]);
+    }
+
+    result
+}
+
+/// Computes the set difference of two sorted, deduplicated slices.
+///
+/// Returns a new sorted `Vec` containing elements that are in `left` but not in `right`.
+///
+/// Uses an index-based two-pointer algorithm with a disjoint fast path.
+///
+/// # Preconditions
+///
+/// Both `left` and `right` must be sorted in strictly ascending order (no duplicates).
+///
+/// # Complexity
+///
+/// O(n + m) where n = `left.len()`, m = `right.len()`.
+fn difference_slices<T: Clone + Ord>(left: &[T], right: &[T]) -> Vec<T> {
+    if left.is_empty() {
+        return Vec::new();
+    }
+    if right.is_empty() {
+        return left.to_vec();
+    }
+
+    // Disjoint fast path: if ranges don't overlap, left is entirely the result
+    if left.last().unwrap() < right.first().unwrap()
+        || right.last().unwrap() < left.first().unwrap()
+    {
+        return left.to_vec();
+    }
+
+    let mut result = Vec::with_capacity(left.len());
+    let mut left_index = 0;
+    let mut right_index = 0;
+
+    while left_index < left.len() && right_index < right.len() {
+        match left[left_index].cmp(&right[right_index]) {
+            Ordering::Less => {
+                result.push(left[left_index].clone());
+                left_index += 1;
+            }
+            Ordering::Greater => {
+                right_index += 1;
+            }
+            Ordering::Equal => {
+                left_index += 1;
+                right_index += 1;
+            }
+        }
+    }
+
+    // Remaining left elements are all in the difference
+    if left_index < left.len() {
+        result.extend_from_slice(&left[left_index..]);
+    }
+
+    result
+}
+
+/// Computes the set intersection of two sorted, deduplicated slices.
+///
+/// Returns a new sorted `Vec` containing elements that are in both `left` and `right`.
+///
+/// Uses an index-based two-pointer algorithm with a disjoint fast path.
+///
+/// # Preconditions
+///
+/// Both `left` and `right` must be sorted in strictly ascending order (no duplicates).
+///
+/// # Complexity
+///
+/// O(n + m) where n = `left.len()`, m = `right.len()`.
+fn intersection_slices<T: Clone + Ord>(left: &[T], right: &[T]) -> Vec<T> {
+    if left.is_empty() || right.is_empty() {
+        return Vec::new();
+    }
+
+    // Disjoint fast path: if ranges don't overlap, intersection is empty
+    if left.last().unwrap() < right.first().unwrap()
+        || right.last().unwrap() < left.first().unwrap()
+    {
+        return Vec::new();
+    }
+
+    let mut result = Vec::with_capacity(left.len().min(right.len()));
+    let mut left_index = 0;
+    let mut right_index = 0;
+
+    while left_index < left.len() && right_index < right.len() {
+        match left[left_index].cmp(&right[right_index]) {
+            Ordering::Less => {
+                left_index += 1;
+            }
+            Ordering::Greater => {
+                right_index += 1;
+            }
+            Ordering::Equal => {
+                result.push(left[left_index].clone());
+                left_index += 1;
+                right_index += 1;
+            }
+        }
+    }
+
+    result
 }
 
 /// Message constant for panic when `from_sorted_*` receives invalid input.
@@ -1878,5 +2039,344 @@ mod tests {
         for (slice_element, iterator_element) in slice.iter().zip(from_iterator.iter()) {
             assert_eq!(slice_element, *iterator_element);
         }
+    }
+
+    // =========================================================================
+    // merge_slices tests
+    // =========================================================================
+
+    #[rstest]
+    fn merge_slices_both_empty() {
+        let result: Vec<i32> = merge_slices(&[], &[]);
+        assert!(result.is_empty());
+    }
+
+    #[rstest]
+    fn merge_slices_left_empty() {
+        let result = merge_slices(&[], &[1, 2, 3]);
+        assert_eq!(result, vec![1, 2, 3]);
+    }
+
+    #[rstest]
+    fn merge_slices_right_empty() {
+        let result = merge_slices(&[1, 2, 3], &[]);
+        assert_eq!(result, vec![1, 2, 3]);
+    }
+
+    #[rstest]
+    fn merge_slices_single_elements_disjoint() {
+        let result = merge_slices(&[1], &[2]);
+        assert_eq!(result, vec![1, 2]);
+    }
+
+    #[rstest]
+    fn merge_slices_single_elements_duplicate() {
+        let result = merge_slices(&[1], &[1]);
+        assert_eq!(result, vec![1]);
+    }
+
+    #[rstest]
+    fn merge_slices_disjoint_left_before_right() {
+        let result = merge_slices(&[1, 2, 3], &[4, 5, 6]);
+        assert_eq!(result, vec![1, 2, 3, 4, 5, 6]);
+    }
+
+    #[rstest]
+    fn merge_slices_disjoint_right_before_left() {
+        let result = merge_slices(&[4, 5, 6], &[1, 2, 3]);
+        assert_eq!(result, vec![1, 2, 3, 4, 5, 6]);
+    }
+
+    #[rstest]
+    fn merge_slices_overlapping() {
+        let result = merge_slices(&[1, 3, 5, 7], &[2, 3, 6, 8]);
+        assert_eq!(result, vec![1, 2, 3, 5, 6, 7, 8]);
+    }
+
+    #[rstest]
+    fn merge_slices_fully_overlapping() {
+        let result = merge_slices(&[1, 2, 3], &[1, 2, 3]);
+        assert_eq!(result, vec![1, 2, 3]);
+    }
+
+    #[rstest]
+    fn merge_slices_interleaved() {
+        let result = merge_slices(&[1, 3, 5], &[2, 4, 6]);
+        assert_eq!(result, vec![1, 2, 3, 4, 5, 6]);
+    }
+
+    #[rstest]
+    fn merge_slices_large() {
+        let left: Vec<i32> = (1..=1000).step_by(2).collect(); // odd: 1,3,5,...,999
+        let right: Vec<i32> = (2..=1000).step_by(2).collect(); // even: 2,4,6,...,1000
+        let result = merge_slices(&left, &right);
+        let expected: Vec<i32> = (1..=1000).collect();
+        assert_eq!(result, expected);
+    }
+
+    #[rstest]
+    fn merge_slices_large_with_overlap() {
+        let left: Vec<i32> = (1..=500).collect();
+        let right: Vec<i32> = (250..=750).collect();
+        let result = merge_slices(&left, &right);
+        let expected: Vec<i32> = (1..=750).collect();
+        assert_eq!(result, expected);
+    }
+
+    #[rstest]
+    fn merge_slices_subset() {
+        let result = merge_slices(&[2, 3, 4], &[1, 2, 3, 4, 5]);
+        assert_eq!(result, vec![1, 2, 3, 4, 5]);
+    }
+
+    // =========================================================================
+    // difference_slices tests
+    // =========================================================================
+
+    #[rstest]
+    fn difference_slices_both_empty() {
+        let result: Vec<i32> = difference_slices(&[], &[]);
+        assert!(result.is_empty());
+    }
+
+    #[rstest]
+    fn difference_slices_left_empty() {
+        let result = difference_slices(&[], &[1, 2, 3]);
+        assert!(result.is_empty());
+    }
+
+    #[rstest]
+    fn difference_slices_right_empty() {
+        let result = difference_slices(&[1, 2, 3], &[]);
+        assert_eq!(result, vec![1, 2, 3]);
+    }
+
+    #[rstest]
+    fn difference_slices_single_elements_different() {
+        let result = difference_slices(&[1], &[2]);
+        assert_eq!(result, vec![1]);
+    }
+
+    #[rstest]
+    fn difference_slices_single_elements_same() {
+        let result = difference_slices(&[1], &[1]);
+        assert!(result.is_empty());
+    }
+
+    #[rstest]
+    fn difference_slices_disjoint_left_before_right() {
+        let result = difference_slices(&[1, 2, 3], &[4, 5, 6]);
+        assert_eq!(result, vec![1, 2, 3]);
+    }
+
+    #[rstest]
+    fn difference_slices_disjoint_right_before_left() {
+        let result = difference_slices(&[4, 5, 6], &[1, 2, 3]);
+        assert_eq!(result, vec![4, 5, 6]);
+    }
+
+    #[rstest]
+    fn difference_slices_overlapping() {
+        let result = difference_slices(&[1, 2, 3, 4, 5], &[3, 4, 5, 6, 7]);
+        assert_eq!(result, vec![1, 2]);
+    }
+
+    #[rstest]
+    fn difference_slices_fully_overlapping() {
+        let result = difference_slices(&[1, 2, 3], &[1, 2, 3]);
+        assert!(result.is_empty());
+    }
+
+    #[rstest]
+    fn difference_slices_subset() {
+        let result = difference_slices(&[2, 3, 4], &[1, 2, 3, 4, 5]);
+        assert!(result.is_empty());
+    }
+
+    #[rstest]
+    fn difference_slices_superset() {
+        let result = difference_slices(&[1, 2, 3, 4, 5], &[2, 3, 4]);
+        assert_eq!(result, vec![1, 5]);
+    }
+
+    #[rstest]
+    fn difference_slices_large() {
+        let left: Vec<i32> = (1..=1000).collect();
+        let right: Vec<i32> = (501..=1500).collect();
+        let result = difference_slices(&left, &right);
+        let expected: Vec<i32> = (1..=500).collect();
+        assert_eq!(result, expected);
+    }
+
+    // =========================================================================
+    // intersection_slices tests
+    // =========================================================================
+
+    #[rstest]
+    fn intersection_slices_both_empty() {
+        let result: Vec<i32> = intersection_slices(&[], &[]);
+        assert!(result.is_empty());
+    }
+
+    #[rstest]
+    fn intersection_slices_left_empty() {
+        let result = intersection_slices(&[], &[1, 2, 3]);
+        assert!(result.is_empty());
+    }
+
+    #[rstest]
+    fn intersection_slices_right_empty() {
+        let result = intersection_slices(&[1, 2, 3], &[]);
+        assert!(result.is_empty());
+    }
+
+    #[rstest]
+    fn intersection_slices_single_elements_different() {
+        let result = intersection_slices(&[1], &[2]);
+        assert!(result.is_empty());
+    }
+
+    #[rstest]
+    fn intersection_slices_single_elements_same() {
+        let result = intersection_slices(&[1], &[1]);
+        assert_eq!(result, vec![1]);
+    }
+
+    #[rstest]
+    fn intersection_slices_disjoint_left_before_right() {
+        let result = intersection_slices(&[1, 2, 3], &[4, 5, 6]);
+        assert!(result.is_empty());
+    }
+
+    #[rstest]
+    fn intersection_slices_disjoint_right_before_left() {
+        let result = intersection_slices(&[4, 5, 6], &[1, 2, 3]);
+        assert!(result.is_empty());
+    }
+
+    #[rstest]
+    fn intersection_slices_overlapping() {
+        let result = intersection_slices(&[1, 2, 3, 4, 5], &[3, 4, 5, 6, 7]);
+        assert_eq!(result, vec![3, 4, 5]);
+    }
+
+    #[rstest]
+    fn intersection_slices_fully_overlapping() {
+        let result = intersection_slices(&[1, 2, 3], &[1, 2, 3]);
+        assert_eq!(result, vec![1, 2, 3]);
+    }
+
+    #[rstest]
+    fn intersection_slices_subset() {
+        let result = intersection_slices(&[2, 3, 4], &[1, 2, 3, 4, 5]);
+        assert_eq!(result, vec![2, 3, 4]);
+    }
+
+    #[rstest]
+    fn intersection_slices_large() {
+        let left: Vec<i32> = (1..=1000).collect();
+        let right: Vec<i32> = (501..=1500).collect();
+        let result = intersection_slices(&left, &right);
+        let expected: Vec<i32> = (501..=1000).collect();
+        assert_eq!(result, expected);
+    }
+
+    // =========================================================================
+    // Slice-based merge/difference/intersection integration tests
+    // =========================================================================
+
+    #[rstest]
+    fn merge_large_large_uses_slice_merge() {
+        let large1 = OrderedUniqueSet::from_sorted_iter(1..=100);
+        let large2 = OrderedUniqueSet::from_sorted_iter(50..=150);
+        assert!(large1.is_large_state());
+        assert!(large2.is_large_state());
+
+        let merged = large1.merge(&large2);
+        let expected: Vec<i32> = (1..=150).collect();
+        assert_eq!(merged.to_sorted_vec(), expected);
+    }
+
+    #[rstest]
+    fn merge_large_small_uses_slice_merge() {
+        let large = OrderedUniqueSet::from_sorted_iter(1..=20);
+        let small = OrderedUniqueSet::from_sorted_iter([15, 16, 17, 25, 30]);
+        assert!(large.is_large_state());
+        assert!(small.is_small_state());
+
+        let merged = large.merge(&small);
+        assert_eq!(
+            merged.to_sorted_vec(),
+            vec![
+                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 25, 30
+            ]
+        );
+    }
+
+    #[rstest]
+    fn merge_small_large_uses_slice_merge() {
+        let small = OrderedUniqueSet::from_sorted_iter([1, 5, 10]);
+        let large = OrderedUniqueSet::from_sorted_iter(1..=20);
+        assert!(small.is_small_state());
+        assert!(large.is_large_state());
+
+        let merged = small.merge(&large);
+        let expected: Vec<i32> = (1..=20).collect();
+        assert_eq!(merged.to_sorted_vec(), expected);
+    }
+
+    #[rstest]
+    fn merge_large_disjoint_fast_path() {
+        let large1 = OrderedUniqueSet::from_sorted_iter(1..=50);
+        let large2 = OrderedUniqueSet::from_sorted_iter(51..=100);
+        assert!(large1.is_large_state());
+        assert!(large2.is_large_state());
+
+        let merged = large1.merge(&large2);
+        let expected: Vec<i32> = (1..=100).collect();
+        assert_eq!(merged.to_sorted_vec(), expected);
+    }
+
+    #[rstest]
+    fn difference_large_large_uses_slice_difference() {
+        let large1 = OrderedUniqueSet::from_sorted_iter(1..=100);
+        let large2 = OrderedUniqueSet::from_sorted_iter(50..=150);
+        assert!(large1.is_large_state());
+        assert!(large2.is_large_state());
+
+        let diff = large1.difference(&large2);
+        let expected: Vec<i32> = (1..=49).collect();
+        assert_eq!(diff.to_sorted_vec(), expected);
+    }
+
+    #[rstest]
+    fn difference_large_disjoint_fast_path() {
+        let large1 = OrderedUniqueSet::from_sorted_iter(1..=50);
+        let large2 = OrderedUniqueSet::from_sorted_iter(51..=100);
+
+        let diff = large1.difference(&large2);
+        let expected: Vec<i32> = (1..=50).collect();
+        assert_eq!(diff.to_sorted_vec(), expected);
+    }
+
+    #[rstest]
+    fn intersection_large_large_uses_slice_intersection() {
+        let large1 = OrderedUniqueSet::from_sorted_iter(1..=100);
+        let large2 = OrderedUniqueSet::from_sorted_iter(50..=150);
+        assert!(large1.is_large_state());
+        assert!(large2.is_large_state());
+
+        let inter = large1.intersection(&large2);
+        let expected: Vec<i32> = (50..=100).collect();
+        assert_eq!(inter.to_sorted_vec(), expected);
+    }
+
+    #[rstest]
+    fn intersection_large_disjoint_fast_path_returns_empty() {
+        let large1 = OrderedUniqueSet::from_sorted_iter(1..=50);
+        let large2 = OrderedUniqueSet::from_sorted_iter(51..=100);
+
+        let inter = large1.intersection(&large2);
+        assert!(inter.is_empty());
     }
 }
