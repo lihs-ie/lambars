@@ -1237,7 +1237,6 @@ struct NgramSegmentOverlay {
 }
 
 impl NgramSegmentOverlay {
-    /// Creates a new overlay with the given base and no delta segments.
     const fn new(base: NgramIndex) -> Self {
         Self {
             base,
@@ -1246,7 +1245,6 @@ impl NgramSegmentOverlay {
         }
     }
 
-    /// Creates a new overlay with the given base and configuration.
     #[allow(dead_code)]
     const fn with_config(base: NgramIndex, config: &SegmentOverlayConfig) -> Self {
         Self {
@@ -1256,13 +1254,11 @@ impl NgramSegmentOverlay {
         }
     }
 
-    /// Total number of segments including the base.
     #[allow(dead_code)]
     const fn segment_count(&self) -> usize {
         1 + self.segments.len()
     }
 
-    /// Whether the number of delta segments has reached the compaction threshold.
     const fn needs_compaction(&self) -> bool {
         self.segments.len() >= self.max_segments
     }
@@ -1271,16 +1267,10 @@ impl NgramSegmentOverlay {
     ///
     /// Returns `None` if the key is absent from every layer.
     fn query(&self, key: &NgramKey) -> Option<TaskIdCollection> {
-        let mut posting_lists: Vec<&TaskIdCollection> = Vec::new();
-
-        if let Some(base_posting_list) = self.base.get(key) {
-            posting_lists.push(base_posting_list);
-        }
-        for segment in &self.segments {
-            if let Some(segment_posting_list) = segment.get(key) {
-                posting_lists.push(segment_posting_list);
-            }
-        }
+        let posting_lists: Vec<&TaskIdCollection> = std::iter::once(&self.base)
+            .chain(&self.segments)
+            .filter_map(|index| index.get(key))
+            .collect();
 
         if posting_lists.is_empty() {
             None
@@ -1289,7 +1279,6 @@ impl NgramSegmentOverlay {
         }
     }
 
-    /// Iterates all distinct keys across base and delta segments.
     #[allow(dead_code)]
     fn keys(&self) -> impl Iterator<Item = &NgramKey> {
         let mut seen = std::collections::HashSet::new();
@@ -1300,7 +1289,6 @@ impl NgramSegmentOverlay {
             .filter(move |key| seen.insert(KeyWrapper(key)))
     }
 
-    /// Appends an add-only delta as a new segment (no merge required).
     fn append_add_only(&self, delta_ngram: NgramIndex) -> Self {
         let mut new_segments = self.segments.clone();
         new_segments.push(delta_ngram);
@@ -1311,10 +1299,25 @@ impl NgramSegmentOverlay {
         }
     }
 
-    /// Applies a general delta (with removes) by first materializing all segments
-    /// and then merging the delta into the materialized index.
+    /// Appends an add-only delta and compacts if needed.
     ///
-    /// Returns a new overlay with the merged result as the sole base (no segments).
+    /// Combines `append_add_only` + `needs_compaction` + `compact_one` into a
+    /// single call, eliminating the repeated 4-line pattern in `apply_delta` /
+    /// `apply_delta_owned`.
+    fn append_and_compact(&self, delta_ngram: NgramIndex) -> Self {
+        if delta_ngram.is_empty() {
+            return self.clone();
+        }
+        let overlay = self.append_add_only(delta_ngram);
+        if overlay.needs_compaction() {
+            overlay.compact_one()
+        } else {
+            overlay
+        }
+    }
+
+    /// Applies a general delta (with removes) by materializing all segments
+    /// before merging, since remove operations require a complete base index.
     fn apply_general_delta(
         &self,
         add: &MutableIndex,
@@ -1331,9 +1334,6 @@ impl NgramSegmentOverlay {
         }
     }
 
-    /// Compacts the oldest delta segment into the base (cooperative compaction).
-    ///
-    /// If there are no delta segments, returns a clone of `self`.
     fn compact_one(&self) -> Self {
         if self.segments.is_empty() {
             return self.clone();
@@ -1347,7 +1347,6 @@ impl NgramSegmentOverlay {
         }
     }
 
-    /// Materializes all delta segments into the base, producing a single [`NgramIndex`].
     fn materialize(&self) -> NgramIndex {
         if self.segments.is_empty() {
             return self.base.clone();
@@ -1380,13 +1379,11 @@ impl NgramSegmentOverlay {
         self.base.get(key)
     }
 
-    /// Returns `true` if both the base and all segments are empty.
     #[allow(dead_code)]
     fn is_empty(&self) -> bool {
         self.base.is_empty() && self.segments.iter().all(NgramIndex::is_empty)
     }
 
-    /// Merges a single segment's entries into a base index.
     fn merge_segment_into(base: NgramIndex, segment: &NgramIndex) -> NgramIndex {
         let mut transient = base.transient();
         for (key, segment_collection) in segment {
@@ -2149,8 +2146,9 @@ impl SearchIndexBulkBuilder {
         }
 
         // After sorting by (token, order), last occurrence wins
+        let sorted_length = sorted.len();
         let deduped = sorted.into_iter().fold(
-            Vec::new(),
+            Vec::with_capacity(sorted_length),
             |mut accumulator: Vec<(String, TaskId)>, (token, task_id, _)| {
                 match accumulator.last_mut() {
                     Some((last_token, last_task_id)) if last_token == &token => {
@@ -2240,12 +2238,11 @@ impl SearchIndexBulkBuilder {
 /// # Complexity
 ///
 #[must_use]
+#[allow(dead_code)]
 fn merge_sorted_posting_lists(
     existing: &TaskIdCollection,
     new_entries: &TaskIdCollection,
 ) -> TaskIdCollection {
-    // TB5-011: concat fast-path -- when all new entries are greater than the
-    // existing maximum, skip two-pointer merge and directly concatenate.
     let can_concat = existing
         .last_sorted()
         .zip(new_entries.first_sorted())
@@ -2257,7 +2254,6 @@ fn merge_sorted_posting_lists(
         result_vec.extend(new_entries.iter_sorted().cloned());
         TaskIdCollection::from_sorted_vec(result_vec)
     } else if new_entries.len().saturating_mul(8) < existing.len() {
-        // TB6-012: galloping merge for small additions into large existing.
         let existing_vec: Vec<TaskId> = existing.iter_sorted().cloned().collect();
         let add_vec: Vec<TaskId> = new_entries.iter_sorted().cloned().collect();
         let mut output = Vec::with_capacity(existing.len() + new_entries.len());
@@ -4659,48 +4655,36 @@ impl SearchIndex {
         index: &NgramSegmentOverlay,
         normalized_query: &str,
     ) -> Option<Vec<TaskId>> {
-        // Check query length: return None if too short for infix search
         let query_char_count = normalized_query.chars().count();
         if query_char_count < self.config.min_query_len_for_infix {
             return None;
         }
 
-        // Generate all n-grams from the query (no limit for query-side)
-        // Note: max_ngrams_per_token is only for index construction to bound memory usage
-        // For search, we need all query n-grams to ensure correct intersection
+        // max_ngrams_per_token is only for index construction to bound memory usage;
+        // for search, we need all query n-grams to ensure correct intersection.
         let query_ngrams = generate_ngrams(
             normalized_query,
             self.config.ngram_size,
-            usize::MAX, // No limit for query n-grams
+            usize::MAX,
         );
 
         if query_ngrams.is_empty() {
-            // Query is shorter than n-gram size: return None to fall back to prefix search
             return None;
         }
 
-        // Intersect posting lists for all query n-grams
         let mut candidate_vec: Option<Vec<TaskId>> = None;
 
         for ngram in &query_ngrams {
             let ngram_key = NgramKey::new(ngram);
             match index.query(&ngram_key) {
                 Some(task_ids) => {
-                    // Use iter_sorted() to maintain sorted order for intersection
                     let current_vec: Vec<TaskId> = task_ids.iter_sorted().cloned().collect();
-
                     candidate_vec = Some(match candidate_vec {
-                        Some(existing) => {
-                            // O(n) merge intersection (both are sorted)
-                            intersect_sorted_vecs(&existing, &current_vec)
-                        }
+                        Some(existing) => intersect_sorted_vecs(&existing, &current_vec),
                         None => current_vec,
                     });
                 }
-                None => {
-                    // This n-gram doesn't exist in the index: no candidates
-                    return Some(Vec::new());
-                }
+                None => return Some(Vec::new()),
             }
         }
 
@@ -5611,19 +5595,11 @@ impl SearchIndex {
             .build()
             .map_err(SearchIndexError::BulkBuildFailed)?;
 
-        let title_word_ngram_materialized = self.title_word_ngram_index.materialize();
-        let title_full_ngram_materialized = self.title_full_ngram_index.materialize();
-        let tag_ngram_materialized = self.tag_ngram_index.materialize();
-
-        let title_word_ngram_index = NgramSegmentOverlay::new(
-            self.merge_bulk_ngram_index(&title_word_ngram_materialized, &title_word_bulk),
-        );
-        let title_full_ngram_index = NgramSegmentOverlay::new(
-            self.merge_bulk_ngram_index(&title_full_ngram_materialized, &title_full_bulk),
-        );
-        let tag_ngram_index = NgramSegmentOverlay::new(
-            self.merge_bulk_ngram_index(&tag_ngram_materialized, &tag_bulk),
-        );
+        let title_word_ngram_index =
+            self.title_word_ngram_index.append_and_compact(title_word_bulk);
+        let title_full_ngram_index =
+            self.title_full_ngram_index.append_and_compact(title_full_bulk);
+        let tag_ngram_index = self.tag_ngram_index.append_and_compact(tag_bulk);
 
         // Use delta without n-gram collection (n-grams already built by bulk builders above)
         let mut delta =
@@ -5654,7 +5630,7 @@ impl SearchIndex {
     /// fails (which should not happen due to chunk size constraints), falls back to
     /// individual inserts to ensure the operation completes successfully.
     #[must_use]
-    #[allow(clippy::unused_self)]
+    #[allow(clippy::unused_self, dead_code)]
     fn merge_bulk_ngram_index(
         &self,
         existing_index: &NgramIndex,
@@ -5682,31 +5658,21 @@ impl SearchIndex {
             );
             entries.push((ngram_key.clone(), merged));
 
-            if entries.len() >= CHUNK_SIZE {
-                // TB-003: Use match instead of expect for proper error handling.
-                // insert_bulk_drain borrows &mut self without consuming transient,
-                // so fallback does not need to rebuild from scratch.
-                if let Err(_error) = transient.insert_bulk_drain(&mut entries) {
-                    // Fallback: insert individually (should not happen due to CHUNK_SIZE constraint).
-                    // entries still contains the rejected items after TooManyEntries error.
-                    // drain(..) is intentional here: capacity must be preserved for reuse
-                    // in the next loop iteration.
-                    #[allow(clippy::iter_with_drain)]
-                    for (key, value) in entries.drain(..) {
-                        transient.insert(key, value);
-                    }
+            if entries.len() >= CHUNK_SIZE
+                && let Err(_error) = transient.insert_bulk_drain(&mut entries)
+            {
+                #[allow(clippy::iter_with_drain)]
+                for (key, value) in entries.drain(..) {
+                    transient.insert(key, value);
                 }
-                // entries is now empty but capacity is preserved for reuse
             }
         }
 
-        if !entries.is_empty() {
-            // TB-003: Use match instead of expect for proper error handling
-            if let Err(_error) = transient.insert_bulk_drain(&mut entries) {
-                // Fallback: insert individually (should not happen due to CHUNK_SIZE constraint)
-                for (key, value) in entries {
-                    transient.insert(key, value);
-                }
+        if !entries.is_empty()
+            && let Err(_error) = transient.insert_bulk_drain(&mut entries)
+        {
+            for (key, value) in entries {
+                transient.insert(key, value);
             }
         }
 
@@ -5777,30 +5743,15 @@ impl SearchIndex {
                     &delta.title_word_add,
                 ),
                 tag_index: Self::merge_index_delta_add_only(&self.tag_index, &delta.tag_add),
-                title_full_ngram_index: {
-                    let delta_index = build_ngram_from_mutable(delta.title_full_ngram_add.clone());
-                    let mut overlay = self.title_full_ngram_index.append_add_only(delta_index);
-                    if overlay.needs_compaction() {
-                        overlay = overlay.compact_one();
-                    }
-                    overlay
-                },
-                title_word_ngram_index: {
-                    let delta_index = build_ngram_from_mutable(delta.title_word_ngram_add.clone());
-                    let mut overlay = self.title_word_ngram_index.append_add_only(delta_index);
-                    if overlay.needs_compaction() {
-                        overlay = overlay.compact_one();
-                    }
-                    overlay
-                },
-                tag_ngram_index: {
-                    let delta_index = build_ngram_from_mutable(delta.tag_ngram_add.clone());
-                    let mut overlay = self.tag_ngram_index.append_add_only(delta_index);
-                    if overlay.needs_compaction() {
-                        overlay = overlay.compact_one();
-                    }
-                    overlay
-                },
+                title_full_ngram_index: self.title_full_ngram_index.append_and_compact(
+                    build_ngram_from_mutable(delta.title_full_ngram_add.clone()),
+                ),
+                title_word_ngram_index: self.title_word_ngram_index.append_and_compact(
+                    build_ngram_from_mutable(delta.title_word_ngram_add.clone()),
+                ),
+                tag_ngram_index: self.tag_ngram_index.append_and_compact(
+                    build_ngram_from_mutable(delta.tag_ngram_add.clone()),
+                ),
                 title_full_all_suffix_index: Self::merge_index_delta_add_only(
                     &self.title_full_all_suffix_index,
                     &delta.title_full_all_suffix_add,
@@ -5911,30 +5862,15 @@ impl SearchIndex {
                 title_word_add,
             ),
             tag_index: Self::merge_index_delta_add_only_owned(&self.tag_index, tag_add),
-            title_full_ngram_index: {
-                let delta_index = build_ngram_from_mutable(title_full_ngram_add);
-                let mut overlay = self.title_full_ngram_index.append_add_only(delta_index);
-                if overlay.needs_compaction() {
-                    overlay = overlay.compact_one();
-                }
-                overlay
-            },
-            title_word_ngram_index: {
-                let delta_index = build_ngram_from_mutable(title_word_ngram_add);
-                let mut overlay = self.title_word_ngram_index.append_add_only(delta_index);
-                if overlay.needs_compaction() {
-                    overlay = overlay.compact_one();
-                }
-                overlay
-            },
-            tag_ngram_index: {
-                let delta_index = build_ngram_from_mutable(tag_ngram_add);
-                let mut overlay = self.tag_ngram_index.append_add_only(delta_index);
-                if overlay.needs_compaction() {
-                    overlay = overlay.compact_one();
-                }
-                overlay
-            },
+            title_full_ngram_index: self.title_full_ngram_index.append_and_compact(
+                build_ngram_from_mutable(title_full_ngram_add),
+            ),
+            title_word_ngram_index: self.title_word_ngram_index.append_and_compact(
+                build_ngram_from_mutable(title_word_ngram_add),
+            ),
+            tag_ngram_index: self.tag_ngram_index.append_and_compact(
+                build_ngram_from_mutable(tag_ngram_add),
+            ),
             title_full_all_suffix_index: Self::merge_index_delta_add_only_owned(
                 &self.title_full_all_suffix_index,
                 title_full_all_suffix_add,
@@ -6042,7 +5978,6 @@ impl SearchIndex {
             if scratch.is_empty() {
                 transient.remove(key_str);
             } else {
-                // Move data out while preserving scratch capacity for reuse in next iteration
                 let mut collected = Vec::with_capacity(scratch.len());
                 collected.append(&mut scratch);
                 let collection = TaskIdCollection::from_sorted_vec(collected);
@@ -6104,7 +6039,6 @@ impl SearchIndex {
             if scratch.is_empty() {
                 result.remove(key_str);
             } else {
-                // Move data out while preserving scratch capacity for reuse in next iteration
                 let mut collected = Vec::with_capacity(scratch.len());
                 collected.append(&mut scratch);
                 let collection = TaskIdCollection::from_sorted_vec(collected);
@@ -6115,7 +6049,6 @@ impl SearchIndex {
         MergeNgramDeltaResult::Ok(result.persistent())
     }
 
-    /// Bulk insert variant. Falls back to individual inserts on failure.
     fn merge_ngram_delta_bulk(
         index: &NgramIndex,
         add: &MutableIndex,
@@ -6151,7 +6084,6 @@ impl SearchIndex {
             if scratch.is_empty() {
                 keys_to_remove.push(key_str);
             } else {
-                // Move data out while preserving scratch capacity for reuse in next iteration
                 let mut collected = Vec::with_capacity(scratch.len());
                 collected.append(&mut scratch);
                 let collection = TaskIdCollection::from_sorted_vec(collected);
@@ -6451,13 +6383,11 @@ impl SearchIndex {
             return 0;
         }
 
-        // Exponential search: jump 1, 2, 4, 8, ... until overshoot
         let mut bound = 1;
         while bound < length && sorted_slice[bound] < *target {
             bound *= 2;
         }
 
-        // Binary search within [bound/2, min(bound, length))
         let lower = bound / 2;
         let upper = bound.min(length);
         lower
@@ -6481,16 +6411,12 @@ impl SearchIndex {
 
         let mut existing_position = 0;
         for add_item in add {
-            // Find where add_item belongs in remaining existing
             if existing_position < existing.len() {
                 let remaining = &existing[existing_position..];
                 let skip = Self::galloping_search(remaining, add_item);
-
-                // Copy all existing items before the insertion point
                 output.extend_from_slice(&existing[existing_position..existing_position + skip]);
                 existing_position += skip;
 
-                // Skip duplicates
                 if existing_position < existing.len() && existing[existing_position] == *add_item {
                     output.push(add_item.clone());
                     existing_position += 1;
@@ -6500,7 +6426,6 @@ impl SearchIndex {
             output.push(add_item.clone());
         }
 
-        // Copy remaining existing items
         if existing_position < existing.len() {
             output.extend_from_slice(&existing[existing_position..]);
         }
@@ -6521,13 +6446,8 @@ impl SearchIndex {
         output.extend_from_slice(existing);
 
         for add_item in add {
-            match output.binary_search(add_item) {
-                Ok(_position) => {
-                    // Duplicate: already present, skip insertion
-                }
-                Err(position) => {
-                    output.insert(position, add_item.clone());
-                }
+            if let Err(position) = output.binary_search(add_item) {
+                output.insert(position, add_item.clone());
             }
         }
     }
@@ -6546,18 +6466,10 @@ impl SearchIndex {
         add: &[TaskId],
         output: &mut Vec<TaskId>,
     ) {
-        #[cfg(debug_assertions)]
-        fn is_strictly_sorted(slice: &[TaskId]) -> bool {
-            slice.windows(2).all(|window| window[0] < window[1])
-        }
-
-        #[cfg(debug_assertions)]
-        {
-            debug_assert!(
-                add.is_empty() || is_strictly_sorted(add),
-                "add slice must be sorted and deduplicated"
-            );
-        }
+        debug_assert!(
+            add.windows(2).all(|window| window[0] < window[1]),
+            "add slice must be sorted and deduplicated"
+        );
 
         if add.is_empty() {
             output.clear();
@@ -6586,6 +6498,43 @@ impl SearchIndex {
             );
         } else {
             Self::merge_posting_add_only_two_pointer(existing, add, output);
+        }
+    }
+
+    /// Slice-based variant of [`merge_posting_add_only_into`].
+    ///
+    /// When the caller already has a `&[TaskId]` (e.g. from
+    /// [`OrderedUniqueSet::as_sorted_slice`]), this avoids the `collect()`
+    /// allocation that the iterator-based variant requires for galloping and
+    /// binary-search paths.
+    fn merge_posting_add_only_into_slice(
+        existing: &[TaskId],
+        add: &[TaskId],
+        output: &mut Vec<TaskId>,
+    ) {
+        debug_assert!(
+            add.windows(2).all(|window| window[0] < window[1]),
+            "add slice must be sorted and deduplicated"
+        );
+
+        if add.is_empty() {
+            output.clear();
+            output.extend_from_slice(existing);
+            return;
+        }
+
+        if existing.is_empty() {
+            output.clear();
+            output.extend_from_slice(add);
+            return;
+        }
+
+        if add.len() <= 4 {
+            Self::merge_posting_add_only_binary_search_insert(existing, add, output);
+        } else if add.len().saturating_mul(8) < existing.len() {
+            Self::merge_posting_add_only_galloping(existing, add, output);
+        } else {
+            Self::merge_posting_add_only_two_pointer(existing.iter(), add, output);
         }
     }
 
@@ -6658,6 +6607,18 @@ impl SearchIndex {
                         result_vec.extend(add_list.iter().cloned());
                         transient
                             .insert(key.clone(), TaskIdCollection::from_sorted_vec(result_vec));
+                    } else if let Some(existing_slice) = collection.as_sorted_slice() {
+                        Self::merge_posting_add_only_into_slice(
+                            existing_slice,
+                            add_list.as_slice(),
+                            &mut scratch,
+                        );
+                        if !scratch.is_empty() {
+                            let mut collected = Vec::with_capacity(scratch.len());
+                            collected.append(&mut scratch);
+                            transient
+                                .insert(key.clone(), TaskIdCollection::from_sorted_vec(collected));
+                        }
                     } else {
                         Self::merge_posting_add_only_into(
                             collection.iter_sorted(),
@@ -6672,11 +6633,11 @@ impl SearchIndex {
                         }
                     }
                 }
-                // clone() is required because MutableIndex is borrowed; the memcpy cost
-                // is lower than the old merge_posting_add_only_into(empty, ...) path.
                 None if !add_list.is_empty() => {
-                    let collection = TaskIdCollection::from_sorted_vec(add_list.clone());
-                    transient.insert(key.clone(), collection);
+                    transient.insert(
+                        key.clone(),
+                        TaskIdCollection::from_sorted_vec(add_list.clone()),
+                    );
                 }
                 Some(_) | None => {}
             }
@@ -6685,11 +6646,8 @@ impl SearchIndex {
         transient.persistent()
     }
 
-    /// Computes `existing ∪ add` for a `PrefixIndex` (add-only fast path, owned variant).
-    ///
-    /// Unlike [`merge_index_delta_add_only`], this method consumes the `MutableIndex`
+    /// Owned variant of [`merge_index_delta_add_only`] that consumes the `MutableIndex`
     /// via `into_iter()`, eliminating `add_list.clone()` on the miss path.
-    /// The hit path also benefits by taking `&add_list` without cloning.
     fn merge_index_delta_add_only_owned(index: &PrefixIndex, add: MutableIndex) -> PrefixIndex {
         if add.is_empty() {
             return index.clone();
@@ -6712,6 +6670,17 @@ impl SearchIndex {
                         result_vec.extend(collection.iter_sorted().cloned());
                         result_vec.extend(add_list);
                         transient.insert(key, TaskIdCollection::from_sorted_vec(result_vec));
+                    } else if let Some(existing_slice) = collection.as_sorted_slice() {
+                        Self::merge_posting_add_only_into_slice(
+                            existing_slice,
+                            add_list.as_slice(),
+                            &mut scratch,
+                        );
+                        if !scratch.is_empty() {
+                            let mut collected = Vec::with_capacity(scratch.len());
+                            collected.append(&mut scratch);
+                            transient.insert(key, TaskIdCollection::from_sorted_vec(collected));
+                        }
                     } else {
                         Self::merge_posting_add_only_into(
                             collection.iter_sorted(),
@@ -6790,11 +6759,11 @@ impl SearchIndex {
                         }
                     }
                 }
-                // clone() is required because MutableIndex is borrowed; the memcpy cost
-                // is lower than the old merge_posting_add_only_into(empty, ...) path.
                 None if !add_list.is_empty() => {
-                    let collection = TaskIdCollection::from_sorted_vec(add_list.clone());
-                    result.insert(key.clone(), collection);
+                    result.insert(
+                        key.clone(),
+                        TaskIdCollection::from_sorted_vec(add_list.clone()),
+                    );
                 }
                 Some(_) | None => {}
             }
@@ -6843,11 +6812,9 @@ impl SearchIndex {
                         }
                     }
                 }
-                // clone() is required because MutableIndex is borrowed; the memcpy cost
-                // is lower than the old merge_posting_add_only_into(empty, ...) path.
                 None if !add_list.is_empty() => {
-                    let collection = TaskIdCollection::from_sorted_vec(add_list.clone());
-                    entries_to_insert.push((key.clone(), collection));
+                    entries_to_insert
+                        .push((key.clone(), TaskIdCollection::from_sorted_vec(add_list.clone())));
                 }
                 Some(_) | None => {}
             }
@@ -6877,9 +6844,7 @@ impl SearchIndex {
         MergeNgramDeltaResult::Ok(result.persistent())
     }
 
-    /// Computes `existing ∪ add` for a `NgramIndex` (add-only fast path, owned variant).
-    ///
-    /// Unlike [`merge_ngram_delta_add_only`], this method consumes the `MutableIndex`
+    /// Owned variant of [`merge_ngram_delta_add_only`] that consumes the `MutableIndex`
     /// via `into_iter()`, eliminating `add_list.clone()` on the miss path.
     #[allow(dead_code)]
     fn merge_ngram_delta_add_only_owned(
@@ -6898,9 +6863,6 @@ impl SearchIndex {
         }
     }
 
-    /// Owned variant of `merge_ngram_delta_add_only_individual`.
-    ///
-    /// Consumes the `MutableIndex` to avoid cloning posting lists on the miss path.
     #[allow(dead_code)]
     fn merge_ngram_delta_add_only_individual_owned(
         index: &NgramIndex,
@@ -6947,11 +6909,6 @@ impl SearchIndex {
         MergeNgramDeltaResult::Ok(result.persistent())
     }
 
-    /// Owned variant of `merge_ngram_delta_add_only_bulk`.
-    ///
-    /// Consumes the `MutableIndex` to avoid cloning posting lists on the miss path.
-    /// On bulk insert failure, falls back to individual owned insertion from the
-    /// original index. This mirrors the non-owned bulk variant's fallback strategy.
     #[allow(dead_code)]
     fn merge_ngram_delta_add_only_bulk_owned(
         index: &NgramIndex,
@@ -7009,12 +6966,7 @@ impl SearchIndex {
                 break;
             }
             let insert_count = chunk_buffer.len();
-            // insert_bulk_drain borrows &mut self without consuming it, so no
-            // snapshot is needed. On error the buffer contents are preserved.
             if let Err(_error) = result.insert_bulk_drain(&mut chunk_buffer) {
-                // Fallback: bulk insert failed. result still contains all
-                // previously successful chunks. Individually insert the
-                // rejected entries (still in chunk_buffer) plus remaining.
                 for (key, collection) in chunk_buffer.into_iter().chain(entries_iterator) {
                     result.insert(key, collection);
                 }
@@ -22586,6 +22538,33 @@ mod ngram_segment_overlay_tests {
                 "Search results differ after compaction for query '{query}'"
             );
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // append_and_compact: empty delta is a no-op
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn overlay_append_and_compact_empty_delta_is_noop() {
+        let base = make_ngram_index(&[("abc", &[1])]);
+        let segment = make_ngram_index(&[("abc", &[2])]);
+        let overlay = NgramSegmentOverlay {
+            base,
+            segments: vec![segment],
+            max_segments: 4,
+        };
+
+        let updated = overlay.append_and_compact(NgramIndex::new());
+
+        // Empty delta should not add a new segment
+        assert_eq!(updated.segments.len(), 1);
+        let key = NgramKey::new("abc");
+        let ids = sorted_ids(&updated.query(&key).expect("abc present"));
+        let expected: Vec<TaskId> = [1, 2]
+            .iter()
+            .map(|value| TaskId::from_uuid(Uuid::from_u128(*value)))
+            .collect();
+        assert_eq!(ids, expected);
     }
 }
 
