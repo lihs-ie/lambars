@@ -5402,44 +5402,29 @@ impl SearchIndex {
             entries.push((ngram_key.clone(), merged));
 
             if entries.len() >= CHUNK_SIZE {
-                // TB-003: Use match instead of expect for proper error handling
-                let items_to_insert = std::mem::take(&mut entries);
-                match transient.insert_bulk_owned(items_to_insert) {
-                    Ok(t) => {
-                        transient = t;
-                    }
-                    Err(error) => {
-                        // Fallback: insert individually (should not happen due to CHUNK_SIZE constraint)
-                        // Since insert_bulk_owned consumed transient, we need to rebuild from existing_index
-                        // and insert all processed entries individually.
-                        let rejected_entries = error.into_items();
-                        let mut fallback = existing_index.clone().transient();
-                        for (key, value) in rejected_entries {
-                            fallback.insert(key, value);
-                        }
-                        transient = fallback;
+                // TB-003: Use match instead of expect for proper error handling.
+                // insert_bulk_drain borrows &mut self without consuming transient,
+                // so fallback does not need to rebuild from scratch.
+                if let Err(_error) = transient.insert_bulk_drain(&mut entries) {
+                    // Fallback: insert individually (should not happen due to CHUNK_SIZE constraint).
+                    // entries still contains the rejected items after TooManyEntries error.
+                    // drain(..) is intentional here: capacity must be preserved for reuse
+                    // in the next loop iteration.
+                    #[allow(clippy::iter_with_drain)]
+                    for (key, value) in entries.drain(..) {
+                        transient.insert(key, value);
                     }
                 }
-                entries = Vec::with_capacity(CHUNK_SIZE);
+                // entries is now empty but capacity is preserved for reuse
             }
         }
 
         if !entries.is_empty() {
             // TB-003: Use match instead of expect for proper error handling
-            match transient.insert_bulk_owned(entries) {
-                Ok(t) => {
-                    transient = t;
-                }
-                Err(error) => {
-                    // Fallback: insert individually (should not happen due to CHUNK_SIZE constraint)
-                    // Since insert_bulk_owned consumed transient, we need to rebuild from existing_index
-                    // and insert all processed entries individually.
-                    let rejected_entries = error.into_items();
-                    let mut fallback = existing_index.clone().transient();
-                    for (key, value) in rejected_entries {
-                        fallback.insert(key, value);
-                    }
-                    transient = fallback;
+            if let Err(_error) = transient.insert_bulk_drain(&mut entries) {
+                // Fallback: insert individually (should not happen due to CHUNK_SIZE constraint)
+                for (key, value) in entries {
+                    transient.insert(key, value);
                 }
             }
         }
@@ -5892,15 +5877,15 @@ impl SearchIndex {
         }
 
         let mut entries_iterator = entries_to_insert.into_iter();
+        let mut chunk_buffer: Vec<(NgramKey, TaskIdCollection)> = Vec::with_capacity(CHUNK_SIZE);
         loop {
-            let chunk_vec: Vec<_> = entries_iterator.by_ref().take(CHUNK_SIZE).collect();
-            if chunk_vec.is_empty() {
+            chunk_buffer.clear();
+            chunk_buffer.extend(entries_iterator.by_ref().take(CHUNK_SIZE));
+            if chunk_buffer.is_empty() {
                 break;
             }
-            let insert_count = chunk_vec.len();
-            if let Ok(updated) = result.insert_bulk_owned(chunk_vec) {
-                result = updated;
-            } else {
+            let insert_count = chunk_buffer.len();
+            if result.insert_bulk_drain(&mut chunk_buffer).is_err() {
                 let fallback =
                     Self::merge_ngram_delta_individual(index, add, remove, all_keys).into_index();
                 return MergeNgramDeltaResult::Fallback {
@@ -6441,15 +6426,15 @@ impl SearchIndex {
         }
 
         let mut entries_iterator = entries_to_insert.into_iter();
+        let mut chunk_buffer: Vec<(NgramKey, TaskIdCollection)> = Vec::with_capacity(CHUNK_SIZE);
         loop {
-            let chunk_vec: Vec<_> = entries_iterator.by_ref().take(CHUNK_SIZE).collect();
-            if chunk_vec.is_empty() {
+            chunk_buffer.clear();
+            chunk_buffer.extend(entries_iterator.by_ref().take(CHUNK_SIZE));
+            if chunk_buffer.is_empty() {
                 break;
             }
-            let insert_count = chunk_vec.len();
-            if let Ok(updated) = result.insert_bulk_owned(chunk_vec) {
-                result = updated;
-            } else {
+            let insert_count = chunk_buffer.len();
+            if result.insert_bulk_drain(&mut chunk_buffer).is_err() {
                 let fallback = Self::merge_ngram_delta_add_only_individual(index, add).into_index();
                 return MergeNgramDeltaResult::Fallback {
                     index: fallback,
@@ -6585,36 +6570,30 @@ impl SearchIndex {
         }
 
         let mut entries_iterator = entries_to_insert.into_iter();
+        let mut chunk_buffer: Vec<(NgramKey, TaskIdCollection)> = Vec::with_capacity(CHUNK_SIZE);
         loop {
-            let chunk_vec: Vec<_> = entries_iterator.by_ref().take(CHUNK_SIZE).collect();
-            if chunk_vec.is_empty() {
+            chunk_buffer.clear();
+            chunk_buffer.extend(entries_iterator.by_ref().take(CHUNK_SIZE));
+            if chunk_buffer.is_empty() {
                 break;
             }
-            let insert_count = chunk_vec.len();
-            // Snapshot before consuming result via insert_bulk_owned, so that
-            // on failure the snapshot retains all previously successful chunks.
-            let snapshot = result.persistent();
-            match snapshot.clone().transient().insert_bulk_owned(chunk_vec) {
-                Ok(updated) => {
-                    result = updated;
+            let insert_count = chunk_buffer.len();
+            // insert_bulk_drain borrows &mut self without consuming it, so no
+            // snapshot is needed. On error the buffer contents are preserved.
+            if let Err(_error) = result.insert_bulk_drain(&mut chunk_buffer) {
+                // Fallback: bulk insert failed. result still contains all
+                // previously successful chunks. Individually insert the
+                // rejected entries (still in chunk_buffer) plus remaining.
+                for (key, collection) in chunk_buffer.into_iter().chain(entries_iterator) {
+                    result.insert(key, collection);
                 }
-                Err(error) => {
-                    // Fallback: bulk insert failed. Use snapshot (which includes
-                    // all previously successful chunks) and individually insert
-                    // the rejected entries plus remaining entries.
-                    let rejected_entries = error.into_items();
-                    let mut fallback_result = snapshot.transient();
-                    for (key, collection) in rejected_entries.into_iter().chain(entries_iterator) {
-                        fallback_result.insert(key, collection);
-                    }
-                    return MergeNgramDeltaResult::Fallback {
-                        index: fallback_result.persistent(),
-                        reason: MergeNgramDeltaFallbackReason::TooManyEntries {
-                            count: insert_count,
-                            limit: CHUNK_SIZE,
-                        },
-                    };
-                }
+                return MergeNgramDeltaResult::Fallback {
+                    index: result.persistent(),
+                    reason: MergeNgramDeltaFallbackReason::TooManyEntries {
+                        count: insert_count,
+                        limit: CHUNK_SIZE,
+                    },
+                };
             }
         }
 
@@ -19928,6 +19907,132 @@ mod merge_ngram_delta_optimization_tests {
         let new_index = index.apply_changes(&changes);
 
         assert_eq!(new_index.tasks_by_id.len(), 10);
+    }
+
+    /// TB6-017: Bulk `insert_bulk_drain` chunk buffer reuse produces identical results
+    /// to individual insertion for both add-only and add+remove paths.
+    #[rstest]
+    fn chunk_buffer_reuse_equivalence_add_only() {
+        let empty_tasks: PersistentVector<Task> = PersistentVector::new();
+
+        // Create a non-trivial dataset with multiple unique ngram keys
+        let changes: Vec<TaskChange> = (0..20)
+            .map(|i| {
+                create_task_with_tags(
+                    &format!("UniqueTitle{i:04} word{}", i % 5),
+                    vec![&format!("alpha{}", i % 7), &format!("beta{}", i % 3)],
+                )
+            })
+            .map(TaskChange::Add)
+            .collect();
+
+        // Bulk path (uses insert_bulk_drain with chunk buffer reuse)
+        let config_bulk = SearchIndexConfig {
+            use_merge_ngram_delta_bulk_insert: true,
+            ..Default::default()
+        };
+        let index_bulk = SearchIndex::build_with_config(&empty_tasks, config_bulk);
+        let result_bulk = index_bulk.apply_changes(&changes);
+
+        // Individual path (no bulk insert)
+        let config_individual = SearchIndexConfig {
+            use_merge_ngram_delta_bulk_insert: false,
+            ..Default::default()
+        };
+        let index_individual = SearchIndex::build_with_config(&empty_tasks, config_individual);
+        let result_individual = index_individual.apply_changes(&changes);
+
+        // Verify same tasks
+        assert_eq!(
+            result_bulk.tasks_by_id.len(),
+            result_individual.tasks_by_id.len(),
+            "Task count mismatch between bulk and individual paths"
+        );
+
+        // Verify same ngram index content
+        assert_eq!(
+            result_bulk.title_word_ngram_index.len(),
+            result_individual.title_word_ngram_index.len(),
+            "title_word_ngram_index length mismatch"
+        );
+        for (key, bulk_collection) in &result_bulk.title_word_ngram_index {
+            let individual_collection = result_individual
+                .title_word_ngram_index
+                .get(key.as_str())
+                .unwrap_or_else(|| {
+                    panic!("Key '{}' missing in individual result", key.as_str())
+                });
+            let bulk_ids: Vec<_> = bulk_collection.iter_sorted().cloned().collect();
+            let individual_ids: Vec<_> = individual_collection.iter_sorted().cloned().collect();
+            assert_eq!(
+                bulk_ids, individual_ids,
+                "Posting list mismatch for ngram key '{}'",
+                key.as_str()
+            );
+        }
+    }
+
+    /// TB6-017: Chunk buffer reuse equivalence for add+remove delta path.
+    #[rstest]
+    fn chunk_buffer_reuse_equivalence_add_and_remove() {
+        let empty_tasks: PersistentVector<Task> = PersistentVector::new();
+
+        // Build initial index with some tasks
+        let initial_tasks: Vec<Task> = (0..10)
+            .map(|i| {
+                create_task_with_tags(
+                    &format!("Initial{i:04}"),
+                    vec![&format!("tag{}", i % 4)],
+                )
+            })
+            .collect();
+        let add_changes: Vec<TaskChange> =
+            initial_tasks.iter().cloned().map(TaskChange::Add).collect();
+
+        let config_bulk = SearchIndexConfig {
+            use_merge_ngram_delta_bulk_insert: true,
+            ..Default::default()
+        };
+        let config_individual = SearchIndexConfig {
+            use_merge_ngram_delta_bulk_insert: false,
+            ..Default::default()
+        };
+
+        let base_bulk =
+            SearchIndex::build_with_config(&empty_tasks, config_bulk).apply_changes(&add_changes);
+        let base_individual = SearchIndex::build_with_config(&empty_tasks, config_individual)
+            .apply_changes(&add_changes);
+
+        // Remove some tasks and add new ones
+        let mut delta_changes: Vec<TaskChange> = initial_tasks
+            .iter()
+            .take(3)
+            .map(|t| TaskChange::Remove(t.task_id.clone()))
+            .collect();
+        delta_changes.extend(
+            (0..5)
+                .map(|i| {
+                    create_task_with_tags(
+                        &format!("NewTask{i:04}"),
+                        vec![&format!("newtag{}", i % 2)],
+                    )
+                })
+                .map(TaskChange::Add),
+        );
+
+        let result_bulk = base_bulk.apply_changes(&delta_changes);
+        let result_individual = base_individual.apply_changes(&delta_changes);
+
+        assert_eq!(
+            result_bulk.tasks_by_id.len(),
+            result_individual.tasks_by_id.len(),
+            "Task count mismatch in add+remove path"
+        );
+        assert_eq!(
+            result_bulk.tag_ngram_index.len(),
+            result_individual.tag_ngram_index.len(),
+            "tag_ngram_index length mismatch in add+remove path"
+        );
     }
 }
 
