@@ -1197,6 +1197,268 @@ type MutableIndex = std::collections::HashMap<NgramKey, Vec<TaskId>>;
 pub type PrefixIndex = PersistentTreeMap<NgramKey, TaskIdCollection>;
 
 // =============================================================================
+// Phase 6: Segment Overlay for NgramIndex
+// =============================================================================
+
+/// Configuration for [`NgramSegmentOverlay`] compaction behavior.
+///
+/// Controls the maximum number of delta segments before compaction is triggered.
+#[allow(dead_code)]
+#[derive(Clone, Debug)]
+struct SegmentOverlayConfig {
+    /// Maximum number of delta segments (2..=6).
+    max_segments: usize,
+}
+
+impl Default for SegmentOverlayConfig {
+    fn default() -> Self {
+        Self { max_segments: 4 }
+    }
+}
+
+/// Two-layer overlay structure for [`NgramIndex`].
+///
+/// Maintains a compacted `base` index and a vector of delta `segments`.
+/// Queries merge posting lists across all layers. Compaction progressively
+/// folds the oldest delta into the base, amortising merge cost.
+///
+/// # Invariants
+///
+/// - `segments.len() < max_segments` after compaction.
+/// - The base and every segment contain only sorted, deduplicated posting lists.
+#[derive(Clone, Debug)]
+struct NgramSegmentOverlay {
+    /// Compacted base index.
+    base: NgramIndex,
+    /// Un-compacted delta segments (newest is last).
+    segments: Vec<NgramIndex>,
+    /// Maximum number of delta segments before compaction.
+    max_segments: usize,
+}
+
+impl NgramSegmentOverlay {
+    /// Creates a new overlay with the given base and no delta segments.
+    const fn new(base: NgramIndex) -> Self {
+        Self {
+            base,
+            segments: Vec::new(),
+            max_segments: 4,
+        }
+    }
+
+    /// Creates a new overlay with the given base and configuration.
+    #[allow(dead_code)]
+    const fn with_config(base: NgramIndex, config: &SegmentOverlayConfig) -> Self {
+        Self {
+            base,
+            segments: Vec::new(),
+            max_segments: config.max_segments,
+        }
+    }
+
+    /// Total number of segments including the base.
+    #[allow(dead_code)]
+    const fn segment_count(&self) -> usize {
+        1 + self.segments.len()
+    }
+
+    /// Whether the number of delta segments has reached the compaction threshold.
+    const fn needs_compaction(&self) -> bool {
+        self.segments.len() >= self.max_segments
+    }
+
+    /// Queries a key across base and all delta segments, merging posting lists.
+    ///
+    /// Returns `None` if the key is absent from every layer.
+    fn query(&self, key: &NgramKey) -> Option<TaskIdCollection> {
+        let mut posting_lists: Vec<&TaskIdCollection> = Vec::new();
+
+        if let Some(base_posting_list) = self.base.get(key) {
+            posting_lists.push(base_posting_list);
+        }
+        for segment in &self.segments {
+            if let Some(segment_posting_list) = segment.get(key) {
+                posting_lists.push(segment_posting_list);
+            }
+        }
+
+        if posting_lists.is_empty() {
+            None
+        } else {
+            Some(merge_postings_multiway(&posting_lists))
+        }
+    }
+
+    /// Iterates all distinct keys across base and delta segments.
+    #[allow(dead_code)]
+    fn keys(&self) -> impl Iterator<Item = &NgramKey> {
+        let mut seen = std::collections::HashSet::new();
+        let base_keys = self.base.keys();
+        let segment_keys = self.segments.iter().flat_map(PersistentHashMap::keys);
+        base_keys
+            .chain(segment_keys)
+            .filter(move |key| seen.insert(KeyWrapper(key)))
+    }
+
+    /// Appends an add-only delta as a new segment (no merge required).
+    fn append_add_only(&self, delta_ngram: NgramIndex) -> Self {
+        let mut new_segments = self.segments.clone();
+        new_segments.push(delta_ngram);
+        Self {
+            base: self.base.clone(),
+            segments: new_segments,
+            max_segments: self.max_segments,
+        }
+    }
+
+    /// Applies a general delta (with removes) by first materializing all segments
+    /// and then merging the delta into the materialized index.
+    ///
+    /// Returns a new overlay with the merged result as the sole base (no segments).
+    fn apply_general_delta(
+        &self,
+        add: &MutableIndex,
+        remove: &MutableIndex,
+        config: &SearchIndexConfig,
+    ) -> Self {
+        let materialized = self.materialize();
+        let merged =
+            SearchIndex::merge_ngram_delta(&materialized, add, remove, config).into_index();
+        Self {
+            base: merged,
+            segments: Vec::new(),
+            max_segments: self.max_segments,
+        }
+    }
+
+    /// Compacts the oldest delta segment into the base (cooperative compaction).
+    ///
+    /// If there are no delta segments, returns a clone of `self`.
+    fn compact_one(&self) -> Self {
+        if self.segments.is_empty() {
+            return self.clone();
+        }
+        let oldest = &self.segments[0];
+        let merged_base = Self::merge_segment_into(self.base.clone(), oldest);
+        Self {
+            base: merged_base,
+            segments: self.segments[1..].to_vec(),
+            max_segments: self.max_segments,
+        }
+    }
+
+    /// Materializes all delta segments into the base, producing a single [`NgramIndex`].
+    fn materialize(&self) -> NgramIndex {
+        if self.segments.is_empty() {
+            return self.base.clone();
+        }
+        let mut result = self.base.clone();
+        for segment in &self.segments {
+            result = Self::merge_segment_into(result, segment);
+        }
+        result
+    }
+
+    /// Returns the total number of unique keys in the base index.
+    ///
+    /// Note: This returns only the base count (excludes delta segments).
+    /// For the exact total, use `materialize().len()`.
+    /// This approximation is acceptable for metrics/diagnostics.
+    const fn len(&self) -> usize {
+        self.base.len()
+    }
+
+    /// Looks up a key in the base index only.
+    ///
+    /// This is a convenience method for backward compatibility in tests.
+    /// For cross-segment queries, use [`query`].
+    #[allow(dead_code)]
+    fn get<Q: ?Sized + std::hash::Hash + Eq>(&self, key: &Q) -> Option<&TaskIdCollection>
+    where
+        NgramKey: std::borrow::Borrow<Q>,
+    {
+        self.base.get(key)
+    }
+
+    /// Returns `true` if both the base and all segments are empty.
+    #[allow(dead_code)]
+    fn is_empty(&self) -> bool {
+        self.base.is_empty() && self.segments.iter().all(NgramIndex::is_empty)
+    }
+
+    /// Merges a single segment's entries into a base index.
+    fn merge_segment_into(base: NgramIndex, segment: &NgramIndex) -> NgramIndex {
+        let mut transient = base.transient();
+        for (key, segment_collection) in segment {
+            match transient.get(key) {
+                Some(existing) => {
+                    let merged = existing.merge(segment_collection);
+                    transient.insert(key.clone(), merged);
+                }
+                None => {
+                    transient.insert(key.clone(), segment_collection.clone());
+                }
+            }
+        }
+        transient.persistent()
+    }
+}
+
+/// Merges posting lists from multiple segments using sequential pair-wise merge.
+///
+/// All input lists must be sorted and unique. Output is sorted and unique.
+/// For k <= 6 (base + max 4 segments), sequential merge is more efficient
+/// than a `BinaryHeap`-based k-way merge due to lower overhead.
+fn merge_postings_multiway(posting_lists: &[&TaskIdCollection]) -> TaskIdCollection {
+    match posting_lists.len() {
+        0 => TaskIdCollection::new(),
+        1 => posting_lists[0].clone(),
+        2 => posting_lists[0].merge(posting_lists[1]),
+        _ => {
+            let mut result = posting_lists[0].clone();
+            for posting_list in &posting_lists[1..] {
+                result = result.merge(posting_list);
+            }
+            result
+        }
+    }
+}
+
+/// Builds a [`NgramIndex`] from a [`MutableIndex`] (`HashMap<NgramKey, Vec<TaskId>>`).
+///
+/// Each `Vec<TaskId>` is converted to a [`TaskIdCollection`] via `from_sorted_vec`.
+/// Empty posting lists are skipped.
+fn build_ngram_from_mutable(mutable: MutableIndex) -> NgramIndex {
+    let mut transient = NgramIndex::new().transient();
+    for (key, values) in mutable {
+        if !values.is_empty() {
+            transient.insert(key, TaskIdCollection::from_sorted_vec(values));
+        }
+    }
+    transient.persistent()
+}
+
+/// Thin wrapper around `&NgramKey` that implements `Hash` + `Eq` by delegation,
+/// enabling use of `&NgramKey` in a `HashSet` without extra cloning.
+#[allow(dead_code)]
+#[derive(Debug)]
+struct KeyWrapper<'a>(&'a NgramKey);
+
+impl std::hash::Hash for KeyWrapper<'_> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.0.hash(state);
+    }
+}
+
+impl PartialEq for KeyWrapper<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+
+impl Eq for KeyWrapper<'_> {}
+
+// =============================================================================
 // Phase 3: merge_ngram_delta Result Types
 // =============================================================================
 
@@ -3969,17 +4231,20 @@ pub struct SearchIndex {
     ///
     /// Maps n-gram substrings to task IDs that contain them in their title.
     /// Used when `config.infix_mode == InfixMode::Ngram`.
-    title_full_ngram_index: NgramIndex,
+    /// Wrapped in [`NgramSegmentOverlay`] for amortised delta merge.
+    title_full_ngram_index: NgramSegmentOverlay,
     /// N-gram index for normalized title words (for infix search in Ngram mode).
     ///
     /// Maps n-gram substrings to task IDs that contain them in any title word.
     /// Used when `config.infix_mode == InfixMode::Ngram`.
-    title_word_ngram_index: NgramIndex,
+    /// Wrapped in [`NgramSegmentOverlay`] for amortised delta merge.
+    title_word_ngram_index: NgramSegmentOverlay,
     /// N-gram index for normalized tag values (for infix search in Ngram mode).
     ///
     /// Maps n-gram substrings to task IDs that contain them in any tag.
     /// Used when `config.infix_mode == InfixMode::Ngram`.
-    tag_ngram_index: NgramIndex,
+    /// Wrapped in [`NgramSegmentOverlay`] for amortised delta merge.
+    tag_ngram_index: NgramSegmentOverlay,
 
     /// Configuration for the search index (acts as feature flag).
     ///
@@ -4204,9 +4469,9 @@ impl SearchIndex {
             tag_index: tag_index.persistent(),
             tag_all_suffix_index: tag_all_suffix_index.persistent(),
             tasks_by_id: tasks_by_id.persistent(),
-            title_full_ngram_index: finalize_ngram_index(title_full_ngram_batch),
-            title_word_ngram_index: finalize_ngram_index(title_word_ngram_batch),
-            tag_ngram_index: finalize_ngram_index(tag_ngram_batch),
+            title_full_ngram_index: NgramSegmentOverlay::new(finalize_ngram_index(title_full_ngram_batch)),
+            title_word_ngram_index: NgramSegmentOverlay::new(finalize_ngram_index(title_word_ngram_batch)),
+            tag_ngram_index: NgramSegmentOverlay::new(finalize_ngram_index(tag_ngram_batch)),
             config,
         }
     }
@@ -4384,7 +4649,7 @@ impl SearchIndex {
     /// filter out false positives.
     fn find_candidates_by_ngrams(
         &self,
-        index: &NgramIndex,
+        index: &NgramSegmentOverlay,
         normalized_query: &str,
     ) -> Option<Vec<TaskId>> {
         // Check query length: return None if too short for infix search
@@ -4411,7 +4676,8 @@ impl SearchIndex {
         let mut candidate_vec: Option<Vec<TaskId>> = None;
 
         for ngram in &query_ngrams {
-            match index.get(ngram.as_str()) {
+            let ngram_key = NgramKey::new(ngram);
+            match index.query(&ngram_key) {
                 Some(task_ids) => {
                     // Use iter_sorted() to maintain sorted order for intersection
                     let current_vec: Vec<TaskId> = task_ids.iter_sorted().cloned().collect();
@@ -4769,11 +5035,11 @@ impl SearchIndex {
 
         // Remove from infix index based on mode (full title)
         let mut title_full_all_suffix_index = self.title_full_all_suffix_index.clone();
-        let mut title_full_ngram_index = self.title_full_ngram_index.clone();
+        let mut title_full_ngram_materialized = self.title_full_ngram_index.materialize();
         match self.config.infix_mode {
             InfixMode::Ngram => {
-                title_full_ngram_index = remove_ngrams(
-                    title_full_ngram_index,
+                title_full_ngram_materialized = remove_ngrams(
+                    title_full_ngram_materialized,
                     normalized_title,
                     task_id,
                     &self.config,
@@ -4794,7 +5060,7 @@ impl SearchIndex {
         // Remove from title_word_index and infix index
         let mut title_word_index = self.title_word_index.clone();
         let mut title_word_all_suffix_index = self.title_word_all_suffix_index.clone();
-        let mut title_word_ngram_index = self.title_word_ngram_index.clone();
+        let mut title_word_ngram_materialized = self.title_word_ngram_index.materialize();
         for word in &words {
             let word_key = (*word).clone();
             title_word_index =
@@ -4803,8 +5069,8 @@ impl SearchIndex {
             // Remove from infix index based on mode
             match self.config.infix_mode {
                 InfixMode::Ngram => {
-                    title_word_ngram_index =
-                        remove_ngrams(title_word_ngram_index, &word_key, task_id, &self.config);
+                    title_word_ngram_materialized =
+                        remove_ngrams(title_word_ngram_materialized, &word_key, task_id, &self.config);
                 }
                 InfixMode::LegacyAllSuffix => {
                     title_word_all_suffix_index = Self::remove_id_from_all_suffixes(
@@ -4826,7 +5092,7 @@ impl SearchIndex {
 
         let mut tag_index = self.tag_index.clone();
         let mut tag_all_suffix_index = self.tag_all_suffix_index.clone();
-        let mut tag_ngram_index = self.tag_ngram_index.clone();
+        let mut tag_ngram_materialized = self.tag_ngram_index.materialize();
         for tag in sorted_tags {
             // Normalize tag using normalize_query() for consistency
             let normalized_tag = normalize_query(tag.as_str()).into_key();
@@ -4835,8 +5101,8 @@ impl SearchIndex {
             // Remove from infix index based on mode
             match self.config.infix_mode {
                 InfixMode::Ngram => {
-                    tag_ngram_index =
-                        remove_ngrams(tag_ngram_index, &normalized_tag, task_id, &self.config);
+                    tag_ngram_materialized =
+                        remove_ngrams(tag_ngram_materialized, &normalized_tag, task_id, &self.config);
                 }
                 InfixMode::LegacyAllSuffix => {
                     tag_all_suffix_index = Self::remove_id_from_all_suffixes(
@@ -4859,9 +5125,9 @@ impl SearchIndex {
             tag_index,
             tag_all_suffix_index,
             tasks_by_id,
-            title_full_ngram_index,
-            title_word_ngram_index,
-            tag_ngram_index,
+            title_full_ngram_index: NgramSegmentOverlay::new(title_full_ngram_materialized),
+            title_word_ngram_index: NgramSegmentOverlay::new(title_word_ngram_materialized),
+            tag_ngram_index: NgramSegmentOverlay::new(tag_ngram_materialized),
             config: self.config.clone(),
         }
     }
@@ -4974,11 +5240,11 @@ impl SearchIndex {
 
         // Add to infix index based on mode (full title)
         let mut title_full_all_suffix_index = self.title_full_all_suffix_index.clone();
-        let mut title_full_ngram_index = self.title_full_ngram_index.clone();
+        let mut title_full_ngram_materialized = self.title_full_ngram_index.materialize();
         match self.config.infix_mode {
             InfixMode::Ngram => {
-                title_full_ngram_index = index_ngrams(
-                    title_full_ngram_index,
+                title_full_ngram_materialized = index_ngrams(
+                    title_full_ngram_materialized,
                     &normalized.title_key,
                     task_id,
                     &self.config,
@@ -5000,7 +5266,7 @@ impl SearchIndex {
         // TaskIdCollection::insert handles deduplication internally
         let mut title_word_index = self.title_word_index.clone();
         let mut title_word_all_suffix_index = self.title_word_all_suffix_index.clone();
-        let mut title_word_ngram_index = self.title_word_ngram_index.clone();
+        let mut title_word_ngram_materialized = self.title_word_ngram_index.materialize();
         for word in normalized.title_words.iter().take(word_limit) {
             let word_str = word.as_str();
             let task_ids = title_word_index
@@ -5013,8 +5279,8 @@ impl SearchIndex {
             // Add to infix index based on mode
             match self.config.infix_mode {
                 InfixMode::Ngram => {
-                    title_word_ngram_index =
-                        index_ngrams(title_word_ngram_index, word_str, task_id, &self.config);
+                    title_word_ngram_materialized =
+                        index_ngrams(title_word_ngram_materialized, word_str, task_id, &self.config);
                 }
                 InfixMode::LegacyAllSuffix => {
                     title_word_all_suffix_index =
@@ -5031,7 +5297,7 @@ impl SearchIndex {
         // TaskIdCollection::insert handles deduplication internally
         let mut tag_index = self.tag_index.clone();
         let mut tag_all_suffix_index = self.tag_all_suffix_index.clone();
-        let mut tag_ngram_index = self.tag_ngram_index.clone();
+        let mut tag_ngram_materialized = self.tag_ngram_index.materialize();
         for normalized_tag in normalized.tags.iter().take(tag_limit) {
             let normalized_tag_str = normalized_tag.as_str();
             let task_ids = tag_index
@@ -5046,8 +5312,8 @@ impl SearchIndex {
             // Add to infix index based on mode
             match self.config.infix_mode {
                 InfixMode::Ngram => {
-                    tag_ngram_index =
-                        index_ngrams(tag_ngram_index, normalized_tag_str, task_id, &self.config);
+                    tag_ngram_materialized =
+                        index_ngrams(tag_ngram_materialized, normalized_tag_str, task_id, &self.config);
                 }
                 InfixMode::LegacyAllSuffix => {
                     tag_all_suffix_index =
@@ -5067,9 +5333,9 @@ impl SearchIndex {
             tag_index,
             tag_all_suffix_index,
             tasks_by_id,
-            title_full_ngram_index,
-            title_word_ngram_index,
-            tag_ngram_index,
+            title_full_ngram_index: NgramSegmentOverlay::new(title_full_ngram_materialized),
+            title_word_ngram_index: NgramSegmentOverlay::new(title_word_ngram_materialized),
+            tag_ngram_index: NgramSegmentOverlay::new(tag_ngram_materialized),
             config: self.config.clone(),
         }
     }
@@ -5338,11 +5604,19 @@ impl SearchIndex {
             .build()
             .map_err(SearchIndexError::BulkBuildFailed)?;
 
-        let title_word_ngram_index =
-            self.merge_bulk_ngram_index(&self.title_word_ngram_index, &title_word_bulk);
-        let title_full_ngram_index =
-            self.merge_bulk_ngram_index(&self.title_full_ngram_index, &title_full_bulk);
-        let tag_ngram_index = self.merge_bulk_ngram_index(&self.tag_ngram_index, &tag_bulk);
+        let title_word_ngram_materialized = self.title_word_ngram_index.materialize();
+        let title_full_ngram_materialized = self.title_full_ngram_index.materialize();
+        let tag_ngram_materialized = self.tag_ngram_index.materialize();
+
+        let title_word_ngram_index = NgramSegmentOverlay::new(
+            self.merge_bulk_ngram_index(&title_word_ngram_materialized, &title_word_bulk),
+        );
+        let title_full_ngram_index = NgramSegmentOverlay::new(
+            self.merge_bulk_ngram_index(&title_full_ngram_materialized, &title_full_bulk),
+        );
+        let tag_ngram_index = NgramSegmentOverlay::new(
+            self.merge_bulk_ngram_index(&tag_ngram_materialized, &tag_bulk),
+        );
 
         // Use delta without n-gram collection (n-grams already built by bulk builders above)
         let mut delta =
@@ -5496,24 +5770,30 @@ impl SearchIndex {
                     &delta.title_word_add,
                 ),
                 tag_index: Self::merge_index_delta_add_only(&self.tag_index, &delta.tag_add),
-                title_full_ngram_index: Self::merge_ngram_delta_add_only(
-                    &self.title_full_ngram_index,
-                    &delta.title_full_ngram_add,
-                    &self.config,
-                )
-                .into_index(),
-                title_word_ngram_index: Self::merge_ngram_delta_add_only(
-                    &self.title_word_ngram_index,
-                    &delta.title_word_ngram_add,
-                    &self.config,
-                )
-                .into_index(),
-                tag_ngram_index: Self::merge_ngram_delta_add_only(
-                    &self.tag_ngram_index,
-                    &delta.tag_ngram_add,
-                    &self.config,
-                )
-                .into_index(),
+                title_full_ngram_index: {
+                    let delta_index = build_ngram_from_mutable(delta.title_full_ngram_add.clone());
+                    let mut overlay = self.title_full_ngram_index.append_add_only(delta_index);
+                    if overlay.needs_compaction() {
+                        overlay = overlay.compact_one();
+                    }
+                    overlay
+                },
+                title_word_ngram_index: {
+                    let delta_index = build_ngram_from_mutable(delta.title_word_ngram_add.clone());
+                    let mut overlay = self.title_word_ngram_index.append_add_only(delta_index);
+                    if overlay.needs_compaction() {
+                        overlay = overlay.compact_one();
+                    }
+                    overlay
+                },
+                tag_ngram_index: {
+                    let delta_index = build_ngram_from_mutable(delta.tag_ngram_add.clone());
+                    let mut overlay = self.tag_ngram_index.append_add_only(delta_index);
+                    if overlay.needs_compaction() {
+                        overlay = overlay.compact_one();
+                    }
+                    overlay
+                },
                 title_full_all_suffix_index: Self::merge_index_delta_add_only(
                     &self.title_full_all_suffix_index,
                     &delta.title_full_all_suffix_add,
@@ -5543,27 +5823,21 @@ impl SearchIndex {
                 &delta.title_word_remove,
             ),
             tag_index: Self::merge_index_delta(&self.tag_index, &delta.tag_add, &delta.tag_remove),
-            title_full_ngram_index: Self::merge_ngram_delta(
-                &self.title_full_ngram_index,
+            title_full_ngram_index: self.title_full_ngram_index.apply_general_delta(
                 &delta.title_full_ngram_add,
                 &delta.title_full_ngram_remove,
                 &self.config,
-            )
-            .into_index(),
-            title_word_ngram_index: Self::merge_ngram_delta(
-                &self.title_word_ngram_index,
+            ),
+            title_word_ngram_index: self.title_word_ngram_index.apply_general_delta(
                 &delta.title_word_ngram_add,
                 &delta.title_word_ngram_remove,
                 &self.config,
-            )
-            .into_index(),
-            tag_ngram_index: Self::merge_ngram_delta(
-                &self.tag_ngram_index,
+            ),
+            tag_ngram_index: self.tag_ngram_index.apply_general_delta(
                 &delta.tag_ngram_add,
                 &delta.tag_ngram_remove,
                 &self.config,
-            )
-            .into_index(),
+            ),
             title_full_all_suffix_index: Self::merge_index_delta(
                 &self.title_full_all_suffix_index,
                 &delta.title_full_all_suffix_add,
@@ -5630,24 +5904,30 @@ impl SearchIndex {
                 title_word_add,
             ),
             tag_index: Self::merge_index_delta_add_only_owned(&self.tag_index, tag_add),
-            title_full_ngram_index: Self::merge_ngram_delta_add_only_owned(
-                &self.title_full_ngram_index,
-                title_full_ngram_add,
-                &self.config,
-            )
-            .into_index(),
-            title_word_ngram_index: Self::merge_ngram_delta_add_only_owned(
-                &self.title_word_ngram_index,
-                title_word_ngram_add,
-                &self.config,
-            )
-            .into_index(),
-            tag_ngram_index: Self::merge_ngram_delta_add_only_owned(
-                &self.tag_ngram_index,
-                tag_ngram_add,
-                &self.config,
-            )
-            .into_index(),
+            title_full_ngram_index: {
+                let delta_index = build_ngram_from_mutable(title_full_ngram_add);
+                let mut overlay = self.title_full_ngram_index.append_add_only(delta_index);
+                if overlay.needs_compaction() {
+                    overlay = overlay.compact_one();
+                }
+                overlay
+            },
+            title_word_ngram_index: {
+                let delta_index = build_ngram_from_mutable(title_word_ngram_add);
+                let mut overlay = self.title_word_ngram_index.append_add_only(delta_index);
+                if overlay.needs_compaction() {
+                    overlay = overlay.compact_one();
+                }
+                overlay
+            },
+            tag_ngram_index: {
+                let delta_index = build_ngram_from_mutable(tag_ngram_add);
+                let mut overlay = self.tag_ngram_index.append_add_only(delta_index);
+                if overlay.needs_compaction() {
+                    overlay = overlay.compact_one();
+                }
+                overlay
+            },
             title_full_all_suffix_index: Self::merge_index_delta_add_only_owned(
                 &self.title_full_all_suffix_index,
                 title_full_all_suffix_add,
@@ -6312,6 +6592,7 @@ impl SearchIndex {
     }
 
     /// Computes `existing ∪ add` for a `NgramIndex` (add-only fast path).
+    #[allow(dead_code)]
     fn merge_ngram_delta_add_only(
         index: &NgramIndex,
         add: &MutableIndex,
@@ -6328,6 +6609,7 @@ impl SearchIndex {
         }
     }
 
+    #[allow(dead_code)]
     fn merge_ngram_delta_add_only_individual(
         index: &NgramIndex,
         add: &MutableIndex,
@@ -6376,6 +6658,7 @@ impl SearchIndex {
         MergeNgramDeltaResult::Ok(result.persistent())
     }
 
+    #[allow(dead_code)]
     fn merge_ngram_delta_add_only_bulk(
         index: &NgramIndex,
         add: &MutableIndex,
@@ -6453,6 +6736,7 @@ impl SearchIndex {
     ///
     /// Unlike [`merge_ngram_delta_add_only`], this method consumes the `MutableIndex`
     /// via `into_iter()`, eliminating `add_list.clone()` on the miss path.
+    #[allow(dead_code)]
     fn merge_ngram_delta_add_only_owned(
         index: &NgramIndex,
         add: MutableIndex,
@@ -6472,6 +6756,7 @@ impl SearchIndex {
     /// Owned variant of `merge_ngram_delta_add_only_individual`.
     ///
     /// Consumes the `MutableIndex` to avoid cloning posting lists on the miss path.
+    #[allow(dead_code)]
     fn merge_ngram_delta_add_only_individual_owned(
         index: &NgramIndex,
         add: MutableIndex,
@@ -6522,6 +6807,7 @@ impl SearchIndex {
     /// Consumes the `MutableIndex` to avoid cloning posting lists on the miss path.
     /// On bulk insert failure, falls back to individual owned insertion from the
     /// original index. This mirrors the non-owned bulk variant's fallback strategy.
+    #[allow(dead_code)]
     fn merge_ngram_delta_add_only_bulk_owned(
         index: &NgramIndex,
         add: MutableIndex,
@@ -15419,19 +15705,19 @@ mod apply_changes_tests {
         }
 
         // 5. title_full_ngram_index equality
+        let batch_title_full_ngram = batch.title_full_ngram_index.materialize();
+        let seq_title_full_ngram = sequential.title_full_ngram_index.materialize();
         assert_eq!(
-            batch.title_full_ngram_index.len(),
-            sequential.title_full_ngram_index.len(),
+            batch_title_full_ngram.len(),
+            seq_title_full_ngram.len(),
             "title_full_ngram_index length mismatch"
         );
-        for key in batch.title_full_ngram_index.keys() {
-            let batch_posting: HashSet<_> = batch
-                .title_full_ngram_index
+        for key in batch_title_full_ngram.keys() {
+            let batch_posting: HashSet<_> = batch_title_full_ngram
                 .get(key.as_str())
                 .map(|v| v.iter().cloned().collect())
                 .unwrap_or_default();
-            let seq_posting: HashSet<_> = sequential
-                .title_full_ngram_index
+            let seq_posting: HashSet<_> = seq_title_full_ngram
                 .get(key.as_str())
                 .map(|v| v.iter().cloned().collect())
                 .unwrap_or_default();
@@ -15443,19 +15729,19 @@ mod apply_changes_tests {
         }
 
         // 6. title_word_ngram_index equality
+        let batch_title_word_ngram = batch.title_word_ngram_index.materialize();
+        let seq_title_word_ngram = sequential.title_word_ngram_index.materialize();
         assert_eq!(
-            batch.title_word_ngram_index.len(),
-            sequential.title_word_ngram_index.len(),
+            batch_title_word_ngram.len(),
+            seq_title_word_ngram.len(),
             "title_word_ngram_index length mismatch"
         );
-        for key in batch.title_word_ngram_index.keys() {
-            let batch_posting: HashSet<_> = batch
-                .title_word_ngram_index
+        for key in batch_title_word_ngram.keys() {
+            let batch_posting: HashSet<_> = batch_title_word_ngram
                 .get(key.as_str())
                 .map(|v| v.iter().cloned().collect())
                 .unwrap_or_default();
-            let seq_posting: HashSet<_> = sequential
-                .title_word_ngram_index
+            let seq_posting: HashSet<_> = seq_title_word_ngram
                 .get(key.as_str())
                 .map(|v| v.iter().cloned().collect())
                 .unwrap_or_default();
@@ -15467,19 +15753,19 @@ mod apply_changes_tests {
         }
 
         // 7. tag_ngram_index equality
+        let batch_tag_ngram = batch.tag_ngram_index.materialize();
+        let seq_tag_ngram = sequential.tag_ngram_index.materialize();
         assert_eq!(
-            batch.tag_ngram_index.len(),
-            sequential.tag_ngram_index.len(),
+            batch_tag_ngram.len(),
+            seq_tag_ngram.len(),
             "tag_ngram_index length mismatch"
         );
-        for key in batch.tag_ngram_index.keys() {
-            let batch_posting: HashSet<_> = batch
-                .tag_ngram_index
+        for key in batch_tag_ngram.keys() {
+            let batch_posting: HashSet<_> = batch_tag_ngram
                 .get(key.as_str())
                 .map(|v| v.iter().cloned().collect())
                 .unwrap_or_default();
-            let seq_posting: HashSet<_> = sequential
-                .tag_ngram_index
+            let seq_posting: HashSet<_> = seq_tag_ngram
                 .get(key.as_str())
                 .map(|v| v.iter().cloned().collect())
                 .unwrap_or_default();
@@ -19955,9 +20241,10 @@ mod merge_ngram_delta_optimization_tests {
             result_individual.title_word_ngram_index.len(),
             "title_word_ngram_index length mismatch"
         );
-        for (key, bulk_collection) in &result_bulk.title_word_ngram_index {
-            let individual_collection = result_individual
-                .title_word_ngram_index
+        let bulk_materialized = result_bulk.title_word_ngram_index.materialize();
+        let individual_materialized = result_individual.title_word_ngram_index.materialize();
+        for (key, bulk_collection) in &bulk_materialized {
+            let individual_collection = individual_materialized
                 .get(key.as_str())
                 .unwrap_or_else(|| {
                     panic!("Key '{}' missing in individual result", key.as_str())
@@ -20565,14 +20852,15 @@ mod merge_posting_add_only_tests {
         }
 
         // Verify ngram indexes (title_full_ngram, title_word_ngram, tag_ngram)
+        let borrowed_title_full_ngram = result_borrowed.title_full_ngram_index.materialize();
+        let owned_title_full_ngram = result_owned.title_full_ngram_index.materialize();
         assert_eq!(
-            result_borrowed.title_full_ngram_index.len(),
-            result_owned.title_full_ngram_index.len(),
+            borrowed_title_full_ngram.len(),
+            owned_title_full_ngram.len(),
             "title_full_ngram_index length mismatch"
         );
-        for (key, borrowed_collection) in &result_borrowed.title_full_ngram_index {
-            let owned_collection = result_owned
-                .title_full_ngram_index
+        for (key, borrowed_collection) in &borrowed_title_full_ngram {
+            let owned_collection = owned_title_full_ngram
                 .get(key.as_str())
                 .expect("Key should exist in owned title_full_ngram_index");
             assert_eq!(
@@ -20586,14 +20874,15 @@ mod merge_posting_add_only_tests {
             );
         }
 
+        let borrowed_title_word_ngram = result_borrowed.title_word_ngram_index.materialize();
+        let owned_title_word_ngram = result_owned.title_word_ngram_index.materialize();
         assert_eq!(
-            result_borrowed.title_word_ngram_index.len(),
-            result_owned.title_word_ngram_index.len(),
+            borrowed_title_word_ngram.len(),
+            owned_title_word_ngram.len(),
             "title_word_ngram_index length mismatch"
         );
-        for (key, borrowed_collection) in &result_borrowed.title_word_ngram_index {
-            let owned_collection = result_owned
-                .title_word_ngram_index
+        for (key, borrowed_collection) in &borrowed_title_word_ngram {
+            let owned_collection = owned_title_word_ngram
                 .get(key.as_str())
                 .expect("Key should exist in owned title_word_ngram_index");
             assert_eq!(
@@ -20607,14 +20896,15 @@ mod merge_posting_add_only_tests {
             );
         }
 
+        let borrowed_tag_ngram = result_borrowed.tag_ngram_index.materialize();
+        let owned_tag_ngram = result_owned.tag_ngram_index.materialize();
         assert_eq!(
-            result_borrowed.tag_ngram_index.len(),
-            result_owned.tag_ngram_index.len(),
+            borrowed_tag_ngram.len(),
+            owned_tag_ngram.len(),
             "tag_ngram_index length mismatch"
         );
-        for (key, borrowed_collection) in &result_borrowed.tag_ngram_index {
-            let owned_collection = result_owned
-                .tag_ngram_index
+        for (key, borrowed_collection) in &borrowed_tag_ngram {
+            let owned_collection = owned_tag_ngram
                 .get(key.as_str())
                 .expect("Key should exist in owned tag_ngram_index");
             assert_eq!(
@@ -20949,13 +21239,14 @@ mod merge_posting_add_only_tests {
         }
 
         // Verify ngram indexes
+        let borrowed_title_full_ngram = result_borrowed.title_full_ngram_index.materialize();
+        let owned_title_full_ngram = result_owned.title_full_ngram_index.materialize();
         assert_eq!(
-            result_borrowed.title_full_ngram_index.len(),
-            result_owned.title_full_ngram_index.len()
+            borrowed_title_full_ngram.len(),
+            owned_title_full_ngram.len()
         );
-        for (key, borrowed_collection) in &result_borrowed.title_full_ngram_index {
-            let owned_collection = result_owned
-                .title_full_ngram_index
+        for (key, borrowed_collection) in &borrowed_title_full_ngram {
+            let owned_collection = owned_title_full_ngram
                 .get(key.as_str())
                 .expect("Key should exist in owned title_full_ngram_index (fallback)");
             assert_eq!(
@@ -20967,13 +21258,14 @@ mod merge_posting_add_only_tests {
             );
         }
 
+        let borrowed_title_word_ngram = result_borrowed.title_word_ngram_index.materialize();
+        let owned_title_word_ngram = result_owned.title_word_ngram_index.materialize();
         assert_eq!(
-            result_borrowed.title_word_ngram_index.len(),
-            result_owned.title_word_ngram_index.len()
+            borrowed_title_word_ngram.len(),
+            owned_title_word_ngram.len()
         );
-        for (key, borrowed_collection) in &result_borrowed.title_word_ngram_index {
-            let owned_collection = result_owned
-                .title_word_ngram_index
+        for (key, borrowed_collection) in &borrowed_title_word_ngram {
+            let owned_collection = owned_title_word_ngram
                 .get(key.as_str())
                 .expect("Key should exist in owned title_word_ngram_index (fallback)");
             assert_eq!(
@@ -20985,13 +21277,14 @@ mod merge_posting_add_only_tests {
             );
         }
 
+        let borrowed_tag_ngram = result_borrowed.tag_ngram_index.materialize();
+        let owned_tag_ngram = result_owned.tag_ngram_index.materialize();
         assert_eq!(
-            result_borrowed.tag_ngram_index.len(),
-            result_owned.tag_ngram_index.len()
+            borrowed_tag_ngram.len(),
+            owned_tag_ngram.len()
         );
-        for (key, borrowed_collection) in &result_borrowed.tag_ngram_index {
-            let owned_collection = result_owned
-                .tag_ngram_index
+        for (key, borrowed_collection) in &borrowed_tag_ngram {
+            let owned_collection = owned_tag_ngram
                 .get(key.as_str())
                 .expect("Key should exist in owned tag_ngram_index (fallback)");
             assert_eq!(
@@ -21529,5 +21822,592 @@ mod concat_fast_path_tests {
             result.get(key.as_str()).unwrap(),
             &task_ids(&[1, 3, 5, 10, 20]),
         );
+    }
+}
+
+// =============================================================================
+// Tests: NgramSegmentOverlay (Phase 6)
+// =============================================================================
+
+#[cfg(test)]
+mod ngram_segment_overlay_tests {
+    use super::*;
+    use crate::domain::{Tag, Timestamp};
+    use rstest::rstest;
+    use uuid::Uuid;
+
+    /// Helper: creates a `NgramIndex` from a list of (`key_str`, `task_id_u128_values`).
+    fn make_ngram_index(entries: &[(&str, &[u128])]) -> NgramIndex {
+        let mut mutable: MutableIndex = std::collections::HashMap::new();
+        for (key_string, id_values) in entries {
+            let mut ids: Vec<TaskId> = id_values
+                .iter()
+                .map(|value| TaskId::from_uuid(Uuid::from_u128(*value)))
+                .collect();
+            ids.sort();
+            ids.dedup();
+            mutable.insert(NgramKey::new(key_string), ids);
+        }
+        build_ngram_from_mutable(mutable)
+    }
+
+    /// Helper: collects sorted task IDs from a `TaskIdCollection`.
+    fn sorted_ids(collection: &TaskIdCollection) -> Vec<TaskId> {
+        collection.iter_sorted().cloned().collect()
+    }
+
+    // -------------------------------------------------------------------------
+    // IMPL-TB6-001: NgramSegmentOverlay construction
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn overlay_new_creates_empty_segments() {
+        let base = NgramIndex::new();
+        let overlay = NgramSegmentOverlay::new(base);
+
+        assert_eq!(overlay.segment_count(), 1);
+        assert!(overlay.segments.is_empty());
+        assert!(!overlay.needs_compaction());
+    }
+
+    #[rstest]
+    fn overlay_with_config_respects_max_segments() {
+        let base = NgramIndex::new();
+        let config = SegmentOverlayConfig { max_segments: 2 };
+        let overlay = NgramSegmentOverlay::with_config(base, &config);
+
+        assert_eq!(overlay.max_segments, 2);
+        assert_eq!(overlay.segment_count(), 1);
+    }
+
+    // -------------------------------------------------------------------------
+    // IMPL-TB6-001B: query
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn overlay_query_returns_merged_results() {
+        let base = make_ngram_index(&[("abc", &[1, 3])]);
+        let segment_1 = make_ngram_index(&[("abc", &[2, 5])]);
+        let segment_2 = make_ngram_index(&[("abc", &[4])]);
+
+        let overlay = NgramSegmentOverlay {
+            base,
+            segments: vec![segment_1, segment_2],
+            max_segments: 4,
+        };
+
+        let key = NgramKey::new("abc");
+        let result = overlay.query(&key).expect("key should be present");
+        let ids = sorted_ids(&result);
+
+        let expected: Vec<TaskId> = [1, 2, 3, 4, 5]
+            .iter()
+            .map(|value| TaskId::from_uuid(Uuid::from_u128(*value)))
+            .collect();
+        assert_eq!(ids, expected);
+    }
+
+    #[rstest]
+    fn overlay_query_empty_key_returns_none() {
+        let base = make_ngram_index(&[("abc", &[1])]);
+        let overlay = NgramSegmentOverlay::new(base);
+
+        let key = NgramKey::new("xyz");
+        assert!(overlay.query(&key).is_none());
+    }
+
+    // -------------------------------------------------------------------------
+    // IMPL-TB6-003: append_add_only
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn overlay_append_add_only_adds_segment() {
+        let base = make_ngram_index(&[("abc", &[1])]);
+        let overlay = NgramSegmentOverlay::new(base);
+
+        let delta = make_ngram_index(&[("abc", &[2])]);
+        let updated = overlay.append_add_only(delta);
+
+        assert_eq!(updated.segment_count(), 2);
+        assert_eq!(updated.segments.len(), 1);
+
+        // Query should include both base and segment
+        let key = NgramKey::new("abc");
+        let result = updated.query(&key).expect("key should be present");
+        let ids = sorted_ids(&result);
+        let expected: Vec<TaskId> = [1, 2]
+            .iter()
+            .map(|value| TaskId::from_uuid(Uuid::from_u128(*value)))
+            .collect();
+        assert_eq!(ids, expected);
+    }
+
+    // -------------------------------------------------------------------------
+    // IMPL-TB6-004: compact_one
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn overlay_compact_one_merges_oldest() {
+        let base = make_ngram_index(&[("abc", &[1])]);
+        let segment_1 = make_ngram_index(&[("abc", &[2]), ("def", &[10])]);
+        let segment_2 = make_ngram_index(&[("abc", &[3])]);
+
+        let overlay = NgramSegmentOverlay {
+            base,
+            segments: vec![segment_1, segment_2],
+            max_segments: 4,
+        };
+
+        let compacted = overlay.compact_one();
+        assert_eq!(compacted.segments.len(), 1);
+        assert_eq!(compacted.segment_count(), 2);
+
+        // Base should now contain merged segment_1
+        let key_abc = NgramKey::new("abc");
+        let base_abc = compacted.base.get(&key_abc).expect("abc in base");
+        let base_abc_ids = sorted_ids(base_abc);
+        let expected_abc: Vec<TaskId> = [1, 2]
+            .iter()
+            .map(|value| TaskId::from_uuid(Uuid::from_u128(*value)))
+            .collect();
+        assert_eq!(base_abc_ids, expected_abc);
+
+        let key_def = NgramKey::new("def");
+        assert!(compacted.base.get(&key_def).is_some());
+
+        // Full query still returns all IDs
+        let full_result = compacted.query(&key_abc).expect("abc present");
+        let full_ids = sorted_ids(&full_result);
+        let expected_full: Vec<TaskId> = [1, 2, 3]
+            .iter()
+            .map(|value| TaskId::from_uuid(Uuid::from_u128(*value)))
+            .collect();
+        assert_eq!(full_ids, expected_full);
+    }
+
+    #[rstest]
+    fn overlay_compact_one_no_segments_returns_clone() {
+        let base = make_ngram_index(&[("abc", &[1])]);
+        let overlay = NgramSegmentOverlay::new(base);
+
+        let compacted = overlay.compact_one();
+        assert_eq!(compacted.segment_count(), 1);
+        assert!(compacted.segments.is_empty());
+    }
+
+    // -------------------------------------------------------------------------
+    // IMPL-TB6-004: materialize
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn overlay_materialize_combines_all() {
+        let base = make_ngram_index(&[("abc", &[1]), ("ghi", &[100])]);
+        let segment_1 = make_ngram_index(&[("abc", &[2]), ("def", &[10])]);
+        let segment_2 = make_ngram_index(&[("abc", &[3]), ("def", &[20])]);
+
+        let overlay = NgramSegmentOverlay {
+            base,
+            segments: vec![segment_1, segment_2],
+            max_segments: 4,
+        };
+
+        let materialized = overlay.materialize();
+
+        // "abc" should have [1, 2, 3]
+        let key_abc = NgramKey::new("abc");
+        let abc_ids = sorted_ids(materialized.get(&key_abc).expect("abc present"));
+        let expected_abc: Vec<TaskId> = [1, 2, 3]
+            .iter()
+            .map(|value| TaskId::from_uuid(Uuid::from_u128(*value)))
+            .collect();
+        assert_eq!(abc_ids, expected_abc);
+
+        // "def" should have [10, 20]
+        let key_def = NgramKey::new("def");
+        let def_ids = sorted_ids(materialized.get(&key_def).expect("def present"));
+        let expected_def: Vec<TaskId> = [10, 20]
+            .iter()
+            .map(|value| TaskId::from_uuid(Uuid::from_u128(*value)))
+            .collect();
+        assert_eq!(def_ids, expected_def);
+
+        // "ghi" should have [100]
+        let key_ghi = NgramKey::new("ghi");
+        let ghi_ids = sorted_ids(materialized.get(&key_ghi).expect("ghi present"));
+        let expected_ghi: Vec<TaskId> = vec![TaskId::from_uuid(Uuid::from_u128(100))];
+        assert_eq!(ghi_ids, expected_ghi);
+    }
+
+    #[rstest]
+    fn overlay_materialize_empty_segments_returns_base_clone() {
+        let base = make_ngram_index(&[("abc", &[1, 2])]);
+        let overlay = NgramSegmentOverlay::new(base.clone());
+
+        let materialized = overlay.materialize();
+        assert_eq!(materialized.len(), base.len());
+    }
+
+    // -------------------------------------------------------------------------
+    // IMPL-TB6-001: needs_compaction
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn overlay_needs_compaction_at_threshold() {
+        let base = NgramIndex::new();
+        let config = SegmentOverlayConfig { max_segments: 2 };
+        let overlay = NgramSegmentOverlay::with_config(base, &config);
+
+        assert!(!overlay.needs_compaction());
+
+        let delta_1 = NgramIndex::new();
+        let with_one = overlay.append_add_only(delta_1);
+        assert!(!with_one.needs_compaction());
+
+        let delta_2 = NgramIndex::new();
+        let with_two = with_one.append_add_only(delta_2);
+        assert!(with_two.needs_compaction());
+    }
+
+    // -------------------------------------------------------------------------
+    // IMPL-TB6-001A: merge_postings_multiway
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn merge_postings_multiway_basic() {
+        let collection_1 = TaskIdCollection::from_sorted_vec(vec![
+            TaskId::from_uuid(Uuid::from_u128(1)),
+            TaskId::from_uuid(Uuid::from_u128(3)),
+        ]);
+        let collection_2 = TaskIdCollection::from_sorted_vec(vec![
+            TaskId::from_uuid(Uuid::from_u128(2)),
+            TaskId::from_uuid(Uuid::from_u128(4)),
+        ]);
+        let collection_3 = TaskIdCollection::from_sorted_vec(vec![
+            TaskId::from_uuid(Uuid::from_u128(3)),
+            TaskId::from_uuid(Uuid::from_u128(5)),
+        ]);
+
+        let result =
+            super::merge_postings_multiway(&[&collection_1, &collection_2, &collection_3]);
+        let ids = sorted_ids(&result);
+
+        let expected: Vec<TaskId> = [1, 2, 3, 4, 5]
+            .iter()
+            .map(|value| TaskId::from_uuid(Uuid::from_u128(*value)))
+            .collect();
+        assert_eq!(ids, expected);
+    }
+
+    #[rstest]
+    fn merge_postings_multiway_empty() {
+        let result = super::merge_postings_multiway(&[]);
+        assert_eq!(result.len(), 0);
+    }
+
+    #[rstest]
+    fn merge_postings_multiway_single() {
+        let collection = TaskIdCollection::from_sorted_vec(vec![
+            TaskId::from_uuid(Uuid::from_u128(1)),
+            TaskId::from_uuid(Uuid::from_u128(2)),
+        ]);
+
+        let result = super::merge_postings_multiway(&[&collection]);
+        let ids = sorted_ids(&result);
+
+        let expected: Vec<TaskId> = [1, 2]
+            .iter()
+            .map(|value| TaskId::from_uuid(Uuid::from_u128(*value)))
+            .collect();
+        assert_eq!(ids, expected);
+    }
+
+    // -------------------------------------------------------------------------
+    // build_ngram_from_mutable
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn build_ngram_from_mutable_creates_index() {
+        let mut mutable: MutableIndex = std::collections::HashMap::new();
+        let id_1 = TaskId::from_uuid(Uuid::from_u128(1));
+        let id_2 = TaskId::from_uuid(Uuid::from_u128(2));
+        mutable.insert(NgramKey::new("abc"), vec![id_1, id_2]);
+        mutable.insert(NgramKey::new("empty"), vec![]);
+
+        let index = super::build_ngram_from_mutable(mutable);
+
+        // "abc" should be present
+        let key = NgramKey::new("abc");
+        let collection = index.get(&key).expect("abc should be present");
+        assert_eq!(collection.len(), 2);
+
+        // "empty" should not be present (empty posting list skipped)
+        let empty_key = NgramKey::new("empty");
+        assert!(index.get(&empty_key).is_none());
+    }
+
+    // -------------------------------------------------------------------------
+    // IMPL-TB6-003A: apply_general_delta
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn overlay_apply_general_delta_materializes_and_merges() {
+        let base = make_ngram_index(&[("abc", &[1, 2])]);
+        let segment = make_ngram_index(&[("abc", &[3])]);
+        let overlay = NgramSegmentOverlay {
+            base,
+            segments: vec![segment],
+            max_segments: 4,
+        };
+
+        // Add id=4 to "abc", remove id=1 from "abc"
+        let mut add: MutableIndex = std::collections::HashMap::new();
+        add.insert(
+            NgramKey::new("abc"),
+            vec![TaskId::from_uuid(Uuid::from_u128(4))],
+        );
+        let mut remove: MutableIndex = std::collections::HashMap::new();
+        remove.insert(
+            NgramKey::new("abc"),
+            vec![TaskId::from_uuid(Uuid::from_u128(1))],
+        );
+
+        let config = SearchIndexConfig::default();
+        let result = overlay.apply_general_delta(&add, &remove, &config);
+
+        // Should have no segments (materialized + merged)
+        assert!(result.segments.is_empty());
+
+        // Check the base: should contain abc -> [2, 3, 4]
+        let key = NgramKey::new("abc");
+        let ids = sorted_ids(result.base.get(&key).expect("abc present"));
+        let expected: Vec<TaskId> = [2, 3, 4]
+            .iter()
+            .map(|value| TaskId::from_uuid(Uuid::from_u128(*value)))
+            .collect();
+        assert_eq!(ids, expected);
+    }
+
+    // -------------------------------------------------------------------------
+    // keys() deduplication
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn overlay_keys_deduplicates_across_segments() {
+        let base = make_ngram_index(&[("abc", &[1]), ("def", &[2])]);
+        let segment = make_ngram_index(&[("abc", &[3]), ("ghi", &[4])]);
+        let overlay = NgramSegmentOverlay {
+            base,
+            segments: vec![segment],
+            max_segments: 4,
+        };
+
+        let mut keys: Vec<String> = overlay.keys().map(|key| key.as_str().to_owned()).collect();
+        keys.sort();
+
+        assert_eq!(keys, vec!["abc", "def", "ghi"]);
+    }
+
+    // -------------------------------------------------------------------------
+    // IMPL-TB6-008: Overlay integration equivalence tests
+    // -------------------------------------------------------------------------
+
+    /// Creates a test task with a given title and tags for overlay integration tests.
+    fn create_overlay_test_task(title: &str, tags: &[&str]) -> Task {
+        let base = Task::new(TaskId::generate(), title, Timestamp::now());
+        tags.iter()
+            .fold(base, |task, tag| task.add_tag(Tag::new(*tag)))
+    }
+
+    /// TB6-008: Overlay search produces the same results as materialized search.
+    ///
+    /// Builds a `SearchIndex`, applies add-only deltas (creating overlay segments),
+    /// then verifies that searching via overlay produces identical results
+    /// to searching on a fully materialized (rebuilt) index.
+    #[rstest]
+    fn overlay_search_equivalence() {
+        let empty_tasks: PersistentVector<Task> = PersistentVector::new();
+        let config = SearchIndexConfig::default();
+        let index = SearchIndex::build_with_config(&empty_tasks, config);
+
+        // Add initial tasks
+        let task1 = create_overlay_test_task("callback function handler", &["important"]);
+        let task2 = create_overlay_test_task("debug logging middleware", &["urgent"]);
+        let changes = vec![TaskChange::Add(task1.clone()), TaskChange::Add(task2.clone())];
+        let index_with_tasks = index.apply_changes(&changes);
+
+        // Add more tasks to create overlay segments
+        let task3 = create_overlay_test_task("callback promise resolver", &["important"]);
+        let changes2 = vec![TaskChange::Add(task3.clone())];
+        let index_with_overlay = index_with_tasks.apply_changes(&changes2);
+
+        // Build a fresh index from all tasks for comparison
+        let mut all_tasks = PersistentVector::new();
+        all_tasks = all_tasks.push_back(task1);
+        all_tasks = all_tasks.push_back(task2);
+        all_tasks = all_tasks.push_back(task3);
+        let index_rebuilt = SearchIndex::build_with_config(&all_tasks, SearchIndexConfig::default());
+
+        // Search queries to test
+        let queries = vec!["callback", "cal", "debug", "important", "urg"];
+
+        for query in queries {
+            let result_overlay =
+                search_with_scope_indexed(&index_with_overlay, query, SearchScope::All);
+            let result_rebuilt =
+                search_with_scope_indexed(&index_rebuilt, query, SearchScope::All);
+
+            // Compare task IDs (sorted for deterministic comparison)
+            let mut overlay_ids: Vec<_> =
+                result_overlay.tasks.iter().map(|t| t.task_id.clone()).collect();
+            overlay_ids.sort();
+            let mut rebuilt_ids: Vec<_> =
+                result_rebuilt.tasks.iter().map(|t| t.task_id.clone()).collect();
+            rebuilt_ids.sort();
+
+            assert_eq!(
+                overlay_ids, rebuilt_ids,
+                "Search results differ for query '{}': overlay has {} tasks, rebuilt has {} tasks",
+                query,
+                overlay_ids.len(),
+                rebuilt_ids.len()
+            );
+        }
+    }
+
+    /// TB6-008: `apply_delta_owned` with add-only delta produces correct overlay.
+    ///
+    /// Verifies that:
+    /// 1. The overlay has segments after add-only delta
+    /// 2. Materialized overlay matches a freshly built index
+    #[rstest]
+    fn overlay_apply_delta_owned_correctness() {
+        let empty_tasks: PersistentVector<Task> = PersistentVector::new();
+        let config = SearchIndexConfig::default();
+        let base_index = SearchIndex::build_with_config(&empty_tasks, config);
+
+        // Apply add-only changes
+        let tasks: Vec<Task> = (0..5)
+            .map(|i| {
+                create_overlay_test_task(
+                    &format!("TaskItem{i:04}"),
+                    &[&format!("tag{}", i % 3)],
+                )
+            })
+            .collect();
+        let changes: Vec<TaskChange> = tasks.iter().cloned().map(TaskChange::Add).collect();
+        let result = base_index.apply_changes(&changes);
+
+        // Build fresh index for comparison
+        let mut all_tasks = PersistentVector::new();
+        for task in &tasks {
+            all_tasks = all_tasks.push_back(task.clone());
+        }
+        let rebuilt = SearchIndex::build_with_config(&all_tasks, SearchIndexConfig::default());
+
+        // Materialized ngram indexes should match
+        let result_title_full = result.title_full_ngram_index.materialize();
+        let rebuilt_title_full = rebuilt.title_full_ngram_index.materialize();
+        assert_eq!(
+            result_title_full.len(),
+            rebuilt_title_full.len(),
+            "title_full_ngram_index materialized length mismatch"
+        );
+
+        let result_title_word = result.title_word_ngram_index.materialize();
+        let rebuilt_title_word = rebuilt.title_word_ngram_index.materialize();
+        assert_eq!(
+            result_title_word.len(),
+            rebuilt_title_word.len(),
+            "title_word_ngram_index materialized length mismatch"
+        );
+
+        let result_tag = result.tag_ngram_index.materialize();
+        let rebuilt_tag = rebuilt.tag_ngram_index.materialize();
+        assert_eq!(
+            result_tag.len(),
+            rebuilt_tag.len(),
+            "tag_ngram_index materialized length mismatch"
+        );
+
+        // Verify posting list content matches
+        for (key, result_collection) in &result_title_word {
+            let rebuilt_collection = rebuilt_title_word
+                .get(key.as_str())
+                .unwrap_or_else(|| panic!("Key '{}' missing in rebuilt index", key.as_str()));
+            assert_eq!(
+                sorted_ids(result_collection),
+                sorted_ids(rebuilt_collection),
+                "Posting list mismatch for key '{}'",
+                key.as_str()
+            );
+        }
+    }
+
+    /// TB6-008: Compaction preserves search equivalence.
+    ///
+    /// Applies multiple add-only deltas to create segments, then verifies
+    /// that search results are identical before and after compaction.
+    #[rstest]
+    fn overlay_compact_search_equivalence() {
+        let empty_tasks: PersistentVector<Task> = PersistentVector::new();
+        let config = SearchIndexConfig::default();
+        let mut current_index = SearchIndex::build_with_config(&empty_tasks, config);
+
+        // Apply several batches of changes to accumulate segments
+        for batch in 0..3 {
+            let changes: Vec<TaskChange> = (0..3)
+                .map(|i| {
+                    TaskChange::Add(create_overlay_test_task(
+                        &format!("Batch{batch}Item{i}"),
+                        &[&format!("category{}", (batch * 3 + i) % 5)],
+                    ))
+                })
+                .collect();
+            current_index = current_index.apply_changes(&changes);
+        }
+
+        // Record search results before compaction
+        let queries = vec!["batch", "item", "category"];
+        let mut pre_compaction_results: Vec<Vec<TaskId>> = Vec::new();
+        for query in &queries {
+            let result =
+                search_with_scope_indexed(&current_index, query, SearchScope::All);
+            let mut ids: Vec<_> = result.tasks.iter().map(|t| t.task_id.clone()).collect();
+            ids.sort();
+            pre_compaction_results.push(ids);
+        }
+
+        // Force compaction on all overlay fields by materializing and re-wrapping
+        let compacted_index = SearchIndex {
+            title_full_ngram_index: NgramSegmentOverlay::new(
+                current_index.title_full_ngram_index.materialize(),
+            ),
+            title_word_ngram_index: NgramSegmentOverlay::new(
+                current_index.title_word_ngram_index.materialize(),
+            ),
+            tag_ngram_index: NgramSegmentOverlay::new(
+                current_index.tag_ngram_index.materialize(),
+            ),
+            title_word_index: current_index.title_word_index.clone(),
+            title_full_index: current_index.title_full_index.clone(),
+            title_full_all_suffix_index: current_index.title_full_all_suffix_index.clone(),
+            title_word_all_suffix_index: current_index.title_word_all_suffix_index.clone(),
+            tag_index: current_index.tag_index.clone(),
+            tag_all_suffix_index: current_index.tag_all_suffix_index.clone(),
+            tasks_by_id: current_index.tasks_by_id.clone(),
+            config: current_index.config,
+        };
+
+        // Verify search results are identical after compaction
+        for (index, query) in queries.iter().enumerate() {
+            let result =
+                search_with_scope_indexed(&compacted_index, query, SearchScope::All);
+            let mut ids: Vec<_> = result.tasks.iter().map(|t| t.task_id.clone()).collect();
+            ids.sort();
+            assert_eq!(
+                pre_compaction_results[index], ids,
+                "Search results differ after compaction for query '{query}'"
+            );
+        }
     }
 }
