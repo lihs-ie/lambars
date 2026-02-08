@@ -1503,12 +1503,11 @@ impl NgramSegmentOverlay {
                 TaskIdCollection::from_sorted_vec(std::mem::take(scratch))
             }
             (Some(left_slice), None) => {
-                let right_vec: Vec<TaskId> =
-                    segment_collection.iter_sorted().cloned().collect();
+                let right_vec = SearchIndex::to_sorted_vec(segment_collection);
                 Self::merge_slices_into(left_slice, &right_vec, scratch)
             }
             (None, Some(right_slice)) => {
-                let left_vec: Vec<TaskId> = existing.iter_sorted().cloned().collect();
+                let left_vec = SearchIndex::to_sorted_vec(existing);
                 Self::merge_slices_into(&left_vec, right_slice, scratch)
             }
             (None, None) => existing.merge(segment_collection),
@@ -2384,12 +2383,12 @@ fn merge_sorted_posting_lists(
 
     if can_concat {
         let mut result_vec = Vec::with_capacity(existing.len() + new_entries.len());
-        result_vec.extend(existing.iter_sorted().cloned());
-        result_vec.extend(new_entries.iter_sorted().cloned());
+        SearchIndex::extend_sorted_into(existing, &mut result_vec);
+        SearchIndex::extend_sorted_into(new_entries, &mut result_vec);
         TaskIdCollection::from_sorted_vec(result_vec)
     } else if new_entries.len().saturating_mul(8) < existing.len() {
-        let existing_vec: Vec<TaskId> = existing.iter_sorted().cloned().collect();
-        let add_vec: Vec<TaskId> = new_entries.iter_sorted().cloned().collect();
+        let existing_vec = SearchIndex::to_sorted_vec(existing);
+        let add_vec = SearchIndex::to_sorted_vec(new_entries);
         let mut output = Vec::with_capacity(existing.len() + new_entries.len());
         SearchIndex::merge_posting_add_only_galloping(&existing_vec, &add_vec, &mut output);
         TaskIdCollection::from_sorted_vec(output)
@@ -4391,6 +4390,23 @@ pub struct SearchIndex {
 }
 
 impl SearchIndex {
+    #[inline]
+    fn extend_sorted_into(collection: &TaskIdCollection, output: &mut Vec<TaskId>) {
+        if let Some(slice) = collection.as_sorted_slice() {
+            output.extend_from_slice(slice);
+        } else {
+            output.extend(collection.iter_sorted().cloned());
+        }
+    }
+
+    #[inline]
+    fn to_sorted_vec(collection: &TaskIdCollection) -> Vec<TaskId> {
+        collection.as_sorted_slice().map_or_else(
+            || collection.iter_sorted().cloned().collect(),
+            <[TaskId]>::to_vec,
+        )
+    }
+
     /// Builds a search index from a collection of tasks using default configuration.
     ///
     /// This is a convenience method that uses `SearchIndexConfig::default()`,
@@ -4779,8 +4795,9 @@ impl SearchIndex {
     ///
     /// # Complexity
     ///
-    /// - Time: O(q * (log N + k log k)) where q is query n-gram count, k is posting list size
-    /// - `iter_sorted()` sorts each posting list in O(k log k) for merge intersection
+    /// - Time: O(q * (log N + k)) where q is query n-gram count, k is posting list size
+    /// - Large state (len > 8): `as_sorted_slice` + `to_vec` in O(k) (memcpy)
+    /// - Small state (len <= 8): `iter_sorted` with sorting cost O(k log k)
     /// - Intersection is O(k) using merge intersection on sorted vectors
     ///
     /// # Soundness
@@ -4812,7 +4829,7 @@ impl SearchIndex {
             let ngram_key = NgramKey::new(ngram);
             match index.query(&ngram_key) {
                 Some(task_ids) => {
-                    let current_vec: Vec<TaskId> = task_ids.iter_sorted().cloned().collect();
+                    let current_vec = Self::to_sorted_vec(&task_ids);
                     candidate_vec = Some(match candidate_vec {
                         Some(existing) => intersect_sorted_vecs(&existing, &current_vec),
                         None => current_vec,
@@ -6747,7 +6764,7 @@ impl SearchIndex {
 
                     if can_concat {
                         let mut result_vec = Vec::with_capacity(collection.len() + add_list.len());
-                        result_vec.extend(collection.iter_sorted().cloned());
+                        Self::extend_sorted_into(collection, &mut result_vec);
                         result_vec.extend(add_list.iter().cloned());
                         transient
                             .insert(key.clone(), TaskIdCollection::from_sorted_vec(result_vec));
@@ -6811,7 +6828,7 @@ impl SearchIndex {
 
                     if can_concat {
                         let mut result_vec = Vec::with_capacity(collection.len() + add_list.len());
-                        result_vec.extend(collection.iter_sorted().cloned());
+                        Self::extend_sorted_into(collection, &mut result_vec);
                         result_vec.extend(add_list);
                         transient.insert(key, TaskIdCollection::from_sorted_vec(result_vec));
                     } else if let Some(existing_slice) = collection.as_sorted_slice() {
@@ -6886,7 +6903,7 @@ impl SearchIndex {
 
                     if can_concat {
                         let mut result_vec = Vec::with_capacity(collection.len() + add_list.len());
-                        result_vec.extend(collection.iter_sorted().cloned());
+                        Self::extend_sorted_into(collection, &mut result_vec);
                         result_vec.extend(add_list.iter().cloned());
                         result.insert(key.clone(), TaskIdCollection::from_sorted_vec(result_vec));
                     } else {
@@ -6938,7 +6955,7 @@ impl SearchIndex {
 
                     if can_concat {
                         let mut result_vec = Vec::with_capacity(collection.len() + add_list.len());
-                        result_vec.extend(collection.iter_sorted().cloned());
+                        Self::extend_sorted_into(collection, &mut result_vec);
                         result_vec.extend(add_list.iter().cloned());
                         entries_to_insert
                             .push((key.clone(), TaskIdCollection::from_sorted_vec(result_vec)));
@@ -7040,7 +7057,7 @@ impl SearchIndex {
 
                     if can_concat {
                         let mut result_vec = Vec::with_capacity(collection.len() + add_list.len());
-                        result_vec.extend(collection.iter_sorted().cloned());
+                        Self::extend_sorted_into(collection, &mut result_vec);
                         result_vec.extend(add_list);
                         result.insert(key, TaskIdCollection::from_sorted_vec(result_vec));
                     } else {
@@ -7089,7 +7106,7 @@ impl SearchIndex {
 
                     if can_concat {
                         let mut result_vec = Vec::with_capacity(collection.len() + add_list.len());
-                        result_vec.extend(collection.iter_sorted().cloned());
+                        Self::extend_sorted_into(collection, &mut result_vec);
                         result_vec.extend(add_list);
                         entries_to_insert
                             .push((key, TaskIdCollection::from_sorted_vec(result_vec)));
