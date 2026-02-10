@@ -191,6 +191,11 @@ function request()
 
     local update_type = update_types[(counter % #update_types) + 1]
     local body = generate_update_body(update_type, task_state.version, counter)
+
+    -- Contract validation: PUT payload must not contain status field (REQ-TU2-001)
+    -- If violated, trigger assertion failure to stop benchmark
+    assert(not body:find('"status"%s*:'), "[tasks_update] FATAL: PUT payload contains status field - contract violation detected")
+
     return wrk and wrk.format and wrk.format("PUT", "/tasks/" .. task_state.id, {["Content-Type"] = "application/json"}, body) or ""
 end
 

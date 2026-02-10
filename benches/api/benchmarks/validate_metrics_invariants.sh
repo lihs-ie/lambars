@@ -119,8 +119,19 @@ validate_meta_json() {
         fi
     fi
 
-    scenario_name=$(basename "$(dirname "${meta_file}")")
-    if [[ "${scenario_name}" == *"tasks_update"* ]]; then
+    # Extract scenario name from meta_file path
+    # Handles both ".../scenario_name/meta.json" and ".../scenario_name/benchmark/meta/scenario_name.json"
+    local scenario_name
+    scenario_name=$(basename "${meta_file}" .json)
+    if [[ "${scenario_name}" == "meta" ]]; then
+        # For ".../scenario_name/meta.json" format
+        scenario_name=$(basename "$(dirname "${meta_file}")")
+    fi
+
+    # Invariant 4: PUT /tasks/{id} contract validation (REQ-TU2-003)
+    # Only applies to PUT scenarios (tasks_update, tasks_update_steady, tasks_update_conflict)
+    # Excludes PATCH scenarios (tasks_update_status)
+    if [[ "${scenario_name}" == "tasks_update" || "${scenario_name}" == "tasks_update_steady" || "${scenario_name}" == "tasks_update_conflict" ]]; then
         status_400=$(jq -r '.results.http_status."400" // 0' "${meta_file}" 2>/dev/null)
         if (( 10#${status_400} > 0 )); then
             violations_for_file+=("PUT contract violation: status field included in payload (http_status.400=${status_400}, expected 0)")

@@ -200,7 +200,10 @@ if [[ -n "${CONFLICT_RATE}" ]]; then
 fi
 echo ""
 
-if [[ "${SCENARIO}" == tasks_update_* ]]; then
+# GATE-001: 400 fail-fast for PUT /tasks/{id} scenarios (REQ-TU2-003)
+# Only applies to PUT scenarios (tasks_update, tasks_update_steady, tasks_update_conflict)
+# Excludes PATCH scenarios (tasks_update_status)
+if [[ "${SCENARIO}" == "tasks_update" || "${SCENARIO}" == "tasks_update_steady" || "${SCENARIO}" == "tasks_update_conflict" ]]; then
     STATUS_400=$(jq -r '.results.http_status."400" // 0' "${META_FILE}")
     STATUS_409=$(jq -r '.results.http_status."409" // 0' "${META_FILE}")
 

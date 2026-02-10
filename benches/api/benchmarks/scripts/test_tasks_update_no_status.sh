@@ -28,8 +28,11 @@ fi
 
 # Test 3: Check that full update does not include status field
 echo "Test 3: full update should not include status field"
-if grep -A 10 'elseif update_type == "full"' "${LUA_SCRIPT}" | grep -q 'status ='; then
-    echo "FAIL: full update includes status field"
+# Implementation uses "else" branch with payload_table for full update
+# Extract only the table literal (between '= {' and '}'), excluding assert lines
+# Check for 'status =' assignment within the table definition
+if sed -n '/local payload_table = {/,/^        }/p' "${LUA_SCRIPT}" | grep -E '^\s+status\s*=' | grep -v 'payload_table.status'; then
+    echo "FAIL: full update includes status field in table definition"
     exit 1
 else
     echo "PASS: full update does not include status field"
