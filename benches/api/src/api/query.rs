@@ -1216,7 +1216,8 @@ fn merge_segment_hit_miss_counts() -> (usize, usize) {
 /// Budget for controlling compaction aggressiveness in [`NgramSegmentOverlay`].
 ///
 /// Below `soft_max_segments_per_compact`, no compaction runs.
-/// At or above `hard_max_segments`, a full compaction is forced.
+/// At or above `hard_max_segments`, compaction repeats until segment count
+/// drops below `hard_max_segments` (bounded loop, not necessarily full).
 /// Between the two thresholds, a single `compact_one` is executed.
 #[derive(Debug, Clone, Copy)]
 pub struct CompactionBudget {
@@ -1272,10 +1273,15 @@ impl MergeArena {
         &mut self.scratch
     }
 
-    /// Replaces the scratch buffer if its capacity exceeds the threshold.
+    /// Shrinks the scratch buffer when capacity exceeds twice the threshold.
+    ///
+    /// Uses a hysteresis band to avoid allocation thrashing: the buffer is
+    /// only shrunk when capacity exceeds `2 * shrink_threshold`, and it is
+    /// shrunk back to `shrink_threshold` using `Vec::shrink_to`.
     pub fn maybe_shrink(&mut self) {
-        if self.scratch.capacity() > self.shrink_threshold {
-            self.scratch = Vec::with_capacity(self.shrink_threshold);
+        let hysteresis_limit = self.shrink_threshold.saturating_mul(2);
+        if self.scratch.capacity() > hysteresis_limit {
+            self.scratch.shrink_to(self.shrink_threshold);
         }
     }
 }
@@ -1412,6 +1418,37 @@ impl NgramSegmentOverlay {
         }
     }
 
+    /// Like [`append_and_compact`] but reuses scratch from the [`MergeArena`].
+    fn append_and_compact_with_arena(
+        &self,
+        delta_ngram: NgramIndex,
+        arena: &mut MergeArena,
+    ) -> Self {
+        if delta_ngram.is_empty() {
+            return self.clone();
+        }
+        let overlay = self.append_add_only(delta_ngram);
+
+        let segment_count = overlay.segments.len();
+        let budget = &overlay.budget;
+
+        if segment_count >= budget.hard_max_segments {
+            let mut result = overlay;
+            while result.segments.len() >= result.budget.hard_max_segments
+                && !result.segments.is_empty()
+            {
+                result = result.compact_one_with_arena(arena);
+            }
+            result
+        } else if segment_count >= budget.soft_max_segments_per_compact
+            || overlay.needs_compaction()
+        {
+            overlay.compact_one_with_arena(arena)
+        } else {
+            overlay
+        }
+    }
+
     /// Applies a delta with removes (materializes all segments first).
     fn apply_general_delta(
         &self,
@@ -1448,7 +1485,6 @@ impl NgramSegmentOverlay {
     }
 
     /// Like [`compact_one`] but reuses scratch from the [`MergeArena`].
-    #[allow(dead_code)]
     fn compact_one_with_arena(&self, arena: &mut MergeArena) -> Self {
         if self.segments.is_empty() {
             return self.clone();
@@ -6169,13 +6205,19 @@ impl SearchIndex {
             ),
             title_full_ngram_index: self
                 .title_full_ngram_index
-                .append_and_compact(build_ngram_from_mutable(title_full_ngram_add)),
+                .append_and_compact_with_arena(
+                    build_ngram_from_mutable(title_full_ngram_add),
+                    arena,
+                ),
             title_word_ngram_index: self
                 .title_word_ngram_index
-                .append_and_compact(build_ngram_from_mutable(title_word_ngram_add)),
+                .append_and_compact_with_arena(
+                    build_ngram_from_mutable(title_word_ngram_add),
+                    arena,
+                ),
             tag_ngram_index: self
                 .tag_ngram_index
-                .append_and_compact(build_ngram_from_mutable(tag_ngram_add)),
+                .append_and_compact_with_arena(build_ngram_from_mutable(tag_ngram_add), arena),
             title_full_all_suffix_index: Self::merge_index_delta_add_only_owned_with_arena(
                 &self.title_full_all_suffix_index,
                 title_full_all_suffix_add,
@@ -23822,11 +23864,16 @@ mod ngram_segment_overlay_tests {
         assert!(arena.scratch().is_empty());
         assert_eq!(arena.shrink_threshold, 16_384);
 
-        // Use scratch buffer to grow it beyond the shrink threshold
+        // Use scratch buffer to grow it beyond the hysteresis limit (2 * threshold = 32_768).
+        // We need capacity > 32_768 to trigger shrink.
         let scratch = arena.scratch();
-        scratch.extend((0..20_000).map(|i| TaskId::from_uuid(Uuid::from_u128(i))));
+        scratch.extend((0..40_000).map(|i| TaskId::from_uuid(Uuid::from_u128(i))));
         let capacity_before_shrink = arena.scratch.capacity();
-        assert!(capacity_before_shrink >= 20_000);
+        assert!(capacity_before_shrink >= 40_000);
+
+        // Simulate the real workflow: scratch() clears len before maybe_shrink
+        // (writer_loop calls apply_coalesced_changes which uses scratch(), then maybe_shrink)
+        arena.scratch.clear();
 
         // maybe_shrink should reduce capacity (allocator may round up)
         arena.maybe_shrink();

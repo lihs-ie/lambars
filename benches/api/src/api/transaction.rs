@@ -36,7 +36,7 @@ use super::dto::{
     TaskResponse, TaskStatusDto, UpdateTaskRequest, validate_description, validate_tags,
     validate_title,
 };
-use super::error::{ApiErrorResponse, ValidationError};
+use super::error::{ApiError, ApiErrorResponse, ValidationError};
 use super::handlers::AppState;
 use super::query::TaskChange;
 use crate::domain::{
@@ -412,6 +412,9 @@ const RETRYABLE_CONFLICT_CODE: &str = "VERSION_CONFLICT_RETRYABLE";
 /// Error code for stale-version conflicts (handler-level version mismatch).
 const STALE_VERSION_CONFLICT_CODE: &str = "VERSION_CONFLICT";
 
+/// Error code for non-commutative rebase conflicts (concurrent field-level conflict).
+const NON_COMMUTATIVE_CONFLICT_CODE: &str = "NON_COMMUTATIVE_CONFLICT";
+
 // =============================================================================
 // Conflict Classification
 // =============================================================================
@@ -477,22 +480,45 @@ impl std::fmt::Display for RebaseError {
 /// For each field the client wants to update, if the field was concurrently
 /// changed to a different value, returns [`RebaseError::NonCommutativeConflict`].
 /// Otherwise, returns the request with version rebased to `latest.version`.
-#[must_use]
+///
+/// Request values are normalized (trimmed, empty-to-None) before comparison
+/// because DB-stored values have already been through validation normalization.
+///
+/// # Errors
+///
+/// Returns [`RebaseError::NonCommutativeConflict`] when both the original request
+/// and a concurrent update modified the same field to different values.
+///
+/// # Panics
+///
+/// Panics if `request.priority` is `Some` but the contained value cannot be
+/// converted to [`Priority`]. This should not occur with validated inputs.
 pub fn rebase_update_request(
     original_base: &Task,
     latest: &Task,
     request: &UpdateTaskRequest,
 ) -> Result<UpdateTaskRequest, RebaseError> {
-    if request.title.is_some()
+    // Normalize title: DB values are trimmed, so trim request value before comparison.
+    let normalized_title = request.title.as_ref().map(|title| title.trim().to_string());
+    if normalized_title.is_some()
         && original_base.title != latest.title
-        && request.title.as_deref() != Some(latest.title.as_str())
+        && normalized_title.as_deref() != Some(latest.title.as_str())
     {
         return Err(RebaseError::NonCommutativeConflict { field: "title" });
     }
 
+    // Normalize description: DB values are trimmed and empty strings become None.
+    let normalized_description = request.description.as_ref().and_then(|description| {
+        let trimmed = description.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    });
     if request.description.is_some()
         && original_base.description != latest.description
-        && request.description != latest.description
+        && normalized_description != latest.description
     {
         return Err(RebaseError::NonCommutativeConflict {
             field: "description",
@@ -757,6 +783,19 @@ pub const fn can_merge_without_conflict(request: &UpdateTaskRequest) -> bool {
 /// Re-reads the latest task, rebases the update request via 3-way merge,
 /// and retries up to [`READ_REPAIR_MAX_RETRIES`] times. Returns 409 if
 /// a non-commutative field conflict is detected during rebase.
+///
+/// This function is called after the caller has already determined that a
+/// stale-version conflict occurred. It skips the initial retry attempt and
+/// enters the rebase loop directly.
+///
+/// # Limitations
+///
+/// `original_base` is the task state at the time this function is invoked,
+/// not the exact state at `request.version`. This is an intentional
+/// approximation because the benchmark application does not maintain an
+/// event store for point-in-time reconstruction. The 3-way merge detects
+/// field-level conflicts between the request and concurrent updates, which
+/// is sufficient for the stale-version absorption use case.
 #[allow(clippy::future_not_send)]
 pub(crate) async fn update_task_with_read_repair(
     state: &AppState,
@@ -770,21 +809,9 @@ pub(crate) async fn update_task_with_read_repair(
         .map_err(ApiErrorResponse::from)?
         .ok_or_else(|| ApiErrorResponse::not_found(format!("Task {task_id} not found")))?;
 
-    let first_result = retry_on_conflict(
-        || update_task_inner(state.clone(), task_id.clone(), request.clone()),
-        DEFAULT_MAX_RETRIES,
-        DEFAULT_BASE_DELAY_MS,
-        |_| {},
-    )
-    .await;
-
-    let first_error = match first_result {
-        Ok(success) => return Ok(success),
-        Err(error) if !is_stale_version_conflict(&error) => return Err(error),
-        Err(error) => error,
-    };
-
-    let mut last_error = first_error;
+    // The caller already confirmed a stale-version conflict, so we enter
+    // the rebase loop directly without a redundant initial retry.
+    let mut last_error = ApiErrorResponse::conflict("stale-version conflict detected by caller");
 
     for repair_attempt in 0..READ_REPAIR_MAX_RETRIES {
         let latest = state
@@ -797,7 +824,13 @@ pub(crate) async fn update_task_with_read_repair(
         let rebased_request = match rebase_update_request(&original_base, &latest, request) {
             Ok(rebased) => rebased,
             Err(rebase_error) => {
-                return Err(ApiErrorResponse::conflict(rebase_error.to_string()));
+                return Err(ApiErrorResponse::new(
+                    StatusCode::CONFLICT,
+                    ApiError::new(
+                        NON_COMMUTATIVE_CONFLICT_CODE,
+                        rebase_error.to_string(),
+                    ),
+                ));
             }
         };
 
@@ -3230,7 +3263,7 @@ mod tests {
         assert!(!is_stale_version_conflict(&error));
     }
 
-    /// is_retryable_conflict should be a wrapper around classify_conflict_kind
+    /// `is_retryable_conflict` should be a wrapper around `classify_conflict_kind`
     #[rstest]
     fn test_is_retryable_conflict_consistent_with_classify() {
         let retryable = ApiErrorResponse::retryable_conflict("CAS failure");
@@ -3471,21 +3504,25 @@ mod tests {
     }
 
     /// Read-repair with non-commutative conflict is tested via the
-    /// rebase_update_request pure function unit tests (IMPL-PRB1-001-002).
+    /// `rebase_update_request` pure function unit tests (IMPL-PRB1-001-002).
     /// Integration-level non-commutative tests require concurrent DB mutations
-    /// during the read-repair loop, which are not practical with InMemory repos.
-
-    /// Verify that rebase_update_request returning NonCommutativeConflict
-    /// would produce a 409 Conflict response (conversion test).
+    /// during the read-repair loop, which are not practical with `InMemory` repos.
+    ///
+    /// Verify that `rebase_update_request` returning `NonCommutativeConflict`
+    /// would produce a 409 Conflict response with `NON_COMMUTATIVE_CONFLICT` code.
     #[rstest]
     fn test_rebase_error_converts_to_409_conflict() {
         let rebase_error = RebaseError::NonCommutativeConflict { field: "title" };
-        let api_error = ApiErrorResponse::conflict(rebase_error.to_string());
+        let api_error = ApiErrorResponse::new(
+            StatusCode::CONFLICT,
+            ApiError::new(NON_COMMUTATIVE_CONFLICT_CODE, rebase_error.to_string()),
+        );
         assert_eq!(api_error.status, StatusCode::CONFLICT);
+        assert_eq!(api_error.error.code, NON_COMMUTATIVE_CONFLICT_CODE);
         assert!(api_error.error.message.contains("title"));
     }
 
-    /// Read-repair converts RebaseError to 409 Conflict response.
+    /// Read-repair converts `RebaseError` to 409 Conflict response.
     #[rstest]
     fn test_rebase_error_display() {
         let error = RebaseError::NonCommutativeConflict { field: "title" };
