@@ -181,6 +181,21 @@ fi
 if [[ -n "${CONFLICT_RATE}" ]]; then
     echo "  conflict_rate = ${CONFLICT_RATE}"
 fi
+
+# Display conflict_detail if present
+STALE_VERSION=$(jq -r '.results.conflict_detail.stale_version // empty' "${META_FILE}" 2>/dev/null || true)
+RETRYABLE_CAS=$(jq -r '.results.conflict_detail.retryable_cas // empty' "${META_FILE}" 2>/dev/null || true)
+RETRY_SUCCESS=$(jq -r '.results.conflict_detail.retry_success // empty' "${META_FILE}" 2>/dev/null || true)
+RETRY_EXHAUSTED=$(jq -r '.results.conflict_detail.retry_exhausted // empty' "${META_FILE}" 2>/dev/null || true)
+
+if [[ -n "${STALE_VERSION}" ]] || [[ -n "${RETRYABLE_CAS}" ]] || [[ -n "${RETRY_SUCCESS}" ]] || [[ -n "${RETRY_EXHAUSTED}" ]]; then
+    echo "  conflict_detail:"
+    [[ -n "${STALE_VERSION}" ]] && echo "    stale_version = ${STALE_VERSION}"
+    [[ -n "${RETRYABLE_CAS}" ]] && echo "    retryable_cas = ${RETRYABLE_CAS}"
+    [[ -n "${RETRY_SUCCESS}" ]] && echo "    retry_success = ${RETRY_SUCCESS}"
+    [[ -n "${RETRY_EXHAUSTED}" ]] && echo "    retry_exhausted = ${RETRY_EXHAUSTED}"
+fi
+
 echo ""
 
 check_validation_gate() {
