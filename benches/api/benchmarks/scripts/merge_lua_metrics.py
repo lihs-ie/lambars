@@ -140,6 +140,12 @@ def merge_lua_metrics(input_files: List[Path], output_file: Path) -> None:
 
     total_requests_sum = 0
     valid_requests: Dict[Path, int] = {}
+    conflict_detail = {
+        "stale_version": 0,
+        "retryable_cas": 0,
+        "retry_success": 0,
+        "retry_exhausted": 0
+    }
 
     for file in input_files:
         try:
@@ -164,6 +170,14 @@ def merge_lua_metrics(input_files: List[Path], output_file: Path) -> None:
 
                 total_requests_sum += requests
                 valid_requests[file] = requests
+
+                # Merge conflict_detail if present
+                cd = data.get("conflict_detail", {})
+                if isinstance(cd, dict):
+                    conflict_detail["stale_version"] += cd.get("stale_version", 0)
+                    conflict_detail["retryable_cas"] += cd.get("retryable_cas", 0)
+                    conflict_detail["retry_success"] += cd.get("retry_success", 0)
+                    conflict_detail["retry_exhausted"] += cd.get("retry_exhausted", 0)
 
         except (FileNotFoundError, json.JSONDecodeError) as e:
             print(f"Warning: Failed to read {file}: {e}", file=sys.stderr)
@@ -208,6 +222,7 @@ def merge_lua_metrics(input_files: List[Path], output_file: Path) -> None:
         "http_5xx": http_5xx,
         "status_distribution": status_distribution,
         "latency": latency,
+        "conflict_detail": conflict_detail,
     }
 
     output_file.parent.mkdir(parents=True, exist_ok=True)
