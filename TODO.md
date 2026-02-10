@@ -1,13 +1,15 @@
 # TODO - Tasks Bulk/Tasks Update ボトルネック改善
 
 ## In Progress
-- [GREEN] [IMPL-PRB1-001-001] ConflictKind 列挙型の導入 - 最小実装完了
+- [RED] [IMPL-PRB1-001-002] RebaseError + rebase_update_request 純粋関数 - 失敗テスト作成中
   - Started: 2026-02-11
-  - Goal: classify_conflict_kind 純粋関数と is_stale_version_conflict 追加
+  - Goal: rebase_update_request 純粋関数で stale-version 競合時のリクエスト再構築
 
 ## Next
-- [ ] [IMPL-PRB1-001-002] RebaseError + rebase_update_request 純粋関数
 - [ ] [IMPL-PRB1-001-003] update_task に read-repair ループ追加
+
+## Done
+- [x] [IMPL-PRB1-001-001] ConflictKind 列挙型の導入 (2026-02-11)
 - [ ] [Phase 2-1] insert_bulk_owned の全経路適用
 - [ ] [Phase 2-2] Builder パターンによる世代トークン管理
 - [ ] [Phase 3-1] ChildSlot の SmallVec 化

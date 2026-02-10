@@ -3111,4 +3111,203 @@ mod tests {
             classify_conflict_kind(&not_found) == ConflictKind::RetryableCas
         );
     }
+
+    // -------------------------------------------------------------------------
+    // RebaseError / rebase_update_request Tests (IMPL-PRB1-001-002)
+    // -------------------------------------------------------------------------
+
+    /// Helper: creates a Task with given fields for rebase testing.
+    fn make_task_for_rebase(
+        task_id: TaskId,
+        title: &str,
+        description: Option<&str>,
+        priority: Priority,
+        version: u64,
+    ) -> Task {
+        let mut task = Task::new(task_id, title, Timestamp::now());
+        task.version = version;
+        task.priority = priority;
+        if let Some(desc) = description {
+            task = task.with_description(desc);
+        }
+        task
+    }
+
+    /// Rebase succeeds when another user changed a different field.
+    #[rstest]
+    fn test_rebase_update_request_success_different_fields() {
+        let task_id = TaskId::generate();
+        let original_base = make_task_for_rebase(
+            task_id.clone(),
+            "Original Title",
+            Some("Original Desc"),
+            Priority::Low,
+            1,
+        );
+        // Another user changed description (version bumped to 2)
+        let latest = make_task_for_rebase(
+            task_id,
+            "Original Title",
+            Some("Changed by another user"),
+            Priority::Low,
+            2,
+        );
+        // Our request changes title only
+        let request = UpdateTaskRequest {
+            title: Some("My New Title".to_string()),
+            description: None,
+            status: None,
+            priority: None,
+            version: 1,
+        };
+
+        let result = rebase_update_request(&original_base, &latest, &request);
+        assert!(result.is_ok());
+        let rebased = result.unwrap();
+        assert_eq!(rebased.title, Some("My New Title".to_string()));
+        assert_eq!(rebased.version, 2); // version rebased to latest
+    }
+
+    /// Rebase succeeds when another user changed to the same value (no-op change).
+    #[rstest]
+    fn test_rebase_update_request_success_same_value_update() {
+        let task_id = TaskId::generate();
+        let original_base = make_task_for_rebase(
+            task_id.clone(),
+            "Title",
+            None,
+            Priority::Low,
+            1,
+        );
+        // Another user also set title to "Title" (same value)
+        let latest = make_task_for_rebase(
+            task_id,
+            "Title",
+            None,
+            Priority::Low,
+            2,
+        );
+        // Our request changes title
+        let request = UpdateTaskRequest {
+            title: Some("New Title".to_string()),
+            description: None,
+            status: None,
+            priority: None,
+            version: 1,
+        };
+
+        let result = rebase_update_request(&original_base, &latest, &request);
+        assert!(result.is_ok());
+        let rebased = result.unwrap();
+        assert_eq!(rebased.title, Some("New Title".to_string()));
+        assert_eq!(rebased.version, 2);
+    }
+
+    /// Rebase fails when both users changed the same field (title) to different values.
+    #[rstest]
+    fn test_rebase_update_request_fails_title_conflict() {
+        let task_id = TaskId::generate();
+        let original_base = make_task_for_rebase(
+            task_id.clone(),
+            "Original Title",
+            None,
+            Priority::Low,
+            1,
+        );
+        // Another user changed title
+        let latest = make_task_for_rebase(
+            task_id,
+            "Changed by another user",
+            None,
+            Priority::Low,
+            2,
+        );
+        // Our request also changes title
+        let request = UpdateTaskRequest {
+            title: Some("My Title".to_string()),
+            description: None,
+            status: None,
+            priority: None,
+            version: 1,
+        };
+
+        let result = rebase_update_request(&original_base, &latest, &request);
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err(),
+            RebaseError::NonCommutativeConflict { field: "title" }
+        );
+    }
+
+    /// Rebase fails when both users changed description.
+    #[rstest]
+    fn test_rebase_update_request_fails_description_conflict() {
+        let task_id = TaskId::generate();
+        let original_base = make_task_for_rebase(
+            task_id.clone(),
+            "Title",
+            Some("Original Desc"),
+            Priority::Low,
+            1,
+        );
+        // Another user changed description
+        let latest = make_task_for_rebase(
+            task_id,
+            "Title",
+            Some("Another user desc"),
+            Priority::Low,
+            2,
+        );
+        // Our request also changes description
+        let request = UpdateTaskRequest {
+            title: None,
+            description: Some("My Desc".to_string()),
+            status: None,
+            priority: None,
+            version: 1,
+        };
+
+        let result = rebase_update_request(&original_base, &latest, &request);
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err(),
+            RebaseError::NonCommutativeConflict { field: "description" }
+        );
+    }
+
+    /// Rebase fails when both users changed priority.
+    #[rstest]
+    fn test_rebase_update_request_fails_priority_conflict() {
+        let task_id = TaskId::generate();
+        let original_base = make_task_for_rebase(
+            task_id.clone(),
+            "Title",
+            None,
+            Priority::Low,
+            1,
+        );
+        // Another user changed priority
+        let latest = make_task_for_rebase(
+            task_id,
+            "Title",
+            None,
+            Priority::High,
+            2,
+        );
+        // Our request also changes priority
+        let request = UpdateTaskRequest {
+            title: None,
+            description: None,
+            status: None,
+            priority: Some(crate::api::dto::PriorityDto::Critical),
+            version: 1,
+        };
+
+        let result = rebase_update_request(&original_base, &latest, &request);
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err(),
+            RebaseError::NonCommutativeConflict { field: "priority" }
+        );
+    }
 }
