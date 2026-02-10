@@ -38,17 +38,17 @@ EOF
 
 # Execute check_thresholds.sh (results_dir, scenario)
 if "${CHECK_THRESHOLDS}" "${TEMP_DIR}/pass_case" "tasks_update_status" > "${TEMP_DIR}/output_pass.txt" 2>&1; then
-    # TODO: これらのチェックは GATE-002 実装後に有効化する
-    # grep -q "validation_error_rate (400) = 0.000000" "${TEMP_DIR}/output_pass.txt" || {
-    #     echo "  ERROR: validation_error_rate not found in output"
-    #     exit 1
-    # }
-    # grep -q "conflict_error_rate (409) = 0.000000" "${TEMP_DIR}/output_pass.txt" || {
-    #     echo "  ERROR: conflict_error_rate not found in output"
-    #     exit 1
-    # }
-    echo "  CURRENT: Gate passes but GATE-002 metrics not yet implemented (expected in Red phase)"
-    echo "  EXPECTED AFTER GREEN: validation_error_rate and conflict_error_rate should be displayed"
+    echo "  PASS: Gate passed as expected"
+    grep -q "validation_error_rate (400) = 0.000000" "${TEMP_DIR}/output_pass.txt" || {
+        echo "  ERROR: validation_error_rate not found in output"
+        cat "${TEMP_DIR}/output_pass.txt"
+        exit 1
+    }
+    grep -q "conflict_error_rate (409) = 0.009901" "${TEMP_DIR}/output_pass.txt" || {
+        echo "  ERROR: conflict_error_rate not found in output (expected 0.009901)"
+        cat "${TEMP_DIR}/output_pass.txt"
+        exit 1
+    }
 else
     echo "  FAIL: Gate should have passed"
     cat "${TEMP_DIR}/output_pass.txt"
@@ -82,28 +82,28 @@ EOF
 
 # Execute check_thresholds.sh and expect failure
 if "${CHECK_THRESHOLDS}" "${TEMP_DIR}/fail_case" "tasks_update_status" > "${TEMP_DIR}/output_fail.txt" 2>&1; then
-    echo "  CURRENT: Gate passes but should fail when 400 > 0 (expected in Red phase)"
-    echo "  EXPECTED AFTER GREEN: Should exit with code 3 and show transition validation error"
+    echo "  FAIL: Gate should have failed when 400 > 0"
+    cat "${TEMP_DIR}/output_fail.txt"
+    exit 1
 else
     EXIT_CODE=$?
-    # TODO: これらのチェックは GATE-002 実装後に有効化する
-    # if [[ ${EXIT_CODE} -eq 3 ]]; then
-    #     grep -q "FAIL: Transition validation error - invalid status transition in PATCH payload" "${TEMP_DIR}/output_fail.txt" || {
-    #         echo "  ERROR: Expected error message not found"
-    #         cat "${TEMP_DIR}/output_fail.txt"
-    #         exit 1
-    #     }
-    #     grep -q "http_status.400 = 5 (must be 0)" "${TEMP_DIR}/output_fail.txt" || {
-    #         echo "  ERROR: Expected 400 count not found"
-    #         cat "${TEMP_DIR}/output_fail.txt"
-    #         exit 1
-    #     }
-    # else
-    #     echo "  FAIL: Gate failed with unexpected exit code ${EXIT_CODE}"
-    #     cat "${TEMP_DIR}/output_fail.txt"
-    #     exit 1
-    # fi
-    echo "  CURRENT: Gate failed with exit code ${EXIT_CODE}, but GATE-002 not yet implemented"
+    if [[ ${EXIT_CODE} -eq 3 ]]; then
+        echo "  PASS: Gate failed with exit 3 as expected"
+        grep -q "FAIL: Transition validation error - invalid status transition in PATCH payload" "${TEMP_DIR}/output_fail.txt" || {
+            echo "  ERROR: Expected error message not found"
+            cat "${TEMP_DIR}/output_fail.txt"
+            exit 1
+        }
+        grep -q "http_status.400 = 5 (must be 0)" "${TEMP_DIR}/output_fail.txt" || {
+            echo "  ERROR: Expected 400 count not found"
+            cat "${TEMP_DIR}/output_fail.txt"
+            exit 1
+        }
+    else
+        echo "  FAIL: Gate failed with unexpected exit code ${EXIT_CODE}"
+        cat "${TEMP_DIR}/output_fail.txt"
+        exit 1
+    fi
 fi
 
 echo ""
