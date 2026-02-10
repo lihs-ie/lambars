@@ -403,6 +403,62 @@ const MAX_BACKOFF_MS: u64 = 10;
 /// Error code for retryable version conflicts (repository-level CAS failure).
 const RETRYABLE_CONFLICT_CODE: &str = "VERSION_CONFLICT_RETRYABLE";
 
+/// Error code for stale-version conflicts (handler-level version mismatch).
+const STALE_VERSION_CONFLICT_CODE: &str = "VERSION_CONFLICT";
+
+// =============================================================================
+// Conflict Classification
+// =============================================================================
+
+/// Classifies the kind of 409 Conflict error.
+///
+/// This enum distinguishes between different types of conflict errors:
+/// - `StaleVersion`: The client sent an outdated version (handler-level)
+/// - `RetryableCas`: A CAS failure between read and write (repository-level)
+/// - `Other`: Any other error (non-409, or 409 with unknown code)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConflictKind {
+    /// Handler-level stale version mismatch (code = `VERSION_CONFLICT`).
+    StaleVersion,
+    /// Repository-level CAS failure (code = `VERSION_CONFLICT_RETRYABLE`).
+    RetryableCas,
+    /// Any other error (non-409, or 409 with unrecognized code).
+    Other,
+}
+
+/// Classifies a conflict error into its kind (pure function).
+///
+/// This function examines the HTTP status and error code to determine
+/// the conflict type. Non-409 errors always return `Other`.
+///
+/// # Arguments
+///
+/// * `error` - The error response to classify
+///
+/// # Returns
+///
+/// The [`ConflictKind`] classification of the error.
+#[must_use]
+pub fn classify_conflict_kind(error: &ApiErrorResponse) -> ConflictKind {
+    if error.status != StatusCode::CONFLICT {
+        return ConflictKind::Other;
+    }
+    match error.error.code.as_str() {
+        STALE_VERSION_CONFLICT_CODE => ConflictKind::StaleVersion,
+        RETRYABLE_CONFLICT_CODE => ConflictKind::RetryableCas,
+        _ => ConflictKind::Other,
+    }
+}
+
+/// Returns `true` if the error is a stale-version 409 Conflict.
+///
+/// Stale-version conflicts occur when the client sends an outdated version
+/// in the update request. These are candidates for read-repair.
+#[must_use]
+pub fn is_stale_version_conflict(error: &ApiErrorResponse) -> bool {
+    classify_conflict_kind(error) == ConflictKind::StaleVersion
+}
+
 /// Computes the backoff cap for a given retry index (pure function).
 ///
 /// Formula: `base_delay_ms * 2^retry_index`, clamped to avoid overflow.
@@ -464,9 +520,11 @@ pub fn promote_to_retryable_conflict(mut error: ApiErrorResponse) -> ApiErrorRes
 /// Only repository-level CAS failures (code = `VERSION_CONFLICT_RETRYABLE`) are
 /// retryable. Handler-level stale version mismatches use the standard
 /// `VERSION_CONFLICT` code and are **not** retried.
+///
+/// This is a convenience wrapper around [`classify_conflict_kind`].
 #[must_use]
 pub fn is_retryable_conflict(error: &ApiErrorResponse) -> bool {
-    error.status == StatusCode::CONFLICT && error.error.code == RETRYABLE_CONFLICT_CODE
+    classify_conflict_kind(error) == ConflictKind::RetryableCas
 }
 
 /// Returns `true` if the retry budget was exhausted and the final result is an error (pure function).
@@ -1478,6 +1536,7 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
+    use super::super::error::ApiError;
 
     // -------------------------------------------------------------------------
     // Status Transition Tests

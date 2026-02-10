@@ -1,7 +1,7 @@
 # TODO - Tasks Bulk/Tasks Update ボトルネック改善
 
 ## In Progress
-- [RED] [IMPL-PRB1-001-001] ConflictKind 列挙型の導入 - 失敗テスト作成中
+- [GREEN] [IMPL-PRB1-001-001] ConflictKind 列挙型の導入 - 最小実装完了
   - Started: 2026-02-11
   - Goal: classify_conflict_kind 純粋関数と is_stale_version_conflict 追加
 
