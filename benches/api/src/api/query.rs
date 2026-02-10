@@ -1433,11 +1433,8 @@ impl NgramSegmentOverlay {
                 {
                     hit_count += 1;
                 }
-                let merged = Self::merge_posting_slice_or_fallback(
-                    existing,
-                    segment_collection,
-                    scratch,
-                );
+                let merged =
+                    Self::merge_posting_slice_or_fallback(existing, segment_collection, scratch);
                 transient.insert(key.clone(), merged);
             } else {
                 #[cfg(test)]
@@ -7539,9 +7536,8 @@ impl SearchIndexWriter {
             ..config
         };
 
-        let (sender, receiver) = std::sync::mpsc::sync_channel::<Vec<TaskChange>>(
-            normalized_config.channel_capacity,
-        );
+        let (sender, receiver) =
+            std::sync::mpsc::sync_channel::<Vec<TaskChange>>(normalized_config.channel_capacity);
 
         let handle = std::thread::Builder::new()
             .name("search-index-writer".to_string())
@@ -7569,11 +7565,17 @@ impl SearchIndexWriter {
     /// # Panics
     ///
     /// Panics if the internal sender mutex is poisoned.
-    pub fn send_changes(&self, changes: Vec<TaskChange>) -> Result<(), std::sync::mpsc::SendError<Vec<TaskChange>>> {
+    pub fn send_changes(
+        &self,
+        changes: Vec<TaskChange>,
+    ) -> Result<(), std::sync::mpsc::SendError<Vec<TaskChange>>> {
         if changes.is_empty() {
             return Ok(());
         }
-        let guard = self.sender.lock().expect("SearchIndexWriter sender mutex poisoned");
+        let guard = self
+            .sender
+            .lock()
+            .expect("SearchIndexWriter sender mutex poisoned");
         match guard.as_ref() {
             Some(sender) => sender.send(changes),
             None => Err(std::sync::mpsc::SendError(changes)),
@@ -7588,7 +7590,10 @@ impl SearchIndexWriter {
     /// # Errors
     ///
     /// Returns `Err` if the writer thread has shut down (channel disconnected).
-    pub fn send_change(&self, change: TaskChange) -> Result<(), std::sync::mpsc::SendError<Vec<TaskChange>>> {
+    pub fn send_change(
+        &self,
+        change: TaskChange,
+    ) -> Result<(), std::sync::mpsc::SendError<Vec<TaskChange>>> {
         self.send_changes(vec![change])
     }
 
@@ -7645,10 +7650,7 @@ impl SearchIndexWriter {
                     Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                         // Channel closed; apply what we have and exit
                         if !coalesced_changes.is_empty() {
-                            Self::apply_coalesced_changes(
-                                &search_index,
-                                &coalesced_changes,
-                            );
+                            Self::apply_coalesced_changes(&search_index, &coalesced_changes);
                         }
                         return;
                     }
@@ -7691,12 +7693,18 @@ impl SearchIndexWriter {
     /// Drops the sender to close the channel and joins the writer thread.
     fn close_and_join(&self) {
         {
-            let mut sender_guard = self.sender.lock().expect("SearchIndexWriter sender mutex poisoned");
+            let mut sender_guard = self
+                .sender
+                .lock()
+                .expect("SearchIndexWriter sender mutex poisoned");
             sender_guard.take();
         }
 
         let handle = {
-            let mut handle_guard = self.handle.lock().expect("SearchIndexWriter handle mutex poisoned");
+            let mut handle_guard = self
+                .handle
+                .lock()
+                .expect("SearchIndexWriter handle mutex poisoned");
             handle_guard.take()
         };
         if let Some(handle) = handle {
@@ -22755,9 +22763,7 @@ mod ngram_segment_overlay_tests {
             TaskId::from_uuid(Uuid::from_u128(4)),
             TaskId::from_uuid(Uuid::from_u128(5)),
         ]);
-        let small = TaskIdCollection::from_sorted_vec(vec![
-            TaskId::from_uuid(Uuid::from_u128(10)),
-        ]);
+        let small = TaskIdCollection::from_sorted_vec(vec![TaskId::from_uuid(Uuid::from_u128(10))]);
         let medium = TaskIdCollection::from_sorted_vec(vec![
             TaskId::from_uuid(Uuid::from_u128(6)),
             TaskId::from_uuid(Uuid::from_u128(7)),
@@ -22765,8 +22771,7 @@ mod ngram_segment_overlay_tests {
         ]);
 
         // Order: large, small, medium -> size-aware reorders to small, medium, large
-        let result =
-            super::merge_postings_multiway(&[&large, &small, &medium]);
+        let result = super::merge_postings_multiway(&[&large, &small, &medium]);
         let ids = sorted_ids(&result);
 
         let expected: Vec<TaskId> = [1, 2, 3, 4, 5, 6, 7, 8, 10]
@@ -22786,17 +22791,14 @@ mod ngram_segment_overlay_tests {
             TaskId::from_uuid(Uuid::from_u128(7)),
             TaskId::from_uuid(Uuid::from_u128(9)),
         ]);
-        let list_b = TaskIdCollection::from_sorted_vec(vec![
-            TaskId::from_uuid(Uuid::from_u128(3)),
-        ]);
+        let list_b = TaskIdCollection::from_sorted_vec(vec![TaskId::from_uuid(Uuid::from_u128(3))]);
         let list_c = TaskIdCollection::from_sorted_vec(vec![
             TaskId::from_uuid(Uuid::from_u128(5)),
             TaskId::from_uuid(Uuid::from_u128(9)),
             TaskId::from_uuid(Uuid::from_u128(11)),
         ]);
 
-        let result =
-            super::merge_postings_multiway(&[&list_a, &list_b, &list_c]);
+        let result = super::merge_postings_multiway(&[&list_a, &list_b, &list_c]);
         let ids = sorted_ids(&result);
 
         let expected: Vec<TaskId> = [1, 3, 5, 7, 9, 11]
@@ -23202,8 +23204,7 @@ mod ngram_segment_overlay_tests {
         // ghi: new key {7}
         let key_ghi = NgramKey::new("ghi");
         let ghi_ids = sorted_ids(result.get(&key_ghi).expect("ghi present"));
-        let expected_ghi: Vec<TaskId> =
-            vec![TaskId::from_uuid(Uuid::from_u128(7))];
+        let expected_ghi: Vec<TaskId> = vec![TaskId::from_uuid(Uuid::from_u128(7))];
         assert_eq!(ghi_ids, expected_ghi);
     }
 
@@ -23404,9 +23405,8 @@ mod ngram_segment_overlay_tests {
         ]);
         let mut scratch: Vec<TaskId> = Vec::with_capacity(100);
 
-        let result = NgramSegmentOverlay::merge_posting_slice_or_fallback(
-            &existing, &segment, &mut scratch,
-        );
+        let result =
+            NgramSegmentOverlay::merge_posting_slice_or_fallback(&existing, &segment, &mut scratch);
 
         let ids = sorted_ids(&result);
         let expected: Vec<TaskId> = [1, 2, 3, 10, 11]
@@ -23430,9 +23430,8 @@ mod ngram_segment_overlay_tests {
         ]);
         let mut scratch: Vec<TaskId> = Vec::new();
 
-        let result = NgramSegmentOverlay::merge_posting_slice_or_fallback(
-            &existing, &segment, &mut scratch,
-        );
+        let result =
+            NgramSegmentOverlay::merge_posting_slice_or_fallback(&existing, &segment, &mut scratch);
 
         let ids = sorted_ids(&result);
         let expected: Vec<TaskId> = [1, 2, 3, 10, 11]
@@ -23882,7 +23881,10 @@ mod search_index_writer_tests {
         // Verify the task is in the index
         let index = search_index.load();
         let result = index.search_by_title("Writer Test");
-        assert!(result.is_some(), "Task should be findable after writer applies change");
+        assert!(
+            result.is_some(),
+            "Task should be findable after writer applies change"
+        );
         let search_result = result.unwrap();
         let tasks = search_result.tasks();
         assert_eq!(tasks.len(), 1);
@@ -23915,9 +23917,15 @@ mod search_index_writer_tests {
         writer.shutdown();
 
         let index = search_index.load();
-        let alpha = index.search_by_title("Alpha").expect("Alpha should be findable");
-        let beta = index.search_by_title("Beta").expect("Beta should be findable");
-        let gamma = index.search_by_title("Gamma").expect("Gamma should be findable");
+        let alpha = index
+            .search_by_title("Alpha")
+            .expect("Alpha should be findable");
+        let beta = index
+            .search_by_title("Beta")
+            .expect("Beta should be findable");
+        let gamma = index
+            .search_by_title("Gamma")
+            .expect("Gamma should be findable");
 
         assert_eq!(alpha.tasks().iter().next().unwrap().task_id, task1_id);
         assert_eq!(beta.tasks().iter().next().unwrap().task_id, task2_id);
@@ -23974,7 +23982,9 @@ mod search_index_writer_tests {
         // Use a small sleep to ensure the writer processes the first batch
         std::thread::sleep(std::time::Duration::from_millis(50));
 
-        let updated_task = task_to_update.clone().with_description("Updated description");
+        let updated_task = task_to_update
+            .clone()
+            .with_description("Updated description");
         writer
             .send_changes(vec![
                 TaskChange::Remove(remove_id),
@@ -23993,10 +24003,7 @@ mod search_index_writer_tests {
         let keep_result = index.search_by_title("Keep");
         assert!(keep_result.is_some(), "Kept task should be findable");
         let keep_search = keep_result.unwrap();
-        assert_eq!(
-            keep_search.tasks().iter().next().unwrap().task_id,
-            keep_id
-        );
+        assert_eq!(keep_search.tasks().iter().next().unwrap().task_id, keep_id);
 
         // Remove Me should be gone
         assert!(
@@ -24112,7 +24119,7 @@ mod search_index_writer_tests {
         let writer = SearchIndexWriter::new(
             Arc::clone(&search_index),
             SearchIndexWriterConfig {
-                batch_size: 100, // Very large batch size
+                batch_size: 100,                // Very large batch size
                 batch_timeout_milliseconds: 10, // Short timeout
                 channel_capacity: 32,
             },
@@ -24210,12 +24217,7 @@ mod search_index_writer_tests {
             .map(|task| task.task_id.clone())
             .collect();
 
-        let expected_ids: HashSet<TaskId> = all_task_ids
-            .lock()
-            .unwrap()
-            .iter()
-            .cloned()
-            .collect();
+        let expected_ids: HashSet<TaskId> = all_task_ids.lock().unwrap().iter().cloned().collect();
 
         assert_eq!(
             actual_ids.len(),

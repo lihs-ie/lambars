@@ -3142,6 +3142,9 @@ mod tests {
                 applied_config: AppliedConfig::default(),
                 search_index_rcu_retries: Arc::new(AtomicUsize::new(0)),
                 search_index_writer: None,
+                keyed_update_queue: Arc::new(crate::api::transaction::KeyedUpdateQueue::new()),
+                retry_attempts: Arc::new(AtomicUsize::new(0)),
+                retry_exhausted: Arc::new(AtomicUsize::new(0)),
             }
         }
 
