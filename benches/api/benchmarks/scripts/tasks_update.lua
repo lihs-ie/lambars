@@ -11,7 +11,7 @@ local retry_index, retry_body, retry_attempt = nil, nil, 0
 local counter = 0
 local last_request_index, last_request_is_update = nil, false
 local thread_retry_count, thread_retry_exhausted_count = 0, 0
-local update_types = {"priority", "status", "description", "title", "full"}
+local update_types = {"priority", "description", "title", "full"}
 
 local backoff_skip_counter, backoff_skip_target = 0, 0
 local is_backoff_request, is_suppressed_request, is_fallback_request = false, false, false
@@ -85,8 +85,6 @@ local function generate_update_body(update_type, version, request_counter)
     local timestamp_str = tostring(request_counter)
     if update_type == "priority" then
         return common.json_encode({ priority = common.random_priority(), version = version })
-    elseif update_type == "status" then
-        return common.json_encode({ status = common.random_status(), version = version })
     elseif update_type == "description" then
         return common.json_encode({
             description = "Updated description via Optional optic - request " .. timestamp_str,
@@ -95,14 +93,15 @@ local function generate_update_body(update_type, version, request_counter)
     elseif update_type == "title" then
         return common.json_encode({ title = common.random_title() .. " (updated)", version = version })
     else
-        return common.json_encode({
+        local payload_table = {
             title = common.random_title() .. " (full update)",
             description = "Full update via combined optics",
             priority = common.random_priority(),
-            status = common.random_status(),
             tags = common.array({"updated", "benchmark"}),
             version = version
-        })
+        }
+        assert(payload_table.status == nil, "PUT payload must not contain status field")
+        return common.json_encode(payload_table)
     end
 end
 
