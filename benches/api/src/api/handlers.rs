@@ -200,6 +200,8 @@ pub struct AppState {
     /// to eliminate CAS retry overhead. When `None`, falls back to the
     /// RCU-based `ArcSwap::rcu` path.
     pub search_index_writer: Option<Arc<SearchIndexWriter>>,
+    /// Per-`task_id` serialization queue to reduce optimistic locking conflicts.
+    pub keyed_update_queue: Arc<super::transaction::KeyedUpdateQueue>,
 }
 
 impl Clone for AppState {
@@ -223,6 +225,7 @@ impl Clone for AppState {
             applied_config: self.applied_config.clone(),
             search_index_rcu_retries: Arc::clone(&self.search_index_rcu_retries),
             search_index_writer: self.search_index_writer.as_ref().map(Arc::clone),
+            keyed_update_queue: Arc::clone(&self.keyed_update_queue),
         }
     }
 }
@@ -438,6 +441,7 @@ impl AppState {
             applied_config,
             search_index_rcu_retries: Arc::new(AtomicUsize::new(0)),
             search_index_writer: Some(search_index_writer),
+            keyed_update_queue: Arc::new(crate::api::transaction::KeyedUpdateQueue::new()),
         })
     }
 
@@ -1239,6 +1243,7 @@ mod tests {
             applied_config: AppliedConfig::default(),
             search_index_rcu_retries: Arc::new(AtomicUsize::new(0)),
             search_index_writer: None,
+            keyed_update_queue: Arc::new(crate::api::transaction::KeyedUpdateQueue::new()),
         }
     }
 
@@ -1274,6 +1279,7 @@ mod tests {
             applied_config: AppliedConfig::default(),
             search_index_rcu_retries: Arc::new(AtomicUsize::new(0)),
             search_index_writer: None,
+            keyed_update_queue: Arc::new(crate::api::transaction::KeyedUpdateQueue::new()),
         }
     }
 

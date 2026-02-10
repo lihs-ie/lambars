@@ -14,11 +14,15 @@
 //! - `POST /tasks/{id}/subtasks` - Add subtask using `PersistentList`
 //! - `POST /tasks/{id}/tags` - Add tag using `PersistentHashSet`
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use axum::{
     Json,
     extract::{Path, State},
     http::StatusCode,
 };
+use tokio::sync::Mutex;
 
 use super::json_buffer::JsonResponse;
 use lambars::control::Either;
@@ -391,6 +395,99 @@ pub fn description_optional() -> impl Optional<Task, String> + Clone {
     description_lens.compose_prism(some_prism)
 }
 
+const DEFAULT_MAX_RETRIES: u8 = 3;
+const DEFAULT_BASE_DELAY_MS: u64 = 1;
+
+/// Retries an async operation on 409 Conflict with full jitter backoff.
+///
+/// Full jitter backoff: `delay = random(0, base_delay_ms * 2^attempt)`.
+/// Only 409 Conflict errors trigger a retry; all other errors are returned immediately.
+///
+/// # Errors
+///
+/// Returns the final [`ApiErrorResponse`] if all retries are exhausted (for 409)
+/// or immediately for non-409 errors.
+pub async fn retry_on_conflict<F, Fut, T>(
+    operation: F,
+    max_retries: u8,
+    base_delay_ms: u64,
+) -> Result<T, ApiErrorResponse>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Result<T, ApiErrorResponse>>,
+{
+    let mut attempt = 0u8;
+    loop {
+        match operation().await {
+            Ok(value) => return Ok(value),
+            Err(error) if error.status == StatusCode::CONFLICT && attempt < max_retries => {
+                attempt += 1;
+                let max_delay = base_delay_ms.saturating_mul(1u64 << u64::from(attempt));
+                if max_delay > 0 {
+                    let delay = rand::random::<u64>() % max_delay;
+                    tokio::time::sleep(tokio::time::Duration::from_millis(delay)).await;
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+/// Per-key lock map that serializes concurrent updates to the same `task_id`.
+///
+/// Different `task_id` values are processed in parallel without contention.
+pub struct KeyedUpdateQueue {
+    locks: std::sync::Mutex<HashMap<TaskId, Arc<Mutex<()>>>>,
+}
+
+impl KeyedUpdateQueue {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            locks: std::sync::Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Acquires a per-`task_id` lock, serializing concurrent updates.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal `Mutex` is poisoned.
+    pub async fn acquire(&self, task_id: &TaskId) -> KeyedGuard {
+        let mutex = {
+            let mut map = self.locks.lock().expect("KeyedUpdateQueue lock poisoned");
+            Arc::clone(
+                map.entry(task_id.clone())
+                    .or_insert_with(|| Arc::new(Mutex::new(()))),
+            )
+        };
+        let guard = mutex.lock_owned().await;
+        KeyedGuard { _guard: guard }
+    }
+}
+
+impl Default for KeyedUpdateQueue {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// RAII guard that holds a per-`task_id` lock until dropped.
+pub struct KeyedGuard {
+    _guard: tokio::sync::OwnedMutexGuard<()>,
+}
+
+/// Returns `true` if the request contains no non-commutative field changes
+/// (title, description, status, priority are all `None`), allowing it to be
+/// safely merged even when the version has changed.
+#[must_use]
+pub const fn can_merge_without_conflict(request: &UpdateTaskRequest) -> bool {
+    request.title.is_none()
+        && request.description.is_none()
+        && request.status.is_none()
+        && request.priority.is_none()
+}
+
 // =============================================================================
 // PUT /tasks/{id} - Update Task with Lens
 // =============================================================================
@@ -439,7 +536,23 @@ pub async fn update_task(
 ) -> Result<(StatusCode, JsonResponse<TaskResponse>), ApiErrorResponse> {
     let task_id = TaskId::from_uuid(path.id);
 
-    // Fetch existing task
+    let _keyed_guard = state.keyed_update_queue.acquire(&task_id).await;
+
+    retry_on_conflict(
+        || update_task_inner(state.clone(), task_id.clone(), request.clone()),
+        DEFAULT_MAX_RETRIES,
+        DEFAULT_BASE_DELAY_MS,
+    )
+    .await
+}
+
+/// Core update logic extracted from `update_task` for retry wrapping.
+#[allow(clippy::future_not_send)]
+async fn update_task_inner(
+    state: AppState,
+    task_id: TaskId,
+    request: UpdateTaskRequest,
+) -> Result<(StatusCode, JsonResponse<TaskResponse>), ApiErrorResponse> {
     let old_task = state
         .task_repository
         .find_by_id(&task_id)
@@ -447,9 +560,20 @@ pub async fn update_task(
         .map_err(ApiErrorResponse::from)?
         .ok_or_else(|| ApiErrorResponse::not_found(format!("Task {task_id} not found")))?;
 
+    // Allow merge if the request contains only commutative (no-op) fields
+    let effective_request =
+        if old_task.version != request.version && can_merge_without_conflict(&request) {
+            UpdateTaskRequest {
+                version: old_task.version,
+                ..request
+            }
+        } else {
+            request
+        };
+
     // Check version (optimistic locking)
-    if old_task.version != request.version {
-        let expected = request.version;
+    if old_task.version != effective_request.version {
+        let expected = effective_request.version;
         let found = old_task.version;
         return Err(ApiErrorResponse::conflict(format!(
             "Expected version {expected}, found {found}"
@@ -468,7 +592,7 @@ pub async fn update_task(
 
     // Validate and apply updates using Lens (pure function)
     // Clone timestamp since it will be used for events later
-    let updated_task = apply_updates_with_lens(old_task.clone(), &request, now.clone())?;
+    let updated_task = apply_updates_with_lens(old_task.clone(), &effective_request, now.clone())?;
 
     // Detect changes (pure function)
     let changes = detect_task_changes(&old_task, &updated_task);
@@ -1162,8 +1286,12 @@ fn apply_tag_update(task: Task, tag: Tag, now: Timestamp) -> Task {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::sync::atomic::{AtomicU8, Ordering};
+    use std::sync::Arc;
+
     use rstest::rstest;
+
+    use super::*;
 
     // -------------------------------------------------------------------------
     // Status Transition Tests
@@ -1963,5 +2091,219 @@ mod tests {
             &changes[2],
             DetectedChange::PriorityChanged { .. }
         ));
+    }
+
+    // -------------------------------------------------------------------------
+    // retry_on_conflict Tests
+    // -------------------------------------------------------------------------
+
+    /// Helper: creates an `Arc<AtomicU8>` counter and a clone for use in async closures.
+    fn new_call_counter() -> (Arc<AtomicU8>, Arc<AtomicU8>) {
+        let counter = Arc::new(AtomicU8::new(0));
+        let counter_clone = Arc::clone(&counter);
+        (counter, counter_clone)
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_retry_on_conflict_succeeds_on_first_attempt() {
+        let (call_count, call_count_inner) = new_call_counter();
+
+        let result: Result<u32, ApiErrorResponse> = retry_on_conflict(
+            || {
+                let count = Arc::clone(&call_count_inner);
+                async move {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    Ok(42)
+                }
+            },
+            3,
+            1,
+        )
+        .await;
+
+        assert_eq!(result.unwrap(), 42);
+        assert_eq!(call_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_retry_on_conflict_retries_on_409_then_succeeds() {
+        let (call_count, call_count_inner) = new_call_counter();
+
+        let result: Result<u32, ApiErrorResponse> = retry_on_conflict(
+            || {
+                let count = Arc::clone(&call_count_inner);
+                async move {
+                    let attempt = count.fetch_add(1, Ordering::SeqCst);
+                    if attempt < 2 {
+                        Err(ApiErrorResponse::conflict("version mismatch"))
+                    } else {
+                        Ok(42)
+                    }
+                }
+            },
+            3,
+            0,
+        )
+        .await;
+
+        assert_eq!(result.unwrap(), 42);
+        assert_eq!(call_count.load(Ordering::SeqCst), 3);
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_retry_on_conflict_does_not_retry_on_non_409_error() {
+        let (call_count, call_count_inner) = new_call_counter();
+
+        let result: Result<u32, ApiErrorResponse> = retry_on_conflict(
+            || {
+                let count = Arc::clone(&call_count_inner);
+                async move {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    Err(ApiErrorResponse::not_found("task not found"))
+                }
+            },
+            3,
+            0,
+        )
+        .await;
+
+        assert_eq!(result.unwrap_err().status, StatusCode::NOT_FOUND);
+        assert_eq!(call_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_retry_on_conflict_exhausts_retries_returns_409() {
+        let (call_count, call_count_inner) = new_call_counter();
+
+        let result: Result<u32, ApiErrorResponse> = retry_on_conflict(
+            || {
+                let count = Arc::clone(&call_count_inner);
+                async move {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    Err(ApiErrorResponse::conflict("version mismatch"))
+                }
+            },
+            3,
+            0,
+        )
+        .await;
+
+        assert_eq!(result.unwrap_err().status, StatusCode::CONFLICT);
+        // 1 initial + 3 retries = 4 total attempts
+        assert_eq!(call_count.load(Ordering::SeqCst), 4);
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_retry_on_conflict_zero_retries_returns_immediately() {
+        let (call_count, call_count_inner) = new_call_counter();
+
+        let result: Result<u32, ApiErrorResponse> = retry_on_conflict(
+            || {
+                let count = Arc::clone(&call_count_inner);
+                async move {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    Err(ApiErrorResponse::conflict("version mismatch"))
+                }
+            },
+            0,
+            0,
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(call_count.load(Ordering::SeqCst), 1);
+    }
+
+    // -------------------------------------------------------------------------
+    // KeyedUpdateQueue Tests
+    // -------------------------------------------------------------------------
+
+    /// Spawns `count` tasks that each acquire the keyed lock, increment a counter,
+    /// sleep, then decrement. Returns the observed maximum concurrency.
+    async fn measure_max_concurrency(
+        queue: &Arc<KeyedUpdateQueue>,
+        task_ids: Vec<TaskId>,
+        sleep_ms: u64,
+    ) -> u32 {
+        use std::sync::atomic::AtomicU32;
+
+        let counter = Arc::new(AtomicU32::new(0));
+        let max_concurrent = Arc::new(AtomicU32::new(0));
+
+        let handles: Vec<_> = task_ids
+            .into_iter()
+            .map(|task_id| {
+                let queue = Arc::clone(queue);
+                let counter = Arc::clone(&counter);
+                let max_concurrent = Arc::clone(&max_concurrent);
+                tokio::spawn(async move {
+                    let _guard = queue.acquire(&task_id).await;
+                    let current = counter.fetch_add(1, Ordering::SeqCst) + 1;
+                    max_concurrent.fetch_max(current, Ordering::SeqCst);
+                    tokio::time::sleep(tokio::time::Duration::from_millis(sleep_ms)).await;
+                    counter.fetch_sub(1, Ordering::SeqCst);
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        max_concurrent.load(Ordering::SeqCst)
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_keyed_update_queue_serializes_same_task_id() {
+        let queue = Arc::new(KeyedUpdateQueue::new());
+        let task_id = TaskId::generate();
+        let task_ids = vec![task_id; 5];
+
+        let max = measure_max_concurrency(&queue, task_ids, 1).await;
+        assert_eq!(max, 1, "Same task_id updates should be serialized");
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_keyed_update_queue_allows_parallel_different_task_ids() {
+        let queue = Arc::new(KeyedUpdateQueue::new());
+        let task_ids: Vec<_> = (0..5).map(|_| TaskId::generate()).collect();
+
+        let max = measure_max_concurrency(&queue, task_ids, 10).await;
+        assert!(max > 1, "Different task_ids should run in parallel");
+    }
+
+    // -------------------------------------------------------------------------
+    // can_merge_without_conflict Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    #[case(None, None, None, None, true)]
+    #[case(Some("Title".to_string()), None, None, None, false)]
+    #[case(None, Some("Desc".to_string()), None, None, false)]
+    #[case(None, None, Some(TaskStatusDto::InProgress), None, false)]
+    #[case(None, None, None, Some(crate::api::dto::PriorityDto::High), false)]
+    #[case(Some("T".to_string()), Some("D".to_string()), None, None, false)]
+    fn test_can_merge_without_conflict(
+        #[case] title: Option<String>,
+        #[case] description: Option<String>,
+        #[case] status: Option<TaskStatusDto>,
+        #[case] priority: Option<crate::api::dto::PriorityDto>,
+        #[case] expected: bool,
+    ) {
+        let request = UpdateTaskRequest {
+            title,
+            description,
+            status,
+            priority,
+            version: 1,
+        };
+        assert_eq!(can_merge_without_conflict(&request), expected);
     }
 }
