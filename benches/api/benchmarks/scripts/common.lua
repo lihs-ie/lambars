@@ -290,6 +290,11 @@ function M.extract_status(body)
     return body:match('"status"%s*:%s*"([^"]+)"')
 end
 
+function M.extract_error_code(body)
+    if type(body) ~= "string" or body == "" then return nil end
+    return body:match('"code"%s*:%s*"([^"]+)"')
+end
+
 local VALID_TASK_STATUS = { pending = true, in_progress = true, completed = true, cancelled = true }
 
 function M.is_valid_status(status)
