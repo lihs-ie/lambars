@@ -1472,6 +1472,26 @@ impl NgramSegmentOverlay {
         }
     }
 
+    /// Arena-backed variant of [`compact_one`].
+    ///
+    /// Reuses the scratch buffer from the provided [`MergeArena`] instead of
+    /// allocating a fresh `Vec<TaskId>`.
+    fn compact_one_with_arena(&self, arena: &mut MergeArena) -> Self {
+        if self.segments.is_empty() {
+            return self.clone();
+        }
+        let oldest = &self.segments[0];
+        let scratch = arena.scratch();
+        let merged_base = Self::merge_segment_into(self.base.clone(), oldest, scratch);
+        Self {
+            base: merged_base,
+            segments: self.segments[1..].to_vec(),
+            max_segments: self.max_segments,
+            max_segment_keys: self.max_segment_keys,
+            budget: self.budget,
+        }
+    }
+
     fn materialize(&self) -> NgramIndex {
         if self.segments.is_empty() {
             return self.base.clone();
@@ -5700,6 +5720,53 @@ impl SearchIndex {
         }
     }
 
+    /// Arena-backed variant of [`apply_changes`].
+    ///
+    /// Uses the provided [`MergeArena`] to reuse scratch buffers across
+    /// merge operations within the delta path. For non-delta paths (bulk builder),
+    /// the arena is not used.
+    #[must_use]
+    pub fn apply_changes_with_arena(
+        &self,
+        changes: &[TaskChange],
+        arena: &mut MergeArena,
+    ) -> Self {
+        if changes.is_empty() {
+            return self.clone();
+        }
+
+        let all_adds = changes.iter().all(|c| matches!(c, TaskChange::Add(_)));
+
+        if self.config.use_apply_bulk && all_adds {
+            if let Ok(new_index) = self.apply_bulk(changes) {
+                return new_index;
+            }
+        }
+
+        if self.config.use_bulk_builder
+            && self.config.infix_mode == InfixMode::Ngram
+            && changes.len() >= self.config.bulk_threshold
+            && all_adds
+        {
+            self.apply_changes_bulk(changes)
+                .unwrap_or_else(|_| self.apply_changes_delta_with_arena(changes, arena))
+        } else {
+            self.apply_changes_delta_with_arena(changes, arena)
+        }
+    }
+
+    /// Arena-backed variant of [`apply_changes_delta`].
+    #[must_use]
+    fn apply_changes_delta_with_arena(
+        &self,
+        changes: &[TaskChange],
+        arena: &mut MergeArena,
+    ) -> Self {
+        let mut delta = SearchIndexDelta::from_changes(changes, &self.config, &self.tasks_by_id);
+        delta.prepare_posting_lists();
+        self.apply_delta_owned_with_arena(delta, changes, arena)
+    }
+
     /// Applies Add-only changes in bulk, optimized for large batches of new tasks.
     ///
     /// This method is specifically designed for Add-only batches and provides
@@ -6141,6 +6208,94 @@ impl SearchIndex {
             tag_all_suffix_index: Self::merge_index_delta_add_only_owned(
                 &self.tag_all_suffix_index,
                 tag_all_suffix_add,
+            ),
+            config: self.config.clone(),
+        }
+    }
+
+    /// Arena-backed variant of [`apply_delta_owned`].
+    ///
+    /// Reuses the scratch buffer from the provided [`MergeArena`] across all
+    /// six `merge_index_delta_add_only_owned_with_arena` calls, eliminating
+    /// repeated Vec allocations within a single batch.
+    ///
+    /// For non-add-only deltas, falls back to [`apply_delta`] (arena unused).
+    #[must_use]
+    #[allow(clippy::too_many_lines)]
+    pub fn apply_delta_owned_with_arena(
+        &self,
+        delta: SearchIndexDelta,
+        changes: &[TaskChange],
+        arena: &mut MergeArena,
+    ) -> Self {
+        #[cfg(debug_assertions)]
+        delta.debug_assert_prepared();
+
+        if !delta.is_add_only() {
+            return self.apply_delta(&delta, changes);
+        }
+
+        let SearchIndexDelta {
+            title_full_add,
+            title_full_remove: _,
+            title_word_add,
+            title_word_remove: _,
+            tag_add,
+            tag_remove: _,
+            title_full_ngram_add,
+            title_full_ngram_remove: _,
+            title_word_ngram_add,
+            title_word_ngram_remove: _,
+            tag_ngram_add,
+            tag_ngram_remove: _,
+            title_full_all_suffix_add,
+            title_full_all_suffix_remove: _,
+            title_word_all_suffix_add,
+            title_word_all_suffix_remove: _,
+            tag_all_suffix_add,
+            tag_all_suffix_remove: _,
+        } = delta;
+
+        Self {
+            tasks_by_id: self.update_tasks_by_id(changes),
+            title_full_index: Self::merge_index_delta_add_only_owned_with_arena(
+                &self.title_full_index,
+                title_full_add,
+                arena,
+            ),
+            title_word_index: Self::merge_index_delta_add_only_owned_with_arena(
+                &self.title_word_index,
+                title_word_add,
+                arena,
+            ),
+            tag_index: Self::merge_index_delta_add_only_owned_with_arena(
+                &self.tag_index,
+                tag_add,
+                arena,
+            ),
+            title_full_ngram_index: self
+                .title_full_ngram_index
+                .append_and_compact(build_ngram_from_mutable(title_full_ngram_add)),
+            title_word_ngram_index: self
+                .title_word_ngram_index
+                .append_and_compact(build_ngram_from_mutable(title_word_ngram_add)),
+            tag_ngram_index: self
+                .tag_ngram_index
+                .append_and_compact(build_ngram_from_mutable(tag_ngram_add)),
+            title_full_all_suffix_index: Self::merge_index_delta_add_only_owned_with_arena(
+                &self.title_full_all_suffix_index,
+                title_full_all_suffix_add,
+                arena,
+            ),
+            title_word_all_suffix_index: Self::merge_index_delta_add_only_owned_with_arena(
+                &self.title_word_all_suffix_index,
+                title_word_all_suffix_add,
+                arena,
+            ),
+            tag_all_suffix_index: Self::merge_index_delta_add_only_owned_with_arena(
+                &self.tag_all_suffix_index,
+                tag_all_suffix_add,
+                arena,
             ),
             config: self.config.clone(),
         }
@@ -6956,6 +7111,72 @@ impl SearchIndex {
         transient.persistent()
     }
 
+    /// Arena-backed variant of [`merge_index_delta_add_only_owned`].
+    ///
+    /// Reuses the scratch buffer from the provided [`MergeArena`] instead of
+    /// allocating a fresh `Vec<TaskId>` per call. This eliminates repeated
+    /// heap allocations when processing multiple index merges in a batch.
+    fn merge_index_delta_add_only_owned_with_arena(
+        index: &PrefixIndex,
+        add: MutableIndex,
+        arena: &mut MergeArena,
+    ) -> PrefixIndex {
+        if add.is_empty() {
+            return index.clone();
+        }
+
+        let mut transient = index.clone().transient();
+        let scratch = arena.scratch();
+
+        for (key, add_list) in add {
+            let key_str = key.as_str();
+            match transient.get(key_str) {
+                Some(collection) if !add_list.is_empty() => {
+                    let can_concat = collection
+                        .last_sorted()
+                        .zip(add_list.first())
+                        .is_none_or(|(existing_max, add_min)| add_min > existing_max);
+
+                    if can_concat {
+                        let mut result_vec = Vec::with_capacity(collection.len() + add_list.len());
+                        Self::extend_sorted_into(collection, &mut result_vec);
+                        result_vec.extend(add_list);
+                        transient.insert(key, TaskIdCollection::from_sorted_vec(result_vec));
+                    } else if let Some(existing_slice) = collection.as_sorted_slice() {
+                        Self::merge_posting_add_only_into_slice(
+                            existing_slice,
+                            add_list.as_slice(),
+                            scratch,
+                        );
+                        if !scratch.is_empty() {
+                            let mut collected = Vec::with_capacity(scratch.len());
+                            collected.append(scratch);
+                            transient.insert(key, TaskIdCollection::from_sorted_vec(collected));
+                        }
+                    } else {
+                        Self::merge_posting_add_only_into(
+                            collection.iter_sorted(),
+                            add_list.as_slice(),
+                            scratch,
+                        );
+                        if !scratch.is_empty() {
+                            let mut collected = Vec::with_capacity(scratch.len());
+                            collected.append(scratch);
+                            transient.insert(key, TaskIdCollection::from_sorted_vec(collected));
+                        }
+                    }
+                }
+                None if !add_list.is_empty() => {
+                    let collection = TaskIdCollection::from_sorted_vec(add_list);
+                    transient.insert(key, collection);
+                }
+                Some(_) | None => {}
+            }
+        }
+
+        transient.persistent()
+    }
+
     /// Computes `existing ∪ add` for a `NgramIndex` (add-only fast path).
     #[allow(dead_code)]
     fn merge_ngram_delta_add_only(
@@ -7441,6 +7662,16 @@ impl SearchIndex {
 
     #[cfg(test)]
     #[must_use]
+    pub fn merge_index_delta_add_only_owned_with_arena_for_test(
+        index: &PrefixIndex,
+        add: MutableIndex,
+        arena: &mut MergeArena,
+    ) -> PrefixIndex {
+        Self::merge_index_delta_add_only_owned_with_arena(index, add, arena)
+    }
+
+    #[cfg(test)]
+    #[must_use]
     pub fn merge_ngram_delta_add_only_individual_owned_for_test(
         index: &NgramIndex,
         add: MutableIndex,
@@ -7707,7 +7938,9 @@ impl SearchIndexWriter {
     /// The writer thread's main loop.
     ///
     /// Receives change sets from the channel, coalesces them into micro-batches,
-    /// and applies them to the search index.
+    /// and applies them to the search index. A single [`MergeArena`] is allocated
+    /// outside the loop and reused across all batches to avoid per-batch heap
+    /// allocations in the merge hot path.
     #[allow(clippy::needless_pass_by_value)] // Receiver and Arc are moved into the spawned thread
     fn writer_loop(
         receiver: std::sync::mpsc::Receiver<Vec<TaskChange>>,
@@ -7715,6 +7948,7 @@ impl SearchIndexWriter {
         config: &SearchIndexWriterConfig,
     ) {
         let batch_timeout = std::time::Duration::from_millis(config.batch_timeout_milliseconds);
+        let mut arena = MergeArena::new();
 
         loop {
             // Block until the first change set arrives (or channel closes)
@@ -7743,7 +7977,11 @@ impl SearchIndexWriter {
                     Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                         // Channel closed; apply what we have and exit
                         if !coalesced_changes.is_empty() {
-                            Self::apply_coalesced_changes(&search_index, &coalesced_changes);
+                            Self::apply_coalesced_changes(
+                                &search_index,
+                                &coalesced_changes,
+                                &mut arena,
+                            );
                         }
                         return;
                     }
@@ -7752,21 +7990,28 @@ impl SearchIndexWriter {
 
             // Apply the coalesced batch
             if !coalesced_changes.is_empty() {
-                Self::apply_coalesced_changes(&search_index, &coalesced_changes);
+                Self::apply_coalesced_changes(&search_index, &coalesced_changes, &mut arena);
             }
+
+            // Prevent unbounded growth of the scratch buffer between batches
+            arena.maybe_shrink();
         }
     }
 
     /// Applies coalesced changes to the search index (single-writer, no CAS needed).
+    ///
+    /// Uses the provided [`MergeArena`] to reuse scratch buffers across
+    /// multiple merge operations within the batch.
     fn apply_coalesced_changes(
         search_index: &arc_swap::ArcSwap<SearchIndex>,
         changes: &[TaskChange],
+        arena: &mut MergeArena,
     ) {
         let total_start = std::time::Instant::now();
 
         let current = search_index.load();
         let apply_start = std::time::Instant::now();
-        let updated = current.apply_changes(changes);
+        let updated = current.apply_changes_with_arena(changes, arena);
         let apply_elapsed = apply_start.elapsed();
 
         search_index.store(Arc::new(updated));
@@ -24643,15 +24888,30 @@ mod merge_arena_integration_tests {
 
     #[rstest]
     fn arena_scratch_capacity_preserved_across_calls() {
-        let index = PrefixIndex::new();
+        // Build an initial index with existing keys that will interleave with
+        // new IDs to force the non-concat merge path (which uses scratch).
+        // Use even IDs for existing, odd IDs for new to prevent disjoint concat.
+        let mut initial_add: MutableIndex = std::collections::HashMap::new();
+        for i in 0..50_u128 {
+            initial_add.insert(
+                NgramKey::new(&format!("key{i}")),
+                vec![
+                    TaskId::from_uuid(Uuid::from_u128(i * 10 + 2)),
+                    TaskId::from_uuid(Uuid::from_u128(i * 10 + 8)),
+                ],
+            );
+        }
+        let index =
+            SearchIndex::merge_index_delta_add_only_for_test(&PrefixIndex::new(), &initial_add);
+
         let mut arena = MergeArena::new();
 
-        // First call: build up scratch buffer capacity
+        // First call: add IDs that interleave with existing to force merge path
         let mut add_1: MutableIndex = std::collections::HashMap::new();
-        for i in 0..100 {
+        for i in 0..50_u128 {
             add_1.insert(
-                NgramKey::new(format!("key{i}")),
-                vec![TaskId::from_uuid(Uuid::from_u128(i))],
+                NgramKey::new(&format!("key{i}")),
+                vec![TaskId::from_uuid(Uuid::from_u128(i * 10 + 5))],
             );
         }
         let _result_1 = SearchIndex::merge_index_delta_add_only_owned_with_arena_for_test(
@@ -24664,8 +24924,8 @@ mod merge_arena_integration_tests {
         // Second call: capacity should be at least as large (reuse, no shrink)
         let mut add_2: MutableIndex = std::collections::HashMap::new();
         add_2.insert(
-            NgramKey::new("single"),
-            vec![TaskId::from_uuid(Uuid::from_u128(999))],
+            NgramKey::new("key0"),
+            vec![TaskId::from_uuid(Uuid::from_u128(9999))],
         );
         let _result_2 = SearchIndex::merge_index_delta_add_only_owned_with_arena_for_test(
             &index, add_2, &mut arena,
