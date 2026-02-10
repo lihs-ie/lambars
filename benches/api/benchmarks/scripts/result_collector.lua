@@ -117,10 +117,9 @@ end
 
 function M.set_conflict_detail(detail)
     if not detail then return end
-    M.results.conflict_detail.stale_version = (M.results.conflict_detail.stale_version or 0) + (detail.stale_version or 0)
-    M.results.conflict_detail.retryable_cas = (M.results.conflict_detail.retryable_cas or 0) + (detail.retryable_cas or 0)
-    M.results.conflict_detail.retry_success = (M.results.conflict_detail.retry_success or 0) + (detail.retry_success or 0)
-    M.results.conflict_detail.retry_exhausted = (M.results.conflict_detail.retry_exhausted or 0) + (detail.retry_exhausted or 0)
+    for key in pairs(M.results.conflict_detail) do
+        M.results.conflict_detail[key] = (M.results.conflict_detail[key] or 0) + (detail[key] or 0)
+    end
 end
 
 function M.load_scenario_from_env()

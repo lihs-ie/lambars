@@ -171,13 +171,10 @@ def merge_lua_metrics(input_files: List[Path], output_file: Path) -> None:
                 total_requests_sum += requests
                 valid_requests[file] = requests
 
-                # Merge conflict_detail if present
                 cd = data.get("conflict_detail", {})
                 if isinstance(cd, dict):
-                    conflict_detail["stale_version"] += cd.get("stale_version", 0)
-                    conflict_detail["retryable_cas"] += cd.get("retryable_cas", 0)
-                    conflict_detail["retry_success"] += cd.get("retry_success", 0)
-                    conflict_detail["retry_exhausted"] += cd.get("retry_exhausted", 0)
+                    for key in conflict_detail:
+                        conflict_detail[key] += cd.get(key, 0)
 
         except (FileNotFoundError, json.JSONDecodeError) as e:
             print(f"Warning: Failed to read {file}: {e}", file=sys.stderr)

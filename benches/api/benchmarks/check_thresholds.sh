@@ -182,18 +182,23 @@ if [[ -n "${CONFLICT_RATE}" ]]; then
     echo "  conflict_rate = ${CONFLICT_RATE}"
 fi
 
-# Display conflict_detail if present
-STALE_VERSION=$(jq -r '.results.conflict_detail.stale_version // empty' "${META_FILE}" 2>/dev/null || true)
-RETRYABLE_CAS=$(jq -r '.results.conflict_detail.retryable_cas // empty' "${META_FILE}" 2>/dev/null || true)
-RETRY_SUCCESS=$(jq -r '.results.conflict_detail.retry_success // empty' "${META_FILE}" 2>/dev/null || true)
-RETRY_EXHAUSTED=$(jq -r '.results.conflict_detail.retry_exhausted // empty' "${META_FILE}" 2>/dev/null || true)
+declare -A CONFLICT_DETAIL_FIELDS=(
+    [stale_version]="stale_version"
+    [retryable_cas]="retryable_cas"
+    [retry_success]="retry_success"
+    [retry_exhausted]="retry_exhausted"
+)
+CONFLICT_DETAIL_VALUES=()
+for field in "${!CONFLICT_DETAIL_FIELDS[@]}"; do
+    value=$(jq -r ".results.conflict_detail.${field} // empty" "${META_FILE}" 2>/dev/null || true)
+    [[ -n "${value}" ]] && CONFLICT_DETAIL_VALUES+=("${field}=${value}")
+done
 
-if [[ -n "${STALE_VERSION}" ]] || [[ -n "${RETRYABLE_CAS}" ]] || [[ -n "${RETRY_SUCCESS}" ]] || [[ -n "${RETRY_EXHAUSTED}" ]]; then
+if [[ ${#CONFLICT_DETAIL_VALUES[@]} -gt 0 ]]; then
     echo "  conflict_detail:"
-    [[ -n "${STALE_VERSION}" ]] && echo "    stale_version = ${STALE_VERSION}"
-    [[ -n "${RETRYABLE_CAS}" ]] && echo "    retryable_cas = ${RETRYABLE_CAS}"
-    [[ -n "${RETRY_SUCCESS}" ]] && echo "    retry_success = ${RETRY_SUCCESS}"
-    [[ -n "${RETRY_EXHAUSTED}" ]] && echo "    retry_exhausted = ${RETRY_EXHAUSTED}"
+    for entry in "${CONFLICT_DETAIL_VALUES[@]}"; do
+        echo "    ${entry}"
+    done
 fi
 
 echo ""
@@ -223,10 +228,10 @@ check_validation_gate() {
         echo "ERROR: results.requests must be a positive integer for 400/409 gate (got: ${REQUESTS:-<empty>})"
         exit 2
     fi
-    VALIDATION_ERROR_RATE=$(awk -v s400="${STATUS_400}" -v req="${REQUESTS}" \
-        'BEGIN { if (req > 0) printf "%.6f", s400 / req; else print "0" }')
-    CONFLICT_ERROR_RATE_CALCULATED=$(awk -v s409="${STATUS_409}" -v req="${REQUESTS}" \
-        'BEGIN { if (req > 0) printf "%.6f", s409 / req; else print "0" }')
+    VALIDATION_ERROR_RATE=$(awk -v s="${STATUS_400}" -v r="${REQUESTS}" \
+        'BEGIN { if (r > 0) printf "%.6f", s / r; else print "0" }')
+    CONFLICT_ERROR_RATE_CALCULATED=$(awk -v s="${STATUS_409}" -v r="${REQUESTS}" \
+        'BEGIN { if (r > 0) printf "%.6f", s / r; else print "0" }')
 
     echo "  validation_error_rate (400) = ${VALIDATION_ERROR_RATE}"
     echo "  conflict_error_rate (409) = ${CONFLICT_ERROR_RATE_CALCULATED}"
