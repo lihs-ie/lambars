@@ -24584,3 +24584,216 @@ mod search_index_writer_tests {
         writer.shutdown();
     }
 }
+
+// =============================================================================
+// Tests: MergeArena Integration (IMPL-PRB1-002-002 + 003)
+// =============================================================================
+
+#[cfg(test)]
+mod merge_arena_integration_tests {
+    use super::*;
+    use crate::domain::{Tag, Timestamp};
+    use rstest::rstest;
+    use uuid::Uuid;
+
+    // -------------------------------------------------------------------------
+    // IMPL-PRB1-002-002: merge_index_delta_add_only_owned_with_arena equivalence
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn merge_index_delta_add_only_owned_with_arena_equivalence() {
+        let index = PrefixIndex::new();
+        let mut add: MutableIndex = std::collections::HashMap::new();
+
+        let id_1 = TaskId::from_uuid(Uuid::from_u128(1));
+        let id_2 = TaskId::from_uuid(Uuid::from_u128(2));
+        let id_3 = TaskId::from_uuid(Uuid::from_u128(3));
+
+        add.insert(NgramKey::new("hello"), vec![id_1, id_2]);
+        add.insert(NgramKey::new("world"), vec![id_3]);
+
+        let add_clone = add.clone();
+
+        let result_without_arena =
+            SearchIndex::merge_index_delta_add_only_owned_for_test(&index, add);
+
+        let mut arena = MergeArena::new();
+        let result_with_arena =
+            SearchIndex::merge_index_delta_add_only_owned_with_arena_for_test(
+                &index,
+                add_clone,
+                &mut arena,
+            );
+
+        assert_eq!(result_without_arena.len(), result_with_arena.len());
+
+        for (key, collection_without) in &result_without_arena {
+            let collection_with = result_with_arena
+                .get(key.as_str())
+                .expect("Key should exist in arena result");
+            let without_elements: Vec<_> = collection_without.iter_sorted().cloned().collect();
+            let with_elements: Vec<_> = collection_with.iter_sorted().cloned().collect();
+            assert_eq!(
+                without_elements, with_elements,
+                "Posting list mismatch for key '{}'",
+                key.as_str()
+            );
+        }
+    }
+
+    #[rstest]
+    fn arena_scratch_capacity_preserved_across_calls() {
+        let index = PrefixIndex::new();
+        let mut arena = MergeArena::new();
+
+        // First call: build up scratch buffer capacity
+        let mut add_1: MutableIndex = std::collections::HashMap::new();
+        for i in 0..100 {
+            add_1.insert(
+                NgramKey::new(format!("key{i}")),
+                vec![TaskId::from_uuid(Uuid::from_u128(i))],
+            );
+        }
+        let _result_1 = SearchIndex::merge_index_delta_add_only_owned_with_arena_for_test(
+            &index, add_1, &mut arena,
+        );
+
+        let capacity_after_first = arena.scratch.capacity();
+        assert!(capacity_after_first > 0, "Arena should have allocated scratch");
+
+        // Second call: capacity should be at least as large (reuse, no shrink)
+        let mut add_2: MutableIndex = std::collections::HashMap::new();
+        add_2.insert(
+            NgramKey::new("single"),
+            vec![TaskId::from_uuid(Uuid::from_u128(999))],
+        );
+        let _result_2 = SearchIndex::merge_index_delta_add_only_owned_with_arena_for_test(
+            &index, add_2, &mut arena,
+        );
+
+        assert!(
+            arena.scratch.capacity() >= capacity_after_first,
+            "Arena capacity should not decrease between calls: was {}, now {}",
+            capacity_after_first,
+            arena.scratch.capacity()
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // IMPL-PRB1-002-003: apply_delta_owned_with_arena equivalence
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn apply_delta_owned_with_arena_equivalence() {
+        let empty_tasks: lambars::persistent::PersistentVector<Task> =
+            lambars::persistent::PersistentVector::new();
+        let index = SearchIndex::build_with_config(&empty_tasks, SearchIndexConfig::default());
+
+        let tasks: Vec<Task> = (0..20)
+            .map(|i| {
+                Task::new(TaskId::generate(), format!("Task {i}"), Timestamp::now())
+                    .add_tag(Tag::new("alpha"))
+                    .add_tag(Tag::new(format!("tag{i}")))
+            })
+            .collect();
+        let changes: Vec<TaskChange> = tasks.iter().cloned().map(TaskChange::Add).collect();
+
+        let mut delta_1 =
+            SearchIndexDelta::from_changes(&changes, &index.config, &index.tasks_by_id);
+        delta_1.prepare_posting_lists();
+        assert!(delta_1.is_add_only());
+
+        let mut delta_2 =
+            SearchIndexDelta::from_changes(&changes, &index.config, &index.tasks_by_id);
+        delta_2.prepare_posting_lists();
+
+        let result_without_arena = index.apply_delta_owned(delta_1, &changes);
+
+        let mut arena = MergeArena::new();
+        let result_with_arena = index.apply_delta_owned_with_arena(delta_2, &changes, &mut arena);
+
+        assert_eq!(
+            result_without_arena.tasks_by_id.len(),
+            result_with_arena.tasks_by_id.len(),
+            "tasks_by_id length mismatch"
+        );
+
+        for (key, without_collection) in &result_without_arena.title_word_index {
+            let with_collection = result_with_arena
+                .title_word_index
+                .get(key.as_str())
+                .expect("Key should exist in arena result");
+            let without_elements: Vec<_> = without_collection.iter_sorted().cloned().collect();
+            let with_elements: Vec<_> = with_collection.iter_sorted().cloned().collect();
+            assert_eq!(
+                without_elements, with_elements,
+                "title_word_index posting list mismatch for key '{}'",
+                key.as_str()
+            );
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // IMPL-PRB1-002-002: compact_one with arena
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn compact_one_with_arena_equivalence() {
+        let base_entries = &[("abc", &[1_u128, 2][..]), ("def", &[10][..])];
+        let segment_entries = &[("abc", &[3_u128, 5][..]), ("ghi", &[20][..])];
+
+        let mut base_map: MutableIndex = std::collections::HashMap::new();
+        for (key_string, id_values) in base_entries {
+            let mut ids: Vec<TaskId> = id_values
+                .iter()
+                .map(|value| TaskId::from_uuid(Uuid::from_u128(*value)))
+                .collect();
+            ids.sort();
+            base_map.insert(NgramKey::new(key_string), ids);
+        }
+        let base = build_ngram_from_mutable(base_map);
+
+        let mut segment_map: MutableIndex = std::collections::HashMap::new();
+        for (key_string, id_values) in segment_entries {
+            let mut ids: Vec<TaskId> = id_values
+                .iter()
+                .map(|value| TaskId::from_uuid(Uuid::from_u128(*value)))
+                .collect();
+            ids.sort();
+            segment_map.insert(NgramKey::new(key_string), ids);
+        }
+        let segment = build_ngram_from_mutable(segment_map);
+
+        let overlay = NgramSegmentOverlay {
+            base,
+            segments: vec![segment],
+            max_segments: 4,
+            max_segment_keys: 50_000,
+            budget: CompactionBudget::default(),
+        };
+
+        let result_without_arena = overlay.compact_one();
+
+        let mut arena = MergeArena::new();
+        let result_with_arena = overlay.compact_one_with_arena(&mut arena);
+
+        // Verify base indexes match
+        assert_eq!(result_without_arena.base.len(), result_with_arena.base.len());
+        assert_eq!(
+            result_without_arena.segments.len(),
+            result_with_arena.segments.len()
+        );
+
+        let materialized_without = result_without_arena.materialize();
+        let materialized_with = result_with_arena.materialize();
+
+        for (key, without_collection) in &materialized_without {
+            let with_collection = materialized_with
+                .get(key)
+                .expect("Key should exist in arena result");
+            let without_ids: Vec<_> = without_collection.iter_sorted().cloned().collect();
+            let with_ids: Vec<_> = with_collection.iter_sorted().cloned().collect();
+            assert_eq!(without_ids, with_ids, "Mismatch for key '{}'", key.as_str());
+        }
+    }
+}

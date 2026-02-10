@@ -1,7 +1,9 @@
 # TODO - Tasks Bulk/Tasks Update ボトルネック改善
 
 ## In Progress
-- [GREEN] [IMPL-PRB1-002-001] CompactionBudget + MergeArena 導入 - 最小実装中
+- [RED] [IMPL-PRB1-002-002+003] MergeArena を writer_loop に配置 + apply_delta_owned arena 統合 - 失敗テスト作成中
+  - Started: 2026-02-11
+  - Goal: writer_loop でバッチ間 MergeArena 再利用、merge_segment_into/apply_delta_owned に arena を渡す
   - Started: 2026-02-11
   - Goal: budget 駆動のコンパクション制御を導入し、append のみ/compact_one/強制 compact を budget パラメータで切り替え可能にする
 
