@@ -11,6 +11,8 @@ local retry_index, retry_body, retry_attempt = nil, nil, 0
 local counter = 0
 local last_request_index, last_request_is_update = nil, false
 local thread_retry_count, thread_retry_exhausted_count = 0, 0
+local thread_stale_version_count = 0
+local thread_retryable_cas_count = 0
 local update_types = {"priority", "description", "title", "full"}
 
 local backoff_skip_counter, backoff_skip_target = 0, 0
@@ -247,6 +249,7 @@ function response(status, headers, body)
         if status == 200 or status == 201 then
             local new_version, err = test_ids.increment_version(retry_index)
             if err then io.stderr:write("[tasks_update] Error incrementing version after retry: " .. err .. "\n") end
+            common.track_retry()
             thread_retry_count = thread_retry_count + 1
             reset_retry_state()
         elseif status == 409 then
@@ -271,6 +274,12 @@ function response(status, headers, body)
                 if err then io.stderr:write("[tasks_update] Error incrementing version: " .. err .. "\n") end
             end
         elseif status == 409 then
+            local error_code = common.extract_error_code(body)
+            if error_code == "VERSION_CONFLICT" then
+                thread_stale_version_count = thread_stale_version_count + 1
+            elseif error_code then
+                thread_retryable_cas_count = thread_retryable_cas_count + 1
+            end
             if last_request_index then
                 retry_index = last_request_index
                 retry_attempt = 0
@@ -399,6 +408,14 @@ function done(summary, latency, requests)
     local rc = pcall(require, "result_collector") and require("result_collector") or nil
     if rc and rc.set_request_categories then
         rc.set_request_categories(categories)
+    end
+    if rc and rc.set_conflict_detail then
+        rc.set_conflict_detail({
+            stale_version = thread_stale_version_count,
+            retryable_cas = thread_retryable_cas_count,
+            retry_success = thread_retry_count,
+            retry_exhausted = thread_retry_exhausted_count
+        })
     end
 
     common.finalize_benchmark(summary, latency, requests)
