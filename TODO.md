@@ -1,12 +1,13 @@
 # TODO - Tasks Bulk/Tasks Update ボトルネック改善
 
 ## In Progress
-- [GREEN] [IMPL-PRB1-001-003] update_task に read-repair ループ追加 - 最小実装完了
-  - Started: 2026-02-11
-  - Goal: update_task に bounded read-repair CAS ループを追加し stale-version 409 を吸収
 
 ## Done
-- [x] [IMPL-PRB1-001-001] ConflictKind 列挙型の導入 (2026-02-11)
+- [x] [IMPL-PRB1-001] PUT stale-version read-repair (2026-02-11)
+  - ConflictKind enum + classify_conflict_kind 純粋関数
+  - RebaseError + rebase_update_request 3-way merge 純粋関数
+  - update_task_with_read_repair bounded CAS loop (max 3 retries)
+  - update_task ハンドラーに read-repair 統合
 - [ ] [Phase 2-1] insert_bulk_owned の全経路適用
 - [ ] [Phase 2-2] Builder パターンによる世代トークン管理
 - [ ] [Phase 3-1] ChildSlot の SmallVec 化

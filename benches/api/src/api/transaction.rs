@@ -1762,8 +1762,8 @@ mod tests {
 
     use rstest::rstest;
 
-    use super::*;
     use super::super::error::ApiError;
+    use super::*;
 
     // -------------------------------------------------------------------------
     // Status Transition Tests
@@ -3399,21 +3399,9 @@ mod tests {
     #[rstest]
     fn test_rebase_update_request_success_same_value_update() {
         let task_id = TaskId::generate();
-        let original_base = make_task_for_rebase(
-            task_id.clone(),
-            "Title",
-            None,
-            Priority::Low,
-            1,
-        );
+        let original_base = make_task_for_rebase(task_id.clone(), "Title", None, Priority::Low, 1);
         // Another user also set title to "Title" (same value)
-        let latest = make_task_for_rebase(
-            task_id,
-            "Title",
-            None,
-            Priority::Low,
-            2,
-        );
+        let latest = make_task_for_rebase(task_id, "Title", None, Priority::Low, 2);
         // Our request changes title
         let request = UpdateTaskRequest {
             title: Some("New Title".to_string()),
@@ -3434,21 +3422,11 @@ mod tests {
     #[rstest]
     fn test_rebase_update_request_fails_title_conflict() {
         let task_id = TaskId::generate();
-        let original_base = make_task_for_rebase(
-            task_id.clone(),
-            "Original Title",
-            None,
-            Priority::Low,
-            1,
-        );
+        let original_base =
+            make_task_for_rebase(task_id.clone(), "Original Title", None, Priority::Low, 1);
         // Another user changed title
-        let latest = make_task_for_rebase(
-            task_id,
-            "Changed by another user",
-            None,
-            Priority::Low,
-            2,
-        );
+        let latest =
+            make_task_for_rebase(task_id, "Changed by another user", None, Priority::Low, 2);
         // Our request also changes title
         let request = UpdateTaskRequest {
             title: Some("My Title".to_string()),
@@ -3498,7 +3476,9 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(
             result.unwrap_err(),
-            RebaseError::NonCommutativeConflict { field: "description" }
+            RebaseError::NonCommutativeConflict {
+                field: "description"
+            }
         );
     }
 
@@ -3506,21 +3486,9 @@ mod tests {
     #[rstest]
     fn test_rebase_update_request_fails_priority_conflict() {
         let task_id = TaskId::generate();
-        let original_base = make_task_for_rebase(
-            task_id.clone(),
-            "Title",
-            None,
-            Priority::Low,
-            1,
-        );
+        let original_base = make_task_for_rebase(task_id.clone(), "Title", None, Priority::Low, 1);
         // Another user changed priority
-        let latest = make_task_for_rebase(
-            task_id,
-            "Title",
-            None,
-            Priority::High,
-            2,
-        );
+        let latest = make_task_for_rebase(task_id, "Title", None, Priority::High, 2);
         // Our request also changes priority
         let request = UpdateTaskRequest {
             title: None,
@@ -3554,7 +3522,6 @@ mod tests {
     #[rstest]
     #[tokio::test]
     async fn test_read_repair_success_different_field_update() {
-
         let (state, task) = create_test_app_state_with_task().await;
 
         // Simulate another user updating description (bumps version to 2)
@@ -3582,12 +3549,7 @@ mod tests {
         assert!(is_stale_version_conflict(&first_result.unwrap_err()));
 
         // Now call the full update_task_with_read_repair - it should succeed via rebase
-        let result = update_task_with_read_repair(
-            &state,
-            &task.task_id,
-            &request,
-        )
-        .await;
+        let result = update_task_with_read_repair(&state, &task.task_id, &request).await;
 
         assert!(result.is_ok(), "Read-repair should succeed: {result:?}");
         let (status_code, json_response) = result.unwrap();
