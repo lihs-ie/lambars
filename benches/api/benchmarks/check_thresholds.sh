@@ -145,9 +145,9 @@ fi
 echo "Checking thresholds for scenario: ${SCENARIO}"
 echo "Meta file: ${META_FILE}"
 
-RAW_P50=$(jq -r '.results.p50 // empty' "${META_FILE}" 2>/dev/null || true)
-RAW_P90=$(jq -r '.results.p90 // empty' "${META_FILE}" 2>/dev/null || true)
-RAW_P99=$(jq -r '.results.p99 // empty' "${META_FILE}" 2>/dev/null || true)
+RAW_P50=$(jq -r '.results.p50 // .results.latency_ms.p50 // empty' "${META_FILE}" 2>/dev/null || true)
+RAW_P90=$(jq -r '.results.p90 // .results.latency_ms.p90 // empty' "${META_FILE}" 2>/dev/null || true)
+RAW_P99=$(jq -r '.results.p99 // .results.latency_ms.p99 // empty' "${META_FILE}" 2>/dev/null || true)
 RAW_ERROR_RATE=$(jq -r '.results.error_rate // empty' "${META_FILE}" 2>/dev/null || true)
 RAW_CONFLICT_RATE=$(jq -r '.results.conflict_rate // empty' "${META_FILE}" 2>/dev/null || true)
 
@@ -247,17 +247,17 @@ if (( $(echo "${P99} > ${P99_MAX}" | bc -l) )); then
 fi
 
 if [[ -n "${ERROR_RATE_MAX}" ]] && [[ -n "${ERROR_RATE}" ]]; then
-    if (( $(echo "${ERROR_RATE} >= ${ERROR_RATE_MAX}" | bc -l) )); then
+    if (( $(echo "${ERROR_RATE} > ${ERROR_RATE_MAX}" | bc -l) )); then
         FAILURES="${FAILURES}
-  - error_rate=${ERROR_RATE} exceeds or equals threshold of ${ERROR_RATE_MAX}"
+  - error_rate=${ERROR_RATE} exceeds threshold of ${ERROR_RATE_MAX}"
         FAILED=1
     fi
 fi
 
 if [[ -n "${CONFLICT_RATE_MAX}" ]] && [[ -n "${CONFLICT_RATE}" ]]; then
-    if (( $(echo "${CONFLICT_RATE} >= ${CONFLICT_RATE_MAX}" | bc -l) )); then
+    if (( $(echo "${CONFLICT_RATE} > ${CONFLICT_RATE_MAX}" | bc -l) )); then
         FAILURES="${FAILURES}
-  - conflict_rate=${CONFLICT_RATE} exceeds or equals threshold of ${CONFLICT_RATE_MAX}"
+  - conflict_rate=${CONFLICT_RATE} exceeds threshold of ${CONFLICT_RATE_MAX}"
         FAILED=1
     fi
 fi

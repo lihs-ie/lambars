@@ -1,0 +1,257 @@
+# tasks_update 契約整合ベンチマーク改善 Phase2 要件定義
+#
+# 概要:
+#   Phase1 で PUT の status 更新を明示的に拒否した結果、
+#   既存 Lua ベンチが無効 payload を大量送信し error_rate が悪化した。
+#   API 契約に整合した負荷モデルへ再設計する。
+#
+# 設計方針:
+#   1. PUT 用負荷生成を endpoint 契約駆動へ変更し、status フィールドを排除する。
+#   2. status 更新負荷は PATCH /tasks/{id}/status シナリオへ分離する。
+#   3. 400(契約違反) と 409(競合) を分離した品質ゲートを導入する。
+#
+# 参照:
+#   - profiling-results-downloaded-latest/api-profiling-all-94801ef2e87c5634fe03d2a9373f8d5fc67f13a8/tasks_update/benchmark/meta/tasks_update.json
+#   - profiling-results-downloaded-latest/api-profiling-all-94801ef2e87c5634fe03d2a9373f8d5fc67f13a8/tasks_update_steady/benchmark/meta/tasks_update.json
+#   - benches/api/src/api/transaction.rs
+#   - benches/api/benchmarks/scripts/tasks_update.lua
+
+version: "1.0.0"
+name: "tasks_update_contract_aligned_benchmark_phase2"
+description: |
+  最新成果物では tasks_update の RPS は 800.35 と維持された一方で、
+  error_rate は 0.402233 まで悪化した。
+  内訳は HTTP 400: 5644, HTTP 409: 4010 であり、
+  409 は改善したが 400 が新規発生し品質判定を破壊している。
+  これは性能劣化ではなく、PUT 契約とベンチ payload の不整合が主要因。
+
+background:
+  problem: |
+    `update_task_inner` は PUT で status が来た場合に 400 を返す設計へ変更された。
+    しかし tasks_update.lua は update_type に status/full を含み、
+    PUT リクエストへ status を継続投入している。
+    その結果、競合改善の効果を評価する前に契約違反エラーが先に支配している。
+  motivation: |
+    A+B（retry + single-writer queue）の効果を正しく評価するため、
+    まずベンチ入力を API 契約に一致させる必要がある。
+  prior_art:
+    - name: "Contract-Aware Workload Modeling"
+      description: "エンドポイントごとの受理フィールド制約を負荷生成器に埋め込む。"
+    - name: "Endpoint-Segregated Benchmark Pipeline"
+      description: "異なる更新意味論（PUT/PATCH）を別シナリオで計測し合成評価する。"
+    - name: "Error Taxonomy Gate"
+      description: "validation error と conflict error を分離し、原因別に閾値判定する。"
+
+requirements:
+  - id: REQ-TU2-001
+    name: "PUT /tasks/{id} 負荷を契約整合 payload のみに制限する"
+    description: |
+      tasks_update.lua の update_type 選択を Contract-Aware Weighted Round Robin へ変更し、
+      PUT では `status` を持つ payload を生成しない。
+      `full` 更新も status なし版へ再定義する。
+      根本設計変更: generic random field update -> endpoint contract aware generator。
+    methods:
+      - name: "select_put_update_type"
+        signature: "fn select_put_update_type(counter: usize, schedule: PutUpdateSchedule) -> PutUpdateType"
+        description: "PUT で許可された更新型のみを返す。"
+      - name: "generate_put_body"
+        signature: "fn generate_put_body(update_type: PutUpdateType, version: i64, request_counter: i64) -> Json"
+        description: "status フィールドを含まない PUT payload を生成する。"
+    implementations:
+      - type: "benches/api/benchmarks/scripts/tasks_update.lua"
+        description: "PUT 経路の update_types と body 生成を契約整合へ変更する。"
+
+  - id: REQ-TU2-002
+    name: "status 更新負荷を PATCH 専用シナリオへ分離する"
+    description: |
+      status 更新は `PATCH /tasks/{id}/status` シナリオへ移し、
+      PUT の error_rate と競合率を汚染しないようにする。
+      これにより status 遷移性能と PUT 更新性能を独立評価できる。
+      根本設計変更: single mixed endpoint benchmark -> endpoint-segregated benchmark。
+    methods:
+      - name: "generate_status_patch_body"
+        signature: "fn generate_status_patch_body(version: i64) -> Json"
+        description: "PATCH status 用 payload を生成する。"
+      - name: "aggregate_update_metrics"
+        signature: "fn aggregate_update_metrics(put_metrics: Metrics, patch_metrics: Metrics, weights: Weights) -> CompositeMetrics"
+        description: "PUT/PATCH の分離計測結果を重み付きで集約する。"
+    implementations:
+      - type: "benches/api/benchmarks/scenarios/tasks_update_status.yaml"
+        description: "PATCH status 専用の新規シナリオを追加する。"
+      - type: "benches/api/benchmarks/run_benchmark.sh"
+        description: "PUT/PATCH 分離シナリオの実行導線を追加する。"
+
+  - id: REQ-TU2-003
+    name: "400 と 409 を分離した品質ゲートを導入する"
+    description: |
+      現状は error_rate 単一指標で評価しており、契約違反(400)と競合(409)が混在する。
+      `validation_error_rate` と `conflict_error_rate` を分離し、
+      PUT シナリオで `http_status.400 == 0` を必須条件にする。
+      アルゴリズムは Rule-based Error Taxonomy Gate。
+    methods:
+      - name: "classify_http_errors"
+        signature: "fn classify_http_errors(http_status: Map<String, usize>) -> ErrorTaxonomy"
+        description: "4xx を validation/conflict/other に分類する。"
+      - name: "evaluate_tasks_update_gate"
+        signature: "fn evaluate_tasks_update_gate(metrics: Metrics, taxonomy: ErrorTaxonomy, thresholds: Thresholds) -> GateResult"
+        description: "契約違反と競合を分離して pass/fail 判定する。"
+    implementations:
+      - type: "benches/api/benchmarks/check_thresholds.sh"
+        description: "tasks_update で 400 を fail-fast 判定する。"
+      - type: "benches/api/benchmarks/validate_metrics_invariants.sh"
+        description: "整合性検証に加え、分類済みエラーの存在を検証する。"
+
+non_functional_requirements:
+  performance:
+    - "tasks_update(PUT): http_status.400 == 0"
+    - "tasks_update(PUT): error_rate <= 0.03"
+    - "tasks_update(PUT): p99_latency_ms <= 100, rps >= 500"
+  compatibility:
+    - "PUT /tasks/{id} の契約（status 非対応）を維持する"
+    - "PATCH /tasks/{id}/status の契約（status 遷移専用）を維持する"
+  testing:
+    - "tasks_update.lua の payload 契約テスト（PUT body に status が含まれないこと）"
+    - "PUT/PATCH 分離シナリオの CI 実行テスト"
+    - "分類ゲートのユニットテスト（400 と 409 が正しく分離されること）"
+
+evidence:
+  artifact_commit: "94801ef2e87c5634fe03d2a9373f8d5fc67f13a8"
+  metrics:
+    - id: "EV-TU2-M1"
+      description: "tasks_update 最新値: error_rate 0.402233, HTTP 400=5644, HTTP 409=4010。"
+      source: "profiling-results-downloaded-latest/api-profiling-all-94801ef2e87c5634fe03d2a9373f8d5fc67f13a8/tasks_update/benchmark/meta/tasks_update.json:30"
+    - id: "EV-TU2-M2"
+      description: "tasks_update_steady でも HTTP 400=1200（HTTP 409=0）で error_rate 0.399867。"
+      source: "profiling-results-downloaded-latest/api-profiling-all-94801ef2e87c5634fe03d2a9373f8d5fc67f13a8/tasks_update_steady/benchmark/meta/tasks_update.json:30"
+    - id: "EV-TU2-M3"
+      description: "tasks_update_conflict でも HTTP 400=3008, HTTP 409=2532 が同時発生。"
+      source: "profiling-results-downloaded-latest/api-profiling-all-94801ef2e87c5634fe03d2a9373f8d5fc67f13a8/tasks_update_conflict/benchmark/meta/tasks_update.json:40"
+    - id: "EV-TU2-M4"
+      description: "Phase7 基準では HTTP 400=0, error_rate 0.199233（409のみ）だった。"
+      source: "profiling-results/github-21797483415/api-profiling-all-cec19b06ec4fe36d95bc84ed889709739152937e/tasks_update/benchmark/meta/tasks_update.json:30"
+    - id: "EV-TU2-M5"
+      description: "tasks_update しきい値は max_error_rate=0.03。現状は大幅超過。"
+      source: "benches/api/benchmarks/scenarios/tasks_update.yaml:68"
+  code:
+    - id: "EV-TU2-C1"
+      description: "PUT で status が存在すると 400 UNSUPPORTED_FIELD を返す。"
+      source: "benches/api/src/api/transaction.rs:735"
+    - id: "EV-TU2-C2"
+      description: "status 更新の正規経路は PATCH /tasks/{id}/status。"
+      source: "benches/api/src/api/transaction.rs:1070"
+    - id: "EV-TU2-C3"
+      description: "tasks_update.lua は update_types に status を含む。"
+      source: "benches/api/benchmarks/scripts/tasks_update.lua:14"
+    - id: "EV-TU2-C4"
+      description: "full payload にも status が含まれている。"
+      source: "benches/api/benchmarks/scripts/tasks_update.lua:98"
+    - id: "EV-TU2-C5"
+      description: "update_type は round-robin で選択される（契約考慮なし）。"
+      source: "benches/api/benchmarks/scripts/tasks_update.lua:193"
+
+implementation_tasks:
+  - id: "IMPL-TU2-001"
+    priority: 1
+    requirement_ids:
+      - "REQ-TU2-001"
+    evidence_ids:
+      - "EV-TU2-M1"
+      - "EV-TU2-M2"
+      - "EV-TU2-C1"
+      - "EV-TU2-C3"
+      - "EV-TU2-C4"
+      - "EV-TU2-C5"
+    objective: "PUT ベンチ payload から status 混入を除去し、契約違反 400 を止血する。"
+    scope_files:
+      - "benches/api/benchmarks/scripts/tasks_update.lua"
+    actions:
+      - "PUT 用 update_types から `status` を除去する。"
+      - "`full` 更新から status フィールドを除去した `full_put` を定義する。"
+      - "request() 直前で PUT body の status 非含有を検証し、違反時はテスト失敗にする。"
+    completion_criteria:
+      - "tasks_update_steady の http_status.400 が 0。"
+      - "tasks_update の http_status.400 が 0。"
+    verification_artifacts:
+      - "profiling-results-downloaded-latest/.../tasks_update_steady/benchmark/meta/tasks_update.json"
+      - "profiling-results-downloaded-latest/.../tasks_update/benchmark/meta/tasks_update.json"
+
+  - id: "IMPL-TU2-002"
+    priority: 2
+    requirement_ids:
+      - "REQ-TU2-002"
+    evidence_ids:
+      - "EV-TU2-C2"
+      - "EV-TU2-C3"
+      - "EV-TU2-C4"
+    objective: "status 更新負荷を PATCH シナリオとして分離し、PUT と独立評価する。"
+    scope_files:
+      - "benches/api/benchmarks/scenarios"
+      - "benches/api/benchmarks/scripts"
+      - "benches/api/benchmarks/run_benchmark.sh"
+    actions:
+      - "`tasks_update_status`（PATCH専用）シナリオを追加する。"
+      - "PATCH 用 Lua スクリプトで status/version のみ送信する。"
+      - "レポートで PUT と PATCH を分離表示し、必要なら重み付き合成値も出力する。"
+    completion_criteria:
+      - "PUT シナリオに status 更新が混入しない。"
+      - "PATCH シナリオで status 更新を継続計測できる。"
+    verification_artifacts:
+      - "tasks_update_status の benchmark/meta/tasks_update.json"
+      - "分離表示された集計レポート"
+
+  - id: "IMPL-TU2-003"
+    priority: 3
+    requirement_ids:
+      - "REQ-TU2-003"
+    evidence_ids:
+      - "EV-TU2-M1"
+      - "EV-TU2-M5"
+      - "EV-TU2-C1"
+    objective: "契約違反(400)と競合(409)の分類ゲートを追加し、誤った改善判定を防止する。"
+    scope_files:
+      - "benches/api/benchmarks/check_thresholds.sh"
+      - "benches/api/benchmarks/validate_metrics_invariants.sh"
+    actions:
+      - "tasks_update(PUT) で `http_status.400 > 0` を即 FAIL にする。"
+      - "`validation_error_rate` と `conflict_error_rate` を別指標として計算する。"
+      - "閾値判定ログに各分類値を明示出力する。"
+    completion_criteria:
+      - "400 混入時に CI 判定が確実に FAIL になる。"
+      - "409 改善と 400 増加を別々に判定できる。"
+    verification_artifacts:
+      - "check_thresholds 実行ログ"
+      - "分類済みメトリクス出力"
+
+  - id: "IMPL-TU2-004"
+    priority: 4
+    requirement_ids:
+      - "REQ-TU2-001"
+      - "REQ-TU2-002"
+      - "REQ-TU2-003"
+    evidence_ids:
+      - "EV-TU2-M1"
+      - "EV-TU2-M4"
+      - "EV-TU2-M5"
+    objective: "Phase2 反映後に A+B 実装効果を再測定し、真の競合改善量を確定する。"
+    scope_files:
+      - "profiling-results-downloaded-latest"
+      - "docs/internal/requirements/20260210_1701_tasks_update_contract_aligned_benchmark_phase2.yaml"
+    actions:
+      - "PUT 契約整合版で再プロファイルを実施する。"
+      - "Phase7/Phase1/Phase2 の 409 件数と error_rate を比較する。"
+      - "閾値達成可否（error_rate<=0.03）を要件に追記する。"
+    completion_criteria:
+      - "400=0 の前提で 409 改善量を提示できる。"
+      - "受け入れ判定が閾値ベースで明確に記録される。"
+    verification_artifacts:
+      - "再実行 tasks_update meta.json"
+      - "比較テーブル（Phase7/Phase1/Phase2）"
+
+future_extensions:
+  - id: "TU2-FUTURE-001"
+    name: "operation schedule auto-tuning"
+    description: |
+      PUT/PATCH の比率を本番アクセスログから自動同定し、
+      ベンチ負荷分布へ反映する。
+    rationale: |
+      まずは契約不整合を除去し、測定値の信頼性を回復する必要がある。

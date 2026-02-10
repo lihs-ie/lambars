@@ -163,6 +163,8 @@ function request()
             io.stderr:write("[tasks_update] Error in retry_put: " .. (err or "retry_body is nil") .. "\n")
             return fallback_request()
         end
+        -- Contract validation: retry PUT payload must not contain status field (REQ-TU2-001)
+        assert(not retry_body:find('"status"%s*:'), "[tasks_update] FATAL: retry PUT payload contains status field")
         last_request_is_update = true
         return wrk and wrk.format and wrk.format("PUT", "/tasks/" .. task_id, {["Content-Type"] = "application/json"}, retry_body) or ""
     elseif state == "fallback" then
