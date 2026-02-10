@@ -23440,6 +23440,178 @@ mod ngram_segment_overlay_tests {
             .collect();
         assert_eq!(ids, expected);
     }
+
+    // -------------------------------------------------------------------------
+    // IMPL-PRB1-002-001: CompactionBudget tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn compaction_budget_default_values() {
+        let budget = CompactionBudget::default();
+        assert_eq!(budget.soft_max_segments_per_compact, 1);
+        assert_eq!(budget.hard_max_segments, 6);
+    }
+
+    #[rstest]
+    fn segment_overlay_config_contains_budget() {
+        let config = SegmentOverlayConfig::default();
+        let _budget = config.budget;
+        // Should compile and be accessible
+        assert_eq!(config.budget.soft_max_segments_per_compact, 1);
+        assert_eq!(config.budget.hard_max_segments, 6);
+    }
+
+    #[rstest]
+    fn with_config_accepts_budget() {
+        let base = NgramIndex::new();
+        let config = SegmentOverlayConfig {
+            max_segments: 3,
+            max_segment_keys: 50_000,
+            budget: CompactionBudget {
+                soft_max_segments_per_compact: 2,
+                hard_max_segments: 4,
+            },
+        };
+        let overlay = NgramSegmentOverlay::with_config(base, &config);
+        assert_eq!(overlay.budget.soft_max_segments_per_compact, 2);
+        assert_eq!(overlay.budget.hard_max_segments, 4);
+    }
+
+    #[rstest]
+    fn budget_below_soft_appends_only() {
+        // When segments.len() < soft_max_segments_per_compact, only append (no compact)
+        let base = make_ngram_index(&[("abc", &[1])]);
+        let config = SegmentOverlayConfig {
+            max_segments: 10,
+            max_segment_keys: 50_000,
+            budget: CompactionBudget {
+                soft_max_segments_per_compact: 3,
+                hard_max_segments: 6,
+            },
+        };
+        let overlay = NgramSegmentOverlay::with_config(base, &config);
+
+        // Add 2 segments (below soft=3), should NOT compact
+        let delta_1 = make_ngram_index(&[("abc", &[2])]);
+        let with_one = overlay.append_and_compact(delta_1);
+        assert_eq!(with_one.segments.len(), 1);
+
+        let delta_2 = make_ngram_index(&[("abc", &[3])]);
+        let with_two = with_one.append_and_compact(delta_2);
+        assert_eq!(with_two.segments.len(), 2);
+
+        // All data accessible
+        let key = NgramKey::new("abc");
+        let result = with_two.query(&key).expect("key present");
+        let ids = sorted_ids(&result);
+        let expected: Vec<TaskId> = [1, 2, 3]
+            .iter()
+            .map(|value| TaskId::from_uuid(Uuid::from_u128(*value)))
+            .collect();
+        assert_eq!(ids, expected);
+    }
+
+    #[rstest]
+    fn budget_at_hard_forces_compact() {
+        // When segments.len() >= hard_max_segments, force compact all down
+        let base = make_ngram_index(&[("abc", &[1])]);
+        let config = SegmentOverlayConfig {
+            max_segments: 10, // high so it does not interfere
+            max_segment_keys: 50_000,
+            budget: CompactionBudget {
+                soft_max_segments_per_compact: 1,
+                hard_max_segments: 3,
+            },
+        };
+        let overlay = NgramSegmentOverlay::with_config(base, &config);
+
+        // Add segments up to hard limit
+        let delta_1 = make_ngram_index(&[("abc", &[2])]);
+        let with_one = overlay.append_and_compact(delta_1);
+
+        let delta_2 = make_ngram_index(&[("abc", &[3])]);
+        let with_two = with_one.append_and_compact(delta_2);
+
+        let delta_3 = make_ngram_index(&[("abc", &[4])]);
+        let with_three = with_two.append_and_compact(delta_3);
+
+        // After hard compact, segments should be fewer than hard_max_segments
+        assert!(
+            with_three.segments.len() < 3,
+            "Expected segments < hard_max_segments(3), got {}",
+            with_three.segments.len()
+        );
+
+        // All data still accessible
+        let key = NgramKey::new("abc");
+        let result = with_three.query(&key).expect("key present");
+        let ids = sorted_ids(&result);
+        let expected: Vec<TaskId> = [1, 2, 3, 4]
+            .iter()
+            .map(|value| TaskId::from_uuid(Uuid::from_u128(*value)))
+            .collect();
+        assert_eq!(ids, expected);
+    }
+
+    #[rstest]
+    fn budget_between_soft_and_hard_compacts_one() {
+        // When soft <= segments.len() < hard, compact_one is called once
+        let base = make_ngram_index(&[("abc", &[1])]);
+        let config = SegmentOverlayConfig {
+            max_segments: 10,
+            max_segment_keys: 50_000,
+            budget: CompactionBudget {
+                soft_max_segments_per_compact: 2,
+                hard_max_segments: 5,
+            },
+        };
+        let overlay = NgramSegmentOverlay::with_config(base, &config);
+
+        // Add 2 segments (= soft), should trigger compact_one
+        let delta_1 = make_ngram_index(&[("abc", &[2])]);
+        let with_one = overlay.append_and_compact(delta_1);
+        assert_eq!(with_one.segments.len(), 1); // below soft, no compact
+
+        let delta_2 = make_ngram_index(&[("abc", &[3])]);
+        let with_two = with_one.append_and_compact(delta_2);
+        // At soft=2 segments, compact_one should run, merging oldest into base
+        // Result: 1 segment remaining (was 2, compact_one removes 1, adds the new one)
+        assert_eq!(with_two.segments.len(), 1,
+            "Expected 1 segment after compact_one at soft boundary, got {}",
+            with_two.segments.len()
+        );
+
+        // All data still accessible
+        let key = NgramKey::new("abc");
+        let result = with_two.query(&key).expect("key present");
+        let ids = sorted_ids(&result);
+        let expected: Vec<TaskId> = [1, 2, 3]
+            .iter()
+            .map(|value| TaskId::from_uuid(Uuid::from_u128(*value)))
+            .collect();
+        assert_eq!(ids, expected);
+    }
+
+    #[rstest]
+    fn budget_shrink_threshold_on_arena() {
+        // MergeArena shrink test (will be expanded in IMPL-PRB1-002-002)
+        let mut arena = MergeArena::new();
+        assert!(arena.scratch().is_empty());
+        assert_eq!(arena.shrink_threshold, 16_384);
+
+        // Use scratch buffer
+        let scratch = arena.scratch();
+        scratch.extend((0..20_000).map(|i| TaskId::from_uuid(Uuid::from_u128(i))));
+        assert!(arena.scratch.capacity() >= 20_000);
+
+        // maybe_shrink should reduce capacity
+        arena.maybe_shrink();
+        assert!(
+            arena.scratch.capacity() <= 16_384,
+            "Expected capacity <= 16384 after shrink, got {}",
+            arena.scratch.capacity()
+        );
+    }
 }
 
 // =============================================================================
