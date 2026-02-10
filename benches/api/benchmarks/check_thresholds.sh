@@ -308,6 +308,34 @@ if [[ -n "${CONFLICT_RATE}" ]]; then
 fi
 echo ""
 
+# Extract 400 and 409 counts for tasks_update scenarios (GATE-001)
+STATUS_400=""
+STATUS_409=""
+if [[ "${SCENARIO}" == tasks_update_* ]]; then
+    STATUS_400=$(jq -r '.results.http_status."400" // 0' "${META_FILE}")
+    STATUS_409=$(jq -r '.results.http_status."409" // 0' "${META_FILE}")
+
+    # Immediate FAIL if any 400 errors (contract violation)
+    if (( 10#${STATUS_400} > 0 )); then
+        echo "FAIL: Contract violation detected - status field included in PUT payload"
+        echo "  http_status.400 = ${STATUS_400} (must be 0)"
+        exit 3
+    fi
+
+    # Calculate validation_error_rate and conflict_error_rate
+    REQUESTS=$(jq -r '.results.requests // 0' "${META_FILE}")
+    VALIDATION_ERROR_RATE=$(awk -v s400="${STATUS_400}" -v req="${REQUESTS}" 'BEGIN {
+        if (req > 0) printf "%.6f", s400 / req; else print "0"
+    }')
+    CONFLICT_ERROR_RATE=$(awk -v s409="${STATUS_409}" -v req="${REQUESTS}" 'BEGIN {
+        if (req > 0) printf "%.6f", s409 / req; else print "0"
+    }')
+
+    echo "  validation_error_rate (400) = ${VALIDATION_ERROR_RATE}"
+    echo "  conflict_error_rate (409) = ${CONFLICT_ERROR_RATE}"
+    echo ""
+fi
+
 # Check thresholds
 FAILED=0
 FAILURES=""
