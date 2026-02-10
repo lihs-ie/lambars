@@ -2981,4 +2981,75 @@ mod tests {
         assert_eq!(events[0].version, u64::MAX);
         assert_eq!(events[1].version, u64::MAX);
     }
+
+    // -------------------------------------------------------------------------
+    // ConflictKind / classify_conflict_kind Tests (IMPL-PRB1-001-001)
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn test_classify_conflict_kind_stale_version() {
+        let error = ApiErrorResponse::conflict("Expected version 1, found 2");
+        assert_eq!(classify_conflict_kind(&error), ConflictKind::StaleVersion);
+    }
+
+    #[rstest]
+    fn test_classify_conflict_kind_retryable_cas() {
+        let error = ApiErrorResponse::retryable_conflict("CAS failure");
+        assert_eq!(classify_conflict_kind(&error), ConflictKind::RetryableCas);
+    }
+
+    #[rstest]
+    fn test_classify_conflict_kind_other_409() {
+        // A 409 with an unknown error code
+        let error = ApiErrorResponse::new(
+            StatusCode::CONFLICT,
+            ApiError::new("UNKNOWN_CONFLICT", "something else"),
+        );
+        assert_eq!(classify_conflict_kind(&error), ConflictKind::Other);
+    }
+
+    #[rstest]
+    fn test_classify_conflict_kind_non_409() {
+        let error = ApiErrorResponse::not_found("task not found");
+        assert_eq!(classify_conflict_kind(&error), ConflictKind::Other);
+    }
+
+    #[rstest]
+    fn test_is_stale_version_conflict_true() {
+        let error = ApiErrorResponse::conflict("Expected version 1, found 2");
+        assert!(is_stale_version_conflict(&error));
+    }
+
+    #[rstest]
+    fn test_is_stale_version_conflict_false_for_retryable() {
+        let error = ApiErrorResponse::retryable_conflict("CAS failure");
+        assert!(!is_stale_version_conflict(&error));
+    }
+
+    #[rstest]
+    fn test_is_stale_version_conflict_false_for_non_409() {
+        let error = ApiErrorResponse::not_found("task not found");
+        assert!(!is_stale_version_conflict(&error));
+    }
+
+    /// is_retryable_conflict should be a wrapper around classify_conflict_kind
+    #[rstest]
+    fn test_is_retryable_conflict_consistent_with_classify() {
+        let retryable = ApiErrorResponse::retryable_conflict("CAS failure");
+        let stale = ApiErrorResponse::conflict("Expected version 1, found 2");
+        let not_found = ApiErrorResponse::not_found("not found");
+
+        assert_eq!(
+            is_retryable_conflict(&retryable),
+            classify_conflict_kind(&retryable) == ConflictKind::RetryableCas
+        );
+        assert_eq!(
+            is_retryable_conflict(&stale),
+            classify_conflict_kind(&stale) == ConflictKind::RetryableCas
+        );
+        assert_eq!(
+            is_retryable_conflict(&not_found),
+            classify_conflict_kind(&not_found) == ConflictKind::RetryableCas
+        );
+    }
 }
