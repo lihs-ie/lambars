@@ -37,6 +37,12 @@ M.results = {
         excluded_requests = 0,
         success_rate = 0
     },
+    conflict_detail = {
+        stale_version = 0,
+        retryable_cas = 0,
+        retry_success = 0,
+        retry_exhausted = 0
+    },
     rps = { target = 0, actual = 0 },
     latency = {
         min_us = 0, max_us = 0, mean_us = 0, stdev_us = 0,
@@ -107,6 +113,14 @@ function M.set_request_categories(categories)
     if not categories then return end
     local excluded = (categories.backoff or 0) + (categories.suppressed or 0) + (categories.fallback or 0)
     M.results.meta.excluded_requests = excluded
+end
+
+function M.set_conflict_detail(detail)
+    if not detail then return end
+    M.results.conflict_detail.stale_version = (M.results.conflict_detail.stale_version or 0) + (detail.stale_version or 0)
+    M.results.conflict_detail.retryable_cas = (M.results.conflict_detail.retryable_cas or 0) + (detail.retryable_cas or 0)
+    M.results.conflict_detail.retry_success = (M.results.conflict_detail.retry_success or 0) + (detail.retry_success or 0)
+    M.results.conflict_detail.retry_exhausted = (M.results.conflict_detail.retry_exhausted or 0) + (detail.retry_exhausted or 0)
 end
 
 function M.load_scenario_from_env()
