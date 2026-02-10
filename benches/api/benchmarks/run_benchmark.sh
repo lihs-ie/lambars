@@ -192,6 +192,7 @@ resolve_script_from_endpoint() {
         "/tasks-eff")               echo "tasks_eff" ;;
         "/tasks/bulk")              echo "tasks_bulk" ;;
         "/tasks/search")            echo "tasks_search" ;;
+        "/tasks/{id}/status"|"/tasks/*/status") echo "tasks_update_status" ;;
         "/tasks/{id}"|"/tasks/*")   echo "tasks_update" ;;
         "/projects/{id}/progress"|"/projects/*/progress")  echo "projects_progress" ;;
         "/tasks")                   echo "recursive" ;;

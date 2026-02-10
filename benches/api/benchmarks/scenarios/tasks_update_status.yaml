@@ -1,0 +1,88 @@
+# Tasks Update Status Endpoint Benchmark
+#
+# Tests PATCH /tasks/{id}/status endpoint for status-only updates
+#
+# IMPORTANT: Requires threads == connections (1:1 mapping)
+# Reason: Version state management and backoff exclusion are thread-local
+
+name: "tasks_update_status"
+description: "Benchmark PATCH /tasks/{id}/status endpoint for status updates"
+
+# Backend configuration (maps to STORAGE_MODE, CACHE_MODE)
+storage_mode: postgres
+cache_mode: redis
+
+# Workload configuration
+load_pattern: mixed
+cache_state: warm
+# data_scale: maps to DATA_SCALE (small=1e2, medium=1e4, large=1e6)
+data_scale: medium
+# payload_variant: maps to PAYLOAD (minimal=small, standard=medium, complex/heavy=large)
+payload_variant: minimal
+# rps_profile: constant=steady, ramp_up_down=ramp, burst=burst
+rps_profile: constant
+
+# Load generation (threads MUST equal connections)
+duration_seconds: 30
+connections: 8
+threads: 8
+target_rps: 800
+warmup_seconds: 5
+
+# Contention level
+contention_level: medium
+
+# Target endpoint (first element maps to ENDPOINT)
+endpoints:
+  - "/tasks/{id}/status"
+
+http_methods:
+  - "PATCH"
+
+# Concurrency settings (maps to POOL_SIZES, WORKERS)
+concurrency:
+  worker_threads: 4
+  database_pool_size: 20
+  redis_pool_size: 10
+  max_connections: 100
+
+# Cache metrics (expected_hit_rate maps to HIT_RATE)
+cache_metrics:
+  enabled: true
+  per_endpoint: true
+  track_latency: true
+  warmup_requests: 200
+  expected_hit_rate: 0.7
+
+# Error handling (inject_error_rate maps to FAIL_RATE, max_retries>0 maps to RETRY)
+error_config:
+  timeout_ms: 5000
+  connect_timeout_ms: 1000
+  max_retries: 2
+  retry_delay_ms: 100
+  expected_error_rate: 0.02
+  fail_on_error_threshold: true
+
+# Performance thresholds
+thresholds:
+  max_error_rate: 0.03
+  p99_latency_ms: 100
+  min_rps_achieved: 500
+
+metadata:
+  test_type: "endpoint_benchmark"
+  endpoint: "PATCH /tasks/{id}/status"
+  payload: "minimal"
+  cache_strategy: "write-through"
+  hit_rate: 50
+  fail_injection: 0
+  retry: true
+  profile: false
+  id_pool_size: 1000
+  retry_count: 1
+  script: "tasks_update_status"
+  tags:
+    - tasks
+    - update
+    - status
+    - patch
