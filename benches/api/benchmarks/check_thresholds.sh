@@ -190,7 +190,7 @@ declare -A CONFLICT_DETAIL_FIELDS=(
 )
 CONFLICT_DETAIL_VALUES=()
 for field in "${!CONFLICT_DETAIL_FIELDS[@]}"; do
-    value=$(jq -r ".results.conflict_detail.${field} // empty" "${META_FILE}" 2>/dev/null || true)
+    value=$(jq -r "(.results.conflict_detail // .conflict_detail // {}).${field} // empty" "${META_FILE}" 2>/dev/null || true)
     [[ -n "${value}" ]] && CONFLICT_DETAIL_VALUES+=("${field}=${value}")
 done
 

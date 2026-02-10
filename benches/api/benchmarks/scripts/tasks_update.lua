@@ -41,6 +41,8 @@ local function validate_and_clamp(value, min_val, default_val, name)
     return value
 end
 
+local all_threads = {}
+
 function setup(thread)
     if not benchmark_initialized then
         common.init_benchmark({scenario_name = "tasks_update", output_format = "json"})
@@ -48,6 +50,13 @@ function setup(thread)
     end
 
     if error_tracker then error_tracker.setup_thread(thread) end
+
+    -- Register thread for conflict_detail aggregation
+    table.insert(all_threads, thread)
+    thread:set("stale_version", 0)
+    thread:set("retryable_cas", 0)
+    thread:set("retry_success", 0)
+    thread:set("retry_exhausted", 0)
 
     local total_threads = validate_and_clamp(tonumber(os.getenv("THREADS") or os.getenv("WRK_THREADS")), 1, 1, "THREADS")
     local pool_size = validate_and_clamp(tonumber(os.getenv("ID_POOL_SIZE")), 1, 10, "ID_POOL_SIZE")
@@ -251,12 +260,21 @@ function response(status, headers, body)
             if err then io.stderr:write("[tasks_update] Error incrementing version after retry: " .. err .. "\n") end
             common.track_retry()
             thread_retry_count = thread_retry_count + 1
+            -- Update thread-local counter for aggregation
+            if wrk.thread then
+                wrk.thread:set("retry_success", (tonumber(wrk.thread:get("retry_success")) or 0) + 1)
+            end
             reset_retry_state()
         elseif status == 409 then
             retry_attempt = retry_attempt + 1
-            if retry_attempt > RETRY_COUNT then
+            if retry_attempt >= RETRY_COUNT then
                 io.stderr:write(string.format("[tasks_update] Retry exhausted after %d attempts\n", RETRY_COUNT))
+                common.track_retry()
                 thread_retry_exhausted_count = thread_retry_exhausted_count + 1
+                -- Update thread-local counter for aggregation
+                if wrk.thread then
+                    wrk.thread:set("retry_exhausted", (tonumber(wrk.thread:get("retry_exhausted")) or 0) + 1)
+                end
                 reset_retry_state()
             else
                 io.stderr:write(string.format("[tasks_update] Retry PUT got 409 (attempt %d/%d)\n", retry_attempt, RETRY_COUNT))
@@ -265,6 +283,7 @@ function response(status, headers, body)
             end
         else
             io.stderr:write(string.format("[tasks_update] Retry PUT failed with status %d\n", status))
+            common.track_retry()
             reset_retry_state()
         end
     elseif state == "update" then
@@ -277,8 +296,17 @@ function response(status, headers, body)
             local error_code = common.extract_error_code(body)
             if error_code == "VERSION_CONFLICT" then
                 thread_stale_version_count = thread_stale_version_count + 1
-            elseif error_code then
+                -- Update thread-local counter for aggregation
+                if wrk.thread then
+                    wrk.thread:set("stale_version", (tonumber(wrk.thread:get("stale_version")) or 0) + 1)
+                end
+            else
+                -- Include nil case (extract_error_code returns nil when no code in body)
                 thread_retryable_cas_count = thread_retryable_cas_count + 1
+                -- Update thread-local counter for aggregation
+                if wrk.thread then
+                    wrk.thread:set("retryable_cas", (tonumber(wrk.thread:get("retryable_cas")) or 0) + 1)
+                end
             end
             if last_request_index then
                 retry_index = last_request_index
@@ -286,6 +314,10 @@ function response(status, headers, body)
                 if RETRY_COUNT == 0 then
                     io.stderr:write("[tasks_update] Conflict detected but retries disabled\n")
                     thread_retry_exhausted_count = thread_retry_exhausted_count + 1
+                    -- Update thread-local counter for aggregation
+                    if wrk.thread then
+                        wrk.thread:set("retry_exhausted", (tonumber(wrk.thread:get("retry_exhausted")) or 0) + 1)
+                    end
                     reset_retry_state()
                 else
                     apply_backoff()
@@ -405,17 +437,26 @@ function done(summary, latency, requests)
         end
     end
 
+    -- Aggregate conflict_detail from all threads
+    local aggregated_conflict_detail = {
+        stale_version = 0,
+        retryable_cas = 0,
+        retry_success = 0,
+        retry_exhausted = 0
+    }
+    for _, thread in ipairs(all_threads) do
+        aggregated_conflict_detail.stale_version = aggregated_conflict_detail.stale_version + (tonumber(thread:get("stale_version")) or 0)
+        aggregated_conflict_detail.retryable_cas = aggregated_conflict_detail.retryable_cas + (tonumber(thread:get("retryable_cas")) or 0)
+        aggregated_conflict_detail.retry_success = aggregated_conflict_detail.retry_success + (tonumber(thread:get("retry_success")) or 0)
+        aggregated_conflict_detail.retry_exhausted = aggregated_conflict_detail.retry_exhausted + (tonumber(thread:get("retry_exhausted")) or 0)
+    end
+
     local rc = pcall(require, "result_collector") and require("result_collector") or nil
     if rc and rc.set_request_categories then
         rc.set_request_categories(categories)
     end
     if rc and rc.set_conflict_detail then
-        rc.set_conflict_detail({
-            stale_version = thread_stale_version_count,
-            retryable_cas = thread_retryable_cas_count,
-            retry_success = thread_retry_count,
-            retry_exhausted = thread_retry_exhausted_count
-        })
+        rc.set_conflict_detail(aggregated_conflict_detail)
     end
 
     common.finalize_benchmark(summary, latency, requests)
