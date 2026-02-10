@@ -1,0 +1,253 @@
+# lambars 本番運用可否・主要ボトルネック改善 Phase1 要件定義
+#
+# 概要:
+#   最新 Run 21882086190 を根拠に本番運用可否を再評価した結果、
+#   tasks_update 系の高409率と tasks_bulk の高P99が残存し、本番運用不可と判断する。
+#
+# 設計方針:
+#   1. PUT /tasks/{id} の stale-version 競合をサーバ側 Read-Repair CAS で吸収する。
+#   2. tasks_bulk のメモリ律速マージを segment budget compaction に再設計する。
+#   3. 409 内訳と retry 実績を計測できる観測面を追加し、改善効果を検証可能にする。
+#
+# 参照:
+#   - profiling-results/github-21882086190/api-profiling-all-eb7d6636ec7628b3dbb3ca5a3dcfeee696422388
+#   - benches/api/src/api/transaction.rs
+#   - benches/api/src/api/query.rs
+
+version: "1.0.0"
+name: "production_readiness_bottlenecks_phase1"
+description: |
+  Run 21882086190 (head_sha: 3497b73bea217f77d3688eb0a708702263e549fc) では、
+  tasks_update が error_rate 0.199233、tasks_update_conflict が 0.208639 で閾値未達。
+  さらに tasks_bulk は P99 8140ms で閾値 500ms を大幅超過している。
+  この2点が現時点の本番運用不可要因である。
+
+background:
+  problem: |
+    PATCH /tasks/{id}/status は error_rate 0 を達成済みだが、
+    PUT /tasks/{id} は 409 が高止まりしている。
+    また bulk 作成はエラー率は低いが、tail latency が秒オーダーで残っている。
+  motivation: |
+    「低エラー率」だけでなく「競合耐性」と「tail latency」を同時に満たし、
+    本番SLO(エラー率/遅延)で運用可能な状態へ到達する。
+  prior_art:
+    - name: "Read-Repair CAS Loop"
+      description: "競合時に最新状態を再取得し、差分再適用して再CASする。"
+    - name: "Segment Budgeted Compaction"
+      description: "同期フルマージを避け、追記+予算付き圧縮で書き込み尾部遅延を抑える。"
+    - name: "Error Taxonomy Gate"
+      description: "409を stale/retryable に分解し、改善対象を誤認しない。"
+
+requirements:
+  - id: REQ-PRB1-001
+    name: "PUT /tasks/{id} の stale-version 競合吸収"
+    description: |
+      現状は stale-version 409 が即時返却され、ハンドラ内再試行の対象外。
+      Read-Repair CAS Loop を導入し、リクエスト差分を最新状態へ再適用して
+      bounded retry (full jitter) で吸収する。
+      根本設計変更: strict immediate 409 -> bounded server-side reconciliation。
+    methods:
+      - name: "update_task_with_read_repair"
+        signature: "async fn update_task_with_read_repair(state: AppState, task_id: TaskId, request: UpdateTaskRequest) -> Result<(StatusCode, JsonResponse<TaskResponse>), ApiErrorResponse>"
+        description: |
+          stale-version 競合時に最新 task を取得し、再適用可能な差分のみ再CASする。
+      - name: "classify_conflict_kind"
+        signature: "fn classify_conflict_kind(error: &ApiErrorResponse) -> ConflictKind"
+        description: "409 を stale_version / retryable_cas / other に分類する。"
+    implementations:
+      - type: "PUT transaction path"
+        description: "update_task/update_task_inner と retry_on_conflict の呼び分けを再設計する。"
+
+  - id: REQ-PRB1-002
+    name: "tasks_bulk のメモリ律速ホットパス再設計"
+    description: |
+      tasks_bulk は P99 8.14s で閾値500msを超過。stacks.folded では
+      malloc/cfree と index merge が支配的で、メモリ確保コストが主律速。
+      Segment Budgeted Compaction + arena/scratch 再利用で
+      同期マージ区間と再確保を削減する。
+      根本設計変更: sync merge-heavy write path -> append + budgeted compaction。
+    methods:
+      - name: "append_delta_segment_budgeted"
+        signature: "fn append_delta_segment_budgeted(&self, delta: NgramIndex, budget: CompactionBudget) -> Self"
+        description: "追記を優先し、圧縮は予算に達したときのみ実施する。"
+      - name: "merge_index_delta_with_arena"
+        signature: "fn merge_index_delta_with_arena(index: &PrefixIndex, add: MutableIndex, arena: &mut MergeArena) -> PrefixIndex"
+        description: "merge バッファを再利用して grow/malloc を削減する。"
+    implementations:
+      - type: "SearchIndex / NgramSegmentOverlay write path"
+        description: "append_and_compact, merge_segment_into, merge_index_delta_add_only_owned 系を対象に再構成する。"
+
+  - id: REQ-PRB1-003
+    name: "競合改善の観測可能性を満たす retry/409計測"
+    description: |
+      meta.json の retries は 0 だが、Lua側 retry 実績との接続が弱く、
+      409改善施策の効果判定が困難。
+      retry カウント経路を統一し、409を原因別に計測する。
+    methods:
+      - name: "track_retry_attempt"
+        signature: "fn track_retry_attempt(context: RetryContext) -> ()"
+        description: "Lua script と result_collector の retry 集計を一元化する。"
+      - name: "emit_conflict_breakdown"
+        signature: "fn emit_conflict_breakdown(meta: &mut MetaResults, stale: u64, retryable: u64) -> ()"
+        description: "meta に conflict 内訳を出力し閾値判定へ接続する。"
+    implementations:
+      - type: "benchmark scripts + collector + threshold gate"
+        description: "tasks_update.lua / result_collector.lua / check_thresholds.sh を連動改修する。"
+
+non_functional_requirements:
+  performance:
+    - "tasks_update: error_rate 0.199233 -> 0.03以下"
+    - "tasks_update_conflict: error_rate 0.208639 -> 0.10以下"
+    - "tasks_bulk: p99 8140ms -> 500ms以下、rps 365.43 -> 500以上"
+  compatibility:
+    - "既存 API 契約 (PUT/PATCH/POST) のレスポンススキーマを維持する"
+    - "409 の意味論を維持しつつ、retryable/stale の分類を追加する"
+  testing:
+    - "stale-version 競合の read-repair 成功/失敗ケースを統合テスト化"
+    - "tasks_bulk で同値性(property test)を維持しつつ P99 を再計測"
+    - "retry_count と conflict 内訳が meta に反映される回帰テストを追加"
+
+evidence:
+  run:
+    - id: "EV-PRB1-R1"
+      description: "Run 21882086190 は completed/success。"
+      source: "GitHub Actions run 21882086190 metadata"
+  metrics:
+    - id: "EV-PRB1-M1"
+      description: "tasks_update: error_rate=0.199233, HTTP 409=4782, retries=0。"
+      source: "profiling-results/github-21882086190/api-profiling-all-eb7d6636ec7628b3dbb3ca5a3dcfeee696422388/tasks_update/benchmark/meta/tasks_update.json:30"
+    - id: "EV-PRB1-M2"
+      description: "tasks_update_conflict: error_rate=0.208639, HTTP 409=3130, retries=0。"
+      source: "profiling-results/github-21882086190/api-profiling-all-eb7d6636ec7628b3dbb3ca5a3dcfeee696422388/tasks_update_conflict/benchmark/meta/tasks_update.json:30"
+    - id: "EV-PRB1-M3"
+      description: "tasks_bulk: p99=8140ms, avg=3570ms, rps=365.43。"
+      source: "profiling-results/github-21882086190/api-profiling-all-eb7d6636ec7628b3dbb3ca5a3dcfeee696422388/tasks_bulk/benchmark/meta/tasks_bulk.json:31"
+    - id: "EV-PRB1-M4"
+      description: "tasks_update_status: error_rate=0, HTTP 4xx=0（前段課題は解消済み）。"
+      source: "profiling-results/github-21882086190/api-profiling-all-eb7d6636ec7628b3dbb3ca5a3dcfeee696422388/tasks_update_status/benchmark/meta/tasks_update_status.json:30"
+  thresholds:
+    - id: "EV-PRB1-T1"
+      description: "tasks_update 閾値: max_error_rate=0.03。"
+      source: "benches/api/benchmarks/scenarios/tasks_update.yaml:68"
+    - id: "EV-PRB1-T2"
+      description: "tasks_update_conflict 閾値: max_error_rate=0.1。"
+      source: "benches/api/benchmarks/scenarios/tasks_update_conflict.yaml:80"
+    - id: "EV-PRB1-T3"
+      description: "tasks_bulk 閾値: p99_latency_ms=500。"
+      source: "benches/api/benchmarks/scenarios/tasks_bulk.yaml:72"
+  code:
+    - id: "EV-PRB1-C1"
+      description: "stale-version 409 は即時返却される。"
+      source: "benches/api/src/api/transaction.rs:757"
+    - id: "EV-PRB1-C2"
+      description: "retry_on_conflict は stale-version 409 を再試行対象外としている。"
+      source: "benches/api/src/api/transaction.rs:495"
+    - id: "EV-PRB1-C3"
+      description: "PUT ハンドラは keyed_update_queue を取得済みでも 409 が高止まりしている。"
+      source: "benches/api/src/api/transaction.rs:688"
+    - id: "EV-PRB1-C4"
+      description: "Repository save は strict expected_version(existing+1) で衝突を返す。"
+      source: "benches/api/src/infrastructure/postgres.rs:505"
+    - id: "EV-PRB1-C5"
+      description: "result_collector には track_retry がある。"
+      source: "benches/api/benchmarks/scripts/result_collector.lua:133"
+    - id: "EV-PRB1-C6"
+      description: "tasks_update.lua は retry成功をローカル加算するが track_retry 接続がない。"
+      source: "benches/api/benchmarks/scripts/tasks_update.lua:250"
+    - id: "EV-PRB1-C7"
+      description: "tasks_bulk stacks: merge_index_delta_add_only_owned の高サンプル。"
+      source: "profiling-results/github-21882086190/api-profiling-all-eb7d6636ec7628b3dbb3ca5a3dcfeee696422388/tasks_bulk/stacks.folded:614"
+    - id: "EV-PRB1-C8"
+      description: "tasks_bulk stacks: merge_segment_into の高サンプル。"
+      source: "profiling-results/github-21882086190/api-profiling-all-eb7d6636ec7628b3dbb3ca5a3dcfeee696422388/tasks_bulk/stacks.folded:325"
+    - id: "EV-PRB1-C9"
+      description: "tasks_bulk stacks: allocator ホットスポット(malloc/cfree)。"
+      source: "profiling-results/github-21882086190/api-profiling-all-eb7d6636ec7628b3dbb3ca5a3dcfeee696422388/tasks_bulk/stacks.folded:224"
+
+implementation_tasks:
+  - id: "IMPL-PRB1-001"
+    priority: 1
+    requirement_ids:
+      - "REQ-PRB1-001"
+    evidence_ids:
+      - "EV-PRB1-M1"
+      - "EV-PRB1-M2"
+      - "EV-PRB1-C1"
+      - "EV-PRB1-C2"
+      - "EV-PRB1-C4"
+      - "EV-PRB1-T1"
+      - "EV-PRB1-T2"
+    objective: "PUT stale-version 競合を bounded read-repair で吸収し、409率を閾値内へ下げる。"
+    scope_files:
+      - "benches/api/src/api/transaction.rs"
+      - "benches/api/src/infrastructure/postgres.rs"
+    actions:
+      - "stale-version 409 を ConflictKind で分類し、read-repair 可否を判定する。"
+      - "再適用可能な更新に限り、latest read -> rebase -> CAS を最大N回実行する。"
+      - "失敗時は現行どおり409返却し、分類情報をログ/メトリクスへ残す。"
+    completion_criteria:
+      - "tasks_update error_rate <= 0.03"
+      - "tasks_update_conflict error_rate <= 0.10"
+    verification_artifacts:
+      - "tasks_update/benchmark/meta/tasks_update.json"
+      - "tasks_update_conflict/benchmark/meta/tasks_update.json"
+
+  - id: "IMPL-PRB1-002"
+    priority: 2
+    requirement_ids:
+      - "REQ-PRB1-002"
+    evidence_ids:
+      - "EV-PRB1-M3"
+      - "EV-PRB1-T3"
+      - "EV-PRB1-C7"
+      - "EV-PRB1-C8"
+      - "EV-PRB1-C9"
+    objective: "tasks_bulk の秒オーダー tail latency を解消する。"
+    scope_files:
+      - "benches/api/src/api/query.rs"
+      - "benches/api/src/api/bulk.rs"
+    actions:
+      - "append_and_compact を budget 駆動へ変更し、同期フルマージを削減する。"
+      - "merge_index_delta_add_only_owned / merge_segment_into に arena/scratch 再利用を導入する。"
+      - "allocator ホットスポット(malloc/cfree)比率を回帰監視項目に追加する。"
+    completion_criteria:
+      - "tasks_bulk p99 <= 500ms"
+      - "tasks_bulk rps >= 500"
+    verification_artifacts:
+      - "tasks_bulk/benchmark/meta/tasks_bulk.json"
+      - "tasks_bulk/stacks.folded"
+
+  - id: "IMPL-PRB1-003"
+    priority: 3
+    requirement_ids:
+      - "REQ-PRB1-003"
+    evidence_ids:
+      - "EV-PRB1-M1"
+      - "EV-PRB1-M2"
+      - "EV-PRB1-C5"
+      - "EV-PRB1-C6"
+    objective: "retry と 409 内訳を観測可能にし、改善施策の有効性を証明可能にする。"
+    scope_files:
+      - "benches/api/benchmarks/scripts/tasks_update.lua"
+      - "benches/api/benchmarks/scripts/result_collector.lua"
+      - "benches/api/benchmarks/check_thresholds.sh"
+    actions:
+      - "retry 成功/失敗で共通 track_retry を呼ぶ。"
+      - "meta に stale/retryable conflict カウンタを出力する。"
+      - "閾値判定で error_rate 単独ではなく conflict 分解結果を表示する。"
+    completion_criteria:
+      - "meta.results.retries が実測に追随する"
+      - "409 の内訳がレポートに表示される"
+    verification_artifacts:
+      - "tasks_update/benchmark/meta/tasks_update.json"
+      - "threshold 判定ログ"
+
+future_extensions:
+  - id: "PRB1-FUTURE-001"
+    name: "Conflict-Free Update Token API"
+    description: |
+      strict version を外部公開せず、サーバ発行の更新トークンで
+      競合吸収可能な更新だけを許可する API 契約へ移行する。
+    rationale: |
+      まずは現行PUT契約を維持したまま read-repair で競合率を下げ、
+      実測で効果を確認してから契約変更を検討する。

@@ -1474,6 +1474,9 @@ generate_meta_json() {
     # v3: retries count (from lua_metrics.json)
     local retries=0
 
+    # v4: conflict_detail (from lua_metrics.json, REQ-PRB1-003)
+    local conflict_detail_json="{}"
+
     # v3: error_rate will be calculated after lua_metrics.json is processed
     local error_rate
 
@@ -1582,6 +1585,11 @@ generate_meta_json() {
         retries_raw=$(jq -r '.retries // 0' "${lua_metrics_file}" 2>/dev/null || echo "0")
         retries="${retries_raw%%.*}"
         [[ ! "${retries}" =~ ^[0-9]+$ ]] && retries=0
+
+        # v4: Get conflict_detail from lua_metrics (REQ-PRB1-003)
+        if jq -e '.conflict_detail | type == "object"' "${lua_metrics_file}" >/dev/null 2>&1; then
+            conflict_detail_json=$(jq -c '.conflict_detail' "${lua_metrics_file}" 2>/dev/null || echo "{}")
+        fi
     fi
 
     # v3: Calculate error_rate using single-source formula (REQ-MET-P3-002)
@@ -1895,6 +1903,7 @@ generate_meta_json() {
         --argjson p99 "${p99_json}" \
         --argjson http_status "${http_status_json}" \
         --argjson retries "${retries}" \
+        --argjson conflict_detail "${conflict_detail_json}" \
         --argjson connect_err "${connect_err:-0}" \
         --argjson read_err "${read_err:-0}" \
         --argjson write_err "${write_err:-0}" \
@@ -1959,7 +1968,8 @@ generate_meta_json() {
       "p99": $p99
     },
     "http_status": $http_status,
-    "retries": $retries
+    "retries": $retries,
+    "conflict_detail": $conflict_detail
   },
   "errors": {
     "socket_errors": {

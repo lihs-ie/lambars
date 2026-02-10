@@ -525,13 +525,12 @@ pub fn rebase_update_request(
         });
     }
 
-    if request.priority.is_some() && original_base.priority != latest.priority {
-        let request_priority: Priority = request
-            .priority
-            .expect("priority is_some checked above")
-            .into();
-        if request_priority != latest.priority {
-            return Err(RebaseError::NonCommutativeConflict { field: "priority" });
+    if let Some(priority_dto) = request.priority {
+        if original_base.priority != latest.priority {
+            let request_priority: Priority = priority_dto.into();
+            if request_priority != latest.priority {
+                return Err(RebaseError::NonCommutativeConflict { field: "priority" });
+            }
         }
     }
 
@@ -3530,4 +3529,14 @@ mod tests {
         assert!(display.contains("title"));
         assert!(display.contains("Non-commutative conflict"));
     }
+
+    // Note: Non-commutative conflict detection within `update_task_with_read_repair`
+    // cannot be tested at integration level with InMemory repositories because
+    // `original_base` is fetched at function entry (same as `latest`), so
+    // `original_base == latest` always holds. The non-commutative path is
+    // fully covered by `test_rebase_update_request_fails_title_conflict`,
+    // `test_rebase_update_request_fails_description_conflict`, and
+    // `test_rebase_update_request_fails_priority_conflict` which test the
+    // pure function `rebase_update_request` directly with divergent inputs.
+    // See design comment at line 793 for the approximation rationale.
 }

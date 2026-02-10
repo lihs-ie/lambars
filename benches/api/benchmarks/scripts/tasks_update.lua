@@ -296,16 +296,20 @@ function response(status, headers, body)
             local error_code = common.extract_error_code(body)
             if error_code == "VERSION_CONFLICT" then
                 thread_stale_version_count = thread_stale_version_count + 1
-                -- Update thread-local counter for aggregation
                 if wrk.thread then
                     wrk.thread:set("stale_version", (tonumber(wrk.thread:get("stale_version")) or 0) + 1)
                 end
-            else
-                -- Include nil case (extract_error_code returns nil when no code in body)
+            elseif error_code == "VERSION_CONFLICT_RETRYABLE" then
                 thread_retryable_cas_count = thread_retryable_cas_count + 1
-                -- Update thread-local counter for aggregation
                 if wrk.thread then
                     wrk.thread:set("retryable_cas", (tonumber(wrk.thread:get("retryable_cas")) or 0) + 1)
+                end
+            else
+                -- NON_COMMUTATIVE_CONFLICT or unrecognized 409 codes (including nil)
+                -- counted as stale_version since they are non-retryable conflicts
+                thread_stale_version_count = thread_stale_version_count + 1
+                if wrk.thread then
+                    wrk.thread:set("stale_version", (tonumber(wrk.thread:get("stale_version")) or 0) + 1)
                 end
             end
             if last_request_index then
