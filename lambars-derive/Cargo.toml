@@ -20,7 +20,7 @@ syn = { version = "2.0", features = ["full", "parsing", "extra-traits"] }
 
 [dev-dependencies]
 rstest = "0.24"
-proptest = "1.5"
+proptest = "1.10"
 
 [lints.rust]
 unsafe_code = "forbid"
