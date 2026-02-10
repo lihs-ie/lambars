@@ -50,14 +50,23 @@ for transition in "${!EXPECTED_TRANSITIONS[@]}"; do
     from="${transition%%:*}"
     to="${transition##*:}"
 
-    # Pattern: ["from"] = {..., "to", ...}
-    if ! grep -A 5 "VALID_TRANSITIONS = {" "$LUA_SCRIPT" | \
-         grep -A 1 "\[\"$from\"\]" | \
-         grep -q "\"$to\""; then
+    # Extract the line for this from state and extract RHS (after =)
+    FROM_LINE=$(grep "^\s*\[\"$from\"\]" "$LUA_SCRIPT")
+
+    if [[ -z "$FROM_LINE" ]]; then
+        echo "❌ FAIL: State '$from' not found in VALID_TRANSITIONS"
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+        continue
+    fi
+
+    # Extract RHS: everything after = sign
+    RHS=$(echo "$FROM_LINE" | sed 's/.*= *//')
+
+    if echo "$RHS" | grep -q "\"$to\""; then
+        echo "✓ Valid transition: $from -> $to"
+    else
         echo "❌ FAIL: Expected transition $from -> $to not found in VALID_TRANSITIONS"
         FAIL_COUNT=$((FAIL_COUNT + 1))
-    else
-        echo "✓ Valid transition: $from -> $to"
     fi
 done
 
@@ -66,9 +75,18 @@ for transition in "${!INVALID_TRANSITIONS[@]}"; do
     from="${transition%%:*}"
     to="${transition##*:}"
 
-    if grep -A 5 "VALID_TRANSITIONS = {" "$LUA_SCRIPT" | \
-       grep -A 1 "\[\"$from\"\]" | \
-       grep -q "\"$to\""; then
+    FROM_LINE=$(grep "^\s*\[\"$from\"\]" "$LUA_SCRIPT")
+
+    if [[ -z "$FROM_LINE" ]]; then
+        # State not in table means no transitions (valid for cancelled)
+        echo "✓ Invalid transition correctly absent: $from -> $to"
+        continue
+    fi
+
+    # Extract RHS: everything after = sign
+    RHS=$(echo "$FROM_LINE" | sed 's/.*= *//')
+
+    if echo "$RHS" | grep -q "\"$to\""; then
         echo "❌ FAIL: Invalid transition $from -> $to found in VALID_TRANSITIONS"
         FAIL_COUNT=$((FAIL_COUNT + 1))
     else

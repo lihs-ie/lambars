@@ -6,10 +6,20 @@ local RETRY_COUNT = tonumber(os.getenv("RETRY_COUNT")) or 1
 local BACKOFF_BASE = 2
 local BACKOFF_MAX = tonumber(os.getenv("RETRY_BACKOFF_MAX")) or 16
 
+-- FSM transition rules from transaction.rs L239-250
+local VALID_TRANSITIONS = {
+    ["pending"] = {"in_progress", "cancelled"},
+    ["in_progress"] = {"completed", "pending", "cancelled"},
+    ["completed"] = {"pending"},
+    ["cancelled"] = {}
+}
+
 local state = "update"
 local retry_index, retry_body, retry_attempt = nil, nil, 0
 local counter = 0
 local last_request_index, last_request_is_update = nil, false
+local last_request_status = nil
+local retry_sent_status = nil
 local thread_retry_count, thread_retry_exhausted_count = 0, 0
 
 local backoff_skip_counter, backoff_skip_target = 0, 0
@@ -80,8 +90,20 @@ function setup(thread)
         thread_id, start_index, start_index + ids_per_thread - 1, ids_per_thread))
 end
 
-local function generate_update_body(version)
-    return common.json_encode({ status = common.random_status(), version = version })
+local function next_valid_status(current_status)
+    local candidates = VALID_TRANSITIONS[current_status]
+    if not candidates or #candidates == 0 then
+        return nil
+    end
+    return candidates[math.random(#candidates)]
+end
+
+local function generate_update_body(current_status, version)
+    local next_status = next_valid_status(current_status)
+    if not next_status then
+        return nil
+    end
+    return common.json_encode({ status = next_status, version = version })
 end
 
 local function reset_retry_state()
@@ -91,7 +113,8 @@ local function reset_retry_state()
 end
 
 local function apply_backoff()
-    backoff_skip_target = math.min(BACKOFF_BASE ^ retry_attempt, BACKOFF_MAX)
+    -- Full jitter: random(0, min(cap, base^attempt))
+    backoff_skip_target = math.random(0, math.min(BACKOFF_BASE ^ retry_attempt, BACKOFF_MAX))
     backoff_skip_counter = 0
 end
 
@@ -168,7 +191,15 @@ function request()
     last_request_index = global_index
     last_request_is_update = true
 
-    local body = generate_update_body(task_state.version)
+    local body = generate_update_body(task_state.status, task_state.version)
+    if not body then
+        -- cancelled state: fallback
+        return fallback_request()
+    end
+
+    -- Extract sent status from body
+    last_request_status = body:match('"status"%s*:%s*"([^"]+)"')
+
     return wrk and wrk.format and wrk.format("PATCH", "/tasks/" .. task_state.id .. "/status", {["Content-Type"] = "application/json"}, body) or ""
 end
 
@@ -197,17 +228,25 @@ function response(status, headers, body)
     if state == "retry_get" then
         if status == 200 then
             local version = common.extract_version(body)
-            if version then
-                local success, err = test_ids.set_version(retry_index, version)
+            local retry_status = common.extract_status(body)
+            if version and retry_status then
+                local success, err = test_ids.set_version_and_status(retry_index, version, retry_status)
                 if not success then
-                    io.stderr:write("[tasks_update_status] Failed to set version: " .. (err or "unknown") .. "\n")
+                    io.stderr:write("[tasks_update_status] Failed to set version and status: " .. (err or "unknown") .. "\n")
                     reset_retry_state()
                     return
                 end
-                retry_body = generate_update_body(version)
+                retry_body = generate_update_body(retry_status, version)
+                if not retry_body then
+                    -- cancelled state
+                    io.stderr:write("[tasks_update_status] Cannot retry from cancelled state\n")
+                    reset_retry_state()
+                    return
+                end
+                retry_sent_status = retry_body:match('"status"%s*:%s*"([^"]+)"')
                 state = "retry_patch"
             else
-                io.stderr:write("[tasks_update_status] Failed to extract version from GET response\n")
+                io.stderr:write("[tasks_update_status] Failed to extract version or status from GET response\n")
                 reset_retry_state()
             end
         else
@@ -217,7 +256,14 @@ function response(status, headers, body)
     elseif state == "retry_patch" then
         if status == 200 or status == 201 then
             local new_version, err = test_ids.increment_version(retry_index)
-            if err then io.stderr:write("[tasks_update_status] Error incrementing version after retry: " .. err .. "\n") end
+            if err then
+                io.stderr:write("[tasks_update_status] Error incrementing version after retry: " .. err .. "\n")
+            elseif retry_sent_status then
+                local success, set_err = test_ids.set_version_and_status(retry_index, new_version, retry_sent_status)
+                if not success then
+                    io.stderr:write("[tasks_update_status] Error setting status after retry: " .. (set_err or "unknown") .. "\n")
+                end
+            end
             thread_retry_count = thread_retry_count + 1
             reset_retry_state()
         elseif status == 409 then
@@ -237,9 +283,16 @@ function response(status, headers, body)
         end
     elseif state == "update" then
         if status == 200 or status == 201 then
-            if last_request_index then
+            if last_request_index and last_request_status then
                 local new_version, err = test_ids.increment_version(last_request_index)
-                if err then io.stderr:write("[tasks_update_status] Error incrementing version: " .. err .. "\n") end
+                if err then
+                    io.stderr:write("[tasks_update_status] Error incrementing version: " .. err .. "\n")
+                else
+                    local success, set_err = test_ids.set_version_and_status(last_request_index, new_version, last_request_status)
+                    if not success then
+                        io.stderr:write("[tasks_update_status] Error setting status: " .. (set_err or "unknown") .. "\n")
+                    end
+                end
             end
         elseif status == 409 then
             if last_request_index then

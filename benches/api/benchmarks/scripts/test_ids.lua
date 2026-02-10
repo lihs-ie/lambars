@@ -50,7 +50,7 @@ end
 
 local task_states = {}
 for i = 1, ID_POOL_SIZE do
-    table.insert(task_states, { id = generate_task_id(i), version = 1 })
+    table.insert(task_states, { id = generate_task_id(i), version = 1, status = "pending" })
 end
 
 local project_ids = {
@@ -89,7 +89,7 @@ function M.get_task_state(index)
     local actual_index, err = normalize_index(index, #task_states)
     if err then return nil, err end
     local state = task_states[actual_index]
-    return { id = state.id, version = state.version }, nil
+    return { id = state.id, version = state.version, status = state.status }, nil
 end
 
 function M.increment_version(index)
@@ -108,8 +108,21 @@ function M.set_version(index, version)
     return true, nil
 end
 
+function M.set_version_and_status(index, version, status)
+    local actual_index, index_err = normalize_index(index, #task_states)
+    if index_err then return nil, index_err end
+    local valid, version_err = validate_version(version)
+    if not valid then return nil, version_err end
+    task_states[actual_index].version = version
+    task_states[actual_index].status = status
+    return true, nil
+end
+
 function M.reset_versions()
-    for i = 1, #task_states do task_states[i].version = 1 end
+    for i = 1, #task_states do
+        task_states[i].version = 1
+        task_states[i].status = "pending"
+    end
 end
 
 function M.get_task_count()

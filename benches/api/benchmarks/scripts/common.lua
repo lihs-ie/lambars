@@ -217,7 +217,7 @@ local function create_fallback_interface(fallback)
     fallback.get_project_count = function() return #fallback.project_ids end
     fallback.get_task_state = function(index)
         local actual_index = get_actual_index(index, fallback.task_ids)
-        return { id = fallback.task_ids[actual_index], version = fallback.task_versions[actual_index] }, nil
+        return { id = fallback.task_ids[actual_index], version = fallback.task_versions[actual_index], status = "pending" }, nil
     end
     fallback.set_version = function(index, version)
         fallback.task_versions[get_actual_index(index, fallback.task_ids)] = version
@@ -269,6 +269,11 @@ function M.extract_version(body)
     local version = tonumber(version_str)
     if not version or version < 1 or version ~= math.floor(version) then return nil end
     return version
+end
+
+function M.extract_status(body)
+    if type(body) ~= "string" or body == "" then return nil end
+    return body:match('"status"%s*:%s*"([^"]+)"')
 end
 
 function M.create_threaded_handlers(script_name)
