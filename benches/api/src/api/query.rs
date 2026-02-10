@@ -1215,14 +1215,12 @@ fn merge_segment_hit_miss_counts() -> (usize, usize) {
 
 /// Budget for controlling compaction aggressiveness in [`NgramSegmentOverlay`].
 ///
-/// - `soft_max_segments_per_compact`: below this segment count, no compaction runs.
-/// - `hard_max_segments`: at or above this count, force a full compaction.
-/// - Between the two thresholds, a single `compact_one` is executed.
+/// Below `soft_max_segments_per_compact`, no compaction runs.
+/// At or above `hard_max_segments`, a full compaction is forced.
+/// Between the two thresholds, a single `compact_one` is executed.
 #[derive(Debug, Clone, Copy)]
 pub struct CompactionBudget {
-    /// Below this segment count, append-only (no compaction).
     pub soft_max_segments_per_compact: usize,
-    /// At or above this segment count, force compaction.
     pub hard_max_segments: usize,
 }
 
@@ -1236,17 +1234,11 @@ impl Default for CompactionBudget {
 }
 
 /// Configuration for [`NgramSegmentOverlay`] compaction behavior.
-///
-/// Controls the maximum number of delta segments and the key-count threshold
-/// for the oldest segment before compaction is triggered.
 #[allow(dead_code)]
 #[derive(Clone, Debug)]
 struct SegmentOverlayConfig {
-    /// Maximum number of delta segments (2..=6).
     max_segments: usize,
-    /// Maximum number of keys in the oldest segment before compaction is triggered.
     max_segment_keys: usize,
-    /// Budget for controlling compaction aggressiveness.
     budget: CompactionBudget,
 }
 
@@ -1260,17 +1252,13 @@ impl Default for SegmentOverlayConfig {
     }
 }
 
-/// Reusable scratch buffer arena for merge operations.
-///
-/// Keeps a pre-allocated `Vec<TaskId>` that is cleared (but not deallocated)
-/// between uses, avoiding repeated heap allocation during hot merge loops.
+/// Reusable scratch buffer for merge operations, avoiding repeated heap allocation.
 pub struct MergeArena {
     scratch: Vec<TaskId>,
     shrink_threshold: usize,
 }
 
 impl MergeArena {
-    /// Creates a new arena with the default shrink threshold (16 384 elements).
     pub const fn new() -> Self {
         Self {
             scratch: Vec::new(),
@@ -1278,15 +1266,13 @@ impl MergeArena {
         }
     }
 
-    /// Returns a mutable reference to the scratch buffer after clearing it.
+    /// Returns the scratch buffer (cleared but capacity preserved).
     pub fn scratch(&mut self) -> &mut Vec<TaskId> {
         self.scratch.clear();
         &mut self.scratch
     }
 
-    /// Replaces the scratch buffer with a smaller one if its capacity
-    /// exceeds the threshold. This guarantees the capacity is reduced
-    /// regardless of allocator behavior.
+    /// Replaces the scratch buffer if its capacity exceeds the threshold.
     pub fn maybe_shrink(&mut self) {
         if self.scratch.capacity() > self.shrink_threshold {
             self.scratch = Vec::with_capacity(self.shrink_threshold);
@@ -1312,24 +1298,16 @@ impl Default for MergeArena {
 /// - The base and every segment contain only sorted, deduplicated posting lists.
 #[derive(Clone, Debug)]
 struct NgramSegmentOverlay {
-    /// Compacted base index.
     base: NgramIndex,
-    /// Un-compacted delta segments (newest is last).
+    /// Newest is last.
     segments: Vec<NgramIndex>,
-    /// Maximum number of delta segments before compaction.
     max_segments: usize,
-    /// Maximum number of keys in the oldest segment before compaction.
     max_segment_keys: usize,
-    /// Budget for controlling compaction aggressiveness.
     budget: CompactionBudget,
 }
 
 impl NgramSegmentOverlay {
     /// Creates a new overlay with legacy-compatible defaults.
-    ///
-    /// The budget `soft_max_segments_per_compact` is set to `max_segments` (3)
-    /// so that the budget soft threshold coincides with the legacy
-    /// `needs_compaction` trigger, preserving backward compatibility.
     const fn new(base: NgramIndex) -> Self {
         Self {
             base,
@@ -1372,9 +1350,6 @@ impl NgramSegmentOverlay {
                 .is_some_and(|oldest| oldest.len() >= self.max_segment_keys)
     }
 
-    /// Queries a key across base and all delta segments, merging posting lists.
-    ///
-    /// Returns `None` if the key is absent from every layer.
     fn query(&self, key: &NgramKey) -> Option<TaskIdCollection> {
         let posting_lists: Vec<&TaskIdCollection> = std::iter::once(&self.base)
             .chain(&self.segments)
@@ -1411,13 +1386,6 @@ impl NgramSegmentOverlay {
     }
 
     /// Appends an add-only delta and compacts based on the [`CompactionBudget`].
-    ///
-    /// - `segments.len() < soft`: append only, no compaction.
-    /// - `segments.len() >= hard`: force compaction (compact until below hard).
-    /// - Between soft and hard: execute `compact_one` once.
-    ///
-    /// Falls back to the legacy `needs_compaction` check (`max_segments` /
-    /// `max_segment_keys`) when the budget thresholds are not reached.
     fn append_and_compact(&self, delta_ngram: NgramIndex) -> Self {
         if delta_ngram.is_empty() {
             return self.clone();
@@ -1428,7 +1396,6 @@ impl NgramSegmentOverlay {
         let budget = &overlay.budget;
 
         if segment_count >= budget.hard_max_segments {
-            // Force compact: fold segments until below hard limit
             let mut result = overlay;
             while result.segments.len() >= result.budget.hard_max_segments
                 && !result.segments.is_empty()
@@ -1436,19 +1403,16 @@ impl NgramSegmentOverlay {
                 result = result.compact_one();
             }
             result
-        } else if segment_count >= budget.soft_max_segments_per_compact {
-            // Between soft and hard: compact one oldest segment
-            overlay.compact_one()
-        } else if overlay.needs_compaction() {
-            // Legacy path: max_segments / max_segment_keys threshold
+        } else if segment_count >= budget.soft_max_segments_per_compact
+            || overlay.needs_compaction()
+        {
             overlay.compact_one()
         } else {
             overlay
         }
     }
 
-    /// Applies a general delta (with removes) by materializing all segments
-    /// before merging, since remove operations require a complete base index.
+    /// Applies a delta with removes (materializes all segments first).
     fn apply_general_delta(
         &self,
         add: &MutableIndex,
@@ -1483,10 +1447,7 @@ impl NgramSegmentOverlay {
         }
     }
 
-    /// Arena-backed variant of [`compact_one`].
-    ///
-    /// Reuses the scratch buffer from the provided [`MergeArena`] instead of
-    /// allocating a fresh `Vec<TaskId>`.
+    /// Like [`compact_one`] but reuses scratch from the [`MergeArena`].
     #[allow(dead_code)]
     fn compact_one_with_arena(&self, arena: &mut MergeArena) -> Self {
         if self.segments.is_empty() {
@@ -1516,19 +1477,12 @@ impl NgramSegmentOverlay {
         result
     }
 
-    /// Returns the total number of unique keys in the base index.
-    ///
-    /// Note: This returns only the base count (excludes delta segments).
-    /// For the exact total, use `materialize().len()`.
-    /// This approximation is acceptable for metrics/diagnostics.
+    /// Returns the base key count (excludes delta segments).
     const fn len(&self) -> usize {
         self.base.len()
     }
 
-    /// Looks up a key in the base index only.
-    ///
-    /// This is a convenience method for backward compatibility in tests.
-    /// For cross-segment queries, use [`query`].
+    /// Looks up a key in the base index only (test convenience).
     #[allow(dead_code)]
     fn get<Q: ?Sized + std::hash::Hash + Eq>(&self, key: &Q) -> Option<&TaskIdCollection>
     where
@@ -1579,11 +1533,7 @@ impl NgramSegmentOverlay {
         transient.persistent()
     }
 
-    /// Merges two `TaskIdCollection`s using slice-based fast paths when possible.
-    ///
-    /// When both collections are in Large state, uses disjoint concat or
-    /// `merge_posting_add_only_into_slice`. Falls back to `OrderedUniqueSet::merge`
-    /// when both are Small.
+    /// Merges two `TaskIdCollection`s with slice-based fast paths where possible.
     fn merge_posting_slice_or_fallback(
         existing: &TaskIdCollection,
         segment_collection: &TaskIdCollection,
@@ -1636,7 +1586,6 @@ impl NgramSegmentOverlay {
         }
     }
 
-    /// Merges two sorted slices into a `TaskIdCollection` using scratch buffer.
     fn merge_slices_into(
         left: &[TaskId],
         right: &[TaskId],
@@ -1649,15 +1598,7 @@ impl NgramSegmentOverlay {
     }
 }
 
-/// Merges posting lists from multiple segments using size-aware pair-wise merge.
-///
-/// All input lists must be sorted and unique. Output is sorted and unique.
-/// For k <= 6 (base + max 4 segments), sequential merge is more efficient
-/// than a `BinaryHeap`-based k-way merge due to lower overhead.
-///
-/// When there are 3 or more lists, they are sorted by size (smallest first)
-/// so that each merge step operates on the smallest possible accumulator,
-/// minimising total comparisons.
+/// Merges posting lists from multiple segments, smallest-first for efficiency.
 fn merge_postings_multiway(posting_lists: &[&TaskIdCollection]) -> TaskIdCollection {
     match posting_lists.len() {
         0 => TaskIdCollection::new(),
@@ -1676,10 +1617,7 @@ fn merge_postings_multiway(posting_lists: &[&TaskIdCollection]) -> TaskIdCollect
     }
 }
 
-/// Builds a [`NgramIndex`] from a [`MutableIndex`] (`HashMap<NgramKey, Vec<TaskId>>`).
-///
-/// Each `Vec<TaskId>` is converted to a [`TaskIdCollection`] via `from_sorted_vec`.
-/// Empty posting lists are skipped.
+/// Builds a [`NgramIndex`] from a [`MutableIndex`], skipping empty posting lists.
 fn build_ngram_from_mutable(mutable: MutableIndex) -> NgramIndex {
     let mut transient = NgramIndex::new().transient();
     for (key, values) in mutable {
@@ -1690,8 +1628,7 @@ fn build_ngram_from_mutable(mutable: MutableIndex) -> NgramIndex {
     transient.persistent()
 }
 
-/// Thin wrapper around `&NgramKey` that implements `Hash` + `Eq` by delegation,
-/// enabling use of `&NgramKey` in a `HashSet` without extra cloning.
+/// `Hash`+`Eq` wrapper for `&NgramKey` to avoid cloning in `HashSet`.
 #[allow(dead_code)]
 #[derive(Debug)]
 struct KeyWrapper<'a>(&'a NgramKey);
@@ -1714,47 +1651,17 @@ impl Eq for KeyWrapper<'_> {}
 // Phase 3: merge_ngram_delta Result Types
 // =============================================================================
 
-/// Result of the `merge_ngram_delta` operation.
-///
-/// This type enables the Phase 3 optimization to use `insert_bulk_owned` for
-/// n-gram index updates while preserving referential transparency.
-///
-/// # Variants
-///
-/// - `Ok`: Normal completion, the optimized path succeeded.
-/// - `Fallback`: Optimization failed but the operation completed using fallback.
-///   The `reason` field indicates why the fallback was triggered.
-///
-/// # Usage in `apply_delta`
-///
-/// The `apply_delta` method extracts the `NgramIndex` from both variants:
-///
-/// ```ignore
-/// let ngram_index = match merge_ngram_delta(index, add, remove, config) {
-///     MergeNgramDeltaResult::Ok(index) => index,
-///     MergeNgramDeltaResult::Fallback { index, reason: _ } => index,
-/// };
-/// ```
-///
-/// The fallback reason is intentionally ignored in `apply_delta` to maintain
-/// referential transparency. Logging is performed at the `AppState` level.
+/// Result of `merge_ngram_delta` with fallback tracking for diagnostics.
 #[derive(Debug, Clone)]
 pub enum MergeNgramDeltaResult {
-    /// Normal completion (optimization succeeded or remove-only operation).
     Ok(NgramIndex),
-    /// Fallback occurred during bulk insertion.
     Fallback {
-        /// The resulting index (operation completed despite fallback).
         index: NgramIndex,
-        /// The reason for the fallback.
         reason: MergeNgramDeltaFallbackReason,
     },
 }
 
 impl MergeNgramDeltaResult {
-    /// Extracts the `NgramIndex` from the result, discarding the fallback reason.
-    ///
-    /// This is the primary way to use the result in `apply_delta`.
     #[must_use]
     pub fn into_index(self) -> NgramIndex {
         match self {
@@ -1762,13 +1669,11 @@ impl MergeNgramDeltaResult {
         }
     }
 
-    /// Returns `true` if this result represents a fallback.
     #[must_use]
     pub const fn is_fallback(&self) -> bool {
         matches!(self, Self::Fallback { .. })
     }
 
-    /// Returns the fallback reason if this is a `Fallback` variant.
     #[must_use]
     pub const fn fallback_reason(&self) -> Option<&MergeNgramDeltaFallbackReason> {
         match self {
@@ -1778,22 +1683,10 @@ impl MergeNgramDeltaResult {
     }
 }
 
-/// Reason for fallback in `merge_ngram_delta`.
-///
-/// These reasons help diagnose performance issues and tune configuration.
-/// The information is logged at the `AppState` level for monitoring.
+/// Reason for fallback in `merge_ngram_delta` (logged at `AppState` level).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MergeNgramDeltaFallbackReason {
-    /// The number of entries exceeded the bulk insert limit.
-    ///
-    /// This triggers individual inserts as a fallback, which is slower but
-    /// guarantees completion.
-    TooManyEntries {
-        /// Actual number of entries.
-        count: usize,
-        /// Maximum allowed entries.
-        limit: usize,
-    },
+    TooManyEntries { count: usize, limit: usize },
 }
 
 /// N-gram key with reference-counted storage for O(1) cloning.
@@ -5732,11 +5625,7 @@ impl SearchIndex {
         }
     }
 
-    /// Arena-backed variant of [`apply_changes`].
-    ///
-    /// Uses the provided [`MergeArena`] to reuse scratch buffers across
-    /// merge operations within the delta path. For non-delta paths (bulk builder),
-    /// the arena is not used.
+    /// Like [`apply_changes`] but reuses scratch from the [`MergeArena`].
     #[must_use]
     pub fn apply_changes_with_arena(&self, changes: &[TaskChange], arena: &mut MergeArena) -> Self {
         if changes.is_empty() {
@@ -5764,7 +5653,7 @@ impl SearchIndex {
         }
     }
 
-    /// Arena-backed variant of [`apply_changes_delta`].
+    /// Like [`apply_changes_delta`] but reuses scratch from the [`MergeArena`].
     #[must_use]
     fn apply_changes_delta_with_arena(
         &self,
@@ -6222,13 +6111,9 @@ impl SearchIndex {
         }
     }
 
-    /// Arena-backed variant of [`apply_delta_owned`].
+    /// Like [`apply_delta_owned`] but reuses scratch from the [`MergeArena`].
     ///
-    /// Reuses the scratch buffer from the provided [`MergeArena`] across all
-    /// six `merge_index_delta_add_only_owned_with_arena` calls, eliminating
-    /// repeated Vec allocations within a single batch.
-    ///
-    /// For non-add-only deltas, falls back to [`apply_delta`] (arena unused).
+    /// Falls back to [`apply_delta`] for non-add-only deltas.
     #[must_use]
     #[allow(clippy::too_many_lines)]
     pub fn apply_delta_owned_with_arena(
@@ -7120,11 +7005,7 @@ impl SearchIndex {
         transient.persistent()
     }
 
-    /// Arena-backed variant of [`merge_index_delta_add_only_owned`].
-    ///
-    /// Reuses the scratch buffer from the provided [`MergeArena`] instead of
-    /// allocating a fresh `Vec<TaskId>` per call. This eliminates repeated
-    /// heap allocations when processing multiple index merges in a batch.
+    /// Like [`merge_index_delta_add_only_owned`] but reuses scratch from the [`MergeArena`].
     fn merge_index_delta_add_only_owned_with_arena(
         index: &PrefixIndex,
         add: MutableIndex,
@@ -7944,13 +7825,10 @@ impl SearchIndexWriter {
         self.close_and_join();
     }
 
-    /// The writer thread's main loop.
+    /// Coalesces change sets into micro-batches and applies them to the index.
     ///
-    /// Receives change sets from the channel, coalesces them into micro-batches,
-    /// and applies them to the search index. A single [`MergeArena`] is allocated
-    /// outside the loop and reused across all batches to avoid per-batch heap
-    /// allocations in the merge hot path.
-    #[allow(clippy::needless_pass_by_value)] // Receiver and Arc are moved into the spawned thread
+    /// A single [`MergeArena`] is reused across all batches.
+    #[allow(clippy::needless_pass_by_value)]
     fn writer_loop(
         receiver: std::sync::mpsc::Receiver<Vec<TaskChange>>,
         search_index: Arc<arc_swap::ArcSwap<SearchIndex>>,
@@ -7960,15 +7838,11 @@ impl SearchIndexWriter {
         let mut arena = MergeArena::new();
 
         loop {
-            // Block until the first change set arrives (or channel closes)
             let Ok(first_changes) = receiver.recv() else {
-                break; // Channel closed, exit loop
+                break;
             };
 
-            // Coalesce additional change sets within the timeout window.
-            // Use a fixed deadline from the first message arrival so that a
-            // continuous stream of small inputs cannot extend the batch window
-            // beyond `batch_timeout`.
+            // Fixed deadline prevents a continuous stream from extending the batch window.
             let mut coalesced_changes = first_changes;
             let deadline = std::time::Instant::now() + batch_timeout;
 
@@ -7984,7 +7858,6 @@ impl SearchIndexWriter {
                     }
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
                     Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                        // Channel closed; apply what we have and exit
                         if !coalesced_changes.is_empty() {
                             Self::apply_coalesced_changes(
                                 &search_index,
@@ -7997,20 +7870,14 @@ impl SearchIndexWriter {
                 }
             }
 
-            // Apply the coalesced batch
             if !coalesced_changes.is_empty() {
                 Self::apply_coalesced_changes(&search_index, &coalesced_changes, &mut arena);
             }
 
-            // Prevent unbounded growth of the scratch buffer between batches
             arena.maybe_shrink();
         }
     }
 
-    /// Applies coalesced changes to the search index (single-writer, no CAS needed).
-    ///
-    /// Uses the provided [`MergeArena`] to reuse scratch buffers across
-    /// multiple merge operations within the batch.
     fn apply_coalesced_changes(
         search_index: &arc_swap::ArcSwap<SearchIndex>,
         changes: &[TaskChange],

@@ -417,11 +417,6 @@ const STALE_VERSION_CONFLICT_CODE: &str = "VERSION_CONFLICT";
 // =============================================================================
 
 /// Classifies the kind of 409 Conflict error.
-///
-/// This enum distinguishes between different types of conflict errors:
-/// - `StaleVersion`: The client sent an outdated version (handler-level)
-/// - `RetryableCas`: A CAS failure between read and write (repository-level)
-/// - `Other`: Any other error (non-409, or 409 with unknown code)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConflictKind {
     /// Handler-level stale version mismatch (code = `VERSION_CONFLICT`).
@@ -432,18 +427,9 @@ pub enum ConflictKind {
     Other,
 }
 
-/// Classifies a conflict error into its kind (pure function).
+/// Classifies a conflict error by HTTP status and error code.
 ///
-/// This function examines the HTTP status and error code to determine
-/// the conflict type. Non-409 errors always return `Other`.
-///
-/// # Arguments
-///
-/// * `error` - The error response to classify
-///
-/// # Returns
-///
-/// The [`ConflictKind`] classification of the error.
+/// Non-409 errors always return [`ConflictKind::Other`].
 #[must_use]
 pub fn classify_conflict_kind(error: &ApiErrorResponse) -> ConflictKind {
     if error.status != StatusCode::CONFLICT {
@@ -456,10 +442,7 @@ pub fn classify_conflict_kind(error: &ApiErrorResponse) -> ConflictKind {
     }
 }
 
-/// Returns `true` if the error is a stale-version 409 Conflict.
-///
-/// Stale-version conflicts occur when the client sends an outdated version
-/// in the update request. These are candidates for read-repair.
+/// Returns `true` if the error is a stale-version 409 Conflict (read-repair candidate).
 #[must_use]
 pub fn is_stale_version_conflict(error: &ApiErrorResponse) -> bool {
     classify_conflict_kind(error) == ConflictKind::StaleVersion
@@ -469,19 +452,11 @@ pub fn is_stale_version_conflict(error: &ApiErrorResponse) -> bool {
 // Read-Repair Rebase Logic
 // =============================================================================
 
-/// Error type for non-commutative field conflicts during rebase.
-///
-/// When two concurrent updates modify the same field to different values,
-/// the conflict cannot be automatically resolved and must be reported
-/// back to the client.
+/// Error when two concurrent updates modify the same field to different values.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RebaseError {
-    /// A non-commutative field conflict where both the original update
-    /// and a concurrent update modified the same field.
-    NonCommutativeConflict {
-        /// The name of the conflicting field.
-        field: &'static str,
-    },
+    /// Both the original and a concurrent update modified the same field.
+    NonCommutativeConflict { field: &'static str },
 }
 
 impl std::fmt::Display for RebaseError {
@@ -497,39 +472,17 @@ impl std::fmt::Display for RebaseError {
     }
 }
 
-/// Rebases an update request against the latest task state (pure function).
+/// 3-way merge: rebases `request` against `latest` using `original_base` as the common ancestor.
 ///
-/// This function implements a 3-way merge: given the original base task
-/// (what the client saw), the latest task (current DB state), and the
-/// client's update request, it produces a new request with the version
-/// updated to match the latest task.
-///
-/// # Conflict Detection
-///
-/// For each field the client wants to update (`request.field.is_some()`):
-/// - If `original_base.field != latest.field` (another user changed it)
-///   AND `latest.field` differs from what the client wants to set,
-///   it is a non-commutative conflict.
-/// - If `original_base.field == latest.field` (no concurrent change),
-///   the rebase succeeds.
-///
-/// # Arguments
-///
-/// * `original_base` - The task state the client based their update on
-/// * `latest` - The current task state from the database
-/// * `request` - The client's update request
-///
-/// # Returns
-///
-/// `Ok(UpdateTaskRequest)` with version rebased to `latest.version`,
-/// or `Err(RebaseError)` if a non-commutative conflict is detected.
+/// For each field the client wants to update, if the field was concurrently
+/// changed to a different value, returns [`RebaseError::NonCommutativeConflict`].
+/// Otherwise, returns the request with version rebased to `latest.version`.
 #[must_use]
 pub fn rebase_update_request(
     original_base: &Task,
     latest: &Task,
     request: &UpdateTaskRequest,
 ) -> Result<UpdateTaskRequest, RebaseError> {
-    // Check title conflict
     if request.title.is_some()
         && original_base.title != latest.title
         && request.title.as_deref() != Some(latest.title.as_str())
@@ -537,7 +490,6 @@ pub fn rebase_update_request(
         return Err(RebaseError::NonCommutativeConflict { field: "title" });
     }
 
-    // Check description conflict
     if request.description.is_some()
         && original_base.description != latest.description
         && request.description != latest.description
@@ -547,7 +499,6 @@ pub fn rebase_update_request(
         });
     }
 
-    // Check priority conflict
     if request.priority.is_some() && original_base.priority != latest.priority {
         let request_priority: Priority = request
             .priority
@@ -558,7 +509,6 @@ pub fn rebase_update_request(
         }
     }
 
-    // No conflicts: rebase version to latest
     Ok(UpdateTaskRequest {
         title: request.title.clone(),
         description: request.description.clone(),
@@ -624,13 +574,7 @@ pub fn promote_to_retryable_conflict(mut error: ApiErrorResponse) -> ApiErrorRes
     error
 }
 
-/// Returns `true` if the error is a retryable 409 Conflict.
-///
-/// Only repository-level CAS failures (code = `VERSION_CONFLICT_RETRYABLE`) are
-/// retryable. Handler-level stale version mismatches use the standard
-/// `VERSION_CONFLICT` code and are **not** retried.
-///
-/// This is a convenience wrapper around [`classify_conflict_kind`].
+/// Returns `true` if the error is a retryable CAS 409 Conflict.
 #[must_use]
 pub fn is_retryable_conflict(error: &ApiErrorResponse) -> bool {
     classify_conflict_kind(error) == ConflictKind::RetryableCas
@@ -808,39 +752,17 @@ pub const fn can_merge_without_conflict(request: &UpdateTaskRequest) -> bool {
 // Read-Repair CAS Loop
 // =============================================================================
 
-/// Attempts to update a task with read-repair for stale-version conflicts.
+/// Read-repair loop for stale-version 409 conflicts.
 ///
-/// When `update_task_inner` returns a stale-version 409 (the client's version
-/// is behind the database), this function performs a read-repair loop:
-///
-/// 1. Record the original task state (what the client saw)
-/// 2. Call `retry_on_conflict(update_task_inner)` as before
-/// 3. If the result is a stale-version 409:
-///    a. Re-read the latest task from the database
-///    b. Rebase the update request against the latest state
-///    c. Retry with the rebased request
-///    d. Repeat up to [`READ_REPAIR_MAX_RETRIES`] times
-/// 4. If rebase fails (non-commutative conflict), return 409
-///
-/// This function does **not** modify `update_task_inner`.
-///
-/// # Arguments
-///
-/// * `state` - Application state containing repositories
-/// * `task_id` - ID of the task to update
-/// * `request` - The client's original update request
-///
-/// # Errors
-///
-/// Returns [`ApiErrorResponse`] in the same cases as `update_task_inner`,
-/// plus 409 Conflict when a non-commutative rebase conflict is detected.
+/// Re-reads the latest task, rebases the update request via 3-way merge,
+/// and retries up to [`READ_REPAIR_MAX_RETRIES`] times. Returns 409 if
+/// a non-commutative field conflict is detected during rebase.
 #[allow(clippy::future_not_send)]
 pub(crate) async fn update_task_with_read_repair(
     state: &AppState,
     task_id: &TaskId,
     request: &UpdateTaskRequest,
 ) -> Result<(StatusCode, JsonResponse<TaskResponse>), ApiErrorResponse> {
-    // Record the original base task (what the client saw when they made the request)
     let original_base = state
         .task_repository
         .find_by_id(task_id)
@@ -848,7 +770,6 @@ pub(crate) async fn update_task_with_read_repair(
         .map_err(ApiErrorResponse::from)?
         .ok_or_else(|| ApiErrorResponse::not_found(format!("Task {task_id} not found")))?;
 
-    // First attempt: try with the original request
     let first_result = retry_on_conflict(
         || update_task_inner(state.clone(), task_id.clone(), request.clone()),
         DEFAULT_MAX_RETRIES,
@@ -857,18 +778,15 @@ pub(crate) async fn update_task_with_read_repair(
     )
     .await;
 
-    // If not a stale-version conflict, return immediately
     let first_error = match first_result {
         Ok(success) => return Ok(success),
         Err(error) if !is_stale_version_conflict(&error) => return Err(error),
         Err(error) => error,
     };
 
-    // Stale-version conflict detected: enter read-repair loop
     let mut last_error = first_error;
 
     for repair_attempt in 0..READ_REPAIR_MAX_RETRIES {
-        // Re-read the latest task from the database
         let latest = state
             .task_repository
             .find_by_id(task_id)
@@ -876,16 +794,13 @@ pub(crate) async fn update_task_with_read_repair(
             .map_err(ApiErrorResponse::from)?
             .ok_or_else(|| ApiErrorResponse::not_found(format!("Task {task_id} not found")))?;
 
-        // Rebase the update request against the latest state
         let rebased_request = match rebase_update_request(&original_base, &latest, request) {
             Ok(rebased) => rebased,
             Err(rebase_error) => {
-                // Non-commutative conflict: cannot auto-resolve
                 return Err(ApiErrorResponse::conflict(rebase_error.to_string()));
             }
         };
 
-        // Retry with the rebased request
         let repair_result = retry_on_conflict(
             || update_task_inner(state.clone(), task_id.clone(), rebased_request.clone()),
             DEFAULT_MAX_RETRIES,
@@ -897,7 +812,6 @@ pub(crate) async fn update_task_with_read_repair(
         match repair_result {
             Ok(success) => return Ok(success),
             Err(error) if is_stale_version_conflict(&error) => {
-                // Still stale: backoff and try again
                 last_error = error;
                 let cap = compute_backoff_cap(READ_REPAIR_BASE_DELAY_MS, repair_attempt)
                     .min(MAX_BACKOFF_MS);
@@ -910,7 +824,6 @@ pub(crate) async fn update_task_with_read_repair(
         }
     }
 
-    // All read-repair retries exhausted
     Err(last_error)
 }
 
@@ -986,7 +899,6 @@ pub async fn update_task(
     )
     .await;
 
-    // If the result is a stale-version 409, attempt read-repair
     let result = match &result {
         Err(error) if is_stale_version_conflict(error) => {
             update_task_with_read_repair(&state, &task_id, &request).await
