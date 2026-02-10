@@ -6,7 +6,6 @@ local RETRY_COUNT = tonumber(os.getenv("RETRY_COUNT")) or 1
 local BACKOFF_BASE = 2
 local BACKOFF_MAX = tonumber(os.getenv("RETRY_BACKOFF_MAX")) or 16
 
--- FSM transition rules from transaction.rs L239-250
 local VALID_TRANSITIONS = {
     ["pending"] = {"in_progress", "cancelled"},
     ["in_progress"] = {"completed", "pending", "cancelled"},
@@ -113,7 +112,6 @@ local function reset_retry_state()
 end
 
 local function apply_backoff()
-    -- Full jitter: random(0, min(cap, base^attempt))
     backoff_skip_target = math.random(0, math.min(BACKOFF_BASE ^ retry_attempt, BACKOFF_MAX))
     backoff_skip_counter = 0
 end
@@ -192,12 +190,8 @@ function request()
     last_request_is_update = true
 
     local body = generate_update_body(task_state.status, task_state.version)
-    if not body then
-        -- cancelled state: fallback
-        return fallback_request()
-    end
+    if not body then return fallback_request() end
 
-    -- Extract sent status from body
     last_request_status = body:match('"status"%s*:%s*"([^"]+)"')
 
     return wrk and wrk.format and wrk.format("PATCH", "/tasks/" .. task_state.id .. "/status", {["Content-Type"] = "application/json"}, body) or ""
@@ -238,8 +232,6 @@ function response(status, headers, body)
                 end
                 retry_body = generate_update_body(retry_status, version)
                 if not retry_body then
-                    -- cancelled state
-                    io.stderr:write("[tasks_update_status] Cannot retry from cancelled state\n")
                     reset_retry_state()
                     return
                 end
@@ -321,14 +313,12 @@ local STATUS_LABELS = {
 }
 
 local function print_excluded_requests()
-    local excluded = {
-        {request_categories.backoff, "Backoff"},
-        {request_categories.suppressed, "Suppressed thread"},
-        {request_categories.fallback, "Fallback"}
-    }
+    local excluded = {{"Backoff", request_categories.backoff},
+                      {"Suppressed thread", request_categories.suppressed},
+                      {"Fallback", request_categories.fallback}}
     for _, item in ipairs(excluded) do
-        if item[1] > 0 then
-            io.stderr:write(string.format("[tasks_update_status] %s requests (excluded): %d\n", item[2], item[1]))
+        if item[2] > 0 then
+            io.stderr:write(string.format("[tasks_update_status] %s requests (excluded): %d\n", item[1], item[2]))
         end
     end
 end
@@ -410,14 +400,11 @@ function done(summary, latency, requests)
 
     io.stderr:write(string.format("[tasks_update_status] Retry config: RETRY_COUNT=%d, BACKOFF_MAX=%d\n", RETRY_COUNT, BACKOFF_MAX))
 
-    local retry_stats = {
-        {thread_retry_count, "Thread successful retries"},
-        {thread_retry_exhausted_count, "Thread retry exhausted"}
-    }
-    for _, stat in ipairs(retry_stats) do
-        if stat[1] > 0 then
-            io.stderr:write(string.format("[tasks_update_status] %s: %d\n", stat[2], stat[1]))
-        end
+    if thread_retry_count > 0 then
+        io.stderr:write(string.format("[tasks_update_status] Thread successful retries: %d\n", thread_retry_count))
+    end
+    if thread_retry_exhausted_count > 0 then
+        io.stderr:write(string.format("[tasks_update_status] Thread retry exhausted: %d\n", thread_retry_exhausted_count))
     end
 
     local rc = pcall(require, "result_collector") and require("result_collector") or nil

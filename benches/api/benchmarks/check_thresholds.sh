@@ -1,31 +1,14 @@
 #!/usr/bin/env bash
-# Check performance thresholds for benchmark scenarios.
-#
-# Usage: check_thresholds.sh <results_dir> <scenario>
-# Exit codes: 0=pass, 1=error, 2=missing metrics, 3=threshold exceeded
-
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Dependency checks
-if ! command -v jq &> /dev/null; then
-    echo "ERROR: jq is required but not installed"
-    echo "Install with: brew install jq (macOS) or apt-get install jq (Linux)"
-    exit 1
-fi
-
-if ! command -v bc &> /dev/null; then
-    echo "ERROR: bc is required but not installed"
-    echo "Install with: brew install bc (macOS) or apt-get install bc (Linux)"
-    exit 1
-fi
-
-if ! command -v yq &> /dev/null; then
-    echo "ERROR: yq is required but not installed"
-    echo "Install with: brew install yq (macOS) or snap install yq (Linux)"
-    exit 1
-fi
+for cmd in jq bc yq; do
+    if ! command -v "$cmd" &> /dev/null; then
+        echo "ERROR: $cmd is required but not installed"
+        exit 1
+    fi
+done
 
 get_threshold() {
     local scenario="${1}"
@@ -200,52 +183,32 @@ if [[ -n "${CONFLICT_RATE}" ]]; then
 fi
 echo ""
 
-# GATE-001: 400 fail-fast for PUT /tasks/{id} scenarios (REQ-TU2-003)
-# Only applies to PUT scenarios (tasks_update, tasks_update_steady, tasks_update_conflict)
-# Excludes PATCH scenarios (tasks_update_status)
+check_validation_gate() {
+    local fail_message="$1"
+    STATUS_400=$(jq -r '.results.http_status."400" // 0' "${META_FILE}")
+    STATUS_409=$(jq -r '.results.http_status."409" // 0' "${META_FILE}")
+
+    if (( 10#${STATUS_400} > 0 )); then
+        echo "FAIL: ${fail_message}"
+        echo "  http_status.400 = ${STATUS_400} (must be 0)"
+        exit 3
+    fi
+
+    REQUESTS=$(jq -r '.results.requests // 0' "${META_FILE}")
+    VALIDATION_ERROR_RATE=$(awk -v s400="${STATUS_400}" -v req="${REQUESTS}" \
+        'BEGIN { if (req > 0) printf "%.6f", s400 / req; else print "0" }')
+    CONFLICT_ERROR_RATE=$(awk -v s409="${STATUS_409}" -v req="${REQUESTS}" \
+        'BEGIN { if (req > 0) printf "%.6f", s409 / req; else print "0" }')
+
+    echo "  validation_error_rate (400) = ${VALIDATION_ERROR_RATE}"
+    echo "  conflict_error_rate (409) = ${CONFLICT_ERROR_RATE}"
+    echo ""
+}
+
 if [[ "${SCENARIO}" == "tasks_update" || "${SCENARIO}" == "tasks_update_steady" || "${SCENARIO}" == "tasks_update_conflict" ]]; then
-    STATUS_400=$(jq -r '.results.http_status."400" // 0' "${META_FILE}")
-    STATUS_409=$(jq -r '.results.http_status."409" // 0' "${META_FILE}")
-
-    if (( 10#${STATUS_400} > 0 )); then
-        echo "FAIL: Contract violation detected - status field included in PUT payload"
-        echo "  http_status.400 = ${STATUS_400} (must be 0)"
-        exit 3
-    fi
-
-    REQUESTS=$(jq -r '.results.requests // 0' "${META_FILE}")
-    VALIDATION_ERROR_RATE=$(awk -v s400="${STATUS_400}" -v req="${REQUESTS}" 'BEGIN {
-        if (req > 0) printf "%.6f", s400 / req; else print "0"
-    }')
-    CONFLICT_ERROR_RATE=$(awk -v s409="${STATUS_409}" -v req="${REQUESTS}" 'BEGIN {
-        if (req > 0) printf "%.6f", s409 / req; else print "0"
-    }')
-
-    echo "  validation_error_rate (400) = ${VALIDATION_ERROR_RATE}"
-    echo "  conflict_error_rate (409) = ${CONFLICT_ERROR_RATE}"
-    echo ""
-# GATE-002: 400 fail-fast for PATCH /tasks/{id}/status (IMPL-TUS3-003)
+    check_validation_gate "Contract violation detected - status field included in PUT payload"
 elif [[ "${SCENARIO}" == "tasks_update_status" ]]; then
-    STATUS_400=$(jq -r '.results.http_status."400" // 0' "${META_FILE}")
-    STATUS_409=$(jq -r '.results.http_status."409" // 0' "${META_FILE}")
-
-    if (( 10#${STATUS_400} > 0 )); then
-        echo "FAIL: Transition validation error - invalid status transition in PATCH payload"
-        echo "  http_status.400 = ${STATUS_400} (must be 0)"
-        exit 3
-    fi
-
-    REQUESTS=$(jq -r '.results.requests // 0' "${META_FILE}")
-    VALIDATION_ERROR_RATE=$(awk -v s400="${STATUS_400}" -v req="${REQUESTS}" 'BEGIN {
-        if (req > 0) printf "%.6f", s400 / req; else print "0"
-    }')
-    CONFLICT_ERROR_RATE=$(awk -v s409="${STATUS_409}" -v req="${REQUESTS}" 'BEGIN {
-        if (req > 0) printf "%.6f", s409 / req; else print "0"
-    }')
-
-    echo "  validation_error_rate (400) = ${VALIDATION_ERROR_RATE}"
-    echo "  conflict_error_rate (409) = ${CONFLICT_ERROR_RATE}"
-    echo ""
+    check_validation_gate "Transition validation error - invalid status transition in PATCH payload"
 fi
 FAILED=0
 FAILURES=""

@@ -1,12 +1,7 @@
--- Test IDs for benchmarking with version management
--- REQ-UPDATE-IDS-001: ID/version pair management for conflict handling
-
 local M = {}
 
 local ID_POOL_SIZE = tonumber(os.getenv("ID_POOL_SIZE")) or 10
 local SEED = tonumber(os.getenv("SEED"))
-
--- Create independent RNG for ID generation to avoid affecting common.lua random_*
 local id_rng_state = SEED or 42
 
 local static_task_ids = {
@@ -26,8 +21,6 @@ local function bit_rshift(a, n)
     return math.floor(a / (2 ^ n))
 end
 
--- Simple LCG (Linear Congruential Generator) for reproducible ID generation
--- Does not affect global math.random() state
 local function next_id_random()
     id_rng_state = (id_rng_state * 1103515245 + 12345) % 0x100000000
     return id_rng_state
@@ -36,16 +29,14 @@ end
 local function generate_task_id(index)
     if index <= #static_task_ids then return static_task_ids[index] end
 
-    -- Use independent RNG for reproducibility without affecting common.lua random_*
     local rand_base = next_id_random()
     local seq = index - #static_task_ids
-    local part1 = (rand_base + seq * 0x12345) % 0x100000000
-    local part2 = (rand_base + seq * 0x67) % 0x10000
-    local part3 = 0x7000 + (bit_rshift(seq, 8) % 0x1000)
-    local part4 = 0x8000 + (seq % 0x4000)
-    local part5 = (index * 0x123456 + rand_base) % 0x1000000000000
-
-    return string.format("%08x-%04x-%04x-%04x-%012x", part1, part2, part3, part4, part5)
+    return string.format("%08x-%04x-%04x-%04x-%012x",
+        (rand_base + seq * 0x12345) % 0x100000000,
+        (rand_base + seq * 0x67) % 0x10000,
+        0x7000 + (bit_rshift(seq, 8) % 0x1000),
+        0x8000 + (seq % 0x4000),
+        (index * 0x123456 + rand_base) % 0x1000000000000)
 end
 
 local task_states = {}

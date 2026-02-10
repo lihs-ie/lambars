@@ -18,18 +18,21 @@ local function random_choice(tbl)
     return tbl[math.random(#tbl)]
 end
 
+local PREFIXES = {"Implement", "Fix", "Update", "Refactor", "Test", "Deploy", "Review", "Optimize"}
+local SUBJECTS = {"authentication", "database", "API", "cache", "logging", "metrics", "UI", "docs"}
+local PRIORITIES = {"low", "medium", "high", "critical"}
+local STATUSES = {"pending", "in_progress", "completed", "cancelled"}
+
 function M.random_title()
-    local prefixes = {"Implement", "Fix", "Update", "Refactor", "Test", "Deploy", "Review", "Optimize"}
-    local subjects = {"authentication", "database", "API", "cache", "logging", "metrics", "UI", "docs"}
-    return random_choice(prefixes) .. " " .. random_choice(subjects)
+    return random_choice(PREFIXES) .. " " .. random_choice(SUBJECTS)
 end
 
 function M.random_priority()
-    return random_choice({"low", "medium", "high", "critical"})
+    return random_choice(PRIORITIES)
 end
 
 function M.random_status()
-    return random_choice({"pending", "in_progress", "completed", "cancelled"})
+    return random_choice(STATUSES)
 end
 
 M.EMPTY_ARRAY = setmetatable({}, {__is_array = true})
@@ -197,7 +200,7 @@ local function create_fallback_interface(fallback)
         fallback.task_versions[i] = fallback.task_versions[i] or 1
     end
 
-    local function get_actual_index(index, ids)
+    local function normalize_index(index, ids)
         return ((index - 1) % #ids) + 1
     end
 
@@ -208,25 +211,25 @@ local function create_fallback_interface(fallback)
     end
 
     fallback.get_task_id = function(index)
-        return fallback.task_ids[get_actual_index(index, fallback.task_ids)], nil
+        return fallback.task_ids[normalize_index(index, fallback.task_ids)], nil
     end
     fallback.get_project_id = function(index)
-        return fallback.project_ids[get_actual_index(index, fallback.project_ids)], nil
+        return fallback.project_ids[normalize_index(index, fallback.project_ids)], nil
     end
     fallback.get_task_count = function() return #fallback.task_ids end
     fallback.get_project_count = function() return #fallback.project_ids end
     fallback.get_task_state = function(index)
-        local actual_index = get_actual_index(index, fallback.task_ids)
-        return { id = fallback.task_ids[actual_index], version = fallback.task_versions[actual_index], status = "pending" }, nil
+        local idx = normalize_index(index, fallback.task_ids)
+        return {id = fallback.task_ids[idx], version = fallback.task_versions[idx], status = "pending"}, nil
     end
     fallback.set_version = function(index, version)
-        fallback.task_versions[get_actual_index(index, fallback.task_ids)] = version
+        fallback.task_versions[normalize_index(index, fallback.task_ids)] = version
         return true, nil
     end
     fallback.increment_version = function(index)
-        local actual_index = get_actual_index(index, fallback.task_ids)
-        fallback.task_versions[actual_index] = fallback.task_versions[actual_index] + 1
-        return fallback.task_versions[actual_index], nil
+        local idx = normalize_index(index, fallback.task_ids)
+        fallback.task_versions[idx] = fallback.task_versions[idx] + 1
+        return fallback.task_versions[idx], nil
     end
     fallback.reset_versions = function()
         for i = 1, #fallback.task_ids do fallback.task_versions[i] = 1 end
@@ -276,6 +279,40 @@ function M.extract_status(body)
     return body:match('"status"%s*:%s*"([^"]+)"')
 end
 
+local STATUS_LABELS = {
+    {code = "200 OK", key = "status_200"},
+    {code = "201 Created", key = "status_201"},
+    {code = "207 Multi-Status", key = "status_207"},
+    {code = "400 Bad Request", key = "status_400"},
+    {code = "404 Not Found", key = "status_404"},
+    {code = "409 Conflict", key = "status_409"},
+    {code = "422 Unprocessable Entity", key = "status_422"},
+    {code = "500 Internal Server Error", key = "status_500"},
+    {code = "502 Bad Gateway", key = "status_502"},
+    {code = "Other Status", key = "status_other"}
+}
+
+local function print_status_distribution(script_name, aggregated, total)
+    io.write(string.format("\n--- %s HTTP Status Distribution ---\n", script_name))
+    if total <= 0 then
+        io.write("  No requests completed\n")
+        return
+    end
+
+    for _, label in ipairs(STATUS_LABELS) do
+        local count = aggregated[label.key]
+        if count > 0 then
+            io.write(string.format("  %s: %d (%.1f%%)\n", label.code, count, (count / total) * 100))
+        end
+    end
+
+    local errors = aggregated.status_400 + aggregated.status_404 + aggregated.status_409 +
+                   aggregated.status_422 + aggregated.status_500 + aggregated.status_502 +
+                   aggregated.status_other
+    io.write(string.format("Error Rate: %.2f%% (%d errors / %d requests)\n",
+        (errors / total) * 100, errors, total))
+end
+
 function M.create_threaded_handlers(script_name)
     local error_tracker = try_require("error_tracker")
     if not error_tracker then
@@ -299,38 +336,7 @@ function M.create_threaded_handlers(script_name)
         done = function(summary, latency, requests)
             M.print_summary(script_name, summary)
             local aggregated = error_tracker.get_all_threads_aggregated_summary()
-            local total = summary.requests or 0
-
-            io.write(string.format("\n--- %s HTTP Status Distribution ---\n", script_name))
-            if total > 0 then
-                local status_labels = {
-                    {code = "200 OK", key = "status_200"},
-                    {code = "201 Created", key = "status_201"},
-                    {code = "207 Multi-Status", key = "status_207"},
-                    {code = "400 Bad Request", key = "status_400"},
-                    {code = "404 Not Found", key = "status_404"},
-                    {code = "409 Conflict", key = "status_409"},
-                    {code = "422 Unprocessable Entity", key = "status_422"},
-                    {code = "500 Internal Server Error", key = "status_500"},
-                    {code = "502 Bad Gateway", key = "status_502"},
-                    {code = "Other Status", key = "status_other"}
-                }
-                for _, label in ipairs(status_labels) do
-                    local count = aggregated[label.key]
-                    if count > 0 then
-                        io.write(string.format("  %s: %d (%.1f%%)\n", label.code, count, (count / total) * 100))
-                    end
-                end
-                -- Calculate error rate (4xx + 5xx)
-                -- Note: status_other only includes non-listed 4xx/5xx (2xx/3xx are excluded in track_thread_response)
-                local errors = aggregated.status_400 + aggregated.status_404 + aggregated.status_409 +
-                               aggregated.status_422 + aggregated.status_500 + aggregated.status_502 +
-                               aggregated.status_other
-                io.write(string.format("Error Rate: %.2f%% (%d errors / %d requests)\n",
-                    (errors / total) * 100, errors, total))
-            else
-                io.write("  No requests completed\n")
-            end
+            print_status_distribution(script_name, aggregated, summary.requests or 0)
         end
     }
 end
@@ -342,8 +348,7 @@ function M.create_standard_handlers(script_name, init_opts)
     local function ensure_initialized()
         if initialized then return end
         initialized = true
-        local opts = init_opts or {scenario_name = script_name, output_format = "json"}
-        M.init_benchmark(opts)
+        M.init_benchmark(init_opts or {scenario_name = script_name, output_format = "json"})
         if error_tracker then error_tracker.init() end
     end
 
@@ -365,37 +370,8 @@ function M.create_standard_handlers(script_name, init_opts)
         done = function(summary, latency, requests)
             M.print_summary(script_name, summary)
             if error_tracker then
-                local aggregated = error_tracker.get_all_threads_aggregated_summary()
-                local total = summary.requests or 0
-
-                io.write(string.format("\n--- %s HTTP Status Distribution ---\n", script_name))
-                if total > 0 then
-                    local status_labels = {
-                        {code = "200 OK", key = "status_200"},
-                        {code = "201 Created", key = "status_201"},
-                        {code = "207 Multi-Status", key = "status_207"},
-                        {code = "400 Bad Request", key = "status_400"},
-                        {code = "404 Not Found", key = "status_404"},
-                        {code = "409 Conflict", key = "status_409"},
-                        {code = "422 Unprocessable Entity", key = "status_422"},
-                        {code = "500 Internal Server Error", key = "status_500"},
-                        {code = "502 Bad Gateway", key = "status_502"},
-                        {code = "Other Status", key = "status_other"}
-                    }
-                    for _, label in ipairs(status_labels) do
-                        local count = aggregated[label.key]
-                        if count > 0 then
-                            io.write(string.format("  %s: %d (%.1f%%)\n", label.code, count, (count / total) * 100))
-                        end
-                    end
-                    local errors = aggregated.status_400 + aggregated.status_404 + aggregated.status_409 +
-                                   aggregated.status_422 + aggregated.status_500 + aggregated.status_502 +
-                                   aggregated.status_other
-                    io.write(string.format("Error Rate: %.2f%% (%d errors / %d requests)\n",
-                        (errors / total) * 100, errors, total))
-                else
-                    io.write("  No requests completed\n")
-                end
+                print_status_distribution(script_name, error_tracker.get_all_threads_aggregated_summary(),
+                                         summary.requests or 0)
             end
             M.finalize_benchmark(summary, latency, requests)
         end

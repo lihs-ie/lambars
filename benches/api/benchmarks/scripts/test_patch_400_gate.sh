@@ -1,6 +1,4 @@
 #!/bin/bash
-# Test script for PATCH /tasks/{id}/status 400 fail-fast gate (IMPL-TUS3-003)
-
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -8,12 +6,9 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
 CHECK_THRESHOLDS="${PROJECT_ROOT}/benches/api/benchmarks/check_thresholds.sh"
 TEMP_DIR="${PROJECT_ROOT}/benches/api/benchmarks/scripts/temp_test_patch_400_gate"
 
-# Clean up on exit
 trap 'rm -rf "${TEMP_DIR}"' EXIT
-
 mkdir -p "${TEMP_DIR}"
 
-# Test 1: PASS case (400 = 0)
 echo "Test 1: PASS case (400 = 0)"
 mkdir -p "${TEMP_DIR}/pass_case"
 cat > "${TEMP_DIR}/pass_case/meta.json" <<'EOF'
@@ -36,19 +31,15 @@ cat > "${TEMP_DIR}/pass_case/meta.json" <<'EOF'
 }
 EOF
 
-# Execute check_thresholds.sh (results_dir, scenario)
 if "${CHECK_THRESHOLDS}" "${TEMP_DIR}/pass_case" "tasks_update_status" > "${TEMP_DIR}/output_pass.txt" 2>&1; then
     echo "  PASS: Gate passed as expected"
-    grep -q "validation_error_rate (400) = 0.000000" "${TEMP_DIR}/output_pass.txt" || {
-        echo "  ERROR: validation_error_rate not found in output"
-        cat "${TEMP_DIR}/output_pass.txt"
-        exit 1
-    }
-    grep -q "conflict_error_rate (409) = 0.009901" "${TEMP_DIR}/output_pass.txt" || {
-        echo "  ERROR: conflict_error_rate not found in output (expected 0.009901)"
-        cat "${TEMP_DIR}/output_pass.txt"
-        exit 1
-    }
+    for pattern in "validation_error_rate (400) = 0.000000" "conflict_error_rate (409) = 0.009901"; do
+        if ! grep -q "$pattern" "${TEMP_DIR}/output_pass.txt"; then
+            echo "  ERROR: Expected pattern not found: $pattern"
+            cat "${TEMP_DIR}/output_pass.txt"
+            exit 1
+        fi
+    done
 else
     echo "  FAIL: Gate should have passed"
     cat "${TEMP_DIR}/output_pass.txt"
@@ -80,30 +71,27 @@ cat > "${TEMP_DIR}/fail_case/meta.json" <<'EOF'
 }
 EOF
 
-# Execute check_thresholds.sh and expect failure
 if "${CHECK_THRESHOLDS}" "${TEMP_DIR}/fail_case" "tasks_update_status" > "${TEMP_DIR}/output_fail.txt" 2>&1; then
     echo "  FAIL: Gate should have failed when 400 > 0"
     cat "${TEMP_DIR}/output_fail.txt"
     exit 1
 else
     EXIT_CODE=$?
-    if [[ ${EXIT_CODE} -eq 3 ]]; then
-        echo "  PASS: Gate failed with exit 3 as expected"
-        grep -q "FAIL: Transition validation error - invalid status transition in PATCH payload" "${TEMP_DIR}/output_fail.txt" || {
-            echo "  ERROR: Expected error message not found"
-            cat "${TEMP_DIR}/output_fail.txt"
-            exit 1
-        }
-        grep -q "http_status.400 = 5 (must be 0)" "${TEMP_DIR}/output_fail.txt" || {
-            echo "  ERROR: Expected 400 count not found"
-            cat "${TEMP_DIR}/output_fail.txt"
-            exit 1
-        }
-    else
+    if [[ ${EXIT_CODE} -ne 3 ]]; then
         echo "  FAIL: Gate failed with unexpected exit code ${EXIT_CODE}"
         cat "${TEMP_DIR}/output_fail.txt"
         exit 1
     fi
+
+    echo "  PASS: Gate failed with exit 3 as expected"
+    for pattern in "FAIL: Transition validation error - invalid status transition in PATCH payload" \
+                   "http_status.400 = 5 (must be 0)"; do
+        if ! grep -q "$pattern" "${TEMP_DIR}/output_fail.txt"; then
+            echo "  ERROR: Expected pattern not found: $pattern"
+            cat "${TEMP_DIR}/output_fail.txt"
+            exit 1
+        fi
+    done
 fi
 
 echo ""
