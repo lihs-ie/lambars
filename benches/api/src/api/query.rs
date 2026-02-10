@@ -1213,6 +1213,28 @@ fn merge_segment_hit_miss_counts() -> (usize, usize) {
 // Phase 6: Segment Overlay for NgramIndex
 // =============================================================================
 
+/// Budget for controlling compaction aggressiveness in [`NgramSegmentOverlay`].
+///
+/// - `soft_max_segments_per_compact`: below this segment count, no compaction runs.
+/// - `hard_max_segments`: at or above this count, force a full compaction.
+/// - Between the two thresholds, a single `compact_one` is executed.
+#[derive(Debug, Clone, Copy)]
+pub struct CompactionBudget {
+    /// Below this segment count, append-only (no compaction).
+    pub soft_max_segments_per_compact: usize,
+    /// At or above this segment count, force compaction.
+    pub hard_max_segments: usize,
+}
+
+impl Default for CompactionBudget {
+    fn default() -> Self {
+        Self {
+            soft_max_segments_per_compact: 1,
+            hard_max_segments: 6,
+        }
+    }
+}
+
 /// Configuration for [`NgramSegmentOverlay`] compaction behavior.
 ///
 /// Controls the maximum number of delta segments and the key-count threshold
@@ -1224,6 +1246,8 @@ struct SegmentOverlayConfig {
     max_segments: usize,
     /// Maximum number of keys in the oldest segment before compaction is triggered.
     max_segment_keys: usize,
+    /// Budget for controlling compaction aggressiveness.
+    budget: CompactionBudget,
 }
 
 impl Default for SegmentOverlayConfig {
@@ -1231,6 +1255,41 @@ impl Default for SegmentOverlayConfig {
         Self {
             max_segments: 3,
             max_segment_keys: 50_000,
+            budget: CompactionBudget::default(),
+        }
+    }
+}
+
+/// Reusable scratch buffer arena for merge operations.
+///
+/// Keeps a pre-allocated `Vec<TaskId>` that is cleared (but not deallocated)
+/// between uses, avoiding repeated heap allocation during hot merge loops.
+pub struct MergeArena {
+    scratch: Vec<TaskId>,
+    shrink_threshold: usize,
+}
+
+impl MergeArena {
+    /// Creates a new arena with the default shrink threshold (16 384 elements).
+    pub fn new() -> Self {
+        Self {
+            scratch: Vec::new(),
+            shrink_threshold: 16_384,
+        }
+    }
+
+    /// Returns a mutable reference to the scratch buffer after clearing it.
+    pub fn scratch(&mut self) -> &mut Vec<TaskId> {
+        self.scratch.clear();
+        &mut self.scratch
+    }
+
+    /// Replaces the scratch buffer with a smaller one if its capacity
+    /// exceeds the threshold. This guarantees the capacity is reduced
+    /// regardless of allocator behavior.
+    pub fn maybe_shrink(&mut self) {
+        if self.scratch.capacity() > self.shrink_threshold {
+            self.scratch = Vec::with_capacity(self.shrink_threshold);
         }
     }
 }
@@ -1255,6 +1314,8 @@ struct NgramSegmentOverlay {
     max_segments: usize,
     /// Maximum number of keys in the oldest segment before compaction.
     max_segment_keys: usize,
+    /// Budget for controlling compaction aggressiveness.
+    budget: CompactionBudget,
 }
 
 impl NgramSegmentOverlay {
@@ -1264,6 +1325,10 @@ impl NgramSegmentOverlay {
             segments: Vec::new(),
             max_segments: 3,
             max_segment_keys: 50_000,
+            budget: CompactionBudget {
+                soft_max_segments_per_compact: 3,
+                hard_max_segments: 6,
+            },
         }
     }
 
@@ -1279,6 +1344,7 @@ impl NgramSegmentOverlay {
             segments: Vec::new(),
             max_segments: config.max_segments.clamp(2, 6),
             max_segment_keys: config.max_segment_keys,
+            budget: config.budget,
         }
     }
 
@@ -1329,16 +1395,41 @@ impl NgramSegmentOverlay {
             segments: new_segments,
             max_segments: self.max_segments,
             max_segment_keys: self.max_segment_keys,
+            budget: self.budget,
         }
     }
 
-    /// Appends an add-only delta and compacts if needed.
+    /// Appends an add-only delta and compacts based on the [`CompactionBudget`].
+    ///
+    /// - `segments.len() < soft`: append only, no compaction.
+    /// - `segments.len() >= hard`: force compaction (compact until below hard).
+    /// - Between soft and hard: execute `compact_one` once.
+    ///
+    /// Falls back to the legacy `needs_compaction` check (max_segments /
+    /// max_segment_keys) when the budget thresholds are not reached.
     fn append_and_compact(&self, delta_ngram: NgramIndex) -> Self {
         if delta_ngram.is_empty() {
             return self.clone();
         }
         let overlay = self.append_add_only(delta_ngram);
-        if overlay.needs_compaction() {
+
+        let segment_count = overlay.segments.len();
+        let budget = &overlay.budget;
+
+        if segment_count >= budget.hard_max_segments {
+            // Force compact: fold segments until below hard limit
+            let mut result = overlay;
+            while result.segments.len() >= result.budget.hard_max_segments
+                && !result.segments.is_empty()
+            {
+                result = result.compact_one();
+            }
+            result
+        } else if segment_count >= budget.soft_max_segments_per_compact {
+            // Between soft and hard: compact one oldest segment
+            overlay.compact_one()
+        } else if overlay.needs_compaction() {
+            // Legacy path: max_segments / max_segment_keys threshold
             overlay.compact_one()
         } else {
             overlay
@@ -1361,6 +1452,7 @@ impl NgramSegmentOverlay {
             segments: Vec::new(),
             max_segments: self.max_segments,
             max_segment_keys: self.max_segment_keys,
+            budget: self.budget,
         }
     }
 
@@ -1376,6 +1468,7 @@ impl NgramSegmentOverlay {
             segments: self.segments[1..].to_vec(),
             max_segments: self.max_segments,
             max_segment_keys: self.max_segment_keys,
+            budget: self.budget,
         }
     }
 
@@ -22495,6 +22588,7 @@ mod ngram_segment_overlay_tests {
         let config = SegmentOverlayConfig {
             max_segments: 2,
             max_segment_keys: 50_000,
+            budget: CompactionBudget::default(),
         };
         let overlay = NgramSegmentOverlay::with_config(base, &config);
 
@@ -22517,6 +22611,7 @@ mod ngram_segment_overlay_tests {
             segments: vec![segment_1, segment_2],
             max_segments: 4,
             max_segment_keys: 50_000,
+            budget: CompactionBudget::default(),
         };
 
         let key = NgramKey::new("abc");
@@ -22580,6 +22675,7 @@ mod ngram_segment_overlay_tests {
             segments: vec![segment_1, segment_2],
             max_segments: 4,
             max_segment_keys: 50_000,
+            budget: CompactionBudget::default(),
         };
 
         let compacted = overlay.compact_one();
@@ -22634,6 +22730,7 @@ mod ngram_segment_overlay_tests {
             segments: vec![segment_1, segment_2],
             max_segments: 4,
             max_segment_keys: 50_000,
+            budget: CompactionBudget::default(),
         };
 
         let materialized = overlay.materialize();
@@ -22682,6 +22779,7 @@ mod ngram_segment_overlay_tests {
         let config = SegmentOverlayConfig {
             max_segments: 2,
             max_segment_keys: 50_000,
+            budget: CompactionBudget::default(),
         };
         let overlay = NgramSegmentOverlay::with_config(base, &config);
 
@@ -22845,6 +22943,7 @@ mod ngram_segment_overlay_tests {
             segments: vec![segment],
             max_segments: 4,
             max_segment_keys: 50_000,
+            budget: CompactionBudget::default(),
         };
 
         // Add id=4 to "abc", remove id=1 from "abc"
@@ -22888,6 +22987,7 @@ mod ngram_segment_overlay_tests {
             segments: vec![segment],
             max_segments: 4,
             max_segment_keys: 50_000,
+            budget: CompactionBudget::default(),
         };
 
         let mut keys: Vec<String> = overlay.keys().map(|key| key.as_str().to_owned()).collect();
@@ -23116,6 +23216,7 @@ mod ngram_segment_overlay_tests {
             segments: vec![segment],
             max_segments: 4,
             max_segment_keys: 50_000,
+            budget: CompactionBudget::default(),
         };
 
         let updated = overlay.append_and_compact(NgramIndex::new());
@@ -23308,6 +23409,7 @@ mod ngram_segment_overlay_tests {
             segments: vec![segment_1, segment_2, segment_3],
             max_segments: 4,
             max_segment_keys: 50_000,
+            budget: CompactionBudget::default(),
         };
 
         let materialized = overlay.materialize();
@@ -23482,7 +23584,7 @@ mod ngram_segment_overlay_tests {
         // When segments.len() < soft_max_segments_per_compact, only append (no compact)
         let base = make_ngram_index(&[("abc", &[1])]);
         let config = SegmentOverlayConfig {
-            max_segments: 10,
+            max_segments: 6,
             max_segment_keys: 50_000,
             budget: CompactionBudget {
                 soft_max_segments_per_compact: 3,
@@ -23516,7 +23618,7 @@ mod ngram_segment_overlay_tests {
         // When segments.len() >= hard_max_segments, force compact all down
         let base = make_ngram_index(&[("abc", &[1])]);
         let config = SegmentOverlayConfig {
-            max_segments: 10, // high so it does not interfere
+            max_segments: 6, // high so legacy path does not interfere
             max_segment_keys: 50_000,
             budget: CompactionBudget {
                 soft_max_segments_per_compact: 1,
@@ -23558,7 +23660,7 @@ mod ngram_segment_overlay_tests {
         // When soft <= segments.len() < hard, compact_one is called once
         let base = make_ngram_index(&[("abc", &[1])]);
         let config = SegmentOverlayConfig {
-            max_segments: 10,
+            max_segments: 6,
             max_segment_keys: 50_000,
             budget: CompactionBudget {
                 soft_max_segments_per_compact: 2,
@@ -23594,23 +23696,38 @@ mod ngram_segment_overlay_tests {
 
     #[rstest]
     fn budget_shrink_threshold_on_arena() {
-        // MergeArena shrink test (will be expanded in IMPL-PRB1-002-002)
         let mut arena = MergeArena::new();
         assert!(arena.scratch().is_empty());
         assert_eq!(arena.shrink_threshold, 16_384);
 
-        // Use scratch buffer
+        // Use scratch buffer to grow it beyond the shrink threshold
         let scratch = arena.scratch();
         scratch.extend((0..20_000).map(|i| TaskId::from_uuid(Uuid::from_u128(i))));
-        assert!(arena.scratch.capacity() >= 20_000);
+        let capacity_before_shrink = arena.scratch.capacity();
+        assert!(capacity_before_shrink >= 20_000);
 
-        // maybe_shrink should reduce capacity
+        // maybe_shrink should reduce capacity (allocator may round up)
         arena.maybe_shrink();
         assert!(
-            arena.scratch.capacity() <= 16_384,
-            "Expected capacity <= 16384 after shrink, got {}",
+            arena.scratch.capacity() < capacity_before_shrink,
+            "Expected capacity to decrease after shrink, was {} and is now {}",
+            capacity_before_shrink,
             arena.scratch.capacity()
         );
+    }
+
+    #[rstest]
+    fn arena_below_threshold_does_not_shrink() {
+        let mut arena = MergeArena::new();
+
+        // Fill scratch below threshold
+        let scratch = arena.scratch();
+        scratch.extend((0..100).map(|i| TaskId::from_uuid(Uuid::from_u128(i))));
+        let capacity_before = arena.scratch.capacity();
+
+        // maybe_shrink should NOT shrink (capacity <= threshold)
+        arena.maybe_shrink();
+        assert_eq!(arena.scratch.capacity(), capacity_before);
     }
 }
 

@@ -1,7 +1,7 @@
 # TODO - Tasks Bulk/Tasks Update ボトルネック改善
 
 ## In Progress
-- [RED] [IMPL-PRB1-002-001] CompactionBudget を SegmentOverlayConfig に導入 - 失敗テスト作成中
+- [GREEN] [IMPL-PRB1-002-001] CompactionBudget + MergeArena 導入 - 最小実装中
   - Started: 2026-02-11
   - Goal: budget 駆動のコンパクション制御を導入し、append のみ/compact_one/強制 compact を budget パラメータで切り替え可能にする
 
