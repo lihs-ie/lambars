@@ -3413,4 +3413,112 @@ mod tests {
             RebaseError::NonCommutativeConflict { field: "priority" }
         );
     }
+
+    // -------------------------------------------------------------------------
+    // Read-Repair Integration Tests (IMPL-PRB1-001-003)
+    // -------------------------------------------------------------------------
+
+    /// Read-repair constants should be defined.
+    #[rstest]
+    fn test_read_repair_constants() {
+        assert_eq!(READ_REPAIR_MAX_RETRIES, 3);
+        assert_eq!(READ_REPAIR_BASE_DELAY_MS, 2);
+    }
+
+    /// Read-repair success: client sends stale version, but changes a
+    /// different field from the concurrent update, so rebase succeeds.
+    #[rstest]
+    #[tokio::test]
+    async fn test_read_repair_success_different_field_update() {
+        use crate::infrastructure::TaskRepository as _;
+
+        let (state, task) = create_test_app_state_with_task().await;
+
+        // Simulate another user updating description (bumps version to 2)
+        let updated_by_other = Task {
+            description: Some("Updated by another user".to_string()),
+            version: 2,
+            updated_at: Timestamp::now(),
+            ..task.clone()
+        };
+        state.task_repository.save(&updated_by_other).await.unwrap();
+
+        // Our request: update title with stale version 1
+        let request = UpdateTaskRequest {
+            title: Some("My New Title".to_string()),
+            description: None,
+            status: None,
+            priority: None,
+            version: 1, // stale: DB is now at version 2
+        };
+
+        // Call update_task_inner first - it should return stale-version 409
+        let first_result =
+            update_task_inner(state.clone(), task.task_id.clone(), request.clone()).await;
+        assert!(first_result.is_err());
+        assert!(is_stale_version_conflict(&first_result.unwrap_err()));
+
+        // Now call the full update_task_with_read_repair - it should succeed via rebase
+        let result = update_task_with_read_repair(
+            &state,
+            &task.task_id,
+            &request,
+        )
+        .await;
+
+        assert!(result.is_ok(), "Read-repair should succeed: {result:?}");
+        let (status_code, json_response) = result.unwrap();
+        assert_eq!(status_code, StatusCode::OK);
+        assert_eq!(json_response.0.title, "My New Title");
+        assert_eq!(json_response.0.version, 3); // version 2 + 1
+    }
+
+    /// Read-repair failure: client sends stale version, and the concurrent
+    /// update changed the same field (title), causing NonCommutativeConflict.
+    #[rstest]
+    #[tokio::test]
+    async fn test_read_repair_failure_non_commutative_conflict() {
+        use crate::infrastructure::TaskRepository as _;
+
+        let (state, task) = create_test_app_state_with_task().await;
+
+        // Simulate another user updating title (bumps version to 2)
+        let updated_by_other = Task {
+            title: "Changed by another user".to_string(),
+            version: 2,
+            updated_at: Timestamp::now(),
+            ..task.clone()
+        };
+        state.task_repository.save(&updated_by_other).await.unwrap();
+
+        // Our request: also update title with stale version 1
+        let request = UpdateTaskRequest {
+            title: Some("My Title".to_string()),
+            description: None,
+            status: None,
+            priority: None,
+            version: 1, // stale: DB is now at version 2
+        };
+
+        let result = update_task_with_read_repair(
+            &state,
+            &task.task_id,
+            &request,
+        )
+        .await;
+
+        // Should fail with 409 (non-commutative conflict converted to 409)
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert_eq!(error.status, StatusCode::CONFLICT);
+    }
+
+    /// Read-repair converts RebaseError to 409 Conflict response.
+    #[rstest]
+    fn test_rebase_error_display() {
+        let error = RebaseError::NonCommutativeConflict { field: "title" };
+        let display = error.to_string();
+        assert!(display.contains("title"));
+        assert!(display.contains("Non-commutative conflict"));
+    }
 }

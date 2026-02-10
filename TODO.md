@@ -1,12 +1,9 @@
 # TODO - Tasks Bulk/Tasks Update ボトルネック改善
 
 ## In Progress
-- [GREEN] [IMPL-PRB1-001-002] RebaseError + rebase_update_request 純粋関数 - 最小実装完了
+- [RED] [IMPL-PRB1-001-003] update_task に read-repair ループ追加 - 失敗テスト作成中
   - Started: 2026-02-11
-  - Goal: rebase_update_request 純粋関数で stale-version 競合時のリクエスト再構築
-
-## Next
-- [ ] [IMPL-PRB1-001-003] update_task に read-repair ループ追加
+  - Goal: update_task に bounded read-repair CAS ループを追加し stale-version 409 を吸収
 
 ## Done
 - [x] [IMPL-PRB1-001-001] ConflictKind 列挙型の導入 (2026-02-11)
