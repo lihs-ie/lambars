@@ -160,6 +160,18 @@ validate_meta_json() {
         fi
     fi
 
+    # Invariant 4: tasks_update PUT contract (REQ-TU2-003)
+    # http_status."400" must be 0 (no status field in PUT payload)
+    local scenario_name
+    scenario_name=$(basename "$(dirname "${meta_file}")")
+    if [[ "${scenario_name}" == *"tasks_update"* ]]; then
+        local status_400
+        status_400=$(jq -r '.results.http_status."400" // 0' "${meta_file}" 2>/dev/null)
+        if (( 10#${status_400} > 0 )); then
+            violations_for_file+=("PUT contract violation: status field included in payload (http_status.400=${status_400}, expected 0)")
+        fi
+    fi
+
     # Report results
     if [[ ${#violations_for_file[@]} -eq 0 ]]; then
         echo -e "${GREEN}PASS: ${file_name}${NC}" >&2
