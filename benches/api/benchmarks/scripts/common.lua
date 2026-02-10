@@ -196,8 +196,10 @@ M.fallback_test_ids = {
 
 local function create_fallback_interface(fallback)
     fallback.task_versions = fallback.task_versions or {}
+    fallback.task_statuses = fallback.task_statuses or {}
     for i = 1, #fallback.task_ids do
         fallback.task_versions[i] = fallback.task_versions[i] or 1
+        fallback.task_statuses[i] = fallback.task_statuses[i] or "pending"
     end
 
     local function normalize_index(index, ids)
@@ -220,10 +222,16 @@ local function create_fallback_interface(fallback)
     fallback.get_project_count = function() return #fallback.project_ids end
     fallback.get_task_state = function(index)
         local idx = normalize_index(index, fallback.task_ids)
-        return {id = fallback.task_ids[idx], version = fallback.task_versions[idx], status = "pending"}, nil
+        return {id = fallback.task_ids[idx], version = fallback.task_versions[idx], status = fallback.task_statuses[idx]}, nil
     end
     fallback.set_version = function(index, version)
         fallback.task_versions[normalize_index(index, fallback.task_ids)] = version
+        return true, nil
+    end
+    fallback.set_version_and_status = function(index, version, status)
+        local idx = normalize_index(index, fallback.task_ids)
+        fallback.task_versions[idx] = version
+        fallback.task_statuses[idx] = status
         return true, nil
     end
     fallback.increment_version = function(index)
@@ -232,7 +240,10 @@ local function create_fallback_interface(fallback)
         return fallback.task_versions[idx], nil
     end
     fallback.reset_versions = function()
-        for i = 1, #fallback.task_ids do fallback.task_versions[i] = 1 end
+        for i = 1, #fallback.task_ids do
+            fallback.task_versions[i] = 1
+            fallback.task_statuses[i] = "pending"
+        end
     end
     fallback.get_all_task_ids = function() return copy_table(fallback.task_ids) end
     fallback.get_all_project_ids = function() return copy_table(fallback.project_ids) end

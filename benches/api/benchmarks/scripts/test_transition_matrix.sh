@@ -27,12 +27,24 @@ for from_state, expected_to in pairs(EXPECTED_TRANSITIONS) do
     if not match then error('State ' .. from_state .. ' not found') end
 
     local count = 0
-    for _ in match:gmatch('"[^"]+"') do count = count + 1 end
+    local found = {}
+    for to_state in match:gmatch('"([^"]+)"') do
+        found[to_state] = true
+        count = count + 1
+    end
 
     if count ~= #expected_to then
         error('State ' .. from_state .. ' has ' .. count .. ' transitions, expected ' .. #expected_to)
     end
-    print('  ✓ State "' .. from_state .. '" has ' .. count .. ' valid transitions')
+
+    -- Verify exact values
+    for _, expected_state in ipairs(expected_to) do
+        if not found[expected_state] then
+            error('State ' .. from_state .. ' missing expected transition to ' .. expected_state)
+        end
+    end
+
+    print('  ✓ State "' .. from_state .. '" has ' .. count .. ' valid transitions (values verified)')
 end
 
 print('  PASS: All transition states are correctly defined')

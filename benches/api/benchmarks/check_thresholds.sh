@@ -185,6 +185,10 @@ echo ""
 
 check_validation_gate() {
     local fail_message="$1"
+    local STATUS_400
+    local STATUS_409
+    local REQUESTS
+
     STATUS_400=$(jq -r '.results.http_status."400" // 0' "${META_FILE}")
     STATUS_409=$(jq -r '.results.http_status."409" // 0' "${META_FILE}")
 
@@ -197,12 +201,15 @@ check_validation_gate() {
     REQUESTS=$(jq -r '.results.requests // 0' "${META_FILE}")
     VALIDATION_ERROR_RATE=$(awk -v s400="${STATUS_400}" -v req="${REQUESTS}" \
         'BEGIN { if (req > 0) printf "%.6f", s400 / req; else print "0" }')
-    CONFLICT_ERROR_RATE=$(awk -v s409="${STATUS_409}" -v req="${REQUESTS}" \
+    CONFLICT_ERROR_RATE_CALCULATED=$(awk -v s409="${STATUS_409}" -v req="${REQUESTS}" \
         'BEGIN { if (req > 0) printf "%.6f", s409 / req; else print "0" }')
 
     echo "  validation_error_rate (400) = ${VALIDATION_ERROR_RATE}"
-    echo "  conflict_error_rate (409) = ${CONFLICT_ERROR_RATE}"
+    echo "  conflict_error_rate (409) = ${CONFLICT_ERROR_RATE_CALCULATED}"
     echo ""
+
+    # Export for use in threshold checks
+    export CONFLICT_ERROR_RATE_CALCULATED
 }
 
 if [[ "${SCENARIO}" == "tasks_update" || "${SCENARIO}" == "tasks_update_steady" || "${SCENARIO}" == "tasks_update_conflict" ]]; then
@@ -239,18 +246,24 @@ if [[ -n "${ERROR_RATE_MAX}" ]] && [[ -n "${ERROR_RATE}" ]]; then
     fi
 fi
 
-if [[ -n "${CONFLICT_RATE_MAX}" ]] && [[ -n "${CONFLICT_RATE}" ]]; then
-    if (( $(echo "${CONFLICT_RATE} > ${CONFLICT_RATE_MAX}" | bc -l) )); then
-        FAILURES="${FAILURES}
-  - conflict_rate=${CONFLICT_RATE} exceeds threshold of ${CONFLICT_RATE_MAX}"
-        FAILED=1
+if [[ -n "${CONFLICT_RATE_MAX}" ]]; then
+    # Use calculated conflict_error_rate if available (from check_validation_gate), otherwise use .results.conflict_rate
+    CONFLICT_RATE_TO_CHECK="${CONFLICT_ERROR_RATE_CALCULATED:-${CONFLICT_RATE}}"
+    if [[ -n "${CONFLICT_RATE_TO_CHECK}" ]]; then
+        if (( $(echo "${CONFLICT_RATE_TO_CHECK} > ${CONFLICT_RATE_MAX}" | bc -l) )); then
+            FAILURES="${FAILURES}
+  - conflict_rate=${CONFLICT_RATE_TO_CHECK} exceeds threshold of ${CONFLICT_RATE_MAX}"
+            FAILED=1
+        fi
     fi
 fi
 RESULTS_SUMMARY="p50=${P50}ms, p90=${P90}ms, p99=${P99}ms"
 THRESHOLDS_SUMMARY="p50<=${P50_MAX}ms, p90<=${P90_MAX}ms, p99<=${P99_MAX}ms"
 [[ -n "${ERROR_RATE}" ]] && RESULTS_SUMMARY="${RESULTS_SUMMARY}, error_rate=${ERROR_RATE}"
 [[ -n "${ERROR_RATE_MAX}" ]] && THRESHOLDS_SUMMARY="${THRESHOLDS_SUMMARY}, error_rate<=${ERROR_RATE_MAX}"
-[[ -n "${CONFLICT_RATE}" ]] && RESULTS_SUMMARY="${RESULTS_SUMMARY}, conflict_rate=${CONFLICT_RATE}"
+# Use calculated conflict_error_rate if available
+CONFLICT_RATE_FOR_SUMMARY="${CONFLICT_ERROR_RATE_CALCULATED:-${CONFLICT_RATE}}"
+[[ -n "${CONFLICT_RATE_FOR_SUMMARY}" ]] && RESULTS_SUMMARY="${RESULTS_SUMMARY}, conflict_rate=${CONFLICT_RATE_FOR_SUMMARY}"
 [[ -n "${CONFLICT_RATE_MAX}" ]] && THRESHOLDS_SUMMARY="${THRESHOLDS_SUMMARY}, conflict_rate<=${CONFLICT_RATE_MAX}"
 if [[ ${FAILED} -eq 1 ]]; then
     echo "FAIL: Threshold(s) exceeded${FAILURES}"

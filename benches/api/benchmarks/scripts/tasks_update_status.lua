@@ -97,9 +97,10 @@ local function next_valid_status(current_status)
     return candidates[math.random(#candidates)]
 end
 
-local function generate_update_body(current_status, version)
+local function generate_update_body(current_status, version, task_index)
     local next_status = next_valid_status(current_status)
     if not next_status then
+        -- Terminal state (e.g., cancelled) reached - skip this task
         return nil
     end
     return common.json_encode({ status = next_status, version = version })
@@ -177,21 +178,33 @@ function request()
         id_range = tonumber(wrk.thread:get("id_range")) or test_ids.get_task_count()
     end
 
-    counter = counter + 1
-    local global_index = id_start + (counter % id_range) + 1
+    -- Find next non-terminal task (skip cancelled tasks)
+    local max_attempts = id_range
+    local attempt = 0
+    local task_state, global_index, body
 
-    local task_state, err = test_ids.get_task_state(global_index)
-    if err then
-        io.stderr:write("[tasks_update_status] Error getting task state: " .. err .. "\n")
+    repeat
+        counter = counter + 1
+        global_index = id_start + (counter % id_range) + 1
+        attempt = attempt + 1
+
+        local err
+        task_state, err = test_ids.get_task_state(global_index)
+        if err then
+            io.stderr:write("[tasks_update_status] Error getting task state: " .. err .. "\n")
+            return fallback_request()
+        end
+
+        body = generate_update_body(task_state.status, task_state.version, global_index)
+    until body or attempt >= max_attempts
+
+    if not body then
+        io.stderr:write("[tasks_update_status] All tasks in terminal state, using fallback\n")
         return fallback_request()
     end
 
     last_request_index = global_index
     last_request_is_update = true
-
-    local body = generate_update_body(task_state.status, task_state.version)
-    if not body then return fallback_request() end
-
     last_request_status = body:match('"status"%s*:%s*"([^"]+)"')
 
     return wrk and wrk.format and wrk.format("PATCH", "/tasks/" .. task_state.id .. "/status", {["Content-Type"] = "application/json"}, body) or ""
@@ -230,7 +243,7 @@ function response(status, headers, body)
                     reset_retry_state()
                     return
                 end
-                retry_body = generate_update_body(retry_status, version)
+                retry_body = generate_update_body(retry_status, version, retry_index)
                 if not retry_body then
                     reset_retry_state()
                     return

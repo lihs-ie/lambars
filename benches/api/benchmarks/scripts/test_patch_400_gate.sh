@@ -9,14 +9,14 @@ TEMP_DIR="${PROJECT_ROOT}/benches/api/benchmarks/scripts/temp_test_patch_400_gat
 trap 'rm -rf "${TEMP_DIR}"' EXIT
 mkdir -p "${TEMP_DIR}"
 
-echo "Test 1: PASS case (400 = 0)"
+echo "Test 1: PASS case (400 = 0, 409 within threshold)"
 mkdir -p "${TEMP_DIR}/pass_case"
 cat > "${TEMP_DIR}/pass_case/meta.json" <<'EOF'
 {
   "results": {
     "http_status": {
-      "200": 1000,
-      "409": 10
+      "200": 1009,
+      "409": 1
     },
     "requests": 1010,
     "duration_seconds": 30,
@@ -33,7 +33,7 @@ EOF
 
 if "${CHECK_THRESHOLDS}" "${TEMP_DIR}/pass_case" "tasks_update_status" > "${TEMP_DIR}/output_pass.txt" 2>&1; then
     echo "  PASS: Gate passed as expected"
-    for pattern in "validation_error_rate (400) = 0.000000" "conflict_error_rate (409) = 0.009901"; do
+    for pattern in "validation_error_rate (400) = 0.000000" "conflict_error_rate (409) = 0.000990"; do
         if ! grep -q "$pattern" "${TEMP_DIR}/output_pass.txt"; then
             echo "  ERROR: Expected pattern not found: $pattern"
             cat "${TEMP_DIR}/output_pass.txt"
@@ -92,6 +92,49 @@ else
             exit 1
         fi
     done
+fi
+
+echo ""
+echo "Test 3: FAIL case (409 exceeds threshold, conflict_rate uses calculated value)"
+mkdir -p "${TEMP_DIR}/fail_409_case"
+cat > "${TEMP_DIR}/fail_409_case/meta.json" <<'EOF'
+{
+  "results": {
+    "http_status": {
+      "200": 900,
+      "409": 100
+    },
+    "requests": 1000,
+    "duration_seconds": 30,
+    "latency_ms": {
+      "p50": 10.5,
+      "p90": 15.2,
+      "p99": 25.8
+    },
+    "error_rate": 0.0,
+    "conflict_rate": 0.0
+  }
+}
+EOF
+
+if "${CHECK_THRESHOLDS}" "${TEMP_DIR}/fail_409_case" "tasks_update_status" > "${TEMP_DIR}/output_fail_409.txt" 2>&1; then
+    echo "  FAIL: Gate should have failed when 409 exceeds threshold"
+    cat "${TEMP_DIR}/output_fail_409.txt"
+    exit 1
+else
+    EXIT_CODE=$?
+    if [[ ${EXIT_CODE} -ne 3 ]]; then
+        echo "  FAIL: Gate failed with unexpected exit code ${EXIT_CODE}"
+        cat "${TEMP_DIR}/output_fail_409.txt"
+        exit 1
+    fi
+
+    echo "  PASS: Gate failed with exit 3 as expected (calculated conflict_rate=0.100000)"
+    if ! grep -q "conflict_rate=0.100000 exceeds threshold of 0.001" "${TEMP_DIR}/output_fail_409.txt"; then
+        echo "  ERROR: Expected conflict_rate threshold violation not found"
+        cat "${TEMP_DIR}/output_fail_409.txt"
+        exit 1
+    fi
 fi
 
 echo ""
