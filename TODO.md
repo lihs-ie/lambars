@@ -1,7 +1,7 @@
 # TODO - Tasks Bulk/Tasks Update ボトルネック改善
 
 ## In Progress
-- [GREEN] [IMPL-PRB1-002-002+003] MergeArena を writer_loop に配置 + apply_delta_owned arena 統合 - 最小実装中
+- [REFACTOR] [IMPL-PRB1-002] CompactionBudget + MergeArena 全体 - リファクタリング中
   - Started: 2026-02-11
   - Goal: writer_loop でバッチ間 MergeArena 再利用、merge_segment_into/apply_delta_owned に arena を渡す
   - Started: 2026-02-11

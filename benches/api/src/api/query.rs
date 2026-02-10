@@ -1294,6 +1294,12 @@ impl MergeArena {
     }
 }
 
+impl Default for MergeArena {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Two-layer overlay structure for [`NgramIndex`].
 ///
 /// Maintains a compacted `base` index and a vector of delta `segments`.
@@ -1319,6 +1325,11 @@ struct NgramSegmentOverlay {
 }
 
 impl NgramSegmentOverlay {
+    /// Creates a new overlay with legacy-compatible defaults.
+    ///
+    /// The budget `soft_max_segments_per_compact` is set to `max_segments` (3)
+    /// so that the budget soft threshold coincides with the legacy
+    /// `needs_compaction` trigger, preserving backward compatibility.
     const fn new(base: NgramIndex) -> Self {
         Self {
             base,
