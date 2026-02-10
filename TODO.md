@@ -1,7 +1,7 @@
 # TODO - Tasks Bulk/Tasks Update ボトルネック改善
 
 ## In Progress
-- [RED] [IMPL-PRB1-001-003] update_task に read-repair ループ追加 - 失敗テスト作成中
+- [GREEN] [IMPL-PRB1-001-003] update_task に read-repair ループ追加 - 最小実装完了
   - Started: 2026-02-11
   - Goal: update_task に bounded read-repair CAS ループを追加し stale-version 409 を吸収
 
