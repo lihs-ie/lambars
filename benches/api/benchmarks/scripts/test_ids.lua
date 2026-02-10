@@ -99,11 +99,16 @@ function M.set_version(index, version)
     return true, nil
 end
 
+local VALID_TASK_STATUS = { pending = true, in_progress = true, completed = true, cancelled = true }
+
 function M.set_version_and_status(index, version, status)
     local actual_index, index_err = normalize_index(index, #task_states)
     if index_err then return nil, index_err end
     local valid, version_err = validate_version(version)
     if not valid then return nil, version_err end
+    if type(status) ~= "string" or not VALID_TASK_STATUS[status] then
+        return nil, "invalid status: " .. tostring(status)
+    end
     task_states[actual_index].version = version
     task_states[actual_index].status = status
     return true, nil

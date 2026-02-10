@@ -192,13 +192,22 @@ check_validation_gate() {
     STATUS_400=$(jq -r '.results.http_status."400" // 0' "${META_FILE}")
     STATUS_409=$(jq -r '.results.http_status."409" // 0' "${META_FILE}")
 
+    if [[ ! "${STATUS_400}" =~ ^[0-9]+$ || ! "${STATUS_409}" =~ ^[0-9]+$ ]]; then
+        echo "ERROR: results.http_status.{400,409} must be non-negative integers (got: 400=${STATUS_400}, 409=${STATUS_409})"
+        exit 2
+    fi
+
     if (( 10#${STATUS_400} > 0 )); then
         echo "FAIL: ${fail_message}"
         echo "  http_status.400 = ${STATUS_400} (must be 0)"
         exit 3
     fi
 
-    REQUESTS=$(jq -r '.results.requests // 0' "${META_FILE}")
+    REQUESTS=$(jq -r '.results.requests // empty' "${META_FILE}")
+    if [[ -z "${REQUESTS}" || ! "${REQUESTS}" =~ ^[0-9]+$ || "${REQUESTS}" -le 0 ]]; then
+        echo "ERROR: results.requests must be a positive integer for 400/409 gate (got: ${REQUESTS:-<empty>})"
+        exit 2
+    fi
     VALIDATION_ERROR_RATE=$(awk -v s400="${STATUS_400}" -v req="${REQUESTS}" \
         'BEGIN { if (req > 0) printf "%.6f", s400 / req; else print "0" }')
     CONFLICT_ERROR_RATE_CALCULATED=$(awk -v s409="${STATUS_409}" -v req="${REQUESTS}" \

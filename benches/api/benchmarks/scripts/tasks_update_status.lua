@@ -236,7 +236,7 @@ function response(status, headers, body)
         if status == 200 then
             local version = common.extract_version(body)
             local retry_status = common.extract_status(body)
-            if version and retry_status then
+            if version and retry_status and common.is_valid_status(retry_status) then
                 local success, err = test_ids.set_version_and_status(retry_index, version, retry_status)
                 if not success then
                     io.stderr:write("[tasks_update_status] Failed to set version and status: " .. (err or "unknown") .. "\n")
@@ -273,7 +273,7 @@ function response(status, headers, body)
             reset_retry_state()
         elseif status == 409 then
             retry_attempt = retry_attempt + 1
-            if retry_attempt > RETRY_COUNT then
+            if retry_attempt >= RETRY_COUNT then
                 io.stderr:write(string.format("[tasks_update_status] Retry exhausted after %d attempts\n", RETRY_COUNT))
                 thread_retry_exhausted_count = thread_retry_exhausted_count + 1
                 reset_retry_state()

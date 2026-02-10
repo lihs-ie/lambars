@@ -290,6 +290,12 @@ function M.extract_status(body)
     return body:match('"status"%s*:%s*"([^"]+)"')
 end
 
+local VALID_TASK_STATUS = { pending = true, in_progress = true, completed = true, cancelled = true }
+
+function M.is_valid_status(status)
+    return type(status) == "string" and VALID_TASK_STATUS[status] == true
+end
+
 local STATUS_LABELS = {
     {code = "200 OK", key = "status_200"},
     {code = "201 Created", key = "status_201"},

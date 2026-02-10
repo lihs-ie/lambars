@@ -138,4 +138,80 @@ else
 fi
 
 echo ""
+echo "Test 4: FAIL case (requests is non-numeric string)"
+mkdir -p "${TEMP_DIR}/fail_nonnumeric"
+cat > "${TEMP_DIR}/fail_nonnumeric/meta.json" <<'EOF'
+{
+  "results": {
+    "http_status": {
+      "200": 10,
+      "400": 0,
+      "409": 0
+    },
+    "requests": "abc",
+    "duration_seconds": 30,
+    "latency_ms": {
+      "p50": 1,
+      "p90": 1,
+      "p99": 1
+    },
+    "error_rate": 0.0,
+    "conflict_rate": 0.0
+  }
+}
+EOF
+
+if "${CHECK_THRESHOLDS}" "${TEMP_DIR}/fail_nonnumeric" "tasks_update_status" > "${TEMP_DIR}/output_nonnumeric.txt" 2>&1; then
+    echo "  FAIL: Gate should have failed for non-numeric requests"
+    cat "${TEMP_DIR}/output_nonnumeric.txt"
+    exit 1
+else
+    EXIT_CODE=$?
+    if [[ ${EXIT_CODE} -ne 2 ]]; then
+        echo "  FAIL: Gate failed with unexpected exit code ${EXIT_CODE} (expected 2)"
+        cat "${TEMP_DIR}/output_nonnumeric.txt"
+        exit 1
+    fi
+    echo "  PASS: Gate failed with exit 2 as expected for non-numeric requests"
+fi
+
+echo ""
+echo "Test 5: FAIL case (requests is 0)"
+mkdir -p "${TEMP_DIR}/fail_zero"
+cat > "${TEMP_DIR}/fail_zero/meta.json" <<'EOF'
+{
+  "results": {
+    "http_status": {
+      "200": 0,
+      "400": 0,
+      "409": 0
+    },
+    "requests": 0,
+    "duration_seconds": 30,
+    "latency_ms": {
+      "p50": 0,
+      "p90": 0,
+      "p99": 0
+    },
+    "error_rate": 0.0,
+    "conflict_rate": 0.0
+  }
+}
+EOF
+
+if "${CHECK_THRESHOLDS}" "${TEMP_DIR}/fail_zero" "tasks_update_status" > "${TEMP_DIR}/output_zero.txt" 2>&1; then
+    echo "  FAIL: Gate should have failed for requests=0"
+    cat "${TEMP_DIR}/output_zero.txt"
+    exit 1
+else
+    EXIT_CODE=$?
+    if [[ ${EXIT_CODE} -ne 2 ]]; then
+        echo "  FAIL: Gate failed with unexpected exit code ${EXIT_CODE} (expected 2)"
+        cat "${TEMP_DIR}/output_zero.txt"
+        exit 1
+    fi
+    echo "  PASS: Gate failed with exit 2 as expected for requests=0"
+fi
+
+echo ""
 echo "All tests passed!"
