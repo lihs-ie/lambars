@@ -1271,7 +1271,7 @@ pub struct MergeArena {
 
 impl MergeArena {
     /// Creates a new arena with the default shrink threshold (16 384 elements).
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             scratch: Vec::new(),
             shrink_threshold: 16_384,
@@ -1416,8 +1416,8 @@ impl NgramSegmentOverlay {
     /// - `segments.len() >= hard`: force compaction (compact until below hard).
     /// - Between soft and hard: execute `compact_one` once.
     ///
-    /// Falls back to the legacy `needs_compaction` check (max_segments /
-    /// max_segment_keys) when the budget thresholds are not reached.
+    /// Falls back to the legacy `needs_compaction` check (`max_segments` /
+    /// `max_segment_keys`) when the budget thresholds are not reached.
     fn append_and_compact(&self, delta_ngram: NgramIndex) -> Self {
         if delta_ngram.is_empty() {
             return self.clone();
@@ -1487,6 +1487,7 @@ impl NgramSegmentOverlay {
     ///
     /// Reuses the scratch buffer from the provided [`MergeArena`] instead of
     /// allocating a fresh `Vec<TaskId>`.
+    #[allow(dead_code)]
     fn compact_one_with_arena(&self, arena: &mut MergeArena) -> Self {
         if self.segments.is_empty() {
             return self.clone();
@@ -5737,21 +5738,18 @@ impl SearchIndex {
     /// merge operations within the delta path. For non-delta paths (bulk builder),
     /// the arena is not used.
     #[must_use]
-    pub fn apply_changes_with_arena(
-        &self,
-        changes: &[TaskChange],
-        arena: &mut MergeArena,
-    ) -> Self {
+    pub fn apply_changes_with_arena(&self, changes: &[TaskChange], arena: &mut MergeArena) -> Self {
         if changes.is_empty() {
             return self.clone();
         }
 
         let all_adds = changes.iter().all(|c| matches!(c, TaskChange::Add(_)));
 
-        if self.config.use_apply_bulk && all_adds {
-            if let Ok(new_index) = self.apply_bulk(changes) {
-                return new_index;
-            }
+        if self.config.use_apply_bulk
+            && all_adds
+            && let Ok(new_index) = self.apply_bulk(changes)
+        {
+            return new_index;
         }
 
         if self.config.use_bulk_builder
@@ -23813,8 +23811,7 @@ mod ngram_segment_overlay_tests {
     #[rstest]
     fn segment_overlay_config_contains_budget() {
         let config = SegmentOverlayConfig::default();
-        let _budget = config.budget;
-        // Should compile and be accessible
+        // Verify budget field is accessible and has expected defaults
         assert_eq!(config.budget.soft_max_segments_per_compact, 1);
         assert_eq!(config.budget.hard_max_segments, 6);
     }
@@ -23934,7 +23931,9 @@ mod ngram_segment_overlay_tests {
         let with_two = with_one.append_and_compact(delta_2);
         // At soft=2 segments, compact_one should run, merging oldest into base
         // Result: 1 segment remaining (was 2, compact_one removes 1, adds the new one)
-        assert_eq!(with_two.segments.len(), 1,
+        assert_eq!(
+            with_two.segments.len(),
+            1,
             "Expected 1 segment after compact_one at soft boundary, got {}",
             with_two.segments.len()
         );
@@ -24874,12 +24873,9 @@ mod merge_arena_integration_tests {
             SearchIndex::merge_index_delta_add_only_owned_for_test(&index, add);
 
         let mut arena = MergeArena::new();
-        let result_with_arena =
-            SearchIndex::merge_index_delta_add_only_owned_with_arena_for_test(
-                &index,
-                add_clone,
-                &mut arena,
-            );
+        let result_with_arena = SearchIndex::merge_index_delta_add_only_owned_with_arena_for_test(
+            &index, add_clone, &mut arena,
+        );
 
         assert_eq!(result_without_arena.len(), result_with_arena.len());
 
@@ -24890,7 +24886,8 @@ mod merge_arena_integration_tests {
             let without_elements: Vec<_> = collection_without.iter_sorted().cloned().collect();
             let with_elements: Vec<_> = collection_with.iter_sorted().cloned().collect();
             assert_eq!(
-                without_elements, with_elements,
+                without_elements,
+                with_elements,
                 "Posting list mismatch for key '{}'",
                 key.as_str()
             );
@@ -24930,7 +24927,10 @@ mod merge_arena_integration_tests {
         );
 
         let capacity_after_first = arena.scratch.capacity();
-        assert!(capacity_after_first > 0, "Arena should have allocated scratch");
+        assert!(
+            capacity_after_first > 0,
+            "Arena should have allocated scratch"
+        );
 
         // Second call: capacity should be at least as large (reuse, no shrink)
         let mut add_2: MutableIndex = std::collections::HashMap::new();
@@ -24997,7 +24997,8 @@ mod merge_arena_integration_tests {
             let without_elements: Vec<_> = without_collection.iter_sorted().cloned().collect();
             let with_elements: Vec<_> = with_collection.iter_sorted().cloned().collect();
             assert_eq!(
-                without_elements, with_elements,
+                without_elements,
+                with_elements,
                 "title_word_index posting list mismatch for key '{}'",
                 key.as_str()
             );
@@ -25049,7 +25050,10 @@ mod merge_arena_integration_tests {
         let result_with_arena = overlay.compact_one_with_arena(&mut arena);
 
         // Verify base indexes match
-        assert_eq!(result_without_arena.base.len(), result_with_arena.base.len());
+        assert_eq!(
+            result_without_arena.base.len(),
+            result_with_arena.base.len()
+        );
         assert_eq!(
             result_without_arena.segments.len(),
             result_with_arena.segments.len()
