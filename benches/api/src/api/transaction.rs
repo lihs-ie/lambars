@@ -459,6 +459,109 @@ pub fn is_stale_version_conflict(error: &ApiErrorResponse) -> bool {
     classify_conflict_kind(error) == ConflictKind::StaleVersion
 }
 
+// =============================================================================
+// Read-Repair Rebase Logic
+// =============================================================================
+
+/// Error type for non-commutative field conflicts during rebase.
+///
+/// When two concurrent updates modify the same field to different values,
+/// the conflict cannot be automatically resolved and must be reported
+/// back to the client.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RebaseError {
+    /// A non-commutative field conflict where both the original update
+    /// and a concurrent update modified the same field.
+    NonCommutativeConflict {
+        /// The name of the conflicting field.
+        field: &'static str,
+    },
+}
+
+impl std::fmt::Display for RebaseError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NonCommutativeConflict { field } => {
+                write!(
+                    formatter,
+                    "Non-commutative conflict on field '{field}': concurrent update detected"
+                )
+            }
+        }
+    }
+}
+
+/// Rebases an update request against the latest task state (pure function).
+///
+/// This function implements a 3-way merge: given the original base task
+/// (what the client saw), the latest task (current DB state), and the
+/// client's update request, it produces a new request with the version
+/// updated to match the latest task.
+///
+/// # Conflict Detection
+///
+/// For each field the client wants to update (`request.field.is_some()`):
+/// - If `original_base.field != latest.field` (another user changed it)
+///   AND `latest.field` differs from what the client wants to set,
+///   it is a non-commutative conflict.
+/// - If `original_base.field == latest.field` (no concurrent change),
+///   the rebase succeeds.
+///
+/// # Arguments
+///
+/// * `original_base` - The task state the client based their update on
+/// * `latest` - The current task state from the database
+/// * `request` - The client's update request
+///
+/// # Returns
+///
+/// `Ok(UpdateTaskRequest)` with version rebased to `latest.version`,
+/// or `Err(RebaseError)` if a non-commutative conflict is detected.
+#[must_use]
+pub fn rebase_update_request(
+    original_base: &Task,
+    latest: &Task,
+    request: &UpdateTaskRequest,
+) -> Result<UpdateTaskRequest, RebaseError> {
+    // Check title conflict
+    if request.title.is_some()
+        && original_base.title != latest.title
+        && request.title.as_deref() != Some(latest.title.as_str())
+    {
+        return Err(RebaseError::NonCommutativeConflict { field: "title" });
+    }
+
+    // Check description conflict
+    if request.description.is_some()
+        && original_base.description != latest.description
+        && request.description != latest.description
+    {
+        return Err(RebaseError::NonCommutativeConflict {
+            field: "description",
+        });
+    }
+
+    // Check priority conflict
+    if request.priority.is_some() && original_base.priority != latest.priority {
+        let request_priority: Priority = request
+            .priority
+            .expect("priority is_some checked above")
+            .into();
+        if request_priority != latest.priority {
+            return Err(RebaseError::NonCommutativeConflict { field: "priority" });
+        }
+    }
+
+    // No conflicts: rebase version to latest
+    Ok(UpdateTaskRequest {
+        title: request.title.clone(),
+        description: request.description.clone(),
+        status: request.status,
+        priority: request.priority,
+        version: latest.version,
+    })
+}
+
 /// Computes the backoff cap for a given retry index (pure function).
 ///
 /// Formula: `base_delay_ms * 2^retry_index`, clamped to avoid overflow.
