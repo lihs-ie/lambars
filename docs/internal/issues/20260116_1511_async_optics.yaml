@@ -1,0 +1,80 @@
+# Issue: Async Optics
+# 非同期コンテキストでの Optics 操作
+
+deferred_features:
+  - id: async_optics
+    name: "Async Optics"
+    discovered_date: "2026-01-16"
+    priority: low
+    category: research
+    labels:
+      - "optics"
+      - "async"
+      - "research"
+      - "priority: low"
+
+    problem:
+      summary: "非同期コンテキストで Lens/Prism を使えない"
+      details: |
+        現在の Optics は同期的な操作のみサポート。
+        非同期のゲッター/セッターを使う場合、手動で await を挟む必要がある。
+
+        - 何が問題なのか: async fn を使った Lens 操作ができない
+        - なぜ発生するのか: Optics が async 非対応
+        - どのような影響があるか: 非同期データソースへのアクセスが煩雑
+
+        需要が限定的で、AsyncIO との統合で代替可能な場合が多い。
+
+      rust_limitation: |
+        ```rust
+        // 現状: async getter/setter を手動で扱う
+        async fn get_nested_value(data: &AsyncData) -> i32 {
+            let outer = data.fetch_outer().await;
+            let inner = outer.fetch_inner().await;
+            inner.value
+        }
+
+        // 理想: async Lens で一行
+        let value = async_lens!(outer, inner, value).get_async(data).await;
+        ```
+
+    solution:
+      approach: "Optics トレイトに async バリアントを追加（将来検討）"
+      options:
+        - name: "AsyncLens トレイト"
+          description: |
+            Lens の async 版トレイトを定義。
+            get_async, set_async メソッドを提供。
+          pros:
+            - "非同期データソースに対応"
+            - "型安全"
+          cons:
+            - "トレイトの複雑化"
+            - "async trait の制約"
+            - "需要が限定的"
+
+        - name: "AsyncIO + 既存 Optics の組み合わせ"
+          description: |
+            AsyncIO で非同期を扱い、内部では既存 Optics を使用。
+          pros:
+            - "既存実装の活用"
+            - "効果システムとの統合"
+          cons:
+            - "やや冗長"
+
+      recommended: "AsyncIO + 既存 Optics の組み合わせ"
+      estimated_complexity: high
+
+    references:
+      - "src/optics/"
+      - "src/effect/async_io.rs"
+      - "docs/internal/requirements/20250101_0400_optics.yaml"
+
+    related:
+      requirement_id: "optics"
+      plan_id: null
+
+    github_issue:
+      number: 181
+      url: "https://github.com/lihs-ie/lambars/issues/181"
+      created: true

@@ -1,0 +1,88 @@
+# Issue: 遅延イテレータ版 for_iter!
+# Vec ではなくイテレータを返すバージョン
+
+deferred_features:
+  - id: for_iter_lazy
+    name: "遅延イテレータ版 for_iter!"
+    discovered_date: "2026-01-16"
+    priority: low
+    category: enhancement
+    labels:
+      - "compose"
+      - "macro"
+      - "enhancement"
+      - "priority: low"
+
+    problem:
+      summary: "for_iter! が Vec を返すため大量データで非効率"
+      details: |
+        現在の for_iter! は結果を Vec に収集して返す。
+        大量のデータを処理する場合、全要素をメモリに保持するため非効率。
+
+        - 何が問題なのか: 大量データで中間 Vec が生成される
+        - なぜ発生するのか: for_iter! が Vec を返す設計
+        - どのような影響があるか: メモリ使用量の増加、パフォーマンス低下
+
+        ただし現在の Vec 版で多くの用途をカバーしている。
+
+      rust_limitation: |
+        ```rust
+        // 現状: Vec を返す
+        let results: Vec<i32> = for_iter!(
+            x <- vec![1, 2, 3, 4, 5];
+            y <- vec![10, 20];
+            yield x + y
+        ); // Vec<i32> が即座に生成される
+
+        // 理想: 遅延イテレータを返す
+        let results = for_iter_lazy!(
+            x <- vec![1, 2, 3, 4, 5];
+            y <- vec![10, 20];
+            yield x + y
+        ); // impl Iterator<Item = i32> を返す
+
+        // 必要な分だけ評価
+        for r in results.take(3) {
+            println!("{}", r);
+        }
+        ```
+
+    solution:
+      approach: "for_iter_lazy! マクロを追加し遅延イテレータを返す"
+      options:
+        - name: "for_iter_lazy! マクロ"
+          description: |
+            遅延評価版のマクロを追加。
+            impl Iterator を返す。
+          pros:
+            - "大量データに対応"
+            - "メモリ効率の向上"
+          cons:
+            - "ライフタイムの複雑化"
+            - "デバッグが難しい"
+
+        - name: "for_iter! にオプション追加"
+          description: |
+            for_iter! にフラグを追加して遅延/即時を選択。
+          pros:
+            - "単一マクロで統一"
+          cons:
+            - "マクロの複雑化"
+            - "構文が分かりにくくなる"
+
+      recommended: "for_iter_lazy! マクロ"
+      estimated_complexity: medium
+
+    references:
+      - "src/compose/for_macro.rs"
+      - "docs/internal/requirements/phase_10_1_for_macro.yaml"
+      - "Haskell list comprehension（遅延評価）"
+
+    related:
+      requirement_id: "compose"
+      plan_id: null
+
+    github_issue:
+      number: 180
+      url: "https://github.com/lihs-ie/lambars/issues/180"
+      created: true
