@@ -1,0 +1,215 @@
+# tasks_update 競合率削減 Phase1 要件定義
+#
+# 概要:
+#   tasks_update の 409 競合率が高いため、更新実行モデルを再設計して
+#   正常系の失敗率を本番許容範囲まで下げる。
+#
+# 設計方針:
+#   1. hot key 更新を key 単位 single-writer で直列化する。
+#   2. 409 は即失敗ではなく bounded retry + jitter backoff で吸収する。
+#   3. 可換更新は field-level merge で競合を縮小する。
+#
+# 参照:
+#   - profiling-results/github-21797483415/api-profiling-all-cec19b06ec4fe36d95bc84ed889709739152937e/tasks_update/benchmark/meta/tasks_update.json
+#   - benches/api/benchmarks/scenarios/tasks_update.yaml
+#   - benches/api/src/api/query.rs
+
+version: "1.1.0"
+name: "tasks_update_conflict_reduction_phase1"
+description: |
+  tasks_update は 800.37 RPS / P99 1.24ms と速度は十分だが、
+  error_rate 0.199233（409: 4,782 / 24,002）が閾値 0.03 を大幅超過している。
+  本番運用観点では可用性不足。
+
+background:
+  problem: |
+    速度指標だけを見ると良好だが、更新競合で約20%が失敗している。
+    失敗を409として即返却する実装が、同時更新の多い環境で機能要件を満たさない。
+  motivation: |
+    更新APIの成功率を引き上げ、運用時の再試行嵐・ユーザー体験劣化を防ぐ。
+  prior_art:
+    - name: "Keyed single-writer queue"
+      description: "同一 key の更新を直列化して楽観ロック競合を減らす。"
+    - name: "Exponential backoff with jitter"
+      description: "衝突時の同時再試行を分散し、再競合を抑える。"
+
+requirements:
+  - id: REQ-TU1-001
+    name: "task_id 単位 single-writer 実行モデルを導入する"
+    description: |
+      同一 task_id への同時更新を直列化し、1リクエストずつ順次適用する。
+      根本設計変更: request-time optimistic race -> keyed serialized execution。
+      実装形態は per-key Mutex による直列化（KeyedUpdateQueue）とする。
+      queue/worker モデルは将来の拡張とし、Phase1 では同等の直列化効果を
+      per-key Mutex で実現する。
+    methods:
+      - name: "KeyedUpdateQueue::acquire"
+        signature: "pub async fn acquire(&self, task_id: &TaskId) -> KeyedGuard"
+        description: "task_id 単位のロックを取得し、同一 task_id の更新を直列化する。"
+    implementations:
+      - type: "PUT /tasks/{id} update pipeline"
+        description: "競合多発経路を同期競争から直列適用へ変更する。"
+
+  - id: REQ-TU1-002
+    name: "409 応答前に bounded retry + jitter backoff を適用する"
+    description: |
+      repository-level CAS failure (retryable conflict) 時は即 409 を返さず、
+      短時間リトライで解消可能な競合を吸収する。
+      アルゴリズムは exponential backoff with full jitter。
+      stale version conflict (クライアントが古いバージョンを送信) は
+      retry しても解決しないため、非 retryable として即時 409 を返す。
+    methods:
+      - name: "retry_on_conflict"
+        signature: "async fn retry_on_conflict<F, Fut, T, R>(operation: F, max_retries: u8, base_delay_ms: u64, on_retry: R) -> Result<T, ApiErrorResponse>"
+        description: "retryable 409 を検知した場合のみ再試行する。on_retry コールバックで観測性を提供。"
+    implementations:
+      - type: "update application service"
+        description: "競合吸収層を追加し、retryable conflict の最終失敗のみ 409 返却する。"
+
+  - id: REQ-TU1-003
+    name: "可換フィールド更新を merge strategy 化する"
+    description: |
+      UpdateTaskRequest の全フィールドが None (no-op) の場合、バージョン不一致でも
+      競合として扱わず、現在の Task をそのまま返却する（短絡評価）。
+      これにより不要な version bump と write amplification を回避する。
+      set-union / 加算マージは現在の DTO 構造にタグ・counter フィールドが
+      存在しないため Phase1 では対象外とし、将来の拡張とする。
+    methods:
+      - name: "can_merge_without_conflict"
+        signature: "pub const fn can_merge_without_conflict(request: &UpdateTaskRequest) -> bool"
+        description: "全フィールドが None なら true を返す純粋関数。"
+    implementations:
+      - type: "task domain update semantics"
+        description: "no-op リクエストの短絡評価で不要な 409 を削減する。"
+
+non_functional_requirements:
+  performance:
+    - "tasks_update error_rate: 0.199233 -> 0.03以下"
+    - "tasks_update P99: 1.24ms を 5ms以下で維持"
+  compatibility:
+    - "既存 API 契約（409 の意味）を維持しつつ成功率を改善する"
+  testing:
+    - "高競合負荷で 409 比率が閾値以下になることを検証する"
+    - "retry/backoff 適用時の重複更新が発生しないことを検証する"
+
+evidence:
+  run_id: "21797483415"
+  metrics:
+    - id: "EV-TU1-M1"
+      description: "tasks_update の error_rate は 0.199233。"
+      source: "profiling-results/github-21797483415/api-profiling-all-cec19b06ec4fe36d95bc84ed889709739152937e/tasks_update/benchmark/meta/tasks_update.json:30"
+    - id: "EV-TU1-M2"
+      description: "HTTP 409 が 4,782 件（200 は 19,220 件）。"
+      source: "profiling-results/github-21797483415/api-profiling-all-cec19b06ec4fe36d95bc84ed889709739152937e/tasks_update/benchmark/meta/tasks_update.json:40"
+    - id: "EV-TU1-M3"
+      description: "許容 error_rate は 0.03。現状がしきい値を超過。"
+      source: "benches/api/benchmarks/scenarios/tasks_update.yaml:68"
+  code:
+    - id: "EV-TU1-C1"
+      description: "バージョン不一致時に即時 409 を返却している。"
+      source: "benches/api/src/api/transaction.rs:450"
+    - id: "EV-TU1-C2"
+      description: "競合時の再試行経路が update_task に存在しない。"
+      source: "benches/api/src/api/transaction.rs:454"
+
+implementation_tasks:
+  - id: "IMPL-TU1-001"
+    priority: 1
+    requirement_ids:
+      - "REQ-TU1-002"
+    evidence_ids:
+      - "EV-TU1-M1"
+      - "EV-TU1-M2"
+      - "EV-TU1-M3"
+      - "EV-TU1-C1"
+      - "EV-TU1-C2"
+    objective: "即時 409 終了を廃止し、bounded retry + full jitter backoff を update_task 経路に実装する。"
+    scope_files:
+      - "benches/api/src/api/transaction.rs"
+    actions:
+      - "repository-level CAS failure を `retry_on_conflict` で再試行する。"
+      - "再試行上限、base delay、jitter を定数として定義する。"
+      - "retryable conflict に対して retry exhausted 時のみ 409 を返す。"
+      - "stale version conflict (クライアント起因) は非 retryable として即時 409 を返す。"
+    completion_criteria:
+      - "retryable conflict 発生時に 1 回以上の再試行ログ (tracing::info!) が記録される。"
+      - "retryable conflict に対しては retry exhausted 以外で 409 を返さない。"
+      - "stale version conflict (クライアントが古いバージョンを送信) は即時 409 を返す。"
+      - "再試行中に同一更新が二重適用されない。"
+    verification_artifacts:
+      - "tasks_update の meta.json で error_rate <= 0.03 を確認する。"
+      - "tasks_update の meta.json で 409 件数が現状 (4,782) から減少していることを確認する。"
+
+  - id: "IMPL-TU1-002"
+    priority: 2
+    requirement_ids:
+      - "REQ-TU1-001"
+    evidence_ids:
+      - "EV-TU1-M1"
+      - "EV-TU1-M2"
+      - "EV-TU1-C1"
+    objective: "task_id 単位 single-writer (per-key Mutex) を導入し、同一 task_id 競合を構造的に削減する。"
+    scope_files:
+      - "benches/api/src/api/transaction.rs"
+      - "benches/api/src/api/handlers.rs"
+    actions:
+      - "update_task 入口で task_id を KeyedUpdateQueue::acquire で直列化する。"
+      - "同一 task_id は per-key Mutex で直列実行する。"
+      - "Weak 参照による自動メモリ回収で unbounded growth を防止する。"
+    completion_criteria:
+      - "同一 task_id の同時更新で 1 リクエストのみが実行される。"
+      - "KeyedUpdateQueue のメモリ使用量が unbounded に増加しない。"
+    verification_artifacts:
+      - "高競合テストで 409 比率が低下することを確認する。"
+      - "更新成功率と最終データ整合性が維持されることを確認する。"
+
+  - id: "IMPL-TU1-003"
+    priority: 3
+    requirement_ids:
+      - "REQ-TU1-003"
+    evidence_ids:
+      - "EV-TU1-M1"
+      - "EV-TU1-M2"
+    objective: "no-op リクエスト (全フィールド None) を短絡評価し、不要な 409 を削減する。"
+    scope_files:
+      - "benches/api/src/api/transaction.rs"
+    actions:
+      - "UpdateTaskRequest の全フィールドが None なら no-op として現在の Task を返却する。"
+      - "no-op 判定を `can_merge_without_conflict` 純粋関数として実装する。"
+      - "PUT /tasks/{id} での status フィールド変更を拒否し PATCH に誘導する。"
+    completion_criteria:
+      - "全フィールド None のリクエストで version bump が発生しない。"
+      - "PUT /tasks/{id} に status を含むリクエストが 400 UNSUPPORTED_FIELD で拒否される。"
+      - "`can_merge_without_conflict` が const fn として純粋関数であること。"
+    verification_artifacts:
+      - "no-op リクエストの統合テストが green。"
+      - "status フィールド拒否テストが green。"
+
+future_extensions:
+  - id: TU1-FUTURE-001
+    name: "conflict telemetry feedback loop"
+    description: |
+      key別競合率を収集し、動的に shard 数と backoff を調整する。
+    rationale: |
+      先に固定戦略で競合率を運用許容範囲へ下げる必要がある。
+  - id: TU1-FUTURE-002
+    name: "set-union / 加算マージの merge strategy"
+    description: |
+      UpdateTaskRequest にタグや counter フィールドが追加された場合、
+      可換項目を set-union / 加算 merge で処理する merge_update_patch を実装する。
+    rationale: |
+      現在の DTO 構造にはタグ・counter フィールドが存在しないため Phase1 では対象外。
+  - id: TU1-FUTURE-003
+    name: "queue/worker 型の直列実行キュー"
+    description: |
+      KeyedUpdateQueue を enqueue/worker パターンに移行し、
+      バックプレッシャーやキューサイズ制限を導入する。
+    rationale: |
+      Phase1 の per-key Mutex で十分な競合削減効果が得られる場合は不要。
+  - id: TU1-FUTURE-004
+    name: "retry 設定の外部化"
+    description: |
+      RetryConfig 構造体を導入し、max_retries / base_delay_ms / max_backoff_ms を
+      環境変数やシナリオ設定から注入可能にする。
+    rationale: |
+      Phase1 では定数で十分。運用環境での動的調整が必要になった時点で実装する。

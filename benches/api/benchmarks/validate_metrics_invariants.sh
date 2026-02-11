@@ -1,19 +1,14 @@
 #!/usr/bin/env bash
-set -euo pipefail
-
-# validate_metrics_invariants.sh
 # Validates metrics invariants across all benchmark scenarios
-#
 # Usage: validate_metrics_invariants.sh [--all <directory>] [--report <path>] [<meta.json>...]
 # Exit code: 0 = all pass, 1 = violations found
 
-# Color codes
+set -euo pipefail
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
-
-# Default values
+NC='\033[0m'
 ALL_MODE=false
 ALL_DIR=""
 REPORT_FILE=""
@@ -38,7 +33,6 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# If --all mode, find all meta.json files recursively
 if [[ "${ALL_MODE}" == "true" ]]; then
     if [[ -z "${ALL_DIR}" || ! -d "${ALL_DIR}" ]]; then
         echo -e "${RED}ERROR: --all requires a valid directory${NC}" >&2
@@ -47,53 +41,37 @@ if [[ "${ALL_MODE}" == "true" ]]; then
     echo "Searching for meta.json files in ${ALL_DIR}..." >&2
     while IFS= read -r -d '' file; do
         META_FILES+=("$file")
-    done < <(
-        find "${ALL_DIR}" -type f \
-            \( -name 'meta.json' -o -path '*/benchmark/meta/*.json' \) \
-            -print0 2>/dev/null
-    )
+    done < <(find "${ALL_DIR}" -type f \( -name 'meta.json' -o -path '*/benchmark/meta/*.json' \) -print0 2>/dev/null)
 
     if [[ ${#META_FILES[@]} -eq 0 ]]; then
         echo -e "${RED}ERROR: No metrics JSON files found in ${ALL_DIR}${NC}" >&2
         exit 1
     fi
-
     echo "Found ${#META_FILES[@]} meta.json files" >&2
 fi
 
-# Check if jq is available
 if ! command -v jq &> /dev/null; then
     echo -e "${RED}ERROR: jq is required but not installed${NC}" >&2
     exit 1
 fi
 
-# Validation results
 declare -a VIOLATIONS=()
 PASS_COUNT=0
 FAIL_COUNT=0
-
-# Report buffer
 REPORT=""
 
-# Add to report
-add_report() {
-    REPORT+="$1"$'\n'
-}
-
-# Validate a single meta.json file
+add_report() { REPORT+="$1"$'\n'; }
 validate_meta_json() {
     local meta_file="$1"
     local file_name
     file_name=$(basename "$(dirname "${meta_file}")")
 
-    # Skip if file doesn't exist or is not readable
     if [[ ! -f "${meta_file}" || ! -r "${meta_file}" ]]; then
         echo -e "${YELLOW}SKIP: ${file_name} (file not found or not readable)${NC}" >&2
         add_report "SKIP: ${file_name} (file not found or not readable)"
         return
     fi
 
-    # Check if file is valid JSON
     if ! jq -e . "${meta_file}" >/dev/null 2>&1; then
         echo -e "${RED}FAIL: ${file_name} (invalid JSON)${NC}" >&2
         add_report "FAIL: ${file_name} (invalid JSON)"
@@ -103,8 +81,6 @@ validate_meta_json() {
     fi
 
     local violations_for_file=()
-
-    # Extract metrics
     local requests status_sum http_status error_rate http_4xx http_5xx socket_errors
     local p50 p95 p99
 
@@ -118,38 +94,21 @@ validate_meta_json() {
     p95=$(jq -r '.results.latency_ms.p95 // null' "${meta_file}" 2>/dev/null)
     p99=$(jq -r '.results.latency_ms.p99 // null' "${meta_file}" 2>/dev/null)
 
-    # Invariant 1: Status coverage (REQ-MET-P3-001)
-    # sum(http_status.*) == requests
     if (( 10#${requests} > 0 )); then
         if (( 10#${status_sum} != 10#${requests} )); then
             violations_for_file+=("Status coverage: ${status_sum}/${requests} != 1.0000")
         fi
-    fi
-
-    # Invariant 2: Error rate consistency (REQ-MET-P3-002)
-    # |error_rate - (http_4xx + http_5xx + socket_errors) / requests| <= 1e-9
-    if (( 10#${requests} > 0 )); then
-        local recomputed
         recomputed=$(awk -v h4="${http_4xx}" -v h5="${http_5xx}" -v se="${socket_errors}" -v req="${requests}" 'BEGIN {
-            total_errors = h4 + h5 + se
-            rate = total_errors / req
-            printf "%.12f", rate
+            printf "%.12f", (h4 + h5 + se) / req
         }')
-        local diff
         diff=$(awk -v er="${error_rate}" -v rc="${recomputed}" 'BEGIN {
-            d = er - rc
-            if (d < 0) d = -d
-            printf "%.12f", d
+            d = er - rc; if (d < 0) d = -d; printf "%.12f", d
         }')
-        local threshold="0.000001"
-        if awk -v d="${diff}" -v t="${threshold}" 'BEGIN { exit !(d > t) }'; then
+        if awk -v d="${diff}" -v t="0.000001" 'BEGIN { exit !(d > t) }'; then
             violations_for_file+=("Error rate inconsistency: error_rate=${error_rate}, recomputed=${recomputed}, diff=${diff}")
         fi
     fi
 
-    # Invariant 3: Latency completeness (REQ-MET-P3-003)
-    # requests > 0 => p50, p99 are non-null
-    # Note: p95 is not checked because wrk2 --latency does not output 95th percentile
     if (( 10#${requests} > 0 )); then
         local missing_percentiles=()
         [[ "${p50}" == "null" ]] && missing_percentiles+=("p50")
@@ -160,7 +119,24 @@ validate_meta_json() {
         fi
     fi
 
-    # Report results
+    # Extract scenario name from meta_file path
+    # Handles both ".../scenario_name/meta.json" and ".../scenario_name/benchmark/meta/scenario_name.json"
+    local scenario_name
+    scenario_name=$(basename "${meta_file}" .json)
+    if [[ "${scenario_name}" == "meta" ]]; then
+        # For ".../scenario_name/meta.json" format
+        scenario_name=$(basename "$(dirname "${meta_file}")")
+    fi
+
+    # Invariant 4: PUT /tasks/{id} contract validation (REQ-TU2-003)
+    # Only applies to PUT scenarios (tasks_update, tasks_update_steady, tasks_update_conflict)
+    # Excludes PATCH scenarios (tasks_update_status)
+    if [[ "${scenario_name}" == "tasks_update" || "${scenario_name}" == "tasks_update_steady" || "${scenario_name}" == "tasks_update_conflict" ]]; then
+        status_400=$(jq -r '.results.http_status."400" // 0' "${meta_file}" 2>/dev/null)
+        if (( 10#${status_400} > 0 )); then
+            violations_for_file+=("PUT contract violation: status field included in payload (http_status.400=${status_400}, expected 0)")
+        fi
+    fi
     if [[ ${#violations_for_file[@]} -eq 0 ]]; then
         echo -e "${GREEN}PASS: ${file_name}${NC}" >&2
         add_report "PASS: ${file_name}"
@@ -177,32 +153,25 @@ validate_meta_json() {
     fi
 }
 
-# Main validation loop
 echo "Validating ${#META_FILES[@]} meta.json files..." >&2
 add_report "=== Metrics Invariant Validation Report ==="
 add_report "Date: $(date)"
 add_report "Files: ${#META_FILES[@]}"
 add_report ""
 
-for meta_file in "${META_FILES[@]}"; do
-    validate_meta_json "${meta_file}"
-done
+for meta_file in "${META_FILES[@]}"; do validate_meta_json "${meta_file}"; done
 
-# Summary
 add_report ""
 add_report "=== Summary ==="
 add_report "Total: ${#META_FILES[@]}"
 add_report "Pass: ${PASS_COUNT}"
 add_report "Fail: ${FAIL_COUNT}"
 
-# Write report if specified
 if [[ -n "${REPORT_FILE}" ]]; then
     mkdir -p "$(dirname "${REPORT_FILE}")"
     echo -e "${REPORT}" > "${REPORT_FILE}"
     echo "Report written to ${REPORT_FILE}" >&2
 fi
-
-# Exit code
 if [[ ${#VIOLATIONS[@]} -gt 0 ]]; then
     echo "" >&2
     echo -e "${RED}=== Violations Summary ===${NC}" >&2

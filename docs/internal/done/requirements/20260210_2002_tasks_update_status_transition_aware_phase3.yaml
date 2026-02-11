@@ -1,0 +1,272 @@
+# tasks_update_status 遷移整合ベンチマーク改善 Phase3 要件定義
+#
+# 概要:
+#   Phase2 で PUT の契約不整合は解消できたが、PATCH /tasks/{id}/status で
+#   HTTP 400 が大量発生している。状態遷移制約を負荷生成に反映し、
+#   競合(409)と検証エラー(400)を分離して改善する。
+#
+# 設計方針:
+#   1. status 生成を遷移制約付き有限状態機械(FSM)へ変更する。
+#   2. ベンチ側 task 状態を {id, version} から {id, version, status} へ拡張する。
+#   3. 409 は GET 再同期 + bounded retry(full jitter) で吸収する。
+#   4. 400(無効遷移)と409(競合)を分離した品質ゲートを導入する。
+#
+# 参照:
+#   - profiling-results-downloaded-latest/api-profiling-all-7806e7ceba6d9fbfbe86f790ff7e4979ffc8fabf/tasks_update_status/benchmark/meta/tasks_update_status.json
+#   - profiling-results-downloaded-latest/api-profiling-all-7806e7ceba6d9fbfbe86f790ff7e4979ffc8fabf/tasks_update/benchmark/meta/tasks_update.json
+#   - benches/api/benchmarks/scripts/tasks_update_status.lua
+#   - benches/api/benchmarks/scripts/test_ids.lua
+#   - benches/api/src/api/transaction.rs
+
+version: "1.0.0"
+name: "tasks_update_status_transition_aware_phase3"
+description: |
+  最新プロファイルでは tasks_update_status の error_rate は 0.455004 で、
+  HTTP 400 が 7,549 件、HTTP 409 が 3,372 件発生している。
+  一方で tasks_update(PUT) は HTTP 400 が 0 に改善済みであり、
+  未解決の主要課題は PATCH 側の遷移不整合入力と競合処理に移っている。
+
+background:
+  problem: |
+    tasks_update_status.lua は status を `random_status()` で無制約に生成するため、
+    現在状態から無効な遷移を高頻度で送信して 400 を誘発している。
+    さらに test_ids.lua は task 状態として version しか保持せず status を保持しないため、
+    次の更新で遷移妥当性を保てない。
+  motivation: |
+    PATCH status シナリオを本番相当の有効遷移モデルへ近づけ、
+    409改善施策の効果を 400ノイズなしで評価できるようにする。
+  prior_art:
+    - name: "Finite-State Transition-Constrained Generator"
+      description: "有効遷移行列に従う状態生成で無効入力を構造的に排除する。"
+    - name: "Read-Repair Retry with Full Jitter"
+      description: "競合時に再読込し、ジッター付き再試行で再競合を抑える。"
+    - name: "Error Taxonomy Gate"
+      description: "validation error と conflict error を分離し品質判定する。"
+
+requirements:
+  - id: REQ-TUS3-001
+    name: "PATCH payload 生成を遷移制約付きFSMに置換する"
+    description: |
+      status 生成アルゴリズムを無制約ランダムから
+      Transition-Matrix Guided Random Walk へ変更する。
+      `is_valid_transition` と同じ遷移規則を generator 側に実装し、
+      無効遷移リクエストを送信しない。
+      根本設計変更: stateless random status -> stateful transition-aware generator。
+    methods:
+      - name: "next_valid_status"
+        signature: "fn next_valid_status(current: TaskStatus, rng: RngState) -> TaskStatus"
+        description: "現在状態から有効遷移先のみを候補に選択する。"
+      - name: "generate_patch_status_body"
+        signature: "fn generate_patch_status_body(current: TaskStatus, version: i64) -> Json"
+        description: "遷移妥当な status/version のみを生成する。"
+    implementations:
+      - type: "benches/api/benchmarks/scripts/tasks_update_status.lua"
+        description: "random_status 直呼びを廃止し、遷移行列ベースへ差し替える。"
+
+  - id: REQ-TUS3-002
+    name: "ベンチ task 状態モデルを status 付きへ拡張する"
+    description: |
+      task 状態を {id, version} から {id, version, status} に拡張し、
+      成功応答・GET再同期で status を更新する。
+      これにより次回PATCH生成の前提状態を正しく維持する。
+    methods:
+      - name: "get_task_state_full"
+        signature: "fn get_task_state_full(index: usize) -> TaskState"
+        description: "id/version/status を返す。"
+      - name: "apply_successful_transition"
+        signature: "fn apply_successful_transition(index: usize, next_status: TaskStatus, next_version: i64) -> ()"
+        description: "成功時にローカル状態を更新する。"
+      - name: "sync_state_from_get"
+        signature: "fn sync_state_from_get(index: usize, body: Json) -> ()"
+        description: "GET応答から version/status を再同期する。"
+    implementations:
+      - type: "benches/api/benchmarks/scripts/test_ids.lua"
+        description: "task_states に status を追加し、更新APIを拡張する。"
+      - type: "benches/api/benchmarks/scripts/tasks_update_status.lua"
+        description: "request/response の状態参照を full state へ変更する。"
+
+  - id: REQ-TUS3-003
+    name: "409 競合処理を GET再同期 + bounded retry に統一する"
+    description: |
+      409検出時は GET で current version/status を再取得し、
+      その状態から有効遷移を再生成して再試行する。
+      backoff は exponential cap + full jitter を採用し、同時再試行を分散する。
+    methods:
+      - name: "retry_patch_on_conflict"
+        signature: "fn retry_patch_on_conflict(task: TaskState, cfg: RetryConfig) -> RetryPlan"
+        description: "再同期と再試行計画を返す。"
+      - name: "compute_backoff_delay"
+        signature: "fn compute_backoff_delay(base_ms: u64, attempt: u8, cap_ms: u64, rand: u64) -> u64"
+        description: "full jitter で待機時間を決定する。"
+    implementations:
+      - type: "benches/api/benchmarks/scripts/tasks_update_status.lua"
+        description: "retry_get/retry_patch 経路で status/version 再同期を必須化する。"
+
+  - id: REQ-TUS3-004
+    name: "PATCH品質ゲートを 400/409 分離で再定義する"
+    description: |
+      現在は error_rate 単一指標で原因を識別できない。
+      `validation_error_rate(400系)` と `conflict_error_rate(409)` を分離し、
+      PATCHシナリオでは `http_status.400 == 0` を必須条件にする。
+    methods:
+      - name: "classify_patch_errors"
+        signature: "fn classify_patch_errors(http_status: Map<String, usize>) -> PatchErrorBreakdown"
+        description: "400/409/other を分類する。"
+      - name: "evaluate_patch_gate"
+        signature: "fn evaluate_patch_gate(metrics: Metrics, breakdown: PatchErrorBreakdown, thresholds: Thresholds) -> GateResult"
+        description: "分離指標で pass/fail を判定する。"
+    implementations:
+      - type: "benches/api/benchmarks/check_thresholds.sh"
+        description: "tasks_update_status で 400>0 を fail-fast 判定する。"
+      - type: "benches/api/benchmarks/scenarios/tasks_update_status.yaml"
+        description: "分離指標を評価できる閾値項目を追加する。"
+
+non_functional_requirements:
+  performance:
+    - "tasks_update_status: http_status.400 == 0"
+    - "tasks_update_status: error_rate 0.455004 -> 0.15以下（短期）/ 0.03以下（最終）"
+    - "tasks_update_status: rps >= 500, p99_latency_ms <= 100"
+  compatibility:
+    - "PATCH /tasks/{id}/status の状態遷移意味論を維持する"
+    - "server側の `is_valid_transition` 規則と generator 規則を一致させる"
+  testing:
+    - "遷移行列と `is_valid_transition` の同値性テスト"
+    - "status再同期(GET)を含む retry 回帰テスト"
+    - "400/409 分離ゲートの判定テスト"
+
+evidence:
+  artifact_commit: "7806e7ceba6d9fbfbe86f790ff7e4979ffc8fabf"
+  metrics:
+    - id: "EV-TUS3-M1"
+      description: "tasks_update_status: error_rate 0.455004, HTTP 400=7549, HTTP 409=3372。"
+      source: "profiling-results-downloaded-latest/api-profiling-all-7806e7ceba6d9fbfbe86f790ff7e4979ffc8fabf/tasks_update_status/benchmark/meta/tasks_update_status.json:30"
+    - id: "EV-TUS3-M2"
+      description: "tasks_update_status: retries が 0 で競合吸収が十分に機能していない。"
+      source: "profiling-results-downloaded-latest/api-profiling-all-7806e7ceba6d9fbfbe86f790ff7e4979ffc8fabf/tasks_update_status/benchmark/meta/tasks_update_status.json:44"
+    - id: "EV-TUS3-M3"
+      description: "tasks_update(PUT): HTTP 400=0, error_rate 0.199233（契約不整合は解消済み）。"
+      source: "profiling-results-downloaded-latest/api-profiling-all-7806e7ceba6d9fbfbe86f790ff7e4979ffc8fabf/tasks_update/benchmark/meta/tasks_update.json:30"
+    - id: "EV-TUS3-M4"
+      description: "tasks_update_status 閾値: max_error_rate=0.03。現状は大幅超過。"
+      source: "benches/api/benchmarks/scenarios/tasks_update_status.yaml:68"
+  code:
+    - id: "EV-TUS3-C1"
+      description: "PATCH payload は status を無制約 random で生成している。"
+      source: "benches/api/benchmarks/scripts/tasks_update_status.lua:83"
+    - id: "EV-TUS3-C2"
+      description: "test_ids の task state は id/version のみで status を保持しない。"
+      source: "benches/api/benchmarks/scripts/test_ids.lua:51"
+    - id: "EV-TUS3-C3"
+      description: "無効遷移は ApiErrorResponse::bad_request(INVALID_TRANSITION) へ変換される。"
+      source: "benches/api/src/api/transaction.rs:119"
+    - id: "EV-TUS3-C4"
+      description: "有効遷移集合は `is_valid_transition` で限定されている。"
+      source: "benches/api/src/api/transaction.rs:239"
+
+implementation_tasks:
+  - id: "IMPL-TUS3-001"
+    priority: 1
+    requirement_ids:
+      - "REQ-TUS3-001"
+      - "REQ-TUS3-002"
+    evidence_ids:
+      - "EV-TUS3-M1"
+      - "EV-TUS3-C1"
+      - "EV-TUS3-C2"
+      - "EV-TUS3-C4"
+    objective: "PATCH生成を遷移整合化し、無効遷移由来の400を構造的に排除する。"
+    scope_files:
+      - "benches/api/benchmarks/scripts/tasks_update_status.lua"
+      - "benches/api/benchmarks/scripts/test_ids.lua"
+    actions:
+      - "task_states に status を追加し初期値を定義する。"
+      - "next_valid_status を導入し `common.random_status()` の直接利用を廃止する。"
+      - "PATCH成功時に version/status を同時更新する。"
+    completion_criteria:
+      - "tasks_update_status の http_status.400 が 0。"
+      - "遷移同値性テストで generator と `is_valid_transition` の不一致が 0。"
+    verification_artifacts:
+      - "tasks_update_status/benchmark/meta/tasks_update_status.json"
+      - "遷移同値性テスト結果"
+
+  - id: "IMPL-TUS3-002"
+    priority: 2
+    requirement_ids:
+      - "REQ-TUS3-003"
+      - "REQ-TUS3-002"
+    evidence_ids:
+      - "EV-TUS3-M1"
+      - "EV-TUS3-M2"
+      - "EV-TUS3-C2"
+    objective: "409処理を再同期前提へ統一し、競合時の成功復帰率を上げる。"
+    scope_files:
+      - "benches/api/benchmarks/scripts/tasks_update_status.lua"
+      - "benches/api/benchmarks/scripts/test_ids.lua"
+    actions:
+      - "409検出時に必ず GET 再同期を実行し最新 version/status を取り込む。"
+      - "retry_patch 送信前に再同期状態から遷移先 status を再生成する。"
+      - "backoff を full jitter 計算へ変更し、同時再試行を分散する。"
+    completion_criteria:
+      - "retries 指標が 0 固定でなく、競合時に再試行が発生する。"
+      - "409比率が現状比で低下する。"
+    verification_artifacts:
+      - "tasks_update_status/benchmark/meta/tasks_update_status.json"
+      - "retry ログ集計"
+
+  - id: "IMPL-TUS3-003"
+    priority: 3
+    requirement_ids:
+      - "REQ-TUS3-004"
+    evidence_ids:
+      - "EV-TUS3-M1"
+      - "EV-TUS3-M4"
+      - "EV-TUS3-C3"
+    objective: "PATCH品質ゲートを原因別判定に変更し、誤判定を防止する。"
+    scope_files:
+      - "benches/api/benchmarks/check_thresholds.sh"
+      - "benches/api/benchmarks/scenarios/tasks_update_status.yaml"
+    actions:
+      - "http_status.400 > 0 を fail-fast 条件に追加する。"
+      - "validation_error_rate と conflict_error_rate を別計算で出力する。"
+      - "CI レポートに分類別判定結果を追加する。"
+    completion_criteria:
+      - "400/409 が分離表示され、fail理由が明示される。"
+      - "error_rate 単独判定による見落としがない。"
+    verification_artifacts:
+      - "check_thresholds 実行ログ"
+      - "分類済みメトリクスレポート"
+
+  - id: "IMPL-TUS3-004"
+    priority: 4
+    requirement_ids:
+      - "REQ-TUS3-001"
+      - "REQ-TUS3-002"
+      - "REQ-TUS3-003"
+      - "REQ-TUS3-004"
+    evidence_ids:
+      - "EV-TUS3-M1"
+      - "EV-TUS3-M3"
+      - "EV-TUS3-M4"
+    objective: "Phase3適用後に PUT/PATCH を再計測し、最終受け入れ可否を確定する。"
+    scope_files:
+      - "profiling-results-downloaded-latest"
+      - "docs/internal/requirements/20260210_2002_tasks_update_status_transition_aware_phase3.yaml"
+    actions:
+      - "tasks_update と tasks_update_status を同条件で再実行する。"
+      - "PUT/PATCH の 400/409/error_rate/p99/rps を比較表で記録する。"
+      - "error_rate <= 0.03（最終）未達時は次フェーズへ進めない。"
+    completion_criteria:
+      - "tasks_update_status で 400=0 を達成。"
+      - "tasks_update_status の error_rate が段階目標を満たす。"
+    verification_artifacts:
+      - "最新 meta.json（PUT/PATCH）"
+      - "比較テーブル（Phase2 vs Phase3）"
+
+future_extensions:
+  - id: "TUS3-FUTURE-001"
+    name: "server-emitted valid-next-status hint"
+    description: |
+      GET/PATCH 応答で次に許可される status 候補を返し、
+      負荷生成器側の状態推定を不要化する。
+    rationale: |
+      まずは現行API契約の範囲で遷移整合ベンチを成立させる必要がある。

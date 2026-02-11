@@ -127,12 +127,27 @@ impl ApiErrorResponse {
         Self::new(StatusCode::NOT_FOUND, ApiError::new("NOT_FOUND", message))
     }
 
-    /// Creates a 409 Conflict response for version conflicts.
+    /// Creates a 409 Conflict response for stale version conflicts.
+    ///
+    /// This represents a handler-level version mismatch that is **not** retryable
+    /// because the client sent an outdated version.
     #[must_use]
     pub fn conflict(message: impl Into<String>) -> Self {
         Self::new(
             StatusCode::CONFLICT,
             ApiError::new("VERSION_CONFLICT", message),
+        )
+    }
+
+    /// Creates a 409 Conflict response for retryable version conflicts.
+    ///
+    /// This represents a repository-level CAS failure that **is** retryable
+    /// because the version changed between read and write within the same handler.
+    #[must_use]
+    pub fn retryable_conflict(message: impl Into<String>) -> Self {
+        Self::new(
+            StatusCode::CONFLICT,
+            ApiError::new("VERSION_CONFLICT_RETRYABLE", message),
         )
     }
 
@@ -326,6 +341,24 @@ mod tests {
     #[rstest]
     fn test_api_error_response_conflict() {
         let response = ApiErrorResponse::conflict("Version mismatch");
+        assert_eq!(response.status, StatusCode::CONFLICT);
+        assert_eq!(response.error.code, "VERSION_CONFLICT");
+    }
+
+    #[rstest]
+    fn test_api_error_response_retryable_conflict() {
+        let response = ApiErrorResponse::retryable_conflict("CAS failure");
+        assert_eq!(response.status, StatusCode::CONFLICT);
+        assert_eq!(response.error.code, "VERSION_CONFLICT_RETRYABLE");
+    }
+
+    #[rstest]
+    fn test_repository_version_conflict_default_is_non_retryable() {
+        let error = RepositoryError::VersionConflict {
+            expected: 2,
+            found: 3,
+        };
+        let response: ApiErrorResponse = error.into();
         assert_eq!(response.status, StatusCode::CONFLICT);
         assert_eq!(response.error.code, "VERSION_CONFLICT");
     }

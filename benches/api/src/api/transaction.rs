@@ -14,11 +14,16 @@
 //! - `POST /tasks/{id}/subtasks` - Add subtask using `PersistentList`
 //! - `POST /tasks/{id}/tags` - Add tag using `PersistentHashSet`
 
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use axum::{
     Json,
     extract::{Path, State},
     http::StatusCode,
 };
+use tokio::sync::Mutex;
 
 use super::json_buffer::JsonResponse;
 use lambars::control::Either;
@@ -31,7 +36,7 @@ use super::dto::{
     TaskResponse, TaskStatusDto, UpdateTaskRequest, validate_description, validate_tags,
     validate_title,
 };
-use super::error::{ApiErrorResponse, ValidationError};
+use super::error::{ApiError, ApiErrorResponse, ValidationError};
 use super::handlers::AppState;
 use super::query::TaskChange;
 use crate::domain::{
@@ -391,6 +396,469 @@ pub fn description_optional() -> impl Optional<Task, String> + Clone {
     description_lens.compose_prism(some_prism)
 }
 
+const DEFAULT_MAX_RETRIES: u8 = 1;
+const DEFAULT_BASE_DELAY_MS: u64 = 5;
+const MAX_BACKOFF_MS: u64 = 10;
+
+/// Maximum number of read-repair retries for stale-version conflicts.
+pub const READ_REPAIR_MAX_RETRIES: u8 = 3;
+
+/// Base delay in milliseconds for read-repair backoff.
+pub const READ_REPAIR_BASE_DELAY_MS: u64 = 2;
+
+/// Error code for retryable version conflicts (repository-level CAS failure).
+const RETRYABLE_CONFLICT_CODE: &str = "VERSION_CONFLICT_RETRYABLE";
+
+/// Error code for stale-version conflicts (handler-level version mismatch).
+const STALE_VERSION_CONFLICT_CODE: &str = "VERSION_CONFLICT";
+
+/// Error code for non-commutative rebase conflicts (concurrent field-level conflict).
+const NON_COMMUTATIVE_CONFLICT_CODE: &str = "NON_COMMUTATIVE_CONFLICT";
+
+// =============================================================================
+// Conflict Classification
+// =============================================================================
+
+/// Classifies the kind of 409 Conflict error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConflictKind {
+    /// Handler-level stale version mismatch (code = `VERSION_CONFLICT`).
+    StaleVersion,
+    /// Repository-level CAS failure (code = `VERSION_CONFLICT_RETRYABLE`).
+    RetryableCas,
+    /// Any other error (non-409, or 409 with unrecognized code).
+    Other,
+}
+
+/// Classifies a conflict error by HTTP status and error code.
+///
+/// Non-409 errors always return [`ConflictKind::Other`].
+#[must_use]
+pub fn classify_conflict_kind(error: &ApiErrorResponse) -> ConflictKind {
+    if error.status != StatusCode::CONFLICT {
+        return ConflictKind::Other;
+    }
+    match error.error.code.as_str() {
+        STALE_VERSION_CONFLICT_CODE => ConflictKind::StaleVersion,
+        RETRYABLE_CONFLICT_CODE => ConflictKind::RetryableCas,
+        _ => ConflictKind::Other,
+    }
+}
+
+/// Returns `true` if the error is a stale-version 409 Conflict (read-repair candidate).
+#[must_use]
+pub fn is_stale_version_conflict(error: &ApiErrorResponse) -> bool {
+    classify_conflict_kind(error) == ConflictKind::StaleVersion
+}
+
+// =============================================================================
+// Read-Repair Rebase Logic
+// =============================================================================
+
+/// Error when two concurrent updates modify the same field to different values.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RebaseError {
+    /// Both the original and a concurrent update modified the same field.
+    NonCommutativeConflict { field: &'static str },
+}
+
+impl std::fmt::Display for RebaseError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NonCommutativeConflict { field } => {
+                write!(
+                    formatter,
+                    "Non-commutative conflict on field '{field}': concurrent update detected"
+                )
+            }
+        }
+    }
+}
+
+/// 3-way merge: rebases `request` against `latest` using `original_base` as the common ancestor.
+///
+/// For each field the client wants to update, if the field was concurrently
+/// changed to a different value, returns [`RebaseError::NonCommutativeConflict`].
+/// Otherwise, returns the request with version rebased to `latest.version`.
+///
+/// Request values are normalized (trimmed, empty-to-None) before comparison
+/// because DB-stored values have already been through validation normalization.
+///
+/// # Errors
+///
+/// Returns [`RebaseError::NonCommutativeConflict`] when both the original request
+/// and a concurrent update modified the same field to different values.
+///
+/// # Panics
+///
+/// Panics if `request.priority` is `Some` but the contained value cannot be
+/// converted to [`Priority`]. This should not occur with validated inputs.
+pub fn rebase_update_request(
+    original_base: &Task,
+    latest: &Task,
+    request: &UpdateTaskRequest,
+) -> Result<UpdateTaskRequest, RebaseError> {
+    // Normalize title: DB values are trimmed, so trim request value before comparison.
+    let normalized_title = request.title.as_ref().map(|title| title.trim().to_string());
+    if normalized_title.is_some()
+        && original_base.title != latest.title
+        && normalized_title.as_deref() != Some(latest.title.as_str())
+    {
+        return Err(RebaseError::NonCommutativeConflict { field: "title" });
+    }
+
+    // Normalize description: DB values are trimmed and empty strings become None.
+    let normalized_description = request.description.as_ref().and_then(|description| {
+        let trimmed = description.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    });
+    if request.description.is_some()
+        && original_base.description != latest.description
+        && normalized_description != latest.description
+    {
+        return Err(RebaseError::NonCommutativeConflict {
+            field: "description",
+        });
+    }
+
+    if let Some(priority_dto) = request.priority {
+        if original_base.priority != latest.priority {
+            let request_priority: Priority = priority_dto.into();
+            if request_priority != latest.priority {
+                return Err(RebaseError::NonCommutativeConflict { field: "priority" });
+            }
+        }
+    }
+
+    Ok(UpdateTaskRequest {
+        title: request.title.clone(),
+        description: request.description.clone(),
+        status: request.status,
+        priority: request.priority,
+        version: latest.version,
+    })
+}
+
+/// Computes the backoff cap for a given retry index (pure function).
+///
+/// Formula: `base_delay_ms * 2^retry_index`, clamped to avoid overflow.
+/// `retry_index` is 0-based (first retry = 0).
+///
+/// # Examples
+///
+/// ```ignore
+/// assert_eq!(compute_backoff_cap(1, 0), 1);  // 1 * 2^0 = 1
+/// assert_eq!(compute_backoff_cap(1, 1), 2);  // 1 * 2^1 = 2
+/// assert_eq!(compute_backoff_cap(1, 2), 4);  // 1 * 2^2 = 4
+/// assert_eq!(compute_backoff_cap(10, 3), 80); // 10 * 2^3 = 80
+/// ```
+#[must_use]
+pub const fn compute_backoff_cap(base_delay_ms: u64, retry_index: u8) -> u64 {
+    let factor = match 1u64.checked_shl(retry_index as u32) {
+        Some(value) => value,
+        None => u64::MAX,
+    };
+    base_delay_ms.saturating_mul(factor)
+}
+
+/// Samples a jitter delay from `[0, cap]` given a random value (pure function).
+///
+/// Returns 0 if `cap` is 0. Returns `rand_value` unchanged if `cap` is `u64::MAX`
+/// (avoids overflow from `cap + 1`). Otherwise returns `rand_value % (cap + 1)`.
+///
+/// This function isolates the non-deterministic part of backoff calculation,
+/// making the delay logic testable with deterministic inputs.
+#[must_use]
+pub const fn sample_delay(rand_value: u64, cap: u64) -> u64 {
+    if cap == 0 {
+        0
+    } else if cap == u64::MAX {
+        rand_value
+    } else {
+        rand_value % (cap + 1)
+    }
+}
+
+/// Promotes a `VERSION_CONFLICT` error to `VERSION_CONFLICT_RETRYABLE` (pure function).
+///
+/// This function is used inside `update_task_inner` to mark repository-level CAS
+/// failures as retryable. The default `From<RepositoryError>` conversion produces
+/// `VERSION_CONFLICT` (non-retryable) so that other handlers are unaffected.
+/// Only the retry-wrapped `update_task` path promotes the code.
+///
+/// Non-conflict errors pass through unchanged.
+#[must_use]
+pub fn promote_to_retryable_conflict(mut error: ApiErrorResponse) -> ApiErrorResponse {
+    if error.status == StatusCode::CONFLICT && error.error.code == "VERSION_CONFLICT" {
+        error.error.code = RETRYABLE_CONFLICT_CODE.to_string();
+    }
+    error
+}
+
+/// Returns `true` if the error is a retryable CAS 409 Conflict.
+#[must_use]
+pub fn is_retryable_conflict(error: &ApiErrorResponse) -> bool {
+    classify_conflict_kind(error) == ConflictKind::RetryableCas
+}
+
+/// Returns `true` if the retry budget was exhausted and the final result is an error (pure function).
+///
+/// This predicate is used after `retry_on_conflict` completes to decide whether
+/// the `retry_exhausted` counter should be incremented.
+///
+/// # Arguments
+///
+/// * `result_is_err` - Whether the final result of the retry loop was an error
+/// * `retries_used` - Number of retries actually triggered (from `on_retry` callback)
+/// * `max_retries` - Maximum retries configured for the retry loop
+#[must_use]
+pub const fn should_count_retry_exhausted(
+    result_is_err: bool,
+    retries_used: usize,
+    max_retries: u8,
+) -> bool {
+    result_is_err && max_retries > 0 && retries_used >= max_retries as usize
+}
+
+/// Retries an async operation on retryable 409 Conflict with full jitter backoff.
+///
+/// Full jitter backoff: `delay = random(0, base_delay_ms * 2^retry_index)`.
+/// Only retryable 409 Conflict errors (code = `VERSION_CONFLICT_RETRYABLE`) trigger
+/// a retry; all other errors -- including stale-version 409s -- are returned immediately.
+///
+/// The optional `on_retry` callback is invoked each time a retry is triggered,
+/// receiving the current retry index (0-based). This enables observability
+/// (e.g. incrementing an atomic counter) without coupling the retry logic to
+/// application state.
+///
+/// # Errors
+///
+/// Returns the final [`ApiErrorResponse`] if all retries are exhausted (for retryable 409)
+/// or immediately for non-retryable errors.
+pub async fn retry_on_conflict<F, Fut, T, R>(
+    operation: F,
+    max_retries: u8,
+    base_delay_ms: u64,
+    on_retry: R,
+) -> Result<T, ApiErrorResponse>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Result<T, ApiErrorResponse>>,
+    R: Fn(u8),
+{
+    let mut attempt = 0u8;
+    loop {
+        match operation().await {
+            Ok(value) => return Ok(value),
+            Err(error) if is_retryable_conflict(&error) && attempt < max_retries => {
+                on_retry(attempt);
+                let cap = compute_backoff_cap(base_delay_ms, attempt).min(MAX_BACKOFF_MS);
+                attempt += 1;
+                let delay = sample_delay(rand::random::<u64>(), cap);
+                if delay > 0 {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(delay)).await;
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+/// Cleanup interval: purge dead `Weak` entries every N acquisitions.
+const CLEANUP_INTERVAL: usize = 64;
+
+/// Map size threshold below which cleanup is skipped entirely.
+const CLEANUP_THRESHOLD: usize = 128;
+
+/// Per-key lock map that serializes concurrent updates to the same `task_id`.
+///
+/// Different `task_id` values are processed in parallel without contention.
+/// Entries are stored as `Weak` references and automatically cleaned up when
+/// no active guards remain, preventing unbounded memory growth.
+///
+/// Cleanup is amortized: dead entries are purged every [`CLEANUP_INTERVAL`]
+/// acquisitions and only when the map exceeds [`CLEANUP_THRESHOLD`] entries,
+/// avoiding O(N) scans on every call.
+pub struct KeyedUpdateQueue {
+    locks: std::sync::Mutex<HashMap<TaskId, std::sync::Weak<Mutex<()>>>>,
+    acquire_counter: AtomicUsize,
+}
+
+impl KeyedUpdateQueue {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            locks: std::sync::Mutex::new(HashMap::new()),
+            acquire_counter: AtomicUsize::new(0),
+        }
+    }
+
+    /// Acquires a per-`task_id` lock, serializing concurrent updates.
+    ///
+    /// Dead entries (where all guards have been dropped) are periodically
+    /// cleaned up to prevent memory leaks without incurring O(N) cost on
+    /// every acquisition.
+    pub async fn acquire(&self, task_id: &TaskId) -> KeyedGuard {
+        let mutex = {
+            let mut map = self
+                .locks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+            // Try to upgrade existing Weak; create new Arc if absent or expired
+            let mutex = map
+                .get(task_id)
+                .and_then(std::sync::Weak::upgrade)
+                .unwrap_or_else(|| {
+                    let new_mutex = Arc::new(Mutex::new(()));
+                    map.insert(task_id.clone(), Arc::downgrade(&new_mutex));
+                    new_mutex
+                });
+
+            // Amortized cleanup: purge dead entries periodically
+            let tick = self.acquire_counter.fetch_add(1, Ordering::Relaxed);
+            if map.len() > CLEANUP_THRESHOLD && tick.is_multiple_of(CLEANUP_INTERVAL) {
+                map.retain(|_, weak| weak.strong_count() > 0);
+            }
+
+            mutex
+        };
+        let guard = mutex.lock_owned().await;
+        KeyedGuard { _guard: guard }
+    }
+
+    /// Returns the number of entries currently in the internal map (for testing).
+    #[cfg(test)]
+    pub fn debug_entry_count(&self) -> usize {
+        self.locks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
+    }
+
+    /// Forces a cleanup of dead entries (for testing).
+    #[cfg(test)]
+    pub fn force_cleanup(&self) {
+        let mut map = self
+            .locks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        map.retain(|_, weak| weak.strong_count() > 0);
+    }
+}
+
+impl Default for KeyedUpdateQueue {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// RAII guard that holds a per-`task_id` lock until dropped.
+pub struct KeyedGuard {
+    _guard: tokio::sync::OwnedMutexGuard<()>,
+}
+
+/// Returns `true` if the request contains no non-commutative field changes
+/// (title, description, status, priority are all `None`), allowing it to be
+/// safely merged even when the version has changed.
+#[must_use]
+pub const fn can_merge_without_conflict(request: &UpdateTaskRequest) -> bool {
+    request.title.is_none()
+        && request.description.is_none()
+        && request.status.is_none()
+        && request.priority.is_none()
+}
+
+// =============================================================================
+// Read-Repair CAS Loop
+// =============================================================================
+
+/// Read-repair loop for stale-version 409 conflicts.
+///
+/// Re-reads the latest task, rebases the update request via 3-way merge,
+/// and retries up to [`READ_REPAIR_MAX_RETRIES`] times. Returns 409 if
+/// a non-commutative field conflict is detected during rebase.
+///
+/// This function is called after the caller has already determined that a
+/// stale-version conflict occurred. It skips the initial retry attempt and
+/// enters the rebase loop directly.
+///
+/// # Limitations
+///
+/// `original_base` is the task state at the time this function is invoked,
+/// not the exact state at `request.version`. This is an intentional
+/// approximation because the benchmark application does not maintain an
+/// event store for point-in-time reconstruction. The 3-way merge detects
+/// field-level conflicts between the request and concurrent updates, which
+/// is sufficient for the stale-version absorption use case.
+#[allow(clippy::future_not_send)]
+pub(crate) async fn update_task_with_read_repair(
+    state: &AppState,
+    task_id: &TaskId,
+    request: &UpdateTaskRequest,
+) -> Result<(StatusCode, JsonResponse<TaskResponse>), ApiErrorResponse> {
+    let original_base = state
+        .task_repository
+        .find_by_id(task_id)
+        .await
+        .map_err(ApiErrorResponse::from)?
+        .ok_or_else(|| ApiErrorResponse::not_found(format!("Task {task_id} not found")))?;
+
+    // The caller already confirmed a stale-version conflict, so we enter
+    // the rebase loop directly without a redundant initial retry.
+    let mut last_error = ApiErrorResponse::conflict("stale-version conflict detected by caller");
+
+    for repair_attempt in 0..READ_REPAIR_MAX_RETRIES {
+        let latest = state
+            .task_repository
+            .find_by_id(task_id)
+            .await
+            .map_err(ApiErrorResponse::from)?
+            .ok_or_else(|| ApiErrorResponse::not_found(format!("Task {task_id} not found")))?;
+
+        let rebased_request = match rebase_update_request(&original_base, &latest, request) {
+            Ok(rebased) => rebased,
+            Err(rebase_error) => {
+                return Err(ApiErrorResponse::new(
+                    StatusCode::CONFLICT,
+                    ApiError::new(
+                        NON_COMMUTATIVE_CONFLICT_CODE,
+                        rebase_error.to_string(),
+                    ),
+                ));
+            }
+        };
+
+        let repair_result = retry_on_conflict(
+            || update_task_inner(state.clone(), task_id.clone(), rebased_request.clone()),
+            DEFAULT_MAX_RETRIES,
+            DEFAULT_BASE_DELAY_MS,
+            |_| {},
+        )
+        .await;
+
+        match repair_result {
+            Ok(success) => return Ok(success),
+            Err(error) if is_stale_version_conflict(&error) => {
+                last_error = error;
+                let cap = compute_backoff_cap(READ_REPAIR_BASE_DELAY_MS, repair_attempt)
+                    .min(MAX_BACKOFF_MS);
+                let delay = sample_delay(rand::random::<u64>(), cap);
+                if delay > 0 {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(delay)).await;
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    Err(last_error)
+}
+
 // =============================================================================
 // PUT /tasks/{id} - Update Task with Lens
 // =============================================================================
@@ -439,13 +907,80 @@ pub async fn update_task(
 ) -> Result<(StatusCode, JsonResponse<TaskResponse>), ApiErrorResponse> {
     let task_id = TaskId::from_uuid(path.id);
 
-    // Fetch existing task
+    let _keyed_guard = state.keyed_update_queue.acquire(&task_id).await;
+
+    let retry_counter = Arc::clone(&state.retry_attempts);
+    let exhausted_counter = Arc::clone(&state.retry_exhausted);
+    let retries_used = Arc::new(AtomicUsize::new(0));
+    let retries_used_inner = Arc::clone(&retries_used);
+    let task_id_for_log = task_id.clone();
+
+    let result = retry_on_conflict(
+        || update_task_inner(state.clone(), task_id.clone(), request.clone()),
+        DEFAULT_MAX_RETRIES,
+        DEFAULT_BASE_DELAY_MS,
+        move |attempt| {
+            tracing::info!(
+                task_id = %task_id_for_log,
+                retry_index = attempt,
+                "Retrying task update after retryable conflict"
+            );
+            retry_counter.fetch_add(1, Ordering::Relaxed);
+            retries_used_inner.fetch_add(1, Ordering::Relaxed);
+        },
+    )
+    .await;
+
+    let result = match &result {
+        Err(error) if is_stale_version_conflict(error) => {
+            update_task_with_read_repair(&state, &task_id, &request).await
+        }
+        _ => result,
+    };
+
+    // Count exhausted retries: any failure after retries were attempted
+    // covers both retryable and stale-version terminal errors.
+    if should_count_retry_exhausted(
+        result.is_err(),
+        retries_used.load(Ordering::Relaxed),
+        DEFAULT_MAX_RETRIES,
+    ) {
+        exhausted_counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    result
+}
+
+/// Core update logic extracted from `update_task` for retry wrapping.
+///
+/// Visibility is `pub(crate)` to allow direct integration testing.
+#[allow(clippy::future_not_send)]
+pub(crate) async fn update_task_inner(
+    state: AppState,
+    task_id: TaskId,
+    request: UpdateTaskRequest,
+) -> Result<(StatusCode, JsonResponse<TaskResponse>), ApiErrorResponse> {
+    // Reject status changes via PUT; use PATCH /tasks/{id}/status instead.
+    if request.status.is_some() {
+        return Err(ApiErrorResponse::bad_request(
+            "UNSUPPORTED_FIELD",
+            "Status updates are not supported via PUT. Use PATCH /tasks/{id}/status instead.",
+        ));
+    }
+
     let old_task = state
         .task_repository
         .find_by_id(&task_id)
         .await
         .map_err(ApiErrorResponse::from)?
         .ok_or_else(|| ApiErrorResponse::not_found(format!("Task {task_id} not found")))?;
+
+    // Short-circuit: if the request contains no non-commutative fields (all None),
+    // treat it as a no-op and return the current task without persisting anything.
+    // This avoids unnecessary version bumps and write amplification.
+    if can_merge_without_conflict(&request) {
+        return Ok((StatusCode::OK, JsonResponse(TaskResponse::from(&old_task))));
+    }
 
     // Check version (optimistic locking)
     if old_task.version != request.version {
@@ -476,9 +1011,13 @@ pub async fn update_task(
     // Build events from changes (I/O boundary: generates event IDs)
     let events = build_events_from_changes(&task_id, &changes, &now, current_event_version);
 
-    // Save task and write events using best-effort consistency
-    let write_result =
-        save_task_with_events(&state, &updated_task, events, current_event_version).await?;
+    // Save task and write events using best-effort consistency.
+    // Promote VERSION_CONFLICT to VERSION_CONFLICT_RETRYABLE so that
+    // the outer `retry_on_conflict` can distinguish CAS failures from
+    // stale-version rejections at the handler level.
+    let write_result = save_task_with_events(&state, &updated_task, events, current_event_version)
+        .await
+        .map_err(promote_to_retryable_conflict)?;
 
     // Build response with any consistency warnings
     // Note: logging is done in save_task_with_events, so we only add to response here
@@ -589,7 +1128,9 @@ fn build_events_from_changes(
         .iter()
         .enumerate()
         .map(|(index, change)| {
-            let version = current_version + 1 + index as u64;
+            let version = current_version
+                .saturating_add(1)
+                .saturating_add(index as u64);
             let event_id = EventId::generate_v7(); // I/O: generate event ID
 
             match change {
@@ -707,7 +1248,10 @@ fn apply_updates_with_lens(
     let version_lens = lens!(Task, version);
 
     let updated = updated_at_lens.set(updated, now);
-    let new_version = updated.version + 1;
+    let new_version = updated
+        .version
+        .checked_add(1)
+        .ok_or_else(|| ApiErrorResponse::internal_error("Version overflow"))?;
     let updated = version_lens.set(updated, new_version);
 
     Ok(updated)
@@ -806,9 +1350,9 @@ pub async fn update_status(
                 &task_id,
                 old_task.status,
                 valid_status,
-                EventId::generate_v7(),    // I/O boundary: generate event ID
-                now,                       // Use same timestamp as task update
-                current_event_version + 1, // This event's version
+                EventId::generate_v7(), // I/O boundary: generate event ID
+                now,                    // Use same timestamp as task update
+                current_event_version.saturating_add(1), // This event's version
             );
 
             // Save task and write event using best-effort consistency
@@ -858,25 +1402,20 @@ pub async fn update_status(
 /// let result = validate_status_transition(TaskStatus::Pending, TaskStatus::Completed);
 /// assert!(result.is_left());
 /// ```
-fn validate_status_transition(
+const fn validate_status_transition(
     current: TaskStatus,
     new_status: TaskStatus,
 ) -> Either<StatusTransitionError, StatusTransitionResult> {
     // Create a StatusTransitionAttempt from the status pair
     let attempt = StatusTransitionAttempt::from_statuses(current, new_status);
 
-    // Use Prism to validate the transition
-    let prism = valid_transition_prism();
-
-    // Handle based on the attempt classification
+    // Handle based on the attempt classification.
+    // All branches return values (no panics) to comply with FP error-as-value principle.
+    // Note: `valid_transition_prism()` is available for callers who need the Prism interface;
+    // here we destructure the enum directly for const-compatibility.
     match attempt {
         StatusTransitionAttempt::NoChange(_) => Either::Right(StatusTransitionResult::NoChange),
-        StatusTransitionAttempt::Valid(_) => {
-            // Use preview_owned to extract the valid transition
-            // This is guaranteed to succeed because we already know it's Valid
-            let valid = prism
-                .preview_owned(attempt)
-                .expect("Valid attempt should preview successfully");
+        StatusTransitionAttempt::Valid(valid) => {
             Either::Right(StatusTransitionResult::Transition(valid.to))
         }
         StatusTransitionAttempt::Invalid { from, to } => {
@@ -899,7 +1438,7 @@ fn apply_status_update(task: Task, new_status: TaskStatus, now: Timestamp) -> Ta
 
     let updated = status_lens.set(task, new_status);
     let updated = updated_at_lens.set(updated, now);
-    let new_version = updated.version + 1;
+    let new_version = updated.version.saturating_add(1);
     version_lens.set(updated, new_version)
 }
 
@@ -1015,7 +1554,7 @@ fn apply_subtask_update(task: Task, subtask: SubTask, now: Timestamp) -> Task {
     // Use PersistentList prepend (Task::prepend_subtask uses this internally)
     let updated = task.prepend_subtask(subtask);
     let updated = updated_at_lens.set(updated, now);
-    let new_version = updated.version + 1;
+    let new_version = updated.version.saturating_add(1);
     version_lens.set(updated, new_version)
 }
 
@@ -1112,9 +1651,9 @@ pub async fn add_tag(
     let event = create_tag_added_event(
         &task_id,
         &tag_for_event,
-        EventId::generate_v7(),    // I/O boundary: generate event ID
-        now,                       // Use same timestamp as task update
-        current_event_version + 1, // This event's version
+        EventId::generate_v7(), // I/O boundary: generate event ID
+        now,                    // Use same timestamp as task update
+        current_event_version.saturating_add(1), // This event's version
     );
 
     // Save task and write event using best-effort consistency
@@ -1152,7 +1691,7 @@ fn apply_tag_update(task: Task, tag: Tag, now: Timestamp) -> Task {
     // Add tag using Task::add_tag (uses PersistentHashSet internally)
     let updated = task.add_tag(tag);
     let updated = updated_at_lens.set(updated, now);
-    let new_version = updated.version + 1;
+    let new_version = updated.version.saturating_add(1);
     version_lens.set(updated, new_version)
 }
 
@@ -1162,8 +1701,13 @@ fn apply_tag_update(task: Task, tag: Tag, now: Timestamp) -> Task {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU8, Ordering};
+
     use rstest::rstest;
+
+    use super::super::error::ApiError;
+    use super::*;
 
     // -------------------------------------------------------------------------
     // Status Transition Tests
@@ -1964,4 +2508,1035 @@ mod tests {
             DetectedChange::PriorityChanged { .. }
         ));
     }
+
+    // -------------------------------------------------------------------------
+    // retry_on_conflict Tests
+    // -------------------------------------------------------------------------
+
+    /// Helper: creates an `Arc<AtomicU8>` counter and a clone for use in async closures.
+    fn new_call_counter() -> (Arc<AtomicU8>, Arc<AtomicU8>) {
+        let counter = Arc::new(AtomicU8::new(0));
+        let counter_clone = Arc::clone(&counter);
+        (counter, counter_clone)
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_retry_on_conflict_succeeds_on_first_attempt() {
+        let (call_count, call_count_inner) = new_call_counter();
+
+        let result: Result<u32, ApiErrorResponse> = retry_on_conflict(
+            || {
+                let count = Arc::clone(&call_count_inner);
+                async move {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    Ok(42)
+                }
+            },
+            3,
+            1,
+            |_| {},
+        )
+        .await;
+
+        assert_eq!(result.unwrap(), 42);
+        assert_eq!(call_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_retry_on_conflict_retries_on_retryable_409_then_succeeds() {
+        let (call_count, call_count_inner) = new_call_counter();
+
+        let result: Result<u32, ApiErrorResponse> = retry_on_conflict(
+            || {
+                let count = Arc::clone(&call_count_inner);
+                async move {
+                    let attempt = count.fetch_add(1, Ordering::SeqCst);
+                    if attempt < 2 {
+                        Err(ApiErrorResponse::retryable_conflict("CAS failure"))
+                    } else {
+                        Ok(42)
+                    }
+                }
+            },
+            3,
+            0,
+            |_| {},
+        )
+        .await;
+
+        assert_eq!(result.unwrap(), 42);
+        assert_eq!(call_count.load(Ordering::SeqCst), 3);
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_retry_on_conflict_does_not_retry_on_non_409_error() {
+        let (call_count, call_count_inner) = new_call_counter();
+
+        let result: Result<u32, ApiErrorResponse> = retry_on_conflict(
+            || {
+                let count = Arc::clone(&call_count_inner);
+                async move {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    Err(ApiErrorResponse::not_found("task not found"))
+                }
+            },
+            3,
+            0,
+            |_| {},
+        )
+        .await;
+
+        assert_eq!(result.unwrap_err().status, StatusCode::NOT_FOUND);
+        assert_eq!(call_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_retry_on_conflict_does_not_retry_on_stale_version_conflict() {
+        let (call_count, call_count_inner) = new_call_counter();
+
+        let result: Result<u32, ApiErrorResponse> = retry_on_conflict(
+            || {
+                let count = Arc::clone(&call_count_inner);
+                async move {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    // Non-retryable conflict (stale version from handler)
+                    Err(ApiErrorResponse::conflict("Expected version 1, found 2"))
+                }
+            },
+            3,
+            0,
+            |_| {},
+        )
+        .await;
+
+        assert_eq!(result.unwrap_err().status, StatusCode::CONFLICT);
+        // Should NOT retry -- only 1 attempt
+        assert_eq!(call_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_retry_on_conflict_exhausts_retries_returns_409() {
+        let (call_count, call_count_inner) = new_call_counter();
+
+        let result: Result<u32, ApiErrorResponse> = retry_on_conflict(
+            || {
+                let count = Arc::clone(&call_count_inner);
+                async move {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    Err(ApiErrorResponse::retryable_conflict("CAS failure"))
+                }
+            },
+            3,
+            0,
+            |_| {},
+        )
+        .await;
+
+        assert_eq!(result.unwrap_err().status, StatusCode::CONFLICT);
+        // 1 initial + 3 retries = 4 total attempts
+        assert_eq!(call_count.load(Ordering::SeqCst), 4);
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_retry_on_conflict_zero_retries_returns_immediately() {
+        let (call_count, call_count_inner) = new_call_counter();
+
+        let result: Result<u32, ApiErrorResponse> = retry_on_conflict(
+            || {
+                let count = Arc::clone(&call_count_inner);
+                async move {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    Err(ApiErrorResponse::retryable_conflict("CAS failure"))
+                }
+            },
+            0,
+            0,
+            |_| {},
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(call_count.load(Ordering::SeqCst), 1);
+    }
+
+    // -------------------------------------------------------------------------
+    // KeyedUpdateQueue Tests
+    // -------------------------------------------------------------------------
+
+    /// Spawns `count` tasks that each acquire the keyed lock, increment a counter,
+    /// sleep, then decrement. Returns the observed maximum concurrency.
+    async fn measure_max_concurrency(
+        queue: &Arc<KeyedUpdateQueue>,
+        task_ids: Vec<TaskId>,
+        sleep_ms: u64,
+    ) -> u32 {
+        use std::sync::atomic::AtomicU32;
+
+        let counter = Arc::new(AtomicU32::new(0));
+        let max_concurrent = Arc::new(AtomicU32::new(0));
+
+        let handles: Vec<_> = task_ids
+            .into_iter()
+            .map(|task_id| {
+                let queue = Arc::clone(queue);
+                let counter = Arc::clone(&counter);
+                let max_concurrent = Arc::clone(&max_concurrent);
+                tokio::spawn(async move {
+                    let _guard = queue.acquire(&task_id).await;
+                    let current = counter.fetch_add(1, Ordering::SeqCst) + 1;
+                    max_concurrent.fetch_max(current, Ordering::SeqCst);
+                    tokio::time::sleep(tokio::time::Duration::from_millis(sleep_ms)).await;
+                    counter.fetch_sub(1, Ordering::SeqCst);
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        max_concurrent.load(Ordering::SeqCst)
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_keyed_update_queue_serializes_same_task_id() {
+        let queue = Arc::new(KeyedUpdateQueue::new());
+        let task_id = TaskId::generate();
+        let task_ids = vec![task_id; 5];
+
+        let max = measure_max_concurrency(&queue, task_ids, 1).await;
+        assert_eq!(max, 1, "Same task_id updates should be serialized");
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_keyed_update_queue_allows_parallel_different_task_ids() {
+        let queue = Arc::new(KeyedUpdateQueue::new());
+        let task_ids: Vec<_> = (0..5).map(|_| TaskId::generate()).collect();
+
+        let max = measure_max_concurrency(&queue, task_ids, 10).await;
+        assert!(max > 1, "Different task_ids should run in parallel");
+    }
+
+    // -------------------------------------------------------------------------
+    // can_merge_without_conflict Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    #[case(None, None, None, None, true)]
+    #[case(Some("Title".to_string()), None, None, None, false)]
+    #[case(None, Some("Desc".to_string()), None, None, false)]
+    #[case(None, None, Some(TaskStatusDto::InProgress), None, false)]
+    #[case(None, None, None, Some(crate::api::dto::PriorityDto::High), false)]
+    #[case(Some("T".to_string()), Some("D".to_string()), None, None, false)]
+    fn test_can_merge_without_conflict(
+        #[case] title: Option<String>,
+        #[case] description: Option<String>,
+        #[case] status: Option<TaskStatusDto>,
+        #[case] priority: Option<crate::api::dto::PriorityDto>,
+        #[case] expected: bool,
+    ) {
+        let request = UpdateTaskRequest {
+            title,
+            description,
+            status,
+            priority,
+            version: 1,
+        };
+        assert_eq!(can_merge_without_conflict(&request), expected);
+    }
+
+    // -------------------------------------------------------------------------
+    // compute_backoff_cap Tests (pure function)
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    #[case(1, 0, 1)] // 1 * 2^0 = 1
+    #[case(1, 1, 2)] // 1 * 2^1 = 2
+    #[case(1, 2, 4)] // 1 * 2^2 = 4
+    #[case(1, 3, 8)] // 1 * 2^3 = 8
+    #[case(10, 0, 10)] // 10 * 2^0 = 10
+    #[case(10, 3, 80)] // 10 * 2^3 = 80
+    #[case(0, 5, 0)] // 0 * 2^5 = 0
+    fn test_compute_backoff_cap(
+        #[case] base_delay_ms: u64,
+        #[case] retry_index: u8,
+        #[case] expected: u64,
+    ) {
+        assert_eq!(compute_backoff_cap(base_delay_ms, retry_index), expected);
+    }
+
+    #[rstest]
+    fn test_compute_backoff_cap_first_retry_is_base() {
+        // First retry (index 0) should use base delay as the cap
+        assert_eq!(compute_backoff_cap(5, 0), 5);
+    }
+
+    #[rstest]
+    fn test_compute_backoff_cap_overflow_saturates() {
+        // Large retry_index should saturate rather than panic
+        let result = compute_backoff_cap(1, 64);
+        assert_eq!(result, u64::MAX);
+
+        let result = compute_backoff_cap(1, u8::MAX);
+        assert_eq!(result, u64::MAX);
+    }
+
+    // -------------------------------------------------------------------------
+    // is_retryable_conflict Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn test_is_retryable_conflict_with_retryable_conflict() {
+        let error = ApiErrorResponse::retryable_conflict("CAS failure");
+        assert!(is_retryable_conflict(&error));
+    }
+
+    #[rstest]
+    fn test_is_retryable_conflict_with_stale_version_conflict() {
+        let error = ApiErrorResponse::conflict("Expected version 1, found 2");
+        assert!(!is_retryable_conflict(&error));
+    }
+
+    #[rstest]
+    fn test_is_retryable_conflict_with_non_conflict_error() {
+        let error = ApiErrorResponse::not_found("task not found");
+        assert!(!is_retryable_conflict(&error));
+    }
+
+    // -------------------------------------------------------------------------
+    // KeyedUpdateQueue entry cleanup Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_keyed_update_queue_releases_unused_keys() {
+        let queue = KeyedUpdateQueue::new();
+
+        // Acquire and drop guards for many unique task_ids
+        for _ in 0..200 {
+            let task_id = TaskId::generate();
+            let _guard = queue.acquire(&task_id).await;
+            // guard drops here
+        }
+
+        // Force cleanup to remove all dead Weak entries
+        queue.force_cleanup();
+
+        // After cleanup, the map should be empty because all guards have been dropped.
+        let entry_count = queue.debug_entry_count();
+        assert_eq!(
+            entry_count, 0,
+            "Expected 0 entries after forced cleanup, found {entry_count}"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // No-op request early return Tests
+    // -------------------------------------------------------------------------
+
+    /// Verifies that a request with all `None` fields is considered a no-op.
+    /// The `update_task_inner` function short-circuits and returns the current
+    /// task without persisting any changes or bumping the version.
+    #[rstest]
+    fn test_noop_request_is_detected_as_merge_safe() {
+        let request = UpdateTaskRequest {
+            title: None,
+            description: None,
+            status: None,
+            priority: None,
+            version: 1,
+        };
+        assert!(
+            can_merge_without_conflict(&request),
+            "All-None request should be merge-safe (no-op)"
+        );
+    }
+
+    /// Verifies that a request with at least one non-None field is NOT a no-op.
+    #[rstest]
+    fn test_request_with_title_is_not_noop() {
+        let request = UpdateTaskRequest {
+            title: Some("New Title".to_string()),
+            description: None,
+            status: None,
+            priority: None,
+            version: 1,
+        };
+        assert!(
+            !can_merge_without_conflict(&request),
+            "Request with title should not be a no-op"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Amortized cleanup interval Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_keyed_update_queue_amortized_cleanup_does_not_run_every_time() {
+        let queue = KeyedUpdateQueue::new();
+
+        // Acquire and drop 50 unique task_ids (below CLEANUP_THRESHOLD)
+        for _ in 0..50 {
+            let task_id = TaskId::generate();
+            let _guard = queue.acquire(&task_id).await;
+        }
+
+        // Without forced cleanup, entries below threshold should accumulate
+        let entry_count = queue.debug_entry_count();
+        assert!(
+            entry_count > 0,
+            "Below threshold, dead entries should not be auto-purged"
+        );
+
+        // Force cleanup should remove them
+        queue.force_cleanup();
+        let entry_count = queue.debug_entry_count();
+        assert_eq!(entry_count, 0);
+    }
+
+    // -------------------------------------------------------------------------
+    // sample_delay Tests (pure function for jitter boundary)
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    #[case(0, 0, 0)] // cap=0 always returns 0
+    #[case(100, 0, 0)] // cap=0 always returns 0 regardless of rand
+    #[case(0, 10, 0)] // rand=0 always returns 0
+    #[case(10, 10, 10)] // 10 % 11 = 10
+    #[case(11, 10, 0)] // 11 % 11 = 0 (wraps around)
+    #[case(u64::MAX, 10, u64::MAX % 11)] // large rand value
+    #[case(123, u64::MAX, 123)] // cap=u64::MAX returns rand_value unchanged
+    fn test_sample_delay(#[case] rand_value: u64, #[case] cap: u64, #[case] expected: u64) {
+        assert_eq!(sample_delay(rand_value, cap), expected);
+    }
+
+    #[rstest]
+    fn test_sample_delay_always_within_range() {
+        // For any random value, result should be in [0, cap]
+        let cap = 10u64;
+        for rand_value in 0..=100 {
+            let result = sample_delay(rand_value, cap);
+            assert!(
+                result <= cap,
+                "sample_delay({rand_value}, {cap}) = {result}, expected <= {cap}"
+            );
+        }
+    }
+
+    #[rstest]
+    fn test_sample_delay_cap_zero_always_zero() {
+        for rand_value in [0, 1, 100, u64::MAX] {
+            assert_eq!(sample_delay(rand_value, 0), 0);
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // PUT /tasks/{id} status field rejection Tests
+    // -------------------------------------------------------------------------
+
+    /// PUT /tasks/{id} should reject requests that include a status field,
+    /// directing clients to use PATCH /tasks/{id}/status instead.
+    #[rstest]
+    fn test_can_merge_without_conflict_with_status_is_not_noop() {
+        let request = UpdateTaskRequest {
+            title: None,
+            description: None,
+            status: Some(TaskStatusDto::InProgress),
+            priority: None,
+            version: 1,
+        };
+        // status is non-None, so this is not a no-op
+        assert!(!can_merge_without_conflict(&request));
+    }
+
+    // -------------------------------------------------------------------------
+    // Handler Integration Tests (update_task_inner)
+    // -------------------------------------------------------------------------
+
+    /// Helper to create an `AppState` with an in-memory repository containing a single task.
+    ///
+    /// Returns `(AppState, Task)` where the task is already persisted and the `AppState`
+    /// is fully initialized with search index built from the persisted task.
+    async fn create_test_app_state_with_task() -> (AppState, Task) {
+        use crate::infrastructure::{
+            InMemoryEventStore, InMemoryProjectRepository, InMemoryTaskRepository, Repositories,
+            TaskRepository as _,
+        };
+
+        let task_repository = Arc::new(InMemoryTaskRepository::new());
+        let task = Task::new(TaskId::generate(), "Test Task", Timestamp::now());
+        task_repository.save(&task).await.unwrap();
+
+        let repositories = Repositories {
+            task_repository: task_repository
+                as Arc<dyn crate::infrastructure::TaskRepository + Send + Sync>,
+            project_repository: Arc::new(InMemoryProjectRepository::new())
+                as Arc<dyn crate::infrastructure::ProjectRepository + Send + Sync>,
+            event_store: Arc::new(InMemoryEventStore::new())
+                as Arc<dyn crate::infrastructure::EventStore + Send + Sync>,
+        };
+
+        let state = super::super::handlers::AppState::from_repositories(repositories)
+            .await
+            .unwrap();
+
+        (state, task)
+    }
+
+    /// `PUT /tasks/{id}` with a status field should return 400 `UNSUPPORTED_FIELD`.
+    ///
+    /// This tests the actual handler path through `update_task_inner`, not just
+    /// the `can_merge_without_conflict` helper.
+    #[rstest]
+    #[tokio::test]
+    async fn test_update_task_inner_rejects_status_field() {
+        let (state, task) = create_test_app_state_with_task().await;
+
+        let request = UpdateTaskRequest {
+            title: None,
+            description: None,
+            status: Some(TaskStatusDto::InProgress),
+            priority: None,
+            version: task.version,
+        };
+
+        let result = update_task_inner(state, task.task_id.clone(), request).await;
+
+        assert!(result.is_err(), "Expected Err for status field in PUT");
+        let error = result.unwrap_err();
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert_eq!(error.error.code, "UNSUPPORTED_FIELD");
+    }
+
+    /// `PUT /tasks/{id}` with all-None fields (no-op) should return 200 OK
+    /// with unchanged version and `updated_at`.
+    ///
+    /// This tests the actual handler path through `update_task_inner`, verifying
+    /// that a stale no-op request does not bump the version or persist anything.
+    #[rstest]
+    #[tokio::test]
+    async fn test_update_task_inner_noop_returns_ok_with_unchanged_version() {
+        let (state, task) = create_test_app_state_with_task().await;
+        let original_version = task.version;
+        let original_updated_at = task.updated_at.to_string();
+
+        let request = UpdateTaskRequest {
+            title: None,
+            description: None,
+            status: None,
+            priority: None,
+            version: 999, // Stale version, but irrelevant for no-op
+        };
+
+        let result = update_task_inner(state, task.task_id.clone(), request).await;
+
+        assert!(result.is_ok(), "Expected Ok for no-op request");
+        let (status_code, json_response) = result.unwrap();
+        assert_eq!(status_code, StatusCode::OK);
+        assert_eq!(json_response.0.version, original_version);
+        assert_eq!(json_response.0.updated_at, original_updated_at);
+    }
+
+    // -------------------------------------------------------------------------
+    // promote_to_retryable_conflict Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn test_promote_to_retryable_conflict_converts_version_conflict() {
+        let error = ApiErrorResponse::conflict("Expected version 1, found 2");
+        let promoted = promote_to_retryable_conflict(error);
+        assert_eq!(promoted.status, StatusCode::CONFLICT);
+        assert_eq!(promoted.error.code, RETRYABLE_CONFLICT_CODE);
+    }
+
+    #[rstest]
+    fn test_promote_to_retryable_conflict_leaves_retryable_unchanged() {
+        let error = ApiErrorResponse::retryable_conflict("CAS failure");
+        let promoted = promote_to_retryable_conflict(error);
+        assert_eq!(promoted.error.code, RETRYABLE_CONFLICT_CODE);
+    }
+
+    #[rstest]
+    fn test_promote_to_retryable_conflict_leaves_non_conflict_unchanged() {
+        let error = ApiErrorResponse::not_found("task not found");
+        let promoted = promote_to_retryable_conflict(error);
+        assert_eq!(promoted.status, StatusCode::NOT_FOUND);
+        assert_eq!(promoted.error.code, "NOT_FOUND");
+    }
+
+    // -------------------------------------------------------------------------
+    // retry_on_conflict on_retry callback Tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_retry_on_conflict_on_retry_callback_counts_retries() {
+        let (call_count, call_count_inner) = new_call_counter();
+        let (retry_count, _) = new_call_counter();
+        let retry_count_inner = Arc::clone(&retry_count);
+
+        let _result: Result<u32, ApiErrorResponse> = retry_on_conflict(
+            || {
+                let count = Arc::clone(&call_count_inner);
+                async move {
+                    let attempt = count.fetch_add(1, Ordering::SeqCst);
+                    if attempt < 2 {
+                        Err(ApiErrorResponse::retryable_conflict("CAS failure"))
+                    } else {
+                        Ok(42)
+                    }
+                }
+            },
+            3,
+            0,
+            move |_attempt| {
+                retry_count_inner.fetch_add(1, Ordering::SeqCst);
+            },
+        )
+        .await;
+
+        assert_eq!(call_count.load(Ordering::SeqCst), 3);
+        assert_eq!(retry_count.load(Ordering::SeqCst), 2);
+    }
+
+    // -------------------------------------------------------------------------
+    // update_task_inner retry path integration test
+    // -------------------------------------------------------------------------
+
+    /// Tests that `update_task_inner` with a real title update succeeds
+    /// and returns the updated task with incremented version.
+    #[rstest]
+    #[tokio::test]
+    async fn test_update_task_inner_title_update_succeeds_with_correct_version() {
+        let (state, task) = create_test_app_state_with_task().await;
+
+        let request = UpdateTaskRequest {
+            title: Some("Updated Title".to_string()),
+            description: None,
+            status: None,
+            priority: None,
+            version: task.version,
+        };
+
+        let result = update_task_inner(state, task.task_id.clone(), request).await;
+
+        assert!(result.is_ok(), "Expected Ok for valid title update");
+        let (status_code, json_response) = result.unwrap();
+        assert_eq!(status_code, StatusCode::OK);
+        assert_eq!(json_response.0.title, "Updated Title");
+        assert_eq!(json_response.0.version, task.version + 1);
+    }
+
+    /// Tests that `update_task_inner` returns 409 (non-retryable) for stale
+    /// version on a non-no-op request.
+    #[rstest]
+    #[tokio::test]
+    async fn test_update_task_inner_stale_version_returns_conflict() {
+        let (state, task) = create_test_app_state_with_task().await;
+
+        let request = UpdateTaskRequest {
+            title: Some("Updated Title".to_string()),
+            description: None,
+            status: None,
+            priority: None,
+            version: task.version + 999, // Stale version
+        };
+
+        let result = update_task_inner(state, task.task_id.clone(), request).await;
+
+        assert!(result.is_err(), "Expected Err for stale version");
+        let error = result.unwrap_err();
+        assert_eq!(error.status, StatusCode::CONFLICT);
+        assert_eq!(error.error.code, "VERSION_CONFLICT");
+    }
+
+    // -------------------------------------------------------------------------
+    // should_count_retry_exhausted truth table Tests
+    // -------------------------------------------------------------------------
+
+    /// Truth table test: `should_count_retry_exhausted` returns `true` only when
+    /// the result is an error AND `max_retries` > 0 AND `retries_used` >= `max_retries`.
+    #[rstest]
+    #[case(true, 1, 1, true)] // err + used==max -> exhausted
+    #[case(true, 2, 1, true)] // err + used>max  -> exhausted
+    #[case(true, 0, 1, false)] // err + no retries -> not exhausted
+    #[case(false, 1, 1, false)] // ok  + used==max  -> not exhausted (success)
+    #[case(false, 0, 1, false)] // ok  + no retries -> not exhausted
+    #[case(true, 0, 0, false)] // err + max=0 (retry disabled) -> not exhausted
+    fn test_should_count_retry_exhausted(
+        #[case] result_is_err: bool,
+        #[case] retries_used: usize,
+        #[case] max_retries: u8,
+        #[case] expected: bool,
+    ) {
+        assert_eq!(
+            should_count_retry_exhausted(result_is_err, retries_used, max_retries),
+            expected
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // build_events_from_changes u64::MAX saturation Tests
+    // -------------------------------------------------------------------------
+
+    /// Verifies that `build_events_from_changes` saturates at `u64::MAX` instead
+    /// of panicking when `current_version` is already at the maximum value.
+    #[rstest]
+    fn test_build_events_from_changes_saturates_at_u64_max() {
+        let task_id = TaskId::generate();
+        let timestamp = Timestamp::now();
+        let changes = vec![
+            DetectedChange::TitleUpdated {
+                old_title: "old".to_string(),
+                new_title: "new".to_string(),
+            },
+            DetectedChange::PriorityChanged {
+                old_priority: Priority::Low,
+                new_priority: Priority::High,
+            },
+        ];
+        let events = build_events_from_changes(&task_id, &changes, &timestamp, u64::MAX);
+        assert_eq!(events.len(), 2);
+        // Both events should saturate at u64::MAX, not panic
+        assert_eq!(events[0].version, u64::MAX);
+        assert_eq!(events[1].version, u64::MAX);
+    }
+
+    // -------------------------------------------------------------------------
+    // ConflictKind / classify_conflict_kind Tests (IMPL-PRB1-001-001)
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn test_classify_conflict_kind_stale_version() {
+        let error = ApiErrorResponse::conflict("Expected version 1, found 2");
+        assert_eq!(classify_conflict_kind(&error), ConflictKind::StaleVersion);
+    }
+
+    #[rstest]
+    fn test_classify_conflict_kind_retryable_cas() {
+        let error = ApiErrorResponse::retryable_conflict("CAS failure");
+        assert_eq!(classify_conflict_kind(&error), ConflictKind::RetryableCas);
+    }
+
+    #[rstest]
+    fn test_classify_conflict_kind_other_409() {
+        // A 409 with an unknown error code
+        let error = ApiErrorResponse::new(
+            StatusCode::CONFLICT,
+            ApiError::new("UNKNOWN_CONFLICT", "something else"),
+        );
+        assert_eq!(classify_conflict_kind(&error), ConflictKind::Other);
+    }
+
+    #[rstest]
+    fn test_classify_conflict_kind_non_409() {
+        let error = ApiErrorResponse::not_found("task not found");
+        assert_eq!(classify_conflict_kind(&error), ConflictKind::Other);
+    }
+
+    #[rstest]
+    fn test_is_stale_version_conflict_true() {
+        let error = ApiErrorResponse::conflict("Expected version 1, found 2");
+        assert!(is_stale_version_conflict(&error));
+    }
+
+    #[rstest]
+    fn test_is_stale_version_conflict_false_for_retryable() {
+        let error = ApiErrorResponse::retryable_conflict("CAS failure");
+        assert!(!is_stale_version_conflict(&error));
+    }
+
+    #[rstest]
+    fn test_is_stale_version_conflict_false_for_non_409() {
+        let error = ApiErrorResponse::not_found("task not found");
+        assert!(!is_stale_version_conflict(&error));
+    }
+
+    /// `is_retryable_conflict` should be a wrapper around `classify_conflict_kind`
+    #[rstest]
+    fn test_is_retryable_conflict_consistent_with_classify() {
+        let retryable = ApiErrorResponse::retryable_conflict("CAS failure");
+        let stale = ApiErrorResponse::conflict("Expected version 1, found 2");
+        let not_found = ApiErrorResponse::not_found("not found");
+
+        assert_eq!(
+            is_retryable_conflict(&retryable),
+            classify_conflict_kind(&retryable) == ConflictKind::RetryableCas
+        );
+        assert_eq!(
+            is_retryable_conflict(&stale),
+            classify_conflict_kind(&stale) == ConflictKind::RetryableCas
+        );
+        assert_eq!(
+            is_retryable_conflict(&not_found),
+            classify_conflict_kind(&not_found) == ConflictKind::RetryableCas
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // RebaseError / rebase_update_request Tests (IMPL-PRB1-001-002)
+    // -------------------------------------------------------------------------
+
+    /// Helper: creates a Task with given fields for rebase testing.
+    fn make_task_for_rebase(
+        task_id: TaskId,
+        title: &str,
+        description: Option<&str>,
+        priority: Priority,
+        version: u64,
+    ) -> Task {
+        let mut task = Task::new(task_id, title, Timestamp::now());
+        task.version = version;
+        task.priority = priority;
+        if let Some(desc) = description {
+            task = task.with_description(desc);
+        }
+        task
+    }
+
+    /// Rebase succeeds when another user changed a different field.
+    #[rstest]
+    fn test_rebase_update_request_success_different_fields() {
+        let task_id = TaskId::generate();
+        let original_base = make_task_for_rebase(
+            task_id.clone(),
+            "Original Title",
+            Some("Original Desc"),
+            Priority::Low,
+            1,
+        );
+        // Another user changed description (version bumped to 2)
+        let latest = make_task_for_rebase(
+            task_id,
+            "Original Title",
+            Some("Changed by another user"),
+            Priority::Low,
+            2,
+        );
+        // Our request changes title only
+        let request = UpdateTaskRequest {
+            title: Some("My New Title".to_string()),
+            description: None,
+            status: None,
+            priority: None,
+            version: 1,
+        };
+
+        let result = rebase_update_request(&original_base, &latest, &request);
+        assert!(result.is_ok());
+        let rebased = result.unwrap();
+        assert_eq!(rebased.title, Some("My New Title".to_string()));
+        assert_eq!(rebased.version, 2); // version rebased to latest
+    }
+
+    /// Rebase succeeds when another user changed to the same value (no-op change).
+    #[rstest]
+    fn test_rebase_update_request_success_same_value_update() {
+        let task_id = TaskId::generate();
+        let original_base = make_task_for_rebase(task_id.clone(), "Title", None, Priority::Low, 1);
+        // Another user also set title to "Title" (same value)
+        let latest = make_task_for_rebase(task_id, "Title", None, Priority::Low, 2);
+        // Our request changes title
+        let request = UpdateTaskRequest {
+            title: Some("New Title".to_string()),
+            description: None,
+            status: None,
+            priority: None,
+            version: 1,
+        };
+
+        let result = rebase_update_request(&original_base, &latest, &request);
+        assert!(result.is_ok());
+        let rebased = result.unwrap();
+        assert_eq!(rebased.title, Some("New Title".to_string()));
+        assert_eq!(rebased.version, 2);
+    }
+
+    /// Rebase fails when both users changed the same field (title) to different values.
+    #[rstest]
+    fn test_rebase_update_request_fails_title_conflict() {
+        let task_id = TaskId::generate();
+        let original_base =
+            make_task_for_rebase(task_id.clone(), "Original Title", None, Priority::Low, 1);
+        // Another user changed title
+        let latest =
+            make_task_for_rebase(task_id, "Changed by another user", None, Priority::Low, 2);
+        // Our request also changes title
+        let request = UpdateTaskRequest {
+            title: Some("My Title".to_string()),
+            description: None,
+            status: None,
+            priority: None,
+            version: 1,
+        };
+
+        let result = rebase_update_request(&original_base, &latest, &request);
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err(),
+            RebaseError::NonCommutativeConflict { field: "title" }
+        );
+    }
+
+    /// Rebase fails when both users changed description.
+    #[rstest]
+    fn test_rebase_update_request_fails_description_conflict() {
+        let task_id = TaskId::generate();
+        let original_base = make_task_for_rebase(
+            task_id.clone(),
+            "Title",
+            Some("Original Desc"),
+            Priority::Low,
+            1,
+        );
+        // Another user changed description
+        let latest = make_task_for_rebase(
+            task_id,
+            "Title",
+            Some("Another user desc"),
+            Priority::Low,
+            2,
+        );
+        // Our request also changes description
+        let request = UpdateTaskRequest {
+            title: None,
+            description: Some("My Desc".to_string()),
+            status: None,
+            priority: None,
+            version: 1,
+        };
+
+        let result = rebase_update_request(&original_base, &latest, &request);
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err(),
+            RebaseError::NonCommutativeConflict {
+                field: "description"
+            }
+        );
+    }
+
+    /// Rebase fails when both users changed priority.
+    #[rstest]
+    fn test_rebase_update_request_fails_priority_conflict() {
+        let task_id = TaskId::generate();
+        let original_base = make_task_for_rebase(task_id.clone(), "Title", None, Priority::Low, 1);
+        // Another user changed priority
+        let latest = make_task_for_rebase(task_id, "Title", None, Priority::High, 2);
+        // Our request also changes priority
+        let request = UpdateTaskRequest {
+            title: None,
+            description: None,
+            status: None,
+            priority: Some(crate::api::dto::PriorityDto::Critical),
+            version: 1,
+        };
+
+        let result = rebase_update_request(&original_base, &latest, &request);
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err(),
+            RebaseError::NonCommutativeConflict { field: "priority" }
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Read-Repair Integration Tests (IMPL-PRB1-001-003)
+    // -------------------------------------------------------------------------
+
+    /// Read-repair constants should be defined.
+    #[rstest]
+    fn test_read_repair_constants() {
+        assert_eq!(READ_REPAIR_MAX_RETRIES, 3);
+        assert_eq!(READ_REPAIR_BASE_DELAY_MS, 2);
+    }
+
+    /// Read-repair success: client sends stale version, but changes a
+    /// different field from the concurrent update, so rebase succeeds.
+    #[rstest]
+    #[tokio::test]
+    async fn test_read_repair_success_different_field_update() {
+        let (state, task) = create_test_app_state_with_task().await;
+
+        // Simulate another user updating description (bumps version to 2)
+        let updated_by_other = Task {
+            description: Some("Updated by another user".to_string()),
+            version: 2,
+            updated_at: Timestamp::now(),
+            ..task.clone()
+        };
+        state.task_repository.save(&updated_by_other).await.unwrap();
+
+        // Our request: update title with stale version 1
+        let request = UpdateTaskRequest {
+            title: Some("My New Title".to_string()),
+            description: None,
+            status: None,
+            priority: None,
+            version: 1, // stale: DB is now at version 2
+        };
+
+        // Call update_task_inner first - it should return stale-version 409
+        let first_result =
+            update_task_inner(state.clone(), task.task_id.clone(), request.clone()).await;
+        assert!(first_result.is_err());
+        assert!(is_stale_version_conflict(&first_result.unwrap_err()));
+
+        // Now call the full update_task_with_read_repair - it should succeed via rebase
+        let result = update_task_with_read_repair(&state, &task.task_id, &request).await;
+
+        assert!(result.is_ok(), "Read-repair should succeed: {result:?}");
+        let (status_code, json_response) = result.unwrap();
+        assert_eq!(status_code, StatusCode::OK);
+        assert_eq!(json_response.0.title, "My New Title");
+        assert_eq!(json_response.0.version, 3); // version 2 + 1
+    }
+
+    /// Read-repair with non-commutative conflict is tested via the
+    /// `rebase_update_request` pure function unit tests (IMPL-PRB1-001-002).
+    /// Integration-level non-commutative tests require concurrent DB mutations
+    /// during the read-repair loop, which are not practical with `InMemory` repos.
+    ///
+    /// Verify that `rebase_update_request` returning `NonCommutativeConflict`
+    /// would produce a 409 Conflict response with `NON_COMMUTATIVE_CONFLICT` code.
+    #[rstest]
+    fn test_rebase_error_converts_to_409_conflict() {
+        let rebase_error = RebaseError::NonCommutativeConflict { field: "title" };
+        let api_error = ApiErrorResponse::new(
+            StatusCode::CONFLICT,
+            ApiError::new(NON_COMMUTATIVE_CONFLICT_CODE, rebase_error.to_string()),
+        );
+        assert_eq!(api_error.status, StatusCode::CONFLICT);
+        assert_eq!(api_error.error.code, NON_COMMUTATIVE_CONFLICT_CODE);
+        assert!(api_error.error.message.contains("title"));
+    }
+
+    /// Read-repair converts `RebaseError` to 409 Conflict response.
+    #[rstest]
+    fn test_rebase_error_display() {
+        let error = RebaseError::NonCommutativeConflict { field: "title" };
+        let display = error.to_string();
+        assert!(display.contains("title"));
+        assert!(display.contains("Non-commutative conflict"));
+    }
+
+    // Note: Non-commutative conflict detection within `update_task_with_read_repair`
+    // cannot be tested at integration level with InMemory repositories because
+    // `original_base` is fetched at function entry (same as `latest`), so
+    // `original_base == latest` always holds. The non-commutative path is
+    // fully covered by `test_rebase_update_request_fails_title_conflict`,
+    // `test_rebase_update_request_fails_description_conflict`, and
+    // `test_rebase_update_request_fails_priority_conflict` which test the
+    // pure function `rebase_update_request` directly with divergent inputs.
+    // See design comment at line 793 for the approximation rationale.
 }

@@ -1,0 +1,81 @@
+# Issue: tasks_update 競合で成功率が低い
+# 実装時に発見された、将来対応が必要な項目
+
+deferred_features:
+  - id: tasks_update_conflict_rate
+    name: "tasks_update 競合で成功率が低い"
+    discovered_date: "2026-01-25"
+    priority: high
+    category: bug
+    labels:
+      - "effect"
+      - "api"
+      - "performance"
+      - "priority: high"
+
+    # 問題の説明
+    problem:
+      summary: "tasks_update が 409 競合で高い失敗率になっている"
+      details: |
+        - tasks_update の実行で Non-2xx が 65.6% 発生している
+          - benches/results/api-profiling-all-85e0ab30b9ea0571c1dfb324e8ce9fe4d4e49c78/tasks_update/benchmark/wrk/tasks_update.txt
+        - tasks_update_conflict でも Errors 33.2% を記録
+          - benches/results/api-profiling-all-85e0ab30b9ea0571c1dfb324e8ce9fe4d4e49c78/tasks_update_conflict/benchmark/wrk/tasks_update.txt
+        - Retry GET/PUT が 409 で失敗し、再試行しても成功しないパターンが多数
+        - 成功率の低さにより実運用の更新系 SLO が満たせない
+
+    # 解決策の提案
+    solution:
+      approach: "競合制御と再試行戦略を見直し、更新成功率を実運用水準まで引き上げる"
+      options:
+        - name: "バージョン付き条件更新 + バックオフ再試行"
+          description: |
+            UPDATE ... WHERE id=? AND version=? の条件更新を標準化し、
+            競合時は指数バックオフ + ジッターで再試行する。
+          pros:
+            - 競合時の成功率を上げやすい
+            - 実装変更が比較的小さい
+          cons:
+            - 高競合時のレイテンシ増加
+            - 再試行回数の設計が必要
+
+        - name: "ID 単位の更新直列化（シャーディングキュー）"
+          description: |
+            task_id ごとに更新を直列化し、同一 ID の競合を根本的に排除する。
+          pros:
+            - 409 競合をほぼ排除できる
+            - 失敗率を抑制しやすい
+          cons:
+            - 実装コストが高い
+            - スループット上限が下がる可能性
+
+        - name: "DB ロック（FOR UPDATE / advisory lock）"
+          description: |
+            更新時に明示的にロックを取得して競合を回避する。
+          pros:
+            - 一貫性が高い
+            - アプリ側の競合制御が簡潔
+          cons:
+            - 待ち時間が増える
+            - ホットキーで詰まりやすい
+
+      recommended: "バージョン付き条件更新 + バックオフ再試行"
+      estimated_complexity: medium
+
+    # 参考情報
+    references:
+      - "benches/results/api-profiling-all-85e0ab30b9ea0571c1dfb324e8ce9fe4d4e49c78/tasks_update/benchmark/summary.txt"
+      - "benches/results/api-profiling-all-85e0ab30b9ea0571c1dfb324e8ce9fe4d4e49c78/tasks_update_conflict/benchmark/summary.txt"
+      - "benches/results/api-profiling-all-85e0ab30b9ea0571c1dfb324e8ce9fe4d4e49c78/tasks_update/benchmark/meta/tasks_update.json"
+      - "benches/results/api-profiling-all-85e0ab30b9ea0571c1dfb324e8ce9fe4d4e49c78/tasks_update_conflict/benchmark/meta/tasks_update.json"
+
+    # 関連する要件・実装
+    related:
+      requirement_id: null
+      plan_id: null
+
+    # GitHub Issue 情報（作成後に追記）
+    github_issue:
+      number: null
+      url: null
+      created: false

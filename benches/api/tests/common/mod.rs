@@ -70,6 +70,11 @@ pub fn create_test_app_state() -> AppState {
         applied_config: AppliedConfig::default(),
         search_index_rcu_retries: Arc::new(AtomicUsize::new(0)),
         search_index_writer: None,
+        keyed_update_queue: Arc::new(
+            task_management_benchmark_api::api::transaction::KeyedUpdateQueue::new(),
+        ),
+        retry_attempts: Arc::new(AtomicUsize::new(0)),
+        retry_exhausted: Arc::new(AtomicUsize::new(0)),
     }
 }
 
@@ -122,6 +127,11 @@ pub fn create_test_app_state_with_fail_injection(
         applied_config: AppliedConfig::default(),
         search_index_rcu_retries: Arc::new(AtomicUsize::new(0)),
         search_index_writer: None,
+        keyed_update_queue: Arc::new(
+            task_management_benchmark_api::api::transaction::KeyedUpdateQueue::new(),
+        ),
+        retry_attempts: Arc::new(AtomicUsize::new(0)),
+        retry_exhausted: Arc::new(AtomicUsize::new(0)),
     }
 }
 

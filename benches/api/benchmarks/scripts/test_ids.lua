@@ -1,12 +1,7 @@
--- Test IDs for benchmarking with version management
--- REQ-UPDATE-IDS-001: ID/version pair management for conflict handling
-
 local M = {}
 
 local ID_POOL_SIZE = tonumber(os.getenv("ID_POOL_SIZE")) or 10
 local SEED = tonumber(os.getenv("SEED"))
-
--- Create independent RNG for ID generation to avoid affecting common.lua random_*
 local id_rng_state = SEED or 42
 
 local static_task_ids = {
@@ -26,8 +21,6 @@ local function bit_rshift(a, n)
     return math.floor(a / (2 ^ n))
 end
 
--- Simple LCG (Linear Congruential Generator) for reproducible ID generation
--- Does not affect global math.random() state
 local function next_id_random()
     id_rng_state = (id_rng_state * 1103515245 + 12345) % 0x100000000
     return id_rng_state
@@ -36,21 +29,19 @@ end
 local function generate_task_id(index)
     if index <= #static_task_ids then return static_task_ids[index] end
 
-    -- Use independent RNG for reproducibility without affecting common.lua random_*
     local rand_base = next_id_random()
     local seq = index - #static_task_ids
-    local part1 = (rand_base + seq * 0x12345) % 0x100000000
-    local part2 = (rand_base + seq * 0x67) % 0x10000
-    local part3 = 0x7000 + (bit_rshift(seq, 8) % 0x1000)
-    local part4 = 0x8000 + (seq % 0x4000)
-    local part5 = (index * 0x123456 + rand_base) % 0x1000000000000
-
-    return string.format("%08x-%04x-%04x-%04x-%012x", part1, part2, part3, part4, part5)
+    return string.format("%08x-%04x-%04x-%04x-%012x",
+        (rand_base + seq * 0x12345) % 0x100000000,
+        (rand_base + seq * 0x67) % 0x10000,
+        0x7000 + (bit_rshift(seq, 8) % 0x1000),
+        0x8000 + (seq % 0x4000),
+        (index * 0x123456 + rand_base) % 0x1000000000000)
 end
 
 local task_states = {}
 for i = 1, ID_POOL_SIZE do
-    table.insert(task_states, { id = generate_task_id(i), version = 1 })
+    table.insert(task_states, { id = generate_task_id(i), version = 1, status = "pending" })
 end
 
 local project_ids = {
@@ -89,7 +80,7 @@ function M.get_task_state(index)
     local actual_index, err = normalize_index(index, #task_states)
     if err then return nil, err end
     local state = task_states[actual_index]
-    return { id = state.id, version = state.version }, nil
+    return { id = state.id, version = state.version, status = state.status }, nil
 end
 
 function M.increment_version(index)
@@ -108,8 +99,26 @@ function M.set_version(index, version)
     return true, nil
 end
 
+local VALID_TASK_STATUS = { pending = true, in_progress = true, completed = true, cancelled = true }
+
+function M.set_version_and_status(index, version, status)
+    local actual_index, index_err = normalize_index(index, #task_states)
+    if index_err then return nil, index_err end
+    local valid, version_err = validate_version(version)
+    if not valid then return nil, version_err end
+    if type(status) ~= "string" or not VALID_TASK_STATUS[status] then
+        return nil, "invalid status: " .. tostring(status)
+    end
+    task_states[actual_index].version = version
+    task_states[actual_index].status = status
+    return true, nil
+end
+
 function M.reset_versions()
-    for i = 1, #task_states do task_states[i].version = 1 end
+    for i = 1, #task_states do
+        task_states[i].version = 1
+        task_states[i].status = "pending"
+    end
 end
 
 function M.get_task_count()

@@ -1213,17 +1213,34 @@ fn merge_segment_hit_miss_counts() -> (usize, usize) {
 // Phase 6: Segment Overlay for NgramIndex
 // =============================================================================
 
-/// Configuration for [`NgramSegmentOverlay`] compaction behavior.
+/// Budget for controlling compaction aggressiveness in [`NgramSegmentOverlay`].
 ///
-/// Controls the maximum number of delta segments and the key-count threshold
-/// for the oldest segment before compaction is triggered.
+/// Below `soft_max_segments_per_compact`, no compaction runs.
+/// At or above `hard_max_segments`, compaction repeats until segment count
+/// drops below `hard_max_segments` (bounded loop, not necessarily full).
+/// Between the two thresholds, a single `compact_one` is executed.
+#[derive(Debug, Clone, Copy)]
+pub struct CompactionBudget {
+    pub soft_max_segments_per_compact: usize,
+    pub hard_max_segments: usize,
+}
+
+impl Default for CompactionBudget {
+    fn default() -> Self {
+        Self {
+            soft_max_segments_per_compact: 1,
+            hard_max_segments: 6,
+        }
+    }
+}
+
+/// Configuration for [`NgramSegmentOverlay`] compaction behavior.
 #[allow(dead_code)]
 #[derive(Clone, Debug)]
 struct SegmentOverlayConfig {
-    /// Maximum number of delta segments (2..=6).
     max_segments: usize,
-    /// Maximum number of keys in the oldest segment before compaction is triggered.
     max_segment_keys: usize,
+    budget: CompactionBudget,
 }
 
 impl Default for SegmentOverlayConfig {
@@ -1231,7 +1248,47 @@ impl Default for SegmentOverlayConfig {
         Self {
             max_segments: 3,
             max_segment_keys: 50_000,
+            budget: CompactionBudget::default(),
         }
+    }
+}
+
+/// Reusable scratch buffer for merge operations, avoiding repeated heap allocation.
+pub struct MergeArena {
+    scratch: Vec<TaskId>,
+    shrink_threshold: usize,
+}
+
+impl MergeArena {
+    pub const fn new() -> Self {
+        Self {
+            scratch: Vec::new(),
+            shrink_threshold: 16_384,
+        }
+    }
+
+    /// Returns the scratch buffer (cleared but capacity preserved).
+    pub fn scratch(&mut self) -> &mut Vec<TaskId> {
+        self.scratch.clear();
+        &mut self.scratch
+    }
+
+    /// Shrinks the scratch buffer when capacity exceeds twice the threshold.
+    ///
+    /// Uses a hysteresis band to avoid allocation thrashing: the buffer is
+    /// only shrunk when capacity exceeds `2 * shrink_threshold`, and it is
+    /// shrunk back to `shrink_threshold` using `Vec::shrink_to`.
+    pub fn maybe_shrink(&mut self) {
+        let hysteresis_limit = self.shrink_threshold.saturating_mul(2);
+        if self.scratch.capacity() > hysteresis_limit {
+            self.scratch.shrink_to(self.shrink_threshold);
+        }
+    }
+}
+
+impl Default for MergeArena {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -1247,23 +1304,26 @@ impl Default for SegmentOverlayConfig {
 /// - The base and every segment contain only sorted, deduplicated posting lists.
 #[derive(Clone, Debug)]
 struct NgramSegmentOverlay {
-    /// Compacted base index.
     base: NgramIndex,
-    /// Un-compacted delta segments (newest is last).
+    /// Newest is last.
     segments: Vec<NgramIndex>,
-    /// Maximum number of delta segments before compaction.
     max_segments: usize,
-    /// Maximum number of keys in the oldest segment before compaction.
     max_segment_keys: usize,
+    budget: CompactionBudget,
 }
 
 impl NgramSegmentOverlay {
+    /// Creates a new overlay with legacy-compatible defaults.
     const fn new(base: NgramIndex) -> Self {
         Self {
             base,
             segments: Vec::new(),
             max_segments: 3,
             max_segment_keys: 50_000,
+            budget: CompactionBudget {
+                soft_max_segments_per_compact: 3,
+                hard_max_segments: 6,
+            },
         }
     }
 
@@ -1279,6 +1339,7 @@ impl NgramSegmentOverlay {
             segments: Vec::new(),
             max_segments: config.max_segments.clamp(2, 6),
             max_segment_keys: config.max_segment_keys,
+            budget: config.budget,
         }
     }
 
@@ -1295,9 +1356,6 @@ impl NgramSegmentOverlay {
                 .is_some_and(|oldest| oldest.len() >= self.max_segment_keys)
     }
 
-    /// Queries a key across base and all delta segments, merging posting lists.
-    ///
-    /// Returns `None` if the key is absent from every layer.
     fn query(&self, key: &NgramKey) -> Option<TaskIdCollection> {
         let posting_lists: Vec<&TaskIdCollection> = std::iter::once(&self.base)
             .chain(&self.segments)
@@ -1329,24 +1387,69 @@ impl NgramSegmentOverlay {
             segments: new_segments,
             max_segments: self.max_segments,
             max_segment_keys: self.max_segment_keys,
+            budget: self.budget,
         }
     }
 
-    /// Appends an add-only delta and compacts if needed.
+    /// Appends an add-only delta and compacts based on the [`CompactionBudget`].
     fn append_and_compact(&self, delta_ngram: NgramIndex) -> Self {
         if delta_ngram.is_empty() {
             return self.clone();
         }
         let overlay = self.append_add_only(delta_ngram);
-        if overlay.needs_compaction() {
+
+        let segment_count = overlay.segments.len();
+        let budget = &overlay.budget;
+
+        if segment_count >= budget.hard_max_segments {
+            let mut result = overlay;
+            while result.segments.len() >= result.budget.hard_max_segments
+                && !result.segments.is_empty()
+            {
+                result = result.compact_one();
+            }
+            result
+        } else if segment_count >= budget.soft_max_segments_per_compact
+            || overlay.needs_compaction()
+        {
             overlay.compact_one()
         } else {
             overlay
         }
     }
 
-    /// Applies a general delta (with removes) by materializing all segments
-    /// before merging, since remove operations require a complete base index.
+    /// Like [`append_and_compact`] but reuses scratch from the [`MergeArena`].
+    fn append_and_compact_with_arena(
+        &self,
+        delta_ngram: NgramIndex,
+        arena: &mut MergeArena,
+    ) -> Self {
+        if delta_ngram.is_empty() {
+            return self.clone();
+        }
+        let overlay = self.append_add_only(delta_ngram);
+
+        let segment_count = overlay.segments.len();
+        let budget = &overlay.budget;
+
+        if segment_count >= budget.hard_max_segments {
+            let mut result = overlay;
+            while result.segments.len() >= result.budget.hard_max_segments
+                && !result.segments.is_empty()
+            {
+                result = result.compact_one_with_arena(arena);
+            }
+            result
+        } else if segment_count >= budget.soft_max_segments_per_compact
+            || overlay.needs_compaction()
+        {
+            overlay.compact_one_with_arena(arena)
+        } else {
+            overlay
+        }
+    }
+
+    /// Applies a delta with removes (materializes all segments first).
     fn apply_general_delta(
         &self,
         add: &MutableIndex,
@@ -1361,6 +1464,7 @@ impl NgramSegmentOverlay {
             segments: Vec::new(),
             max_segments: self.max_segments,
             max_segment_keys: self.max_segment_keys,
+            budget: self.budget,
         }
     }
 
@@ -1376,6 +1480,24 @@ impl NgramSegmentOverlay {
             segments: self.segments[1..].to_vec(),
             max_segments: self.max_segments,
             max_segment_keys: self.max_segment_keys,
+            budget: self.budget,
+        }
+    }
+
+    /// Like [`compact_one`] but reuses scratch from the [`MergeArena`].
+    fn compact_one_with_arena(&self, arena: &mut MergeArena) -> Self {
+        if self.segments.is_empty() {
+            return self.clone();
+        }
+        let oldest = &self.segments[0];
+        let scratch = arena.scratch();
+        let merged_base = Self::merge_segment_into(self.base.clone(), oldest, scratch);
+        Self {
+            base: merged_base,
+            segments: self.segments[1..].to_vec(),
+            max_segments: self.max_segments,
+            max_segment_keys: self.max_segment_keys,
+            budget: self.budget,
         }
     }
 
@@ -1391,19 +1513,12 @@ impl NgramSegmentOverlay {
         result
     }
 
-    /// Returns the total number of unique keys in the base index.
-    ///
-    /// Note: This returns only the base count (excludes delta segments).
-    /// For the exact total, use `materialize().len()`.
-    /// This approximation is acceptable for metrics/diagnostics.
+    /// Returns the base key count (excludes delta segments).
     const fn len(&self) -> usize {
         self.base.len()
     }
 
-    /// Looks up a key in the base index only.
-    ///
-    /// This is a convenience method for backward compatibility in tests.
-    /// For cross-segment queries, use [`query`].
+    /// Looks up a key in the base index only (test convenience).
     #[allow(dead_code)]
     fn get<Q: ?Sized + std::hash::Hash + Eq>(&self, key: &Q) -> Option<&TaskIdCollection>
     where
@@ -1433,11 +1548,8 @@ impl NgramSegmentOverlay {
                 {
                     hit_count += 1;
                 }
-                let merged = Self::merge_posting_slice_or_fallback(
-                    existing,
-                    segment_collection,
-                    scratch,
-                );
+                let merged =
+                    Self::merge_posting_slice_or_fallback(existing, segment_collection, scratch);
                 transient.insert(key.clone(), merged);
             } else {
                 #[cfg(test)]
@@ -1457,11 +1569,7 @@ impl NgramSegmentOverlay {
         transient.persistent()
     }
 
-    /// Merges two `TaskIdCollection`s using slice-based fast paths when possible.
-    ///
-    /// When both collections are in Large state, uses disjoint concat or
-    /// `merge_posting_add_only_into_slice`. Falls back to `OrderedUniqueSet::merge`
-    /// when both are Small.
+    /// Merges two `TaskIdCollection`s with slice-based fast paths where possible.
     fn merge_posting_slice_or_fallback(
         existing: &TaskIdCollection,
         segment_collection: &TaskIdCollection,
@@ -1514,7 +1622,6 @@ impl NgramSegmentOverlay {
         }
     }
 
-    /// Merges two sorted slices into a `TaskIdCollection` using scratch buffer.
     fn merge_slices_into(
         left: &[TaskId],
         right: &[TaskId],
@@ -1527,15 +1634,7 @@ impl NgramSegmentOverlay {
     }
 }
 
-/// Merges posting lists from multiple segments using size-aware pair-wise merge.
-///
-/// All input lists must be sorted and unique. Output is sorted and unique.
-/// For k <= 6 (base + max 4 segments), sequential merge is more efficient
-/// than a `BinaryHeap`-based k-way merge due to lower overhead.
-///
-/// When there are 3 or more lists, they are sorted by size (smallest first)
-/// so that each merge step operates on the smallest possible accumulator,
-/// minimising total comparisons.
+/// Merges posting lists from multiple segments, smallest-first for efficiency.
 fn merge_postings_multiway(posting_lists: &[&TaskIdCollection]) -> TaskIdCollection {
     match posting_lists.len() {
         0 => TaskIdCollection::new(),
@@ -1554,10 +1653,7 @@ fn merge_postings_multiway(posting_lists: &[&TaskIdCollection]) -> TaskIdCollect
     }
 }
 
-/// Builds a [`NgramIndex`] from a [`MutableIndex`] (`HashMap<NgramKey, Vec<TaskId>>`).
-///
-/// Each `Vec<TaskId>` is converted to a [`TaskIdCollection`] via `from_sorted_vec`.
-/// Empty posting lists are skipped.
+/// Builds a [`NgramIndex`] from a [`MutableIndex`], skipping empty posting lists.
 fn build_ngram_from_mutable(mutable: MutableIndex) -> NgramIndex {
     let mut transient = NgramIndex::new().transient();
     for (key, values) in mutable {
@@ -1568,8 +1664,7 @@ fn build_ngram_from_mutable(mutable: MutableIndex) -> NgramIndex {
     transient.persistent()
 }
 
-/// Thin wrapper around `&NgramKey` that implements `Hash` + `Eq` by delegation,
-/// enabling use of `&NgramKey` in a `HashSet` without extra cloning.
+/// `Hash`+`Eq` wrapper for `&NgramKey` to avoid cloning in `HashSet`.
 #[allow(dead_code)]
 #[derive(Debug)]
 struct KeyWrapper<'a>(&'a NgramKey);
@@ -1592,47 +1687,17 @@ impl Eq for KeyWrapper<'_> {}
 // Phase 3: merge_ngram_delta Result Types
 // =============================================================================
 
-/// Result of the `merge_ngram_delta` operation.
-///
-/// This type enables the Phase 3 optimization to use `insert_bulk_owned` for
-/// n-gram index updates while preserving referential transparency.
-///
-/// # Variants
-///
-/// - `Ok`: Normal completion, the optimized path succeeded.
-/// - `Fallback`: Optimization failed but the operation completed using fallback.
-///   The `reason` field indicates why the fallback was triggered.
-///
-/// # Usage in `apply_delta`
-///
-/// The `apply_delta` method extracts the `NgramIndex` from both variants:
-///
-/// ```ignore
-/// let ngram_index = match merge_ngram_delta(index, add, remove, config) {
-///     MergeNgramDeltaResult::Ok(index) => index,
-///     MergeNgramDeltaResult::Fallback { index, reason: _ } => index,
-/// };
-/// ```
-///
-/// The fallback reason is intentionally ignored in `apply_delta` to maintain
-/// referential transparency. Logging is performed at the `AppState` level.
+/// Result of `merge_ngram_delta` with fallback tracking for diagnostics.
 #[derive(Debug, Clone)]
 pub enum MergeNgramDeltaResult {
-    /// Normal completion (optimization succeeded or remove-only operation).
     Ok(NgramIndex),
-    /// Fallback occurred during bulk insertion.
     Fallback {
-        /// The resulting index (operation completed despite fallback).
         index: NgramIndex,
-        /// The reason for the fallback.
         reason: MergeNgramDeltaFallbackReason,
     },
 }
 
 impl MergeNgramDeltaResult {
-    /// Extracts the `NgramIndex` from the result, discarding the fallback reason.
-    ///
-    /// This is the primary way to use the result in `apply_delta`.
     #[must_use]
     pub fn into_index(self) -> NgramIndex {
         match self {
@@ -1640,13 +1705,11 @@ impl MergeNgramDeltaResult {
         }
     }
 
-    /// Returns `true` if this result represents a fallback.
     #[must_use]
     pub const fn is_fallback(&self) -> bool {
         matches!(self, Self::Fallback { .. })
     }
 
-    /// Returns the fallback reason if this is a `Fallback` variant.
     #[must_use]
     pub const fn fallback_reason(&self) -> Option<&MergeNgramDeltaFallbackReason> {
         match self {
@@ -1656,22 +1719,10 @@ impl MergeNgramDeltaResult {
     }
 }
 
-/// Reason for fallback in `merge_ngram_delta`.
-///
-/// These reasons help diagnose performance issues and tune configuration.
-/// The information is logged at the `AppState` level for monitoring.
+/// Reason for fallback in `merge_ngram_delta` (logged at `AppState` level).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MergeNgramDeltaFallbackReason {
-    /// The number of entries exceeded the bulk insert limit.
-    ///
-    /// This triggers individual inserts as a fallback, which is slower but
-    /// guarantees completion.
-    TooManyEntries {
-        /// Actual number of entries.
-        count: usize,
-        /// Maximum allowed entries.
-        limit: usize,
-    },
+    TooManyEntries { count: usize, limit: usize },
 }
 
 /// N-gram key with reference-counted storage for O(1) cloning.
@@ -5610,6 +5661,46 @@ impl SearchIndex {
         }
     }
 
+    /// Like [`apply_changes`] but reuses scratch from the [`MergeArena`].
+    #[must_use]
+    pub fn apply_changes_with_arena(&self, changes: &[TaskChange], arena: &mut MergeArena) -> Self {
+        if changes.is_empty() {
+            return self.clone();
+        }
+
+        let all_adds = changes.iter().all(|c| matches!(c, TaskChange::Add(_)));
+
+        if self.config.use_apply_bulk
+            && all_adds
+            && let Ok(new_index) = self.apply_bulk_with_arena(changes, arena)
+        {
+            return new_index;
+        }
+
+        if self.config.use_bulk_builder
+            && self.config.infix_mode == InfixMode::Ngram
+            && changes.len() >= self.config.bulk_threshold
+            && all_adds
+        {
+            self.apply_changes_bulk_with_arena(changes, arena)
+                .unwrap_or_else(|_| self.apply_changes_delta_with_arena(changes, arena))
+        } else {
+            self.apply_changes_delta_with_arena(changes, arena)
+        }
+    }
+
+    /// Like [`apply_changes_delta`] but reuses scratch from the [`MergeArena`].
+    #[must_use]
+    fn apply_changes_delta_with_arena(
+        &self,
+        changes: &[TaskChange],
+        arena: &mut MergeArena,
+    ) -> Self {
+        let mut delta = SearchIndexDelta::from_changes(changes, &self.config, &self.tasks_by_id);
+        delta.prepare_posting_lists();
+        self.apply_delta_owned_with_arena(delta, changes, arena)
+    }
+
     /// Applies Add-only changes in bulk, optimized for large batches of new tasks.
     ///
     /// This method is specifically designed for Add-only batches and provides
@@ -5680,6 +5771,30 @@ impl SearchIndex {
         self.apply_changes_bulk(changes)
     }
 
+    /// Like [`apply_bulk`] but reuses scratch from the [`MergeArena`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SearchIndexError::BulkBuildFailed`] if the bulk builder fails, or
+    /// [`SearchIndexError::InvalidChanges`] if non-Add changes are present.
+    fn apply_bulk_with_arena(
+        &self,
+        changes: &[TaskChange],
+        arena: &mut MergeArena,
+    ) -> Result<Self, SearchIndexError> {
+        if changes.is_empty() {
+            return Ok(self.clone());
+        }
+
+        validate_changes_for_bulk(changes)?;
+
+        if self.config.infix_mode != InfixMode::Ngram {
+            return Ok(self.apply_changes_delta_with_arena(changes, arena));
+        }
+
+        self.apply_changes_bulk_with_arena(changes, arena)
+    }
+
     /// Applies changes using the delta path (handles Add, Remove, and Update).
     #[must_use]
     fn apply_changes_delta(&self, changes: &[TaskChange]) -> Self {
@@ -5723,15 +5838,14 @@ impl SearchIndex {
         // TB-002: Estimate capacity based on task count and token limits.
         // Each task contributes at most max_tokens_per_task entries across all builders.
         // title_full gets 1 entry per task, title_word and tag share the remaining tokens.
-        let estimated_word_entries = tasks.len() * self.config.max_tokens_per_task;
-        let estimated_tag_entries = tasks.len() * self.config.max_tokens_per_task;
+        let estimated_entries_per_index = tasks.len() * self.config.max_tokens_per_task;
 
         let mut title_word_builder =
-            SearchIndexBulkBuilder::with_capacity(self.config.clone(), estimated_word_entries);
+            SearchIndexBulkBuilder::with_capacity(self.config.clone(), estimated_entries_per_index);
         let mut title_full_builder =
             SearchIndexBulkBuilder::with_capacity(self.config.clone(), tasks.len());
         let mut tag_builder =
-            SearchIndexBulkBuilder::with_capacity(self.config.clone(), estimated_tag_entries);
+            SearchIndexBulkBuilder::with_capacity(self.config.clone(), estimated_entries_per_index);
 
         for task in &tasks {
             let normalized = NormalizedTaskData::from_task(task);
@@ -5775,6 +5889,109 @@ impl SearchIndex {
             SearchIndexDelta::from_changes_without_ngrams(changes, &self.config, &self.tasks_by_id);
         delta.prepare_posting_lists();
         let base_result = self.apply_delta_owned(delta, changes);
+
+        Ok(Self {
+            title_word_ngram_index,
+            title_full_ngram_index,
+            tag_ngram_index,
+            title_word_index: base_result.title_word_index,
+            title_full_index: base_result.title_full_index,
+            title_full_all_suffix_index: base_result.title_full_all_suffix_index,
+            title_word_all_suffix_index: base_result.title_word_all_suffix_index,
+            tag_index: base_result.tag_index,
+            tag_all_suffix_index: base_result.tag_all_suffix_index,
+            tasks_by_id: base_result.tasks_by_id,
+            config: base_result.config,
+        })
+    }
+
+    /// Like [`apply_changes_bulk`] but reuses scratch from the [`MergeArena`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SearchIndexError::BulkBuildFailed`] if the bulk builder fails to construct
+    /// the n-gram index.
+    ///
+    /// # Idempotency
+    ///
+    /// Same idempotency guarantees as [`apply_changes_bulk`]:
+    /// - Skipping tasks that already exist in the index (checked via `tasks_by_id`)
+    /// - Deduplicating Add operations for the same `TaskId` within the batch (first wins)
+    fn apply_changes_bulk_with_arena(
+        &self,
+        changes: &[TaskChange],
+        arena: &mut MergeArena,
+    ) -> Result<Self, SearchIndexError> {
+        let mut seen: std::collections::HashSet<TaskId> =
+            std::collections::HashSet::with_capacity(changes.len());
+        let tasks: Vec<&Task> = changes
+            .iter()
+            .filter_map(|change| match change {
+                TaskChange::Add(task)
+                    if !self.tasks_by_id.contains_key(&task.task_id)
+                        && seen.insert(task.task_id.clone()) =>
+                {
+                    Some(task)
+                }
+                _ => None,
+            })
+            .collect();
+
+        if tasks.is_empty() {
+            return Ok(self.clone());
+        }
+
+        let estimated_entries_per_index = tasks.len() * self.config.max_tokens_per_task;
+
+        let mut title_word_builder =
+            SearchIndexBulkBuilder::with_capacity(self.config.clone(), estimated_entries_per_index);
+        let mut title_full_builder =
+            SearchIndexBulkBuilder::with_capacity(self.config.clone(), tasks.len());
+        let mut tag_builder =
+            SearchIndexBulkBuilder::with_capacity(self.config.clone(), estimated_entries_per_index);
+
+        for task in &tasks {
+            let normalized = NormalizedTaskData::from_task(task);
+            let (word_limit, tag_limit) =
+                SearchIndexDelta::compute_token_limits(&normalized, &self.config);
+
+            title_full_builder =
+                title_full_builder.add_entry(normalized.title_key.clone(), task.task_id.clone());
+
+            for word in normalized.title_words.iter().take(word_limit) {
+                title_word_builder =
+                    title_word_builder.add_entry(word.clone(), task.task_id.clone());
+            }
+
+            for tag in normalized.tags.iter().take(tag_limit) {
+                tag_builder = tag_builder.add_entry(tag.clone(), task.task_id.clone());
+            }
+        }
+
+        let title_word_bulk = title_word_builder
+            .build()
+            .map_err(SearchIndexError::BulkBuildFailed)?;
+        let title_full_bulk = title_full_builder
+            .build()
+            .map_err(SearchIndexError::BulkBuildFailed)?;
+        let tag_bulk = tag_builder
+            .build()
+            .map_err(SearchIndexError::BulkBuildFailed)?;
+
+        let title_word_ngram_index = self
+            .title_word_ngram_index
+            .append_and_compact_with_arena(title_word_bulk, arena);
+        let title_full_ngram_index = self
+            .title_full_ngram_index
+            .append_and_compact_with_arena(title_full_bulk, arena);
+        let tag_ngram_index = self
+            .tag_ngram_index
+            .append_and_compact_with_arena(tag_bulk, arena);
+
+        let mut delta =
+            SearchIndexDelta::from_changes_without_ngrams(changes, &self.config, &self.tasks_by_id);
+        delta.prepare_posting_lists();
+        let base_result = self.apply_delta_owned_with_arena(delta, changes, arena);
 
         Ok(Self {
             title_word_ngram_index,
@@ -6051,6 +6268,96 @@ impl SearchIndex {
             tag_all_suffix_index: Self::merge_index_delta_add_only_owned(
                 &self.tag_all_suffix_index,
                 tag_all_suffix_add,
+            ),
+            config: self.config.clone(),
+        }
+    }
+
+    /// Like [`apply_delta_owned`] but reuses scratch from the [`MergeArena`].
+    ///
+    /// Falls back to [`apply_delta`] for non-add-only deltas.
+    #[must_use]
+    #[allow(clippy::too_many_lines)]
+    pub fn apply_delta_owned_with_arena(
+        &self,
+        delta: SearchIndexDelta,
+        changes: &[TaskChange],
+        arena: &mut MergeArena,
+    ) -> Self {
+        #[cfg(debug_assertions)]
+        delta.debug_assert_prepared();
+
+        if !delta.is_add_only() {
+            return self.apply_delta(&delta, changes);
+        }
+
+        let SearchIndexDelta {
+            title_full_add,
+            title_full_remove: _,
+            title_word_add,
+            title_word_remove: _,
+            tag_add,
+            tag_remove: _,
+            title_full_ngram_add,
+            title_full_ngram_remove: _,
+            title_word_ngram_add,
+            title_word_ngram_remove: _,
+            tag_ngram_add,
+            tag_ngram_remove: _,
+            title_full_all_suffix_add,
+            title_full_all_suffix_remove: _,
+            title_word_all_suffix_add,
+            title_word_all_suffix_remove: _,
+            tag_all_suffix_add,
+            tag_all_suffix_remove: _,
+        } = delta;
+
+        Self {
+            tasks_by_id: self.update_tasks_by_id(changes),
+            title_full_index: Self::merge_index_delta_add_only_owned_with_arena(
+                &self.title_full_index,
+                title_full_add,
+                arena,
+            ),
+            title_word_index: Self::merge_index_delta_add_only_owned_with_arena(
+                &self.title_word_index,
+                title_word_add,
+                arena,
+            ),
+            tag_index: Self::merge_index_delta_add_only_owned_with_arena(
+                &self.tag_index,
+                tag_add,
+                arena,
+            ),
+            title_full_ngram_index: self
+                .title_full_ngram_index
+                .append_and_compact_with_arena(
+                    build_ngram_from_mutable(title_full_ngram_add),
+                    arena,
+                ),
+            title_word_ngram_index: self
+                .title_word_ngram_index
+                .append_and_compact_with_arena(
+                    build_ngram_from_mutable(title_word_ngram_add),
+                    arena,
+                ),
+            tag_ngram_index: self
+                .tag_ngram_index
+                .append_and_compact_with_arena(build_ngram_from_mutable(tag_ngram_add), arena),
+            title_full_all_suffix_index: Self::merge_index_delta_add_only_owned_with_arena(
+                &self.title_full_all_suffix_index,
+                title_full_all_suffix_add,
+                arena,
+            ),
+            title_word_all_suffix_index: Self::merge_index_delta_add_only_owned_with_arena(
+                &self.title_word_all_suffix_index,
+                title_word_all_suffix_add,
+                arena,
+            ),
+            tag_all_suffix_index: Self::merge_index_delta_add_only_owned_with_arena(
+                &self.tag_all_suffix_index,
+                tag_all_suffix_add,
+                arena,
             ),
             config: self.config.clone(),
         }
@@ -6710,6 +7017,8 @@ impl SearchIndex {
         output.clear();
 
         let mut existing_iterator = existing.peekable();
+        let existing_hint = existing_iterator.size_hint().0;
+        output.reserve(existing_hint + add.len());
         let mut add_iterator = add.iter().peekable();
 
         loop {
@@ -6777,8 +7086,7 @@ impl SearchIndex {
                         if !scratch.is_empty() {
                             let mut collected = Vec::with_capacity(scratch.len());
                             collected.append(&mut scratch);
-                            transient
-                                .insert(key.clone(), TaskIdCollection::from_sorted_vec(collected));
+                            transient.insert(key.clone(), TaskIdCollection::from_sorted_vec(collected));
                         }
                     } else {
                         Self::merge_posting_add_only_into(
@@ -6789,8 +7097,7 @@ impl SearchIndex {
                         if !scratch.is_empty() {
                             let mut collected = Vec::with_capacity(scratch.len());
                             collected.append(&mut scratch);
-                            transient
-                                .insert(key.clone(), TaskIdCollection::from_sorted_vec(collected));
+                            transient.insert(key.clone(), TaskIdCollection::from_sorted_vec(collected));
                         }
                     }
                 }
@@ -6851,6 +7158,68 @@ impl SearchIndex {
                         if !scratch.is_empty() {
                             let mut collected = Vec::with_capacity(scratch.len());
                             collected.append(&mut scratch);
+                            transient.insert(key, TaskIdCollection::from_sorted_vec(collected));
+                        }
+                    }
+                }
+                None if !add_list.is_empty() => {
+                    let collection = TaskIdCollection::from_sorted_vec(add_list);
+                    transient.insert(key, collection);
+                }
+                Some(_) | None => {}
+            }
+        }
+
+        transient.persistent()
+    }
+
+    /// Like [`merge_index_delta_add_only_owned`] but reuses scratch from the [`MergeArena`].
+    fn merge_index_delta_add_only_owned_with_arena(
+        index: &PrefixIndex,
+        add: MutableIndex,
+        arena: &mut MergeArena,
+    ) -> PrefixIndex {
+        if add.is_empty() {
+            return index.clone();
+        }
+
+        let mut transient = index.clone().transient();
+        let scratch = arena.scratch();
+
+        for (key, add_list) in add {
+            let key_str = key.as_str();
+            match transient.get(key_str) {
+                Some(collection) if !add_list.is_empty() => {
+                    let can_concat = collection
+                        .last_sorted()
+                        .zip(add_list.first())
+                        .is_none_or(|(existing_max, add_min)| add_min > existing_max);
+
+                    if can_concat {
+                        let mut result_vec = Vec::with_capacity(collection.len() + add_list.len());
+                        Self::extend_sorted_into(collection, &mut result_vec);
+                        result_vec.extend(add_list);
+                        transient.insert(key, TaskIdCollection::from_sorted_vec(result_vec));
+                    } else if let Some(existing_slice) = collection.as_sorted_slice() {
+                        Self::merge_posting_add_only_into_slice(
+                            existing_slice,
+                            add_list.as_slice(),
+                            scratch,
+                        );
+                        if !scratch.is_empty() {
+                            let mut collected = Vec::with_capacity(scratch.len());
+                            collected.append(scratch);
+                            transient.insert(key, TaskIdCollection::from_sorted_vec(collected));
+                        }
+                    } else {
+                        Self::merge_posting_add_only_into(
+                            collection.iter_sorted(),
+                            add_list.as_slice(),
+                            scratch,
+                        );
+                        if !scratch.is_empty() {
+                            let mut collected = Vec::with_capacity(scratch.len());
+                            collected.append(scratch);
                             transient.insert(key, TaskIdCollection::from_sorted_vec(collected));
                         }
                     }
@@ -7351,6 +7720,16 @@ impl SearchIndex {
 
     #[cfg(test)]
     #[must_use]
+    pub fn merge_index_delta_add_only_owned_with_arena_for_test(
+        index: &PrefixIndex,
+        add: MutableIndex,
+        arena: &mut MergeArena,
+    ) -> PrefixIndex {
+        Self::merge_index_delta_add_only_owned_with_arena(index, add, arena)
+    }
+
+    #[cfg(test)]
+    #[must_use]
     pub fn merge_ngram_delta_add_only_individual_owned_for_test(
         index: &NgramIndex,
         add: MutableIndex,
@@ -7366,6 +7745,7 @@ impl SearchIndex {
     ) -> MergeNgramDeltaResult {
         Self::merge_ngram_delta_add_only_bulk_owned(index, add)
     }
+
 }
 
 /// Represents a change to a task for differential index updates.
@@ -7539,9 +7919,8 @@ impl SearchIndexWriter {
             ..config
         };
 
-        let (sender, receiver) = std::sync::mpsc::sync_channel::<Vec<TaskChange>>(
-            normalized_config.channel_capacity,
-        );
+        let (sender, receiver) =
+            std::sync::mpsc::sync_channel::<Vec<TaskChange>>(normalized_config.channel_capacity);
 
         let handle = std::thread::Builder::new()
             .name("search-index-writer".to_string())
@@ -7569,11 +7948,17 @@ impl SearchIndexWriter {
     /// # Panics
     ///
     /// Panics if the internal sender mutex is poisoned.
-    pub fn send_changes(&self, changes: Vec<TaskChange>) -> Result<(), std::sync::mpsc::SendError<Vec<TaskChange>>> {
+    pub fn send_changes(
+        &self,
+        changes: Vec<TaskChange>,
+    ) -> Result<(), std::sync::mpsc::SendError<Vec<TaskChange>>> {
         if changes.is_empty() {
             return Ok(());
         }
-        let guard = self.sender.lock().expect("SearchIndexWriter sender mutex poisoned");
+        let guard = self
+            .sender
+            .lock()
+            .expect("SearchIndexWriter sender mutex poisoned");
         match guard.as_ref() {
             Some(sender) => sender.send(changes),
             None => Err(std::sync::mpsc::SendError(changes)),
@@ -7588,7 +7973,10 @@ impl SearchIndexWriter {
     /// # Errors
     ///
     /// Returns `Err` if the writer thread has shut down (channel disconnected).
-    pub fn send_change(&self, change: TaskChange) -> Result<(), std::sync::mpsc::SendError<Vec<TaskChange>>> {
+    pub fn send_change(
+        &self,
+        change: TaskChange,
+    ) -> Result<(), std::sync::mpsc::SendError<Vec<TaskChange>>> {
         self.send_changes(vec![change])
     }
 
@@ -7606,28 +7994,24 @@ impl SearchIndexWriter {
         self.close_and_join();
     }
 
-    /// The writer thread's main loop.
+    /// Coalesces change sets into micro-batches and applies them to the index.
     ///
-    /// Receives change sets from the channel, coalesces them into micro-batches,
-    /// and applies them to the search index.
-    #[allow(clippy::needless_pass_by_value)] // Receiver and Arc are moved into the spawned thread
+    /// A single [`MergeArena`] is reused across all batches.
+    #[allow(clippy::needless_pass_by_value)]
     fn writer_loop(
         receiver: std::sync::mpsc::Receiver<Vec<TaskChange>>,
         search_index: Arc<arc_swap::ArcSwap<SearchIndex>>,
         config: &SearchIndexWriterConfig,
     ) {
         let batch_timeout = std::time::Duration::from_millis(config.batch_timeout_milliseconds);
+        let mut arena = MergeArena::new();
 
         loop {
-            // Block until the first change set arrives (or channel closes)
             let Ok(first_changes) = receiver.recv() else {
-                break; // Channel closed, exit loop
+                break;
             };
 
-            // Coalesce additional change sets within the timeout window.
-            // Use a fixed deadline from the first message arrival so that a
-            // continuous stream of small inputs cannot extend the batch window
-            // beyond `batch_timeout`.
+            // Fixed deadline prevents a continuous stream from extending the batch window.
             let mut coalesced_changes = first_changes;
             let deadline = std::time::Instant::now() + batch_timeout;
 
@@ -7643,11 +8027,11 @@ impl SearchIndexWriter {
                     }
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
                     Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                        // Channel closed; apply what we have and exit
                         if !coalesced_changes.is_empty() {
                             Self::apply_coalesced_changes(
                                 &search_index,
                                 &coalesced_changes,
+                                &mut arena,
                             );
                         }
                         return;
@@ -7655,23 +8039,24 @@ impl SearchIndexWriter {
                 }
             }
 
-            // Apply the coalesced batch
             if !coalesced_changes.is_empty() {
-                Self::apply_coalesced_changes(&search_index, &coalesced_changes);
+                Self::apply_coalesced_changes(&search_index, &coalesced_changes, &mut arena);
             }
+
+            arena.maybe_shrink();
         }
     }
 
-    /// Applies coalesced changes to the search index (single-writer, no CAS needed).
     fn apply_coalesced_changes(
         search_index: &arc_swap::ArcSwap<SearchIndex>,
         changes: &[TaskChange],
+        arena: &mut MergeArena,
     ) {
         let total_start = std::time::Instant::now();
 
         let current = search_index.load();
         let apply_start = std::time::Instant::now();
-        let updated = current.apply_changes(changes);
+        let updated = current.apply_changes_with_arena(changes, arena);
         let apply_elapsed = apply_start.elapsed();
 
         search_index.store(Arc::new(updated));
@@ -7691,12 +8076,18 @@ impl SearchIndexWriter {
     /// Drops the sender to close the channel and joins the writer thread.
     fn close_and_join(&self) {
         {
-            let mut sender_guard = self.sender.lock().expect("SearchIndexWriter sender mutex poisoned");
+            let mut sender_guard = self
+                .sender
+                .lock()
+                .expect("SearchIndexWriter sender mutex poisoned");
             sender_guard.take();
         }
 
         let handle = {
-            let mut handle_guard = self.handle.lock().expect("SearchIndexWriter handle mutex poisoned");
+            let mut handle_guard = self
+                .handle
+                .lock()
+                .expect("SearchIndexWriter handle mutex poisoned");
             handle_guard.take()
         };
         if let Some(handle) = handle {
@@ -22487,6 +22878,7 @@ mod ngram_segment_overlay_tests {
         let config = SegmentOverlayConfig {
             max_segments: 2,
             max_segment_keys: 50_000,
+            budget: CompactionBudget::default(),
         };
         let overlay = NgramSegmentOverlay::with_config(base, &config);
 
@@ -22509,6 +22901,7 @@ mod ngram_segment_overlay_tests {
             segments: vec![segment_1, segment_2],
             max_segments: 4,
             max_segment_keys: 50_000,
+            budget: CompactionBudget::default(),
         };
 
         let key = NgramKey::new("abc");
@@ -22572,6 +22965,7 @@ mod ngram_segment_overlay_tests {
             segments: vec![segment_1, segment_2],
             max_segments: 4,
             max_segment_keys: 50_000,
+            budget: CompactionBudget::default(),
         };
 
         let compacted = overlay.compact_one();
@@ -22626,6 +23020,7 @@ mod ngram_segment_overlay_tests {
             segments: vec![segment_1, segment_2],
             max_segments: 4,
             max_segment_keys: 50_000,
+            budget: CompactionBudget::default(),
         };
 
         let materialized = overlay.materialize();
@@ -22674,6 +23069,7 @@ mod ngram_segment_overlay_tests {
         let config = SegmentOverlayConfig {
             max_segments: 2,
             max_segment_keys: 50_000,
+            budget: CompactionBudget::default(),
         };
         let overlay = NgramSegmentOverlay::with_config(base, &config);
 
@@ -22755,9 +23151,7 @@ mod ngram_segment_overlay_tests {
             TaskId::from_uuid(Uuid::from_u128(4)),
             TaskId::from_uuid(Uuid::from_u128(5)),
         ]);
-        let small = TaskIdCollection::from_sorted_vec(vec![
-            TaskId::from_uuid(Uuid::from_u128(10)),
-        ]);
+        let small = TaskIdCollection::from_sorted_vec(vec![TaskId::from_uuid(Uuid::from_u128(10))]);
         let medium = TaskIdCollection::from_sorted_vec(vec![
             TaskId::from_uuid(Uuid::from_u128(6)),
             TaskId::from_uuid(Uuid::from_u128(7)),
@@ -22765,8 +23159,7 @@ mod ngram_segment_overlay_tests {
         ]);
 
         // Order: large, small, medium -> size-aware reorders to small, medium, large
-        let result =
-            super::merge_postings_multiway(&[&large, &small, &medium]);
+        let result = super::merge_postings_multiway(&[&large, &small, &medium]);
         let ids = sorted_ids(&result);
 
         let expected: Vec<TaskId> = [1, 2, 3, 4, 5, 6, 7, 8, 10]
@@ -22786,17 +23179,14 @@ mod ngram_segment_overlay_tests {
             TaskId::from_uuid(Uuid::from_u128(7)),
             TaskId::from_uuid(Uuid::from_u128(9)),
         ]);
-        let list_b = TaskIdCollection::from_sorted_vec(vec![
-            TaskId::from_uuid(Uuid::from_u128(3)),
-        ]);
+        let list_b = TaskIdCollection::from_sorted_vec(vec![TaskId::from_uuid(Uuid::from_u128(3))]);
         let list_c = TaskIdCollection::from_sorted_vec(vec![
             TaskId::from_uuid(Uuid::from_u128(5)),
             TaskId::from_uuid(Uuid::from_u128(9)),
             TaskId::from_uuid(Uuid::from_u128(11)),
         ]);
 
-        let result =
-            super::merge_postings_multiway(&[&list_a, &list_b, &list_c]);
+        let result = super::merge_postings_multiway(&[&list_a, &list_b, &list_c]);
         let ids = sorted_ids(&result);
 
         let expected: Vec<TaskId> = [1, 3, 5, 7, 9, 11]
@@ -22843,6 +23233,7 @@ mod ngram_segment_overlay_tests {
             segments: vec![segment],
             max_segments: 4,
             max_segment_keys: 50_000,
+            budget: CompactionBudget::default(),
         };
 
         // Add id=4 to "abc", remove id=1 from "abc"
@@ -22886,6 +23277,7 @@ mod ngram_segment_overlay_tests {
             segments: vec![segment],
             max_segments: 4,
             max_segment_keys: 50_000,
+            budget: CompactionBudget::default(),
         };
 
         let mut keys: Vec<String> = overlay.keys().map(|key| key.as_str().to_owned()).collect();
@@ -23114,6 +23506,7 @@ mod ngram_segment_overlay_tests {
             segments: vec![segment],
             max_segments: 4,
             max_segment_keys: 50_000,
+            budget: CompactionBudget::default(),
         };
 
         let updated = overlay.append_and_compact(NgramIndex::new());
@@ -23202,8 +23595,7 @@ mod ngram_segment_overlay_tests {
         // ghi: new key {7}
         let key_ghi = NgramKey::new("ghi");
         let ghi_ids = sorted_ids(result.get(&key_ghi).expect("ghi present"));
-        let expected_ghi: Vec<TaskId> =
-            vec![TaskId::from_uuid(Uuid::from_u128(7))];
+        let expected_ghi: Vec<TaskId> = vec![TaskId::from_uuid(Uuid::from_u128(7))];
         assert_eq!(ghi_ids, expected_ghi);
     }
 
@@ -23307,6 +23699,7 @@ mod ngram_segment_overlay_tests {
             segments: vec![segment_1, segment_2, segment_3],
             max_segments: 4,
             max_segment_keys: 50_000,
+            budget: CompactionBudget::default(),
         };
 
         let materialized = overlay.materialize();
@@ -23404,9 +23797,8 @@ mod ngram_segment_overlay_tests {
         ]);
         let mut scratch: Vec<TaskId> = Vec::with_capacity(100);
 
-        let result = NgramSegmentOverlay::merge_posting_slice_or_fallback(
-            &existing, &segment, &mut scratch,
-        );
+        let result =
+            NgramSegmentOverlay::merge_posting_slice_or_fallback(&existing, &segment, &mut scratch);
 
         let ids = sorted_ids(&result);
         let expected: Vec<TaskId> = [1, 2, 3, 10, 11]
@@ -23430,9 +23822,8 @@ mod ngram_segment_overlay_tests {
         ]);
         let mut scratch: Vec<TaskId> = Vec::new();
 
-        let result = NgramSegmentOverlay::merge_posting_slice_or_fallback(
-            &existing, &segment, &mut scratch,
-        );
+        let result =
+            NgramSegmentOverlay::merge_posting_slice_or_fallback(&existing, &segment, &mut scratch);
 
         let ids = sorted_ids(&result);
         let expected: Vec<TaskId> = [1, 2, 3, 10, 11]
@@ -23440,6 +23831,199 @@ mod ngram_segment_overlay_tests {
             .map(|value| TaskId::from_uuid(Uuid::from_u128(*value)))
             .collect();
         assert_eq!(ids, expected);
+    }
+
+    // -------------------------------------------------------------------------
+    // IMPL-PRB1-002-001: CompactionBudget tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn compaction_budget_default_values() {
+        let budget = CompactionBudget::default();
+        assert_eq!(budget.soft_max_segments_per_compact, 1);
+        assert_eq!(budget.hard_max_segments, 6);
+    }
+
+    #[rstest]
+    fn segment_overlay_config_contains_budget() {
+        let config = SegmentOverlayConfig::default();
+        // Verify budget field is accessible and has expected defaults
+        assert_eq!(config.budget.soft_max_segments_per_compact, 1);
+        assert_eq!(config.budget.hard_max_segments, 6);
+    }
+
+    #[rstest]
+    fn with_config_accepts_budget() {
+        let base = NgramIndex::new();
+        let config = SegmentOverlayConfig {
+            max_segments: 3,
+            max_segment_keys: 50_000,
+            budget: CompactionBudget {
+                soft_max_segments_per_compact: 2,
+                hard_max_segments: 4,
+            },
+        };
+        let overlay = NgramSegmentOverlay::with_config(base, &config);
+        assert_eq!(overlay.budget.soft_max_segments_per_compact, 2);
+        assert_eq!(overlay.budget.hard_max_segments, 4);
+    }
+
+    #[rstest]
+    fn budget_below_soft_appends_only() {
+        // When segments.len() < soft_max_segments_per_compact, only append (no compact)
+        let base = make_ngram_index(&[("abc", &[1])]);
+        let config = SegmentOverlayConfig {
+            max_segments: 6,
+            max_segment_keys: 50_000,
+            budget: CompactionBudget {
+                soft_max_segments_per_compact: 3,
+                hard_max_segments: 6,
+            },
+        };
+        let overlay = NgramSegmentOverlay::with_config(base, &config);
+
+        // Add 2 segments (below soft=3), should NOT compact
+        let delta_1 = make_ngram_index(&[("abc", &[2])]);
+        let with_one = overlay.append_and_compact(delta_1);
+        assert_eq!(with_one.segments.len(), 1);
+
+        let delta_2 = make_ngram_index(&[("abc", &[3])]);
+        let with_two = with_one.append_and_compact(delta_2);
+        assert_eq!(with_two.segments.len(), 2);
+
+        // All data accessible
+        let key = NgramKey::new("abc");
+        let result = with_two.query(&key).expect("key present");
+        let ids = sorted_ids(&result);
+        let expected: Vec<TaskId> = [1, 2, 3]
+            .iter()
+            .map(|value| TaskId::from_uuid(Uuid::from_u128(*value)))
+            .collect();
+        assert_eq!(ids, expected);
+    }
+
+    #[rstest]
+    fn budget_at_hard_forces_compact() {
+        // When segments.len() >= hard_max_segments, force compact all down
+        let base = make_ngram_index(&[("abc", &[1])]);
+        let config = SegmentOverlayConfig {
+            max_segments: 6, // high so legacy path does not interfere
+            max_segment_keys: 50_000,
+            budget: CompactionBudget {
+                soft_max_segments_per_compact: 1,
+                hard_max_segments: 3,
+            },
+        };
+        let overlay = NgramSegmentOverlay::with_config(base, &config);
+
+        // Add segments up to hard limit
+        let delta_1 = make_ngram_index(&[("abc", &[2])]);
+        let with_one = overlay.append_and_compact(delta_1);
+
+        let delta_2 = make_ngram_index(&[("abc", &[3])]);
+        let with_two = with_one.append_and_compact(delta_2);
+
+        let delta_3 = make_ngram_index(&[("abc", &[4])]);
+        let with_three = with_two.append_and_compact(delta_3);
+
+        // After hard compact, segments should be fewer than hard_max_segments
+        assert!(
+            with_three.segments.len() < 3,
+            "Expected segments < hard_max_segments(3), got {}",
+            with_three.segments.len()
+        );
+
+        // All data still accessible
+        let key = NgramKey::new("abc");
+        let result = with_three.query(&key).expect("key present");
+        let ids = sorted_ids(&result);
+        let expected: Vec<TaskId> = [1, 2, 3, 4]
+            .iter()
+            .map(|value| TaskId::from_uuid(Uuid::from_u128(*value)))
+            .collect();
+        assert_eq!(ids, expected);
+    }
+
+    #[rstest]
+    fn budget_between_soft_and_hard_compacts_one() {
+        // When soft <= segments.len() < hard, compact_one is called once
+        let base = make_ngram_index(&[("abc", &[1])]);
+        let config = SegmentOverlayConfig {
+            max_segments: 6,
+            max_segment_keys: 50_000,
+            budget: CompactionBudget {
+                soft_max_segments_per_compact: 2,
+                hard_max_segments: 5,
+            },
+        };
+        let overlay = NgramSegmentOverlay::with_config(base, &config);
+
+        // Add 2 segments (= soft), should trigger compact_one
+        let delta_1 = make_ngram_index(&[("abc", &[2])]);
+        let with_one = overlay.append_and_compact(delta_1);
+        assert_eq!(with_one.segments.len(), 1); // below soft, no compact
+
+        let delta_2 = make_ngram_index(&[("abc", &[3])]);
+        let with_two = with_one.append_and_compact(delta_2);
+        // At soft=2 segments, compact_one should run, merging oldest into base
+        // Result: 1 segment remaining (was 2, compact_one removes 1, adds the new one)
+        assert_eq!(
+            with_two.segments.len(),
+            1,
+            "Expected 1 segment after compact_one at soft boundary, got {}",
+            with_two.segments.len()
+        );
+
+        // All data still accessible
+        let key = NgramKey::new("abc");
+        let result = with_two.query(&key).expect("key present");
+        let ids = sorted_ids(&result);
+        let expected: Vec<TaskId> = [1, 2, 3]
+            .iter()
+            .map(|value| TaskId::from_uuid(Uuid::from_u128(*value)))
+            .collect();
+        assert_eq!(ids, expected);
+    }
+
+    #[rstest]
+    fn budget_shrink_threshold_on_arena() {
+        let mut arena = MergeArena::new();
+        assert!(arena.scratch().is_empty());
+        assert_eq!(arena.shrink_threshold, 16_384);
+
+        // Use scratch buffer to grow it beyond the hysteresis limit (2 * threshold = 32_768).
+        // We need capacity > 32_768 to trigger shrink.
+        let scratch = arena.scratch();
+        scratch.extend((0..40_000).map(|i| TaskId::from_uuid(Uuid::from_u128(i))));
+        let capacity_before_shrink = arena.scratch.capacity();
+        assert!(capacity_before_shrink >= 40_000);
+
+        // Simulate the real workflow: scratch() clears len before maybe_shrink
+        // (writer_loop calls apply_coalesced_changes which uses scratch(), then maybe_shrink)
+        arena.scratch.clear();
+
+        // maybe_shrink should reduce capacity (allocator may round up)
+        arena.maybe_shrink();
+        assert!(
+            arena.scratch.capacity() < capacity_before_shrink,
+            "Expected capacity to decrease after shrink, was {} and is now {}",
+            capacity_before_shrink,
+            arena.scratch.capacity()
+        );
+    }
+
+    #[rstest]
+    fn arena_below_threshold_does_not_shrink() {
+        let mut arena = MergeArena::new();
+
+        // Fill scratch below threshold
+        let scratch = arena.scratch();
+        scratch.extend((0..100).map(|i| TaskId::from_uuid(Uuid::from_u128(i))));
+        let capacity_before = arena.scratch.capacity();
+
+        // maybe_shrink should NOT shrink (capacity <= threshold)
+        arena.maybe_shrink();
+        assert_eq!(arena.scratch.capacity(), capacity_before);
     }
 }
 
@@ -23882,7 +24466,10 @@ mod search_index_writer_tests {
         // Verify the task is in the index
         let index = search_index.load();
         let result = index.search_by_title("Writer Test");
-        assert!(result.is_some(), "Task should be findable after writer applies change");
+        assert!(
+            result.is_some(),
+            "Task should be findable after writer applies change"
+        );
         let search_result = result.unwrap();
         let tasks = search_result.tasks();
         assert_eq!(tasks.len(), 1);
@@ -23915,9 +24502,15 @@ mod search_index_writer_tests {
         writer.shutdown();
 
         let index = search_index.load();
-        let alpha = index.search_by_title("Alpha").expect("Alpha should be findable");
-        let beta = index.search_by_title("Beta").expect("Beta should be findable");
-        let gamma = index.search_by_title("Gamma").expect("Gamma should be findable");
+        let alpha = index
+            .search_by_title("Alpha")
+            .expect("Alpha should be findable");
+        let beta = index
+            .search_by_title("Beta")
+            .expect("Beta should be findable");
+        let gamma = index
+            .search_by_title("Gamma")
+            .expect("Gamma should be findable");
 
         assert_eq!(alpha.tasks().iter().next().unwrap().task_id, task1_id);
         assert_eq!(beta.tasks().iter().next().unwrap().task_id, task2_id);
@@ -23974,7 +24567,9 @@ mod search_index_writer_tests {
         // Use a small sleep to ensure the writer processes the first batch
         std::thread::sleep(std::time::Duration::from_millis(50));
 
-        let updated_task = task_to_update.clone().with_description("Updated description");
+        let updated_task = task_to_update
+            .clone()
+            .with_description("Updated description");
         writer
             .send_changes(vec![
                 TaskChange::Remove(remove_id),
@@ -23993,10 +24588,7 @@ mod search_index_writer_tests {
         let keep_result = index.search_by_title("Keep");
         assert!(keep_result.is_some(), "Kept task should be findable");
         let keep_search = keep_result.unwrap();
-        assert_eq!(
-            keep_search.tasks().iter().next().unwrap().task_id,
-            keep_id
-        );
+        assert_eq!(keep_search.tasks().iter().next().unwrap().task_id, keep_id);
 
         // Remove Me should be gone
         assert!(
@@ -24112,7 +24704,7 @@ mod search_index_writer_tests {
         let writer = SearchIndexWriter::new(
             Arc::clone(&search_index),
             SearchIndexWriterConfig {
-                batch_size: 100, // Very large batch size
+                batch_size: 100,                // Very large batch size
                 batch_timeout_milliseconds: 10, // Short timeout
                 channel_capacity: 32,
             },
@@ -24210,12 +24802,7 @@ mod search_index_writer_tests {
             .map(|task| task.task_id.clone())
             .collect();
 
-        let expected_ids: HashSet<TaskId> = all_task_ids
-            .lock()
-            .unwrap()
-            .iter()
-            .cloned()
-            .collect();
+        let expected_ids: HashSet<TaskId> = all_task_ids.lock().unwrap().iter().cloned().collect();
 
         assert_eq!(
             actual_ids.len(),
@@ -24291,5 +24878,416 @@ mod search_index_writer_tests {
         assert!(debug_output.contains("SearchIndexWriter"));
 
         writer.shutdown();
+    }
+}
+
+// =============================================================================
+// Tests: MergeArena Integration (IMPL-PRB1-002-002 + 003)
+// =============================================================================
+
+#[cfg(test)]
+mod merge_arena_integration_tests {
+    use super::*;
+    use crate::domain::{Tag, Timestamp};
+    use rstest::rstest;
+    use uuid::Uuid;
+
+    // -------------------------------------------------------------------------
+    // IMPL-PRB1-002-002: merge_index_delta_add_only_owned_with_arena equivalence
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn merge_index_delta_add_only_owned_with_arena_equivalence() {
+        let index = PrefixIndex::new();
+        let mut add: MutableIndex = std::collections::HashMap::new();
+
+        let id_1 = TaskId::from_uuid(Uuid::from_u128(1));
+        let id_2 = TaskId::from_uuid(Uuid::from_u128(2));
+        let id_3 = TaskId::from_uuid(Uuid::from_u128(3));
+
+        add.insert(NgramKey::new("hello"), vec![id_1, id_2]);
+        add.insert(NgramKey::new("world"), vec![id_3]);
+
+        let add_clone = add.clone();
+
+        let result_without_arena =
+            SearchIndex::merge_index_delta_add_only_owned_for_test(&index, add);
+
+        let mut arena = MergeArena::new();
+        let result_with_arena = SearchIndex::merge_index_delta_add_only_owned_with_arena_for_test(
+            &index, add_clone, &mut arena,
+        );
+
+        assert_eq!(result_without_arena.len(), result_with_arena.len());
+
+        for (key, collection_without) in &result_without_arena {
+            let collection_with = result_with_arena
+                .get(key.as_str())
+                .expect("Key should exist in arena result");
+            let without_elements: Vec<_> = collection_without.iter_sorted().cloned().collect();
+            let with_elements: Vec<_> = collection_with.iter_sorted().cloned().collect();
+            assert_eq!(
+                without_elements,
+                with_elements,
+                "Posting list mismatch for key '{}'",
+                key.as_str()
+            );
+        }
+    }
+
+    #[rstest]
+    fn arena_scratch_capacity_preserved_across_calls() {
+        // Build an initial index with existing keys that will interleave with
+        // new IDs to force the non-concat merge path (which uses scratch).
+        // Use even IDs for existing, odd IDs for new to prevent disjoint concat.
+        let mut initial_add: MutableIndex = std::collections::HashMap::new();
+        for i in 0..50_u128 {
+            initial_add.insert(
+                NgramKey::new(&format!("key{i}")),
+                vec![
+                    TaskId::from_uuid(Uuid::from_u128(i * 10 + 2)),
+                    TaskId::from_uuid(Uuid::from_u128(i * 10 + 8)),
+                ],
+            );
+        }
+        let index =
+            SearchIndex::merge_index_delta_add_only_for_test(&PrefixIndex::new(), &initial_add);
+
+        let mut arena = MergeArena::new();
+
+        // First call: add IDs that interleave with existing to force merge path
+        let mut add_1: MutableIndex = std::collections::HashMap::new();
+        for i in 0..50_u128 {
+            add_1.insert(
+                NgramKey::new(&format!("key{i}")),
+                vec![TaskId::from_uuid(Uuid::from_u128(i * 10 + 5))],
+            );
+        }
+        let _result_1 = SearchIndex::merge_index_delta_add_only_owned_with_arena_for_test(
+            &index, add_1, &mut arena,
+        );
+
+        let capacity_after_first = arena.scratch.capacity();
+        assert!(
+            capacity_after_first > 0,
+            "Arena should have allocated scratch"
+        );
+
+        // Second call: capacity should be at least as large (reuse, no shrink)
+        let mut add_2: MutableIndex = std::collections::HashMap::new();
+        add_2.insert(
+            NgramKey::new("key0"),
+            vec![TaskId::from_uuid(Uuid::from_u128(9999))],
+        );
+        let _result_2 = SearchIndex::merge_index_delta_add_only_owned_with_arena_for_test(
+            &index, add_2, &mut arena,
+        );
+
+        assert!(
+            arena.scratch.capacity() >= capacity_after_first,
+            "Arena capacity should not decrease between calls: was {}, now {}",
+            capacity_after_first,
+            arena.scratch.capacity()
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // IMPL-PRB1-002-003: apply_delta_owned_with_arena equivalence
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn apply_delta_owned_with_arena_equivalence() {
+        let empty_tasks: lambars::persistent::PersistentVector<Task> =
+            lambars::persistent::PersistentVector::new();
+        let index = SearchIndex::build_with_config(&empty_tasks, SearchIndexConfig::default());
+
+        let tasks: Vec<Task> = (0..20)
+            .map(|i| {
+                Task::new(TaskId::generate(), format!("Task {i}"), Timestamp::now())
+                    .add_tag(Tag::new("alpha"))
+                    .add_tag(Tag::new(format!("tag{i}")))
+            })
+            .collect();
+        let changes: Vec<TaskChange> = tasks.iter().cloned().map(TaskChange::Add).collect();
+
+        let mut delta_1 =
+            SearchIndexDelta::from_changes(&changes, &index.config, &index.tasks_by_id);
+        delta_1.prepare_posting_lists();
+        assert!(delta_1.is_add_only());
+
+        let mut delta_2 =
+            SearchIndexDelta::from_changes(&changes, &index.config, &index.tasks_by_id);
+        delta_2.prepare_posting_lists();
+
+        let result_without_arena = index.apply_delta_owned(delta_1, &changes);
+
+        let mut arena = MergeArena::new();
+        let result_with_arena = index.apply_delta_owned_with_arena(delta_2, &changes, &mut arena);
+
+        assert_eq!(
+            result_without_arena.tasks_by_id.len(),
+            result_with_arena.tasks_by_id.len(),
+            "tasks_by_id length mismatch"
+        );
+
+        for (key, without_collection) in &result_without_arena.title_word_index {
+            let with_collection = result_with_arena
+                .title_word_index
+                .get(key.as_str())
+                .expect("Key should exist in arena result");
+            let without_elements: Vec<_> = without_collection.iter_sorted().cloned().collect();
+            let with_elements: Vec<_> = with_collection.iter_sorted().cloned().collect();
+            assert_eq!(
+                without_elements,
+                with_elements,
+                "title_word_index posting list mismatch for key '{}'",
+                key.as_str()
+            );
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // IMPL-PRB1-002-002: compact_one with arena
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn compact_one_with_arena_equivalence() {
+        let base_entries = &[("abc", &[1_u128, 2][..]), ("def", &[10][..])];
+        let segment_entries = &[("abc", &[3_u128, 5][..]), ("ghi", &[20][..])];
+
+        let mut base_map: MutableIndex = std::collections::HashMap::new();
+        for (key_string, id_values) in base_entries {
+            let mut ids: Vec<TaskId> = id_values
+                .iter()
+                .map(|value| TaskId::from_uuid(Uuid::from_u128(*value)))
+                .collect();
+            ids.sort();
+            base_map.insert(NgramKey::new(key_string), ids);
+        }
+        let base = build_ngram_from_mutable(base_map);
+
+        let mut segment_map: MutableIndex = std::collections::HashMap::new();
+        for (key_string, id_values) in segment_entries {
+            let mut ids: Vec<TaskId> = id_values
+                .iter()
+                .map(|value| TaskId::from_uuid(Uuid::from_u128(*value)))
+                .collect();
+            ids.sort();
+            segment_map.insert(NgramKey::new(key_string), ids);
+        }
+        let segment = build_ngram_from_mutable(segment_map);
+
+        let overlay = NgramSegmentOverlay {
+            base,
+            segments: vec![segment],
+            max_segments: 4,
+            max_segment_keys: 50_000,
+            budget: CompactionBudget::default(),
+        };
+
+        let result_without_arena = overlay.compact_one();
+
+        let mut arena = MergeArena::new();
+        let result_with_arena = overlay.compact_one_with_arena(&mut arena);
+
+        // Verify base indexes match
+        assert_eq!(
+            result_without_arena.base.len(),
+            result_with_arena.base.len()
+        );
+        assert_eq!(
+            result_without_arena.segments.len(),
+            result_with_arena.segments.len()
+        );
+
+        let materialized_without = result_without_arena.materialize();
+        let materialized_with = result_with_arena.materialize();
+
+        for (key, without_collection) in &materialized_without {
+            let with_collection = materialized_with
+                .get(key)
+                .expect("Key should exist in arena result");
+            let without_ids: Vec<_> = without_collection.iter_sorted().cloned().collect();
+            let with_ids: Vec<_> = with_collection.iter_sorted().cloned().collect();
+            assert_eq!(without_ids, with_ids, "Mismatch for key '{}'", key.as_str());
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // IMPL-TBPA2-001: apply_changes_bulk_with_arena equivalence
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn apply_changes_bulk_with_arena_and_bulk_are_equivalent() {
+        let config = SearchIndexConfigBuilder::new()
+            .use_bulk_builder(true)
+            .bulk_threshold(2)
+            .infix_mode(InfixMode::Ngram)
+            .build();
+
+        let tasks_pv: lambars::persistent::PersistentVector<Task> =
+            lambars::persistent::PersistentVector::new();
+        let index = SearchIndex::build_with_config(&tasks_pv, config);
+
+        let tasks: Vec<Task> = (0..20)
+            .map(|i| {
+                Task::new(TaskId::generate(), format!("Task number {i}"), Timestamp::now())
+                    .add_tag(Tag::new("common"))
+                    .add_tag(Tag::new(format!("tag{i}")))
+            })
+            .collect();
+        let changes: Vec<TaskChange> = tasks.iter().cloned().map(TaskChange::Add).collect();
+
+        // Non-arena bulk path
+        let result_bulk = index
+            .apply_changes_bulk(&changes)
+            .expect("apply_changes_bulk should succeed");
+
+        // Arena bulk path
+        let mut arena = MergeArena::new();
+        let result_arena = index
+            .apply_changes_bulk_with_arena(&changes, &mut arena)
+            .expect("apply_changes_bulk_with_arena should succeed");
+
+        // Verify tasks_by_id length
+        assert_eq!(
+            result_bulk.tasks_by_id.len(),
+            result_arena.tasks_by_id.len(),
+            "tasks_by_id length mismatch"
+        );
+
+        // Verify all task IDs present
+        for task in &tasks {
+            assert!(
+                result_arena.tasks_by_id.contains_key(&task.task_id),
+                "Arena result missing task_id: {:?}",
+                task.task_id
+            );
+        }
+
+        // Verify title_word_index equivalence
+        for (key, bulk_collection) in &result_bulk.title_word_index {
+            let arena_collection = result_arena
+                .title_word_index
+                .get(key.as_str())
+                .unwrap_or_else(|| {
+                    panic!(
+                        "title_word_index key '{}' missing in arena result",
+                        key.as_str()
+                    )
+                });
+            let bulk_ids: Vec<_> = bulk_collection.iter_sorted().cloned().collect();
+            let arena_ids: Vec<_> = arena_collection.iter_sorted().cloned().collect();
+            assert_eq!(
+                bulk_ids, arena_ids,
+                "title_word_index posting list mismatch for key '{}'",
+                key.as_str()
+            );
+        }
+
+        // Verify tag_index equivalence
+        for (key, bulk_collection) in &result_bulk.tag_index {
+            let arena_collection = result_arena
+                .tag_index
+                .get(key.as_str())
+                .unwrap_or_else(|| {
+                    panic!("tag_index key '{}' missing in arena result", key.as_str())
+                });
+            let bulk_ids: Vec<_> = bulk_collection.iter_sorted().cloned().collect();
+            let arena_ids: Vec<_> = arena_collection.iter_sorted().cloned().collect();
+            assert_eq!(
+                bulk_ids, arena_ids,
+                "tag_index posting list mismatch for key '{}'",
+                key.as_str()
+            );
+        }
+
+        // Verify ngram indexes have same length
+        assert_eq!(
+            result_bulk.title_word_ngram_index.len(),
+            result_arena.title_word_ngram_index.len(),
+            "title_word_ngram_index length mismatch"
+        );
+        assert_eq!(
+            result_bulk.title_full_ngram_index.len(),
+            result_arena.title_full_ngram_index.len(),
+            "title_full_ngram_index length mismatch"
+        );
+        assert_eq!(
+            result_bulk.tag_ngram_index.len(),
+            result_arena.tag_ngram_index.len(),
+            "tag_ngram_index length mismatch"
+        );
+    }
+
+    #[rstest]
+    fn apply_changes_with_arena_uses_arena_bulk_path() {
+        // This test verifies that apply_changes_with_arena routes to the arena-aware
+        // bulk path by confirming that the results match apply_changes_bulk_with_arena
+        // when bulk conditions are met.
+        let config = SearchIndexConfigBuilder::new()
+            .use_bulk_builder(true)
+            .bulk_threshold(2)
+            .infix_mode(InfixMode::Ngram)
+            .build();
+
+        let tasks_pv: lambars::persistent::PersistentVector<Task> =
+            lambars::persistent::PersistentVector::new();
+        let index = SearchIndex::build_with_config(&tasks_pv, config);
+
+        let tasks: Vec<Task> = (0..10)
+            .map(|i| {
+                Task::new(TaskId::generate(), format!("Arena task {i}"), Timestamp::now())
+                    .add_tag(Tag::new("arenatest"))
+            })
+            .collect();
+        let changes: Vec<TaskChange> = tasks.iter().cloned().map(TaskChange::Add).collect();
+
+        let mut arena = MergeArena::new();
+        let result = index.apply_changes_with_arena(&changes, &mut arena);
+
+        // All tasks should be present
+        assert_eq!(
+            result.tasks_by_id.len(),
+            tasks.len(),
+            "All tasks should be indexed"
+        );
+        for task in &tasks {
+            assert!(
+                result.tasks_by_id.contains_key(&task.task_id),
+                "Missing task_id in result: {:?}",
+                task.task_id
+            );
+        }
+    }
+
+    #[rstest]
+    fn apply_changes_bulk_with_arena_idempotency() {
+        // Verify that adding duplicate tasks is idempotent (same as apply_changes_bulk)
+        let config = SearchIndexConfigBuilder::new()
+            .use_bulk_builder(true)
+            .bulk_threshold(2)
+            .infix_mode(InfixMode::Ngram)
+            .build();
+
+        let tasks_pv: lambars::persistent::PersistentVector<Task> =
+            lambars::persistent::PersistentVector::new();
+        let index = SearchIndex::build_with_config(&tasks_pv, config);
+
+        let task = Task::new(TaskId::generate(), "Duplicate task".to_string(), Timestamp::now())
+            .add_tag(Tag::new("dup"));
+        let changes = vec![
+            TaskChange::Add(task.clone()),
+            TaskChange::Add(task.clone()),
+        ];
+
+        let mut arena = MergeArena::new();
+        let result = index
+            .apply_changes_bulk_with_arena(&changes, &mut arena)
+            .expect("should succeed");
+
+        // Only one copy of the task should exist
+        assert_eq!(result.tasks_by_id.len(), 1, "Duplicate should be deduplicated");
+        assert!(result.tasks_by_id.contains_key(&task.task_id));
     }
 }

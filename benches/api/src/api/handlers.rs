@@ -200,6 +200,12 @@ pub struct AppState {
     /// to eliminate CAS retry overhead. When `None`, falls back to the
     /// RCU-based `ArcSwap::rcu` path.
     pub search_index_writer: Option<Arc<SearchIndexWriter>>,
+    /// Per-`task_id` serialization queue to reduce optimistic locking conflicts.
+    pub keyed_update_queue: Arc<super::transaction::KeyedUpdateQueue>,
+    /// Counter for retry attempts triggered by retryable 409 Conflict (observability).
+    pub retry_attempts: Arc<AtomicUsize>,
+    /// Counter for retries exhausted (all retries failed) (observability).
+    pub retry_exhausted: Arc<AtomicUsize>,
 }
 
 impl Clone for AppState {
@@ -223,11 +229,38 @@ impl Clone for AppState {
             applied_config: self.applied_config.clone(),
             search_index_rcu_retries: Arc::clone(&self.search_index_rcu_retries),
             search_index_writer: self.search_index_writer.as_ref().map(Arc::clone),
+            keyed_update_queue: Arc::clone(&self.keyed_update_queue),
+            retry_attempts: Arc::clone(&self.retry_attempts),
+            retry_exhausted: Arc::clone(&self.retry_exhausted),
         }
     }
 }
 
+/// Snapshot of retry observability counters (value type).
+///
+/// Used to expose `retry_attempts` and `retry_exhausted` counters from
+/// `AppState` without requiring direct `AtomicUsize` reads at every call site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetryMetrics {
+    /// Total number of retry attempts triggered by retryable 409 Conflict.
+    pub retry_attempts: usize,
+    /// Total number of retries exhausted (all retries failed).
+    pub retry_exhausted: usize,
+}
+
 impl AppState {
+    /// Returns a snapshot of the current retry observability counters.
+    ///
+    /// Both counters use `Ordering::Relaxed` because they are monotonic
+    /// and exact cross-counter consistency is not required.
+    #[must_use]
+    pub fn retry_metrics(&self) -> RetryMetrics {
+        RetryMetrics {
+            retry_attempts: self.retry_attempts.load(Ordering::Relaxed),
+            retry_exhausted: self.retry_exhausted.load(Ordering::Relaxed),
+        }
+    }
+
     /// Creates a new `AppState` from initialized repositories.
     ///
     /// This constructor takes ownership of the `Repositories` struct returned
@@ -438,6 +471,9 @@ impl AppState {
             applied_config,
             search_index_rcu_retries: Arc::new(AtomicUsize::new(0)),
             search_index_writer: Some(search_index_writer),
+            keyed_update_queue: Arc::new(crate::api::transaction::KeyedUpdateQueue::new()),
+            retry_attempts: Arc::new(AtomicUsize::new(0)),
+            retry_exhausted: Arc::new(AtomicUsize::new(0)),
         })
     }
 
@@ -1239,6 +1275,9 @@ mod tests {
             applied_config: AppliedConfig::default(),
             search_index_rcu_retries: Arc::new(AtomicUsize::new(0)),
             search_index_writer: None,
+            keyed_update_queue: Arc::new(crate::api::transaction::KeyedUpdateQueue::new()),
+            retry_attempts: Arc::new(AtomicUsize::new(0)),
+            retry_exhausted: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -1274,6 +1313,9 @@ mod tests {
             applied_config: AppliedConfig::default(),
             search_index_rcu_retries: Arc::new(AtomicUsize::new(0)),
             search_index_writer: None,
+            keyed_update_queue: Arc::new(crate::api::transaction::KeyedUpdateQueue::new()),
+            retry_attempts: Arc::new(AtomicUsize::new(0)),
+            retry_exhausted: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -2389,5 +2431,46 @@ mod tests {
         assert_eq!(found_task.title, "Persisted Task");
         assert_eq!(found_task.description, Some("Should be saved".to_string()));
         assert_eq!(found_task.priority, Priority::High);
+    }
+
+    // -------------------------------------------------------------------------
+    // RetryMetrics / retry_metrics() Tests
+    // -------------------------------------------------------------------------
+
+    /// Verifies that `retry_metrics()` returns a correct snapshot of the
+    /// current counter values.
+    #[rstest]
+    fn test_retry_metrics_returns_snapshot() {
+        let state = create_default_app_state();
+        state.retry_attempts.store(3, Ordering::Relaxed);
+        state.retry_exhausted.store(1, Ordering::Relaxed);
+
+        assert_eq!(
+            state.retry_metrics(),
+            RetryMetrics {
+                retry_attempts: 3,
+                retry_exhausted: 1,
+            }
+        );
+    }
+
+    /// Verifies that after `clone()`, both `AppState` instances share the same
+    /// underlying `Arc<AtomicUsize>` counters, so mutations on one are visible
+    /// from the other's `retry_metrics()`.
+    #[rstest]
+    fn test_retry_metrics_reflects_shared_counters_after_clone() {
+        let state = create_default_app_state();
+        let cloned = state.clone();
+
+        state.retry_attempts.fetch_add(2, Ordering::Relaxed);
+        state.retry_exhausted.fetch_add(1, Ordering::Relaxed);
+
+        assert_eq!(
+            cloned.retry_metrics(),
+            RetryMetrics {
+                retry_attempts: 2,
+                retry_exhausted: 1,
+            }
+        );
     }
 }

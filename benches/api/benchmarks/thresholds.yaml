@@ -40,6 +40,9 @@ scenarios:
     p50_latency_ms:
       warning: 40
       error: 50
+    p90_latency_ms:
+      warning: 120
+      error: 150
     p95_latency_ms:
       warning: 150
       error: 200
@@ -54,6 +57,9 @@ scenarios:
     p50_latency_ms:
       warning: 80
       error: 100
+    p90_latency_ms:
+      warning: 200
+      error: 250
     p95_latency_ms:
       warning: 250
       error: 300
@@ -64,8 +70,52 @@ scenarios:
       warning: 0.005
       error: 0.01
 
+  # Status update scenario for PATCH /tasks/{id}/status operations.
+  #
+  # Minimal payload, status-only updates.
+  tasks_update_status:
+    p50_latency_ms:
+      warning: 25
+      error: 30
+    p90_latency_ms:
+      warning: 50
+      error: 70
+    p95_latency_ms:
+      warning: 60
+      error: 80
+    p99_latency_ms:
+      warning: 120
+      error: 150
+    error_rate:
+      warning: 0.0005
+      error: 0.001
+    conflict_rate:
+      warning: 0.0005
+      error: 0.001
+
   # Update scenarios for tasks_update operations.
   #
+  # Base tasks_update scenario (mixed workload with moderate contention)
+  tasks_update:
+    p50_latency_ms:
+      warning: 30
+      error: 40
+    p90_latency_ms:
+      warning: 70
+      error: 100
+    p95_latency_ms:
+      warning: 80
+      error: 120
+    p99_latency_ms:
+      warning: 150
+      error: 200
+    error_rate:
+      warning: 0.01
+      error: 0.03
+    conflict_rate:
+      warning: 0.01
+      error: 0.03
+
   # Steady: Normal update operations without conflicts.
   #   - High success rate required (>= 99.9%)
   #   - Low conflict rate (< 0.1%)
@@ -73,6 +123,9 @@ scenarios:
     p50_latency_ms:
       warning: 25
       error: 30
+    p90_latency_ms:
+      warning: 50
+      error: 70
     p95_latency_ms:
       warning: 60
       error: 80
@@ -93,6 +146,9 @@ scenarios:
     p50_latency_ms:
       warning: 60
       error: 80
+    p90_latency_ms:
+      warning: 120
+      error: 150
     p95_latency_ms:
       warning: 150
       error: 200
@@ -105,3 +161,23 @@ scenarios:
     conflict_rate:
       warning: 0.005
       error: 0.01
+
+  # Bulk operations scenario for POST /tasks/bulk operations.
+  #
+  # High-throughput bulk insertion with arena-based merge optimization.
+  tasks_bulk:
+    p50_latency_ms:
+      warning: 10
+      error: 15
+    p90_latency_ms:
+      warning: 20
+      error: 30
+    p95_latency_ms:
+      warning: 25
+      error: 40
+    p99_latency_ms:
+      warning: 50
+      error: 80
+    error_rate:
+      warning: 0.001
+      error: 0.005

@@ -192,6 +192,7 @@ resolve_script_from_endpoint() {
         "/tasks-eff")               echo "tasks_eff" ;;
         "/tasks/bulk")              echo "tasks_bulk" ;;
         "/tasks/search")            echo "tasks_search" ;;
+        "/tasks/{id}/status"|"/tasks/*/status") echo "tasks_update_status" ;;
         "/tasks/{id}"|"/tasks/*")   echo "tasks_update" ;;
         "/projects/{id}/progress"|"/projects/*/progress")  echo "projects_progress" ;;
         "/tasks")                   echo "recursive" ;;
@@ -1473,6 +1474,9 @@ generate_meta_json() {
     # v3: retries count (from lua_metrics.json)
     local retries=0
 
+    # v4: conflict_detail (from lua_metrics.json, REQ-PRB1-003)
+    local conflict_detail_json="{}"
+
     # v3: error_rate will be calculated after lua_metrics.json is processed
     local error_rate
 
@@ -1581,6 +1585,45 @@ generate_meta_json() {
         retries_raw=$(jq -r '.retries // 0' "${lua_metrics_file}" 2>/dev/null || echo "0")
         retries="${retries_raw%%.*}"
         [[ ! "${retries}" =~ ^[0-9]+$ ]] && retries=0
+
+        # v4: Get conflict_detail from lua_metrics (REQ-PRB1-003)
+        if jq -e '.conflict_detail | type == "object"' "${lua_metrics_file}" >/dev/null 2>&1; then
+            conflict_detail_json=$(jq -c '.conflict_detail' "${lua_metrics_file}" 2>/dev/null || echo "{}")
+        fi
+    fi
+
+    # v4: Calculate merge_path_detail from stacks.folded (IMPL-TBPA2-003)
+    # This tracks whether tasks_bulk uses the optimized with_arena path
+    local merge_path_detail_json="{}"
+    local stacks_folded_file="${RESULTS_DIR}/stacks.folded"
+    if [[ -f "${stacks_folded_file}" ]]; then
+        local with_arena_samples without_arena_samples total_merge with_arena_ratio
+
+        # Count samples for with_arena path (merge_index_delta_add_only_owned_with_arena)
+        with_arena_samples=$(awk '$0~/merge_index_delta_add_only_owned_with_arena/{s+=$NF} END{print s+0}' "${stacks_folded_file}")
+
+        # Count samples for without_arena path (merge_index_delta_add_only_owned but NOT with_arena)
+        # Use stricter pattern to avoid matching _with_arena suffix
+        without_arena_samples=$(awk '$0~/merge_index_delta_add_only_owned/ && $0!~/merge_index_delta_add_only_owned_with_arena/{s+=$NF} END{print s+0}' "${stacks_folded_file}")
+
+        total_merge=$((with_arena_samples + without_arena_samples))
+
+        if [[ ${total_merge} -gt 0 ]]; then
+            with_arena_ratio=$(awk -v w="${with_arena_samples}" -v t="${total_merge}" 'BEGIN{printf "%.6f", w / t}')
+        else
+            with_arena_ratio="0.000000"
+        fi
+
+        # Generate JSON using jq with requirement-aligned key names (IMPL-TBPA2-003)
+        merge_path_detail_json=$(jq -n \
+            --argjson with_arena "${with_arena_samples}" \
+            --argjson without_arena "${without_arena_samples}" \
+            --arg ratio "${with_arena_ratio}" \
+            '{
+                bulk_with_arena: $with_arena,
+                bulk_without_arena: $without_arena,
+                bulk_with_arena_ratio: ($ratio | tonumber)
+            }')
     fi
 
     # v3: Calculate error_rate using single-source formula (REQ-MET-P3-002)
@@ -1894,6 +1937,8 @@ generate_meta_json() {
         --argjson p99 "${p99_json}" \
         --argjson http_status "${http_status_json}" \
         --argjson retries "${retries}" \
+        --argjson conflict_detail "${conflict_detail_json}" \
+        --argjson merge_path_detail "${merge_path_detail_json}" \
         --argjson connect_err "${connect_err:-0}" \
         --argjson read_err "${read_err:-0}" \
         --argjson write_err "${write_err:-0}" \
@@ -1958,7 +2003,9 @@ generate_meta_json() {
       "p99": $p99
     },
     "http_status": $http_status,
-    "retries": $retries
+    "retries": $retries,
+    "conflict_detail": $conflict_detail,
+    "merge_path_detail": $merge_path_detail
   },
   "errors": {
     "socket_errors": {

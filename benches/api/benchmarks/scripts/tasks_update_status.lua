@@ -6,14 +6,20 @@ local RETRY_COUNT = tonumber(os.getenv("RETRY_COUNT")) or 1
 local BACKOFF_BASE = 2
 local BACKOFF_MAX = tonumber(os.getenv("RETRY_BACKOFF_MAX")) or 16
 
+local VALID_TRANSITIONS = {
+    ["pending"] = {"in_progress", "cancelled"},
+    ["in_progress"] = {"completed", "pending", "cancelled"},
+    ["completed"] = {"pending"},
+    ["cancelled"] = {}
+}
+
 local state = "update"
 local retry_index, retry_body, retry_attempt = nil, nil, 0
 local counter = 0
 local last_request_index, last_request_is_update = nil, false
+local last_request_status = nil
+local retry_sent_status = nil
 local thread_retry_count, thread_retry_exhausted_count = 0, 0
-local thread_stale_version_count = 0
-local thread_retryable_cas_count = 0
-local update_types = {"priority", "description", "title", "full"}
 
 local backoff_skip_counter, backoff_skip_target = 0, 0
 local is_backoff_request, is_suppressed_request, is_fallback_request = false, false, false
@@ -30,33 +36,24 @@ local benchmark_initialized = false
 
 function init(args)
     if error_tracker then error_tracker.init() end
-    common.init_benchmark({scenario_name = "tasks_update", output_format = "json"})
+    common.init_benchmark({scenario_name = "tasks_update_status", output_format = "json"})
 end
 
 local function validate_and_clamp(value, min_val, default_val, name)
     if not value or value < min_val then
-        io.stderr:write(string.format("[tasks_update] WARN: Invalid %s, defaulting to %d\n", name, default_val))
+        io.stderr:write(string.format("[tasks_update_status] WARN: Invalid %s, defaulting to %d\n", name, default_val))
         return default_val
     end
     return value
 end
 
-local all_threads = {}
-
 function setup(thread)
     if not benchmark_initialized then
-        common.init_benchmark({scenario_name = "tasks_update", output_format = "json"})
+        common.init_benchmark({scenario_name = "tasks_update_status", output_format = "json"})
         benchmark_initialized = true
     end
 
     if error_tracker then error_tracker.setup_thread(thread) end
-
-    -- Register thread for conflict_detail aggregation
-    table.insert(all_threads, thread)
-    thread:set("stale_version", 0)
-    thread:set("retryable_cas", 0)
-    thread:set("retry_success", 0)
-    thread:set("retry_exhausted", 0)
 
     local total_threads = validate_and_clamp(tonumber(os.getenv("THREADS") or os.getenv("WRK_THREADS")), 1, 1, "THREADS")
     local pool_size = validate_and_clamp(tonumber(os.getenv("ID_POOL_SIZE")), 1, 10, "ID_POOL_SIZE")
@@ -64,13 +61,13 @@ function setup(thread)
 
     if pool_size < total_threads then
         io.stderr:write(string.format(
-            "[tasks_update] WARN: ID_POOL_SIZE (%d) < THREADS (%d), using pool_size=%d\n",
+            "[tasks_update_status] WARN: ID_POOL_SIZE (%d) < THREADS (%d), using pool_size=%d\n",
             pool_size, total_threads, pool_size))
         total_threads = pool_size
     end
 
     if thread_id >= pool_size then
-        io.stderr:write(string.format("[tasks_update] Thread %d suppressed (ID_POOL_SIZE=%d)\n", thread_id, pool_size))
+        io.stderr:write(string.format("[tasks_update_status] Thread %d suppressed (ID_POOL_SIZE=%d)\n", thread_id, pool_size))
         thread:set("suppressed", true)
         thread:set("id", thread_id)
         thread:set("id_start", 0)
@@ -92,28 +89,21 @@ function setup(thread)
         thread_id, start_index, start_index + ids_per_thread - 1, ids_per_thread))
 end
 
-local function generate_update_body(update_type, version, request_counter)
-    local timestamp_str = tostring(request_counter)
-    if update_type == "priority" then
-        return common.json_encode({ priority = common.random_priority(), version = version })
-    elseif update_type == "description" then
-        return common.json_encode({
-            description = "Updated description via Optional optic - request " .. timestamp_str,
-            version = version
-        })
-    elseif update_type == "title" then
-        return common.json_encode({ title = common.random_title() .. " (updated)", version = version })
-    else
-        local payload_table = {
-            title = common.random_title() .. " (full update)",
-            description = "Full update via combined optics",
-            priority = common.random_priority(),
-            tags = common.array({"updated", "benchmark"}),
-            version = version
-        }
-        assert(payload_table.status == nil, "PUT payload must not contain status field")
-        return common.json_encode(payload_table)
+local function next_valid_status(current_status)
+    local candidates = VALID_TRANSITIONS[current_status]
+    if not candidates or #candidates == 0 then
+        return nil
     end
+    return candidates[math.random(#candidates)]
+end
+
+local function generate_update_body(current_status, version, task_index)
+    local next_status = next_valid_status(current_status)
+    if not next_status then
+        -- Terminal state (e.g., cancelled) reached - skip this task
+        return nil
+    end
+    return common.json_encode({ status = next_status, version = version })
 end
 
 local function reset_retry_state()
@@ -123,7 +113,7 @@ local function reset_retry_state()
 end
 
 local function apply_backoff()
-    backoff_skip_target = math.min(BACKOFF_BASE ^ retry_attempt, BACKOFF_MAX)
+    backoff_skip_target = math.random(0, math.min(BACKOFF_BASE ^ retry_attempt, BACKOFF_MAX))
     backoff_skip_counter = 0
 end
 
@@ -163,21 +153,19 @@ function request()
     if state == "retry_get" then
         local task_id, err = test_ids.get_task_id(retry_index)
         if err then
-            io.stderr:write("[tasks_update] Error getting task ID for retry: " .. err .. "\n")
+            io.stderr:write("[tasks_update_status] Error getting task ID for retry: " .. err .. "\n")
             return fallback_request()
         end
         last_request_is_update = true
         return wrk and wrk.format and wrk.format("GET", "/tasks/" .. task_id, {["Accept"] = "application/json"}) or ""
-    elseif state == "retry_put" then
+    elseif state == "retry_patch" then
         local task_id, err = test_ids.get_task_id(retry_index)
         if err or not retry_body then
-            io.stderr:write("[tasks_update] Error in retry_put: " .. (err or "retry_body is nil") .. "\n")
+            io.stderr:write("[tasks_update_status] Error in retry_patch: " .. (err or "retry_body is nil") .. "\n")
             return fallback_request()
         end
-        -- Contract validation: retry PUT payload must not contain status field (REQ-TU2-001)
-        assert(not retry_body:find('"status"%s*:'), "[tasks_update] FATAL: retry PUT payload contains status field")
         last_request_is_update = true
-        return wrk and wrk.format and wrk.format("PUT", "/tasks/" .. task_id, {["Content-Type"] = "application/json"}, retry_body) or ""
+        return wrk and wrk.format and wrk.format("PATCH", "/tasks/" .. task_id .. "/status", {["Content-Type"] = "application/json"}, retry_body) or ""
     elseif state == "fallback" then
         state = "update"
     end
@@ -190,26 +178,36 @@ function request()
         id_range = tonumber(wrk.thread:get("id_range")) or test_ids.get_task_count()
     end
 
-    counter = counter + 1
-    local global_index = id_start + (counter % id_range) + 1
+    -- Find next non-terminal task (skip cancelled tasks)
+    local max_attempts = id_range
+    local attempt = 0
+    local task_state, global_index, body
 
-    local task_state, err = test_ids.get_task_state(global_index)
-    if err then
-        io.stderr:write("[tasks_update] Error getting task state: " .. err .. "\n")
+    repeat
+        counter = counter + 1
+        global_index = id_start + (counter % id_range) + 1
+        attempt = attempt + 1
+
+        local err
+        task_state, err = test_ids.get_task_state(global_index)
+        if err then
+            io.stderr:write("[tasks_update_status] Error getting task state: " .. err .. "\n")
+            return fallback_request()
+        end
+
+        body = generate_update_body(task_state.status, task_state.version, global_index)
+    until body or attempt >= max_attempts
+
+    if not body then
+        io.stderr:write("[tasks_update_status] All tasks in terminal state, using fallback\n")
         return fallback_request()
     end
 
     last_request_index = global_index
     last_request_is_update = true
+    last_request_status = body:match('"status"%s*:%s*"([^"]+)"')
 
-    local update_type = update_types[(counter % #update_types) + 1]
-    local body = generate_update_body(update_type, task_state.version, counter)
-
-    -- Contract validation: PUT payload must not contain status field (REQ-TU2-001)
-    -- If violated, trigger assertion failure to stop benchmark
-    assert(not body:find('"status"%s*:'), "[tasks_update] FATAL: PUT payload contains status field - contract violation detected")
-
-    return wrk and wrk.format and wrk.format("PUT", "/tasks/" .. task_state.id, {["Content-Type"] = "application/json"}, body) or ""
+    return wrk and wrk.format and wrk.format("PATCH", "/tasks/" .. task_state.id .. "/status", {["Content-Type"] = "application/json"}, body) or ""
 end
 
 function response(status, headers, body)
@@ -237,91 +235,77 @@ function response(status, headers, body)
     if state == "retry_get" then
         if status == 200 then
             local version = common.extract_version(body)
-            if version then
-                local success, err = test_ids.set_version(retry_index, version)
+            local retry_status = common.extract_status(body)
+            if version and retry_status and common.is_valid_status(retry_status) then
+                local success, err = test_ids.set_version_and_status(retry_index, version, retry_status)
                 if not success then
-                    io.stderr:write("[tasks_update] Failed to set version: " .. (err or "unknown") .. "\n")
+                    io.stderr:write("[tasks_update_status] Failed to set version and status: " .. (err or "unknown") .. "\n")
                     reset_retry_state()
                     return
                 end
-                retry_body = generate_update_body(update_types[(retry_index % #update_types) + 1], version, retry_index)
-                state = "retry_put"
+                retry_body = generate_update_body(retry_status, version, retry_index)
+                if not retry_body then
+                    reset_retry_state()
+                    return
+                end
+                retry_sent_status = retry_body:match('"status"%s*:%s*"([^"]+)"')
+                state = "retry_patch"
             else
-                io.stderr:write("[tasks_update] Failed to extract version from GET response\n")
+                io.stderr:write("[tasks_update_status] Failed to extract version or status from GET response\n")
                 reset_retry_state()
             end
         else
-            io.stderr:write(string.format("[tasks_update] Retry GET failed with status %d\n", status))
+            io.stderr:write(string.format("[tasks_update_status] Retry GET failed with status %d\n", status))
             reset_retry_state()
         end
-    elseif state == "retry_put" then
+    elseif state == "retry_patch" then
         if status == 200 or status == 201 then
             local new_version, err = test_ids.increment_version(retry_index)
-            if err then io.stderr:write("[tasks_update] Error incrementing version after retry: " .. err .. "\n") end
-            common.track_retry()
-            thread_retry_count = thread_retry_count + 1
-            -- Update thread-local counter for aggregation
-            if wrk.thread then
-                wrk.thread:set("retry_success", (tonumber(wrk.thread:get("retry_success")) or 0) + 1)
+            if err then
+                io.stderr:write("[tasks_update_status] Error incrementing version after retry: " .. err .. "\n")
+            elseif retry_sent_status then
+                local success, set_err = test_ids.set_version_and_status(retry_index, new_version, retry_sent_status)
+                if not success then
+                    io.stderr:write("[tasks_update_status] Error setting status after retry: " .. (set_err or "unknown") .. "\n")
+                end
             end
+            thread_retry_count = thread_retry_count + 1
             reset_retry_state()
         elseif status == 409 then
             retry_attempt = retry_attempt + 1
             if retry_attempt >= RETRY_COUNT then
-                io.stderr:write(string.format("[tasks_update] Retry exhausted after %d attempts\n", RETRY_COUNT))
-                common.track_retry()
+                io.stderr:write(string.format("[tasks_update_status] Retry exhausted after %d attempts\n", RETRY_COUNT))
                 thread_retry_exhausted_count = thread_retry_exhausted_count + 1
-                -- Update thread-local counter for aggregation
-                if wrk.thread then
-                    wrk.thread:set("retry_exhausted", (tonumber(wrk.thread:get("retry_exhausted")) or 0) + 1)
-                end
                 reset_retry_state()
             else
-                io.stderr:write(string.format("[tasks_update] Retry PUT got 409 (attempt %d/%d)\n", retry_attempt, RETRY_COUNT))
+                io.stderr:write(string.format("[tasks_update_status] Retry PATCH got 409 (attempt %d/%d)\n", retry_attempt, RETRY_COUNT))
                 apply_backoff()
                 state = "retry_get"
             end
         else
-            io.stderr:write(string.format("[tasks_update] Retry PUT failed with status %d\n", status))
-            common.track_retry()
+            io.stderr:write(string.format("[tasks_update_status] Retry PATCH failed with status %d\n", status))
             reset_retry_state()
         end
     elseif state == "update" then
         if status == 200 or status == 201 then
-            if last_request_index then
+            if last_request_index and last_request_status then
                 local new_version, err = test_ids.increment_version(last_request_index)
-                if err then io.stderr:write("[tasks_update] Error incrementing version: " .. err .. "\n") end
+                if err then
+                    io.stderr:write("[tasks_update_status] Error incrementing version: " .. err .. "\n")
+                else
+                    local success, set_err = test_ids.set_version_and_status(last_request_index, new_version, last_request_status)
+                    if not success then
+                        io.stderr:write("[tasks_update_status] Error setting status: " .. (set_err or "unknown") .. "\n")
+                    end
+                end
             end
         elseif status == 409 then
-            local error_code = common.extract_error_code(body)
-            if error_code == "VERSION_CONFLICT" then
-                thread_stale_version_count = thread_stale_version_count + 1
-                if wrk.thread then
-                    wrk.thread:set("stale_version", (tonumber(wrk.thread:get("stale_version")) or 0) + 1)
-                end
-            elseif error_code == "VERSION_CONFLICT_RETRYABLE" then
-                thread_retryable_cas_count = thread_retryable_cas_count + 1
-                if wrk.thread then
-                    wrk.thread:set("retryable_cas", (tonumber(wrk.thread:get("retryable_cas")) or 0) + 1)
-                end
-            else
-                -- NON_COMMUTATIVE_CONFLICT or unrecognized 409 codes (including nil)
-                -- counted as stale_version since they are non-retryable conflicts
-                thread_stale_version_count = thread_stale_version_count + 1
-                if wrk.thread then
-                    wrk.thread:set("stale_version", (tonumber(wrk.thread:get("stale_version")) or 0) + 1)
-                end
-            end
             if last_request_index then
                 retry_index = last_request_index
                 retry_attempt = 0
                 if RETRY_COUNT == 0 then
-                    io.stderr:write("[tasks_update] Conflict detected but retries disabled\n")
+                    io.stderr:write("[tasks_update_status] Conflict detected but retries disabled\n")
                     thread_retry_exhausted_count = thread_retry_exhausted_count + 1
-                    -- Update thread-local counter for aggregation
-                    if wrk.thread then
-                        wrk.thread:set("retry_exhausted", (tonumber(wrk.thread:get("retry_exhausted")) or 0) + 1)
-                    end
                     reset_retry_state()
                 else
                     apply_backoff()
@@ -329,7 +313,7 @@ function response(status, headers, body)
                 end
             end
         elseif status >= 400 then
-            io.stderr:write(string.format("[tasks_update] Error %d\n", status))
+            io.stderr:write(string.format("[tasks_update_status] Error %d\n", status))
         end
     end
 end
@@ -342,20 +326,18 @@ local STATUS_LABELS = {
 }
 
 local function print_excluded_requests()
-    local excluded = {
-        {request_categories.backoff, "Backoff"},
-        {request_categories.suppressed, "Suppressed thread"},
-        {request_categories.fallback, "Fallback"}
-    }
+    local excluded = {{"Backoff", request_categories.backoff},
+                      {"Suppressed thread", request_categories.suppressed},
+                      {"Fallback", request_categories.fallback}}
     for _, item in ipairs(excluded) do
-        if item[1] > 0 then
-            io.stderr:write(string.format("[tasks_update] %s requests (excluded): %d\n", item[2], item[1]))
+        if item[2] > 0 then
+            io.stderr:write(string.format("[tasks_update_status] %s requests (excluded): %d\n", item[1], item[2]))
         end
     end
 end
 
 local function print_status_distribution(aggregated, lua_total, summary)
-    io.write("\n--- tasks_update HTTP Status Distribution (all threads) ---\n")
+    io.write("\n--- tasks_update_status HTTP Status Distribution (all threads) ---\n")
 
     local total = 0
     for _, label in ipairs(STATUS_LABELS) do
@@ -408,7 +390,7 @@ function done(summary, latency, requests)
 
     if not is_consistent then
         io.stderr:write(string.format(
-            "[tasks_update] WARN: Inconsistency detected: total=%d, sum(categories)=%d\n",
+            "[tasks_update_status] WARN: Inconsistency detected: total=%d, sum(categories)=%d\n",
             summary.requests, sum))
     end
 
@@ -423,44 +405,24 @@ function done(summary, latency, requests)
     io.write("\n")
 
     print_excluded_requests()
-    common.print_summary("tasks_update", summary)
+    common.print_summary("tasks_update_status", summary)
 
     if error_tracker then
         print_status_distribution(error_tracker.get_all_threads_aggregated_summary(), common.total_requests, summary)
     end
 
-    io.stderr:write(string.format("[tasks_update] Retry config: RETRY_COUNT=%d, BACKOFF_MAX=%d\n", RETRY_COUNT, BACKOFF_MAX))
+    io.stderr:write(string.format("[tasks_update_status] Retry config: RETRY_COUNT=%d, BACKOFF_MAX=%d\n", RETRY_COUNT, BACKOFF_MAX))
 
-    local retry_stats = {
-        {thread_retry_count, "Thread successful retries"},
-        {thread_retry_exhausted_count, "Thread retry exhausted"}
-    }
-    for _, stat in ipairs(retry_stats) do
-        if stat[1] > 0 then
-            io.stderr:write(string.format("[tasks_update] %s: %d\n", stat[2], stat[1]))
-        end
+    if thread_retry_count > 0 then
+        io.stderr:write(string.format("[tasks_update_status] Thread successful retries: %d\n", thread_retry_count))
     end
-
-    -- Aggregate conflict_detail from all threads
-    local aggregated_conflict_detail = {
-        stale_version = 0,
-        retryable_cas = 0,
-        retry_success = 0,
-        retry_exhausted = 0
-    }
-    for _, thread in ipairs(all_threads) do
-        aggregated_conflict_detail.stale_version = aggregated_conflict_detail.stale_version + (tonumber(thread:get("stale_version")) or 0)
-        aggregated_conflict_detail.retryable_cas = aggregated_conflict_detail.retryable_cas + (tonumber(thread:get("retryable_cas")) or 0)
-        aggregated_conflict_detail.retry_success = aggregated_conflict_detail.retry_success + (tonumber(thread:get("retry_success")) or 0)
-        aggregated_conflict_detail.retry_exhausted = aggregated_conflict_detail.retry_exhausted + (tonumber(thread:get("retry_exhausted")) or 0)
+    if thread_retry_exhausted_count > 0 then
+        io.stderr:write(string.format("[tasks_update_status] Thread retry exhausted: %d\n", thread_retry_exhausted_count))
     end
 
     local rc = pcall(require, "result_collector") and require("result_collector") or nil
     if rc and rc.set_request_categories then
         rc.set_request_categories(categories)
-    end
-    if rc and rc.set_conflict_detail then
-        rc.set_conflict_detail(aggregated_conflict_detail)
     end
 
     common.finalize_benchmark(summary, latency, requests)
