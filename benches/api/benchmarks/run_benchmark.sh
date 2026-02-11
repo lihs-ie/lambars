@@ -1603,8 +1603,8 @@ generate_meta_json() {
         with_arena_samples=$(awk '$0~/merge_index_delta_add_only_owned_with_arena/{s+=$NF} END{print s+0}' "${stacks_folded_file}")
 
         # Count samples for without_arena path (merge_index_delta_add_only_owned but NOT with_arena)
-        # Regex: merge_index_delta_add_only_owned[^_] ensures we don't match _with_arena suffix
-        without_arena_samples=$(awk '$0~/merge_index_delta_add_only_owned[^_]/{s+=$NF} END{print s+0}' "${stacks_folded_file}")
+        # Use stricter pattern to avoid matching _with_arena suffix
+        without_arena_samples=$(awk '$0~/merge_index_delta_add_only_owned/ && $0!~/merge_index_delta_add_only_owned_with_arena/{s+=$NF} END{print s+0}' "${stacks_folded_file}")
 
         total_merge=$((with_arena_samples + without_arena_samples))
 
@@ -1614,15 +1614,15 @@ generate_meta_json() {
             with_arena_ratio="0.000000"
         fi
 
-        # Generate JSON using jq for proper escaping
+        # Generate JSON using jq with requirement-aligned key names (IMPL-TBPA2-003)
         merge_path_detail_json=$(jq -n \
             --argjson with_arena "${with_arena_samples}" \
             --argjson without_arena "${without_arena_samples}" \
             --arg ratio "${with_arena_ratio}" \
             '{
-                with_arena_samples: $with_arena,
-                without_arena_samples: $without_arena,
-                with_arena_ratio: ($ratio | tonumber)
+                bulk_with_arena: $with_arena,
+                bulk_without_arena: $without_arena,
+                bulk_with_arena_ratio: ($ratio | tonumber)
             }')
     fi
 

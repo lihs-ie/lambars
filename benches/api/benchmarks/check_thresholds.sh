@@ -243,9 +243,9 @@ check_validation_gate() {
 
 check_merge_path_gate() {
     local MIN_WITH_ARENA_RATIO=0.90
-    local WITH_ARENA_SAMPLES
-    local WITHOUT_ARENA_SAMPLES
-    local WITH_ARENA_RATIO
+    local BULK_WITH_ARENA
+    local BULK_WITHOUT_ARENA
+    local BULK_WITH_ARENA_RATIO
 
     # Check if merge_path_detail exists in meta.json
     if ! jq -e '.results.merge_path_detail' "${META_FILE}" >/dev/null 2>&1; then
@@ -254,26 +254,33 @@ check_merge_path_gate() {
         return 0
     fi
 
-    WITH_ARENA_SAMPLES=$(jq -r '.results.merge_path_detail.with_arena_samples // empty' "${META_FILE}")
-    WITHOUT_ARENA_SAMPLES=$(jq -r '.results.merge_path_detail.without_arena_samples // empty' "${META_FILE}")
-    WITH_ARENA_RATIO=$(jq -r '.results.merge_path_detail.with_arena_ratio // empty' "${META_FILE}")
+    BULK_WITH_ARENA=$(jq -r '.results.merge_path_detail.bulk_with_arena // empty' "${META_FILE}")
+    BULK_WITHOUT_ARENA=$(jq -r '.results.merge_path_detail.bulk_without_arena // empty' "${META_FILE}")
 
-    if [[ -z "${WITH_ARENA_SAMPLES}" ]] || [[ -z "${WITHOUT_ARENA_SAMPLES}" ]] || [[ -z "${WITH_ARENA_RATIO}" ]]; then
-        echo "WARNING: merge_path_detail fields incomplete (with_arena_samples=${WITH_ARENA_SAMPLES}, without_arena_samples=${WITHOUT_ARENA_SAMPLES}, ratio=${WITH_ARENA_RATIO})"
+    if [[ -z "${BULK_WITH_ARENA}" ]] || [[ -z "${BULK_WITHOUT_ARENA}" ]]; then
+        echo "WARNING: merge_path_detail fields incomplete (bulk_with_arena=${BULK_WITH_ARENA}, bulk_without_arena=${BULK_WITHOUT_ARENA})"
         echo ""
         return 0
     fi
 
+    # Recalculate ratio from sample counts (do not trust stored ratio)
+    local TOTAL=$((BULK_WITH_ARENA + BULK_WITHOUT_ARENA))
+    if [[ ${TOTAL} -gt 0 ]]; then
+        BULK_WITH_ARENA_RATIO=$(awk -v w="${BULK_WITH_ARENA}" -v t="${TOTAL}" 'BEGIN{printf "%.6f", w/t}')
+    else
+        BULK_WITH_ARENA_RATIO="0.000000"
+    fi
+
     echo "Merge path telemetry:"
-    echo "  with_arena_samples = ${WITH_ARENA_SAMPLES}"
-    echo "  without_arena_samples = ${WITHOUT_ARENA_SAMPLES}"
-    echo "  with_arena_ratio = ${WITH_ARENA_RATIO}"
+    echo "  bulk_with_arena = ${BULK_WITH_ARENA}"
+    echo "  bulk_without_arena = ${BULK_WITHOUT_ARENA}"
+    echo "  bulk_with_arena_ratio = ${BULK_WITH_ARENA_RATIO}"
     echo ""
 
-    # Check if with_arena_ratio meets the threshold
-    if (( $(echo "${WITH_ARENA_RATIO} < ${MIN_WITH_ARENA_RATIO}" | bc -l) )); then
+    # Check if bulk_with_arena_ratio meets the threshold
+    if awk -v r="${BULK_WITH_ARENA_RATIO}" -v m="${MIN_WITH_ARENA_RATIO}" 'BEGIN{exit (r < m) ? 0 : 1}'; then
         echo "FAIL: Merge path regression detected"
-        echo "  with_arena_ratio = ${WITH_ARENA_RATIO} (must be >= ${MIN_WITH_ARENA_RATIO})"
+        echo "  bulk_with_arena_ratio = ${BULK_WITH_ARENA_RATIO} (must be >= ${MIN_WITH_ARENA_RATIO})"
         echo "  This indicates tasks_bulk is not using the optimized with_arena path"
         exit 3
     fi
