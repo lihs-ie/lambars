@@ -1602,14 +1602,7 @@ impl NgramSegmentOverlay {
                     scratch.extend_from_slice(segment_slice);
                     scratch.extend_from_slice(existing_slice);
                 } else {
-                    // Two-pass capacity planning: compute exact union size
-                    // before allocating to avoid intermediate grow calls.
-                    let union_len = SearchIndex::estimate_union_len_sorted(
-                        existing_slice,
-                        segment_slice,
-                    );
-                    scratch.reserve_exact(union_len);
-                    SearchIndex::merge_posting_add_only_into_slice(
+                    SearchIndex::merge_into_scratch_capacity_planned(
                         existing_slice,
                         segment_slice,
                         scratch,
@@ -1635,10 +1628,7 @@ impl NgramSegmentOverlay {
         right: &[TaskId],
         scratch: &mut Vec<TaskId>,
     ) -> TaskIdCollection {
-        scratch.clear();
-        let union_len = SearchIndex::estimate_union_len_sorted(left, right);
-        scratch.reserve_exact(union_len);
-        SearchIndex::merge_posting_add_only_into_slice(left, right, scratch);
+        SearchIndex::merge_into_scratch_capacity_planned(left, right, scratch);
         TaskIdCollection::from_sorted_vec(std::mem::take(scratch))
     }
 }
@@ -4459,6 +4449,32 @@ impl SearchIndex {
         }
     }
 
+    /// Takes the contents of `scratch` as a [`TaskIdCollection`], leaving `scratch` empty
+    /// but preserving its heap allocation for reuse.
+    #[inline]
+    fn take_scratch_as_collection(scratch: &mut Vec<TaskId>) -> Option<TaskIdCollection> {
+        if scratch.is_empty() {
+            return None;
+        }
+        let mut collected = Vec::with_capacity(scratch.len());
+        collected.append(scratch);
+        Some(TaskIdCollection::from_sorted_vec(collected))
+    }
+
+    /// Merges `existing` and `add` into `scratch` using the capacity-planned
+    /// slice path (estimate exact union size, then merge).
+    #[inline]
+    fn merge_into_scratch_capacity_planned(
+        existing_slice: &[TaskId],
+        add_slice: &[TaskId],
+        scratch: &mut Vec<TaskId>,
+    ) {
+        let union_len = Self::estimate_union_len_sorted(existing_slice, add_slice);
+        scratch.clear();
+        scratch.reserve_exact(union_len);
+        Self::merge_posting_add_only_into_slice(existing_slice, add_slice, scratch);
+    }
+
     #[inline]
     fn to_sorted_vec(collection: &TaskIdCollection) -> Vec<TaskId> {
         collection.as_sorted_slice().map_or_else(
@@ -5823,15 +5839,14 @@ impl SearchIndex {
         // TB-002: Estimate capacity based on task count and token limits.
         // Each task contributes at most max_tokens_per_task entries across all builders.
         // title_full gets 1 entry per task, title_word and tag share the remaining tokens.
-        let estimated_word_entries = tasks.len() * self.config.max_tokens_per_task;
-        let estimated_tag_entries = tasks.len() * self.config.max_tokens_per_task;
+        let estimated_entries_per_index = tasks.len() * self.config.max_tokens_per_task;
 
         let mut title_word_builder =
-            SearchIndexBulkBuilder::with_capacity(self.config.clone(), estimated_word_entries);
+            SearchIndexBulkBuilder::with_capacity(self.config.clone(), estimated_entries_per_index);
         let mut title_full_builder =
             SearchIndexBulkBuilder::with_capacity(self.config.clone(), tasks.len());
         let mut tag_builder =
-            SearchIndexBulkBuilder::with_capacity(self.config.clone(), estimated_tag_entries);
+            SearchIndexBulkBuilder::with_capacity(self.config.clone(), estimated_entries_per_index);
 
         for task in &tasks {
             let normalized = NormalizedTaskData::from_task(task);
@@ -5927,15 +5942,14 @@ impl SearchIndex {
             return Ok(self.clone());
         }
 
-        let estimated_word_entries = tasks.len() * self.config.max_tokens_per_task;
-        let estimated_tag_entries = tasks.len() * self.config.max_tokens_per_task;
+        let estimated_entries_per_index = tasks.len() * self.config.max_tokens_per_task;
 
         let mut title_word_builder =
-            SearchIndexBulkBuilder::with_capacity(self.config.clone(), estimated_word_entries);
+            SearchIndexBulkBuilder::with_capacity(self.config.clone(), estimated_entries_per_index);
         let mut title_full_builder =
             SearchIndexBulkBuilder::with_capacity(self.config.clone(), tasks.len());
         let mut tag_builder =
-            SearchIndexBulkBuilder::with_capacity(self.config.clone(), estimated_tag_entries);
+            SearchIndexBulkBuilder::with_capacity(self.config.clone(), estimated_entries_per_index);
 
         for task in &tasks {
             let normalized = NormalizedTaskData::from_task(task);
@@ -7029,8 +7043,6 @@ impl SearchIndex {
         output.clear();
 
         let mut existing_iterator = existing.peekable();
-        // Pre-allocate using size_hint upper bound to avoid intermediate grows.
-        // ExactSizeIterator implementations provide accurate lower bounds.
         let existing_hint = existing_iterator.size_hint().0;
         output.reserve(existing_hint + add.len());
         let mut add_iterator = add.iter().peekable();
@@ -7092,24 +7104,13 @@ impl SearchIndex {
                         transient
                             .insert(key.clone(), TaskIdCollection::from_sorted_vec(result_vec));
                     } else if let Some(existing_slice) = collection.as_sorted_slice() {
-                        // Capacity planning: pre-allocate scratch with exact
-                        // union size to avoid grow during merge.
-                        let union_len = Self::estimate_union_len_sorted(
-                            existing_slice,
-                            add_list.as_slice(),
-                        );
-                        scratch.clear();
-                        scratch.reserve_exact(union_len);
-                        Self::merge_posting_add_only_into_slice(
+                        Self::merge_into_scratch_capacity_planned(
                             existing_slice,
                             add_list.as_slice(),
                             &mut scratch,
                         );
-                        if !scratch.is_empty() {
-                            let mut collected = Vec::with_capacity(scratch.len());
-                            collected.append(&mut scratch);
-                            transient
-                                .insert(key.clone(), TaskIdCollection::from_sorted_vec(collected));
+                        if let Some(merged) = Self::take_scratch_as_collection(&mut scratch) {
+                            transient.insert(key.clone(), merged);
                         }
                     } else {
                         Self::merge_posting_add_only_into(
@@ -7117,11 +7118,8 @@ impl SearchIndex {
                             add_list.as_slice(),
                             &mut scratch,
                         );
-                        if !scratch.is_empty() {
-                            let mut collected = Vec::with_capacity(scratch.len());
-                            collected.append(&mut scratch);
-                            transient
-                                .insert(key.clone(), TaskIdCollection::from_sorted_vec(collected));
+                        if let Some(merged) = Self::take_scratch_as_collection(&mut scratch) {
+                            transient.insert(key.clone(), merged);
                         }
                     }
                 }
@@ -7163,23 +7161,13 @@ impl SearchIndex {
                         result_vec.extend(add_list);
                         transient.insert(key, TaskIdCollection::from_sorted_vec(result_vec));
                     } else if let Some(existing_slice) = collection.as_sorted_slice() {
-                        // Capacity planning: pre-allocate scratch with exact
-                        // union size to avoid grow during merge.
-                        let union_len = Self::estimate_union_len_sorted(
-                            existing_slice,
-                            add_list.as_slice(),
-                        );
-                        scratch.clear();
-                        scratch.reserve_exact(union_len);
-                        Self::merge_posting_add_only_into_slice(
+                        Self::merge_into_scratch_capacity_planned(
                             existing_slice,
                             add_list.as_slice(),
                             &mut scratch,
                         );
-                        if !scratch.is_empty() {
-                            let mut collected = Vec::with_capacity(scratch.len());
-                            collected.append(&mut scratch);
-                            transient.insert(key, TaskIdCollection::from_sorted_vec(collected));
+                        if let Some(merged) = Self::take_scratch_as_collection(&mut scratch) {
+                            transient.insert(key, merged);
                         }
                     } else {
                         Self::merge_posting_add_only_into(
@@ -7187,16 +7175,13 @@ impl SearchIndex {
                             add_list.as_slice(),
                             &mut scratch,
                         );
-                        if !scratch.is_empty() {
-                            let mut collected = Vec::with_capacity(scratch.len());
-                            collected.append(&mut scratch);
-                            transient.insert(key, TaskIdCollection::from_sorted_vec(collected));
+                        if let Some(merged) = Self::take_scratch_as_collection(&mut scratch) {
+                            transient.insert(key, merged);
                         }
                     }
                 }
                 None if !add_list.is_empty() => {
-                    let collection = TaskIdCollection::from_sorted_vec(add_list);
-                    transient.insert(key, collection);
+                    transient.insert(key, TaskIdCollection::from_sorted_vec(add_list));
                 }
                 Some(_) | None => {}
             }
@@ -7233,23 +7218,13 @@ impl SearchIndex {
                         result_vec.extend(add_list);
                         transient.insert(key, TaskIdCollection::from_sorted_vec(result_vec));
                     } else if let Some(existing_slice) = collection.as_sorted_slice() {
-                        // Capacity planning: pre-allocate scratch with exact
-                        // union size to avoid grow during merge.
-                        let union_len = Self::estimate_union_len_sorted(
-                            existing_slice,
-                            add_list.as_slice(),
-                        );
-                        scratch.clear();
-                        scratch.reserve_exact(union_len);
-                        Self::merge_posting_add_only_into_slice(
+                        Self::merge_into_scratch_capacity_planned(
                             existing_slice,
                             add_list.as_slice(),
                             scratch,
                         );
-                        if !scratch.is_empty() {
-                            let mut collected = Vec::with_capacity(scratch.len());
-                            collected.append(scratch);
-                            transient.insert(key, TaskIdCollection::from_sorted_vec(collected));
+                        if let Some(merged) = Self::take_scratch_as_collection(scratch) {
+                            transient.insert(key, merged);
                         }
                     } else {
                         Self::merge_posting_add_only_into(
@@ -7257,16 +7232,13 @@ impl SearchIndex {
                             add_list.as_slice(),
                             scratch,
                         );
-                        if !scratch.is_empty() {
-                            let mut collected = Vec::with_capacity(scratch.len());
-                            collected.append(scratch);
-                            transient.insert(key, TaskIdCollection::from_sorted_vec(collected));
+                        if let Some(merged) = Self::take_scratch_as_collection(scratch) {
+                            transient.insert(key, merged);
                         }
                     }
                 }
                 None if !add_list.is_empty() => {
-                    let collection = TaskIdCollection::from_sorted_vec(add_list);
-                    transient.insert(key, collection);
+                    transient.insert(key, TaskIdCollection::from_sorted_vec(add_list));
                 }
                 Some(_) | None => {}
             }
