@@ -1609,7 +1609,7 @@ impl NgramSegmentOverlay {
                     );
                 }
 
-                TaskIdCollection::from_sorted_vec(std::mem::take(scratch))
+                Self::take_scratch_as_collection_preserve_capacity(scratch)
             }
             (Some(left_slice), None) => {
                 let right_vec = SearchIndex::to_sorted_vec(segment_collection);
@@ -1623,13 +1623,23 @@ impl NgramSegmentOverlay {
         }
     }
 
+    /// Converts the contents of `scratch` into a [`TaskIdCollection`] while
+    /// preserving the scratch buffer's heap allocation for future reuse.
+    fn take_scratch_as_collection_preserve_capacity(
+        scratch: &mut Vec<TaskId>,
+    ) -> TaskIdCollection {
+        let mut collected = Vec::with_capacity(scratch.len());
+        collected.append(scratch);
+        TaskIdCollection::from_sorted_vec(collected)
+    }
+
     fn merge_slices_into(
         left: &[TaskId],
         right: &[TaskId],
         scratch: &mut Vec<TaskId>,
     ) -> TaskIdCollection {
         SearchIndex::merge_into_scratch_capacity_planned(left, right, scratch);
-        TaskIdCollection::from_sorted_vec(std::mem::take(scratch))
+        Self::take_scratch_as_collection_preserve_capacity(scratch)
     }
 }
 
@@ -4472,7 +4482,9 @@ impl SearchIndex {
         let union_len = Self::estimate_union_len_sorted(existing_slice, add_slice);
         scratch.clear();
         scratch.reserve_exact(union_len);
-        Self::merge_posting_add_only_into_slice(existing_slice, add_slice, scratch);
+        // Use the preallocated variant to avoid redundant clear/reserve
+        // inside the downstream merge function.
+        Self::merge_two_pointer_preallocated(existing_slice, add_slice, scratch);
     }
 
     #[inline]
@@ -7014,6 +7026,17 @@ impl SearchIndex {
     /// computes the exact output size so that the caller can `reserve_exact`
     /// before the actual merge, eliminating intermediate `grow` calls.
     fn estimate_union_len_sorted(existing: &[TaskId], add: &[TaskId]) -> usize {
+        #[cfg(debug_assertions)]
+        {
+            debug_assert!(
+                existing.windows(2).all(|window| window[0] < window[1]),
+                "existing slice must be sorted and deduplicated"
+            );
+            debug_assert!(
+                add.windows(2).all(|window| window[0] < window[1]),
+                "add slice must be sorted and deduplicated"
+            );
+        }
         let mut count = 0usize;
         let mut i = 0;
         let mut j = 0;
@@ -7076,6 +7099,48 @@ impl SearchIndex {
                     }
                 }
             }
+        }
+    }
+
+    /// Two-pointer merge for pre-allocated output buffers.
+    ///
+    /// Unlike [`merge_posting_add_only_two_pointer`], this function does **not**
+    /// call `output.clear()` or `output.reserve()`. The caller is responsible for
+    /// ensuring `output` is empty and has sufficient capacity (e.g. via
+    /// [`merge_into_scratch_capacity_planned`]).
+    ///
+    /// Both inputs must be sorted and deduplicated. Runs in O(n + m) time.
+    fn merge_two_pointer_preallocated(
+        existing: &[TaskId],
+        add: &[TaskId],
+        output: &mut Vec<TaskId>,
+    ) {
+        let mut existing_position = 0;
+        let mut add_position = 0;
+
+        while existing_position < existing.len() && add_position < add.len() {
+            match existing[existing_position].cmp(&add[add_position]) {
+                std::cmp::Ordering::Less => {
+                    output.push(existing[existing_position].clone());
+                    existing_position += 1;
+                }
+                std::cmp::Ordering::Greater => {
+                    output.push(add[add_position].clone());
+                    add_position += 1;
+                }
+                std::cmp::Ordering::Equal => {
+                    output.push(existing[existing_position].clone());
+                    existing_position += 1;
+                    add_position += 1;
+                }
+            }
+        }
+
+        if existing_position < existing.len() {
+            output.extend_from_slice(&existing[existing_position..]);
+        }
+        if add_position < add.len() {
+            output.extend_from_slice(&add[add_position..]);
         }
     }
 
