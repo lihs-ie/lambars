@@ -1,0 +1,210 @@
+# serde デシリアライズ最適化 要件定義
+#
+# 概要:
+#   PersistentList と PersistentVector の serde デシリアライズ時に
+#   Vec が二重作成される問題を最適化する
+#
+# 設計方針:
+#   1. 既存の内部ビルダー関数を直接呼び出し、collect() を経由しない
+#   2. 関数型プログラミングの原則（参照透過性、不変性）を維持
+#   3. 既存の API や動作を変更しない（内部実装の最適化のみ）
+#
+# 参照:
+#   - GitHub Issue #69
+#   - docs/internal/done/requirements/20260107_1330_serde_support.yaml
+
+version: "1.0.0"
+name: "serde_deserialize_optimization"
+description: |
+  PersistentList と PersistentVector の Deserialize 実装において、
+  Vec が二重に作成される非効率を解消する。
+
+  現在のフロー:
+  1. visit_seq で Vec に要素を収集
+  2. collect() を呼び出し
+  3. FromIterator 実装内で再度 Vec を作成
+
+  最適化後:
+  1. visit_seq で Vec に要素を収集
+  2. 直接 build_from_vec / build_persistent_vector_from_vec を呼び出し
+
+background:
+  problem: |
+    serde の Deserialize 実装において、visit_seq メソッドで要素を
+    Vec に収集した後、collect() を呼び出している。
+    しかし、FromIterator の実装内で再度 Vec を作成しているため、
+    余分なメモリアロケーションとデータコピーが発生している。
+  motivation: |
+    デシリアライズはデータの読み込み時に頻繁に呼び出される操作であり、
+    パフォーマンスが重要。特に大規模なデータ構造の場合、
+    メモリアロケーションの削減は顕著な性能改善につながる。
+  prior_art:
+    - name: "PersistentHashSet/HashMap/TreeMap の実装"
+      description: |
+        これらのデータ構造は既に最適化されており、
+        逐次 insert を使用して Vec の二重作成を回避している。
+
+# 設計上の保証
+design_guarantees:
+  semantics_equivalence:
+    description: |
+      FromIterator::from_iter と build_from_vec の等価性について:
+
+      PersistentList の FromIterator 実装:
+        fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+            let elements: Vec<T> = iter.into_iter().collect();
+            Self::build_from_vec(elements)
+        }
+
+      PersistentVector の FromIterator 実装:
+        fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+            let elements: Vec<T> = iter.into_iter().collect();
+            build_persistent_vector_from_vec(elements)
+        }
+
+      FromIterator は単に Vec を収集して build_from_vec を呼び出すだけであり、
+      追加の検証や変換は行わない。したがって、collect() を経由せず直接
+      build_from_vec を呼び出してもセマンティクスは完全に等価である。
+    design_constraint: |
+      FromIterator は内部ビルダー関数の薄いラッパーであることを維持する:
+      - PersistentList: FromIterator は build_from_vec を直接呼び出す
+      - PersistentVector: FromIterator は build_persistent_vector_from_vec を直接呼び出す
+      将来 FromIterator に検証や正規化を追加する場合は、
+      Deserialize 実装も同様に更新する必要がある。
+    verification: |
+      1. 既存のラウンドトリップテストが全て通過すること
+      2. FromIterator 実装が内部ビルダー関数を直接呼び出す構造を維持すること
+         - PersistentList: build_from_vec
+         - PersistentVector: build_persistent_vector_from_vec
+         （コードレビューで確認）
+
+  builder_purity:
+    description: |
+      build_from_vec / build_persistent_vector_from_vec は純粋関数である:
+      - 外部状態に依存しない
+      - 副作用を持たない
+      - 同じ入力に対して常に同じ出力を返す
+      - 入力の Vec を消費し、新しい永続データ構造を返す
+    verification_checklist:
+      - "グローバル変数や static mut へのアクセスがないこと"
+      - "I/O 操作（ファイル、ネットワーク、標準入出力）がないこと"
+      - "乱数や現在時刻の取得がないこと"
+      - "外部クレートの副作用を持つ関数呼び出しがないこと"
+      - "引数と戻り値のみで動作が完結すること"
+
+  max_preallocate_rationale:
+    description: |
+      MAX_PREALLOCATE: 4096 の根拠:
+      - 既存の serde Deserialize 実装（list.rs, vector.rs, hashset.rs,
+        hashmap.rs, treemap.rs）で統一的に使用されている定数値
+      - DoS 攻撃対策: 悪意のある size_hint による過大なメモリ確保を防止
+      - 4096 要素を超える場合は Vec が動的に拡張される
+    reference: |
+      src/persistent/list.rs:1536, src/persistent/vector.rs:3172,
+      src/persistent/hashset.rs:1606, src/persistent/hashmap.rs:2002,
+      src/persistent/treemap.rs:1632
+
+requirements:
+  # ======================================================================
+  # 1. PersistentList のデシリアライズ最適化
+  # ======================================================================
+  - id: req_list_deserialize
+    name: "PersistentList デシリアライズ最適化"
+    description: |
+      PersistentListVisitor::visit_seq で collect() を使用せず、
+      直接 build_from_vec を呼び出すように修正する。
+
+    methods:
+      - name: "visit_seq"
+        signature: "fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error> where A: SeqAccess<'de>"
+        description: |
+          シーケンスアクセスから要素を収集し、PersistentList を構築する。
+          collect() を経由せず、直接 build_from_vec を使用することで
+          Vec の二重作成を回避する。
+        examples:
+          - description: "最適化後の実装"
+            code: |
+              fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+              where
+                  A: serde::de::SeqAccess<'de>,
+              {
+                  const MAX_PREALLOCATE: usize = 4096;
+                  let capacity = seq.size_hint().unwrap_or(0).min(MAX_PREALLOCATE);
+                  let mut elements = Vec::with_capacity(capacity);
+                  while let Some(element) = seq.next_element()? {
+                      elements.push(element);
+                  }
+                  Ok(PersistentList::build_from_vec(elements))
+              }
+
+    implementations:
+      - type: "PersistentList<T>"
+        description: |
+          src/persistent/list.rs の PersistentListVisitor::visit_seq を修正。
+          変更箇所: 1544行目付近
+          変更前: Ok(elements.into_iter().collect())
+          変更後: Ok(PersistentList::build_from_vec(elements))
+
+  # ======================================================================
+  # 2. PersistentVector のデシリアライズ最適化
+  # ======================================================================
+  - id: req_vector_deserialize
+    name: "PersistentVector デシリアライズ最適化"
+    description: |
+      PersistentVectorVisitor::visit_seq で collect() を使用せず、
+      直接 build_persistent_vector_from_vec を呼び出すように修正する。
+
+    methods:
+      - name: "visit_seq"
+        signature: "fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error> where A: SeqAccess<'de>"
+        description: |
+          シーケンスアクセスから要素を収集し、PersistentVector を構築する。
+          collect() を経由せず、直接 build_persistent_vector_from_vec を使用することで
+          Vec の二重作成を回避する。
+        examples:
+          - description: "最適化後の実装"
+            code: |
+              fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+              where
+                  A: serde::de::SeqAccess<'de>,
+              {
+                  const MAX_PREALLOCATE: usize = 4096;
+                  let capacity = seq.size_hint().unwrap_or(0).min(MAX_PREALLOCATE);
+                  let mut elements = Vec::with_capacity(capacity);
+                  while let Some(element) = seq.next_element()? {
+                      elements.push(element);
+                  }
+                  Ok(build_persistent_vector_from_vec(elements))
+              }
+
+    implementations:
+      - type: "PersistentVector<T>"
+        description: |
+          src/persistent/vector.rs の PersistentVectorVisitor::visit_seq を修正。
+          変更箇所: 3180行目付近
+          変更前: Ok(elements.into_iter().collect())
+          変更後: Ok(build_persistent_vector_from_vec(elements))
+
+non_functional_requirements:
+  performance:
+    - "メモリアロケーション回数を 2回 から 1回 に削減"
+    - "デシリアライズ時間の短縮（特に大規模データで顕著）"
+    - "ベンチマークで改善を検証: cargo bench --bench serde_bench --features serde -- serde_deserialize"
+  compatibility:
+    - "既存の API との完全な互換性を維持"
+    - "シリアライズ/デシリアライズのラウンドトリップ結果に変更なし"
+    - "既存のテストが全て通過すること"
+  testing:
+    - "既存の serde テスト（tests/serde_tests.rs）が全て通過すること"
+    - "各モジュール内の serde_tests モジュールが全て通過すること"
+    - "rstest を使用したテストフレームワーク"
+
+future_extensions:
+  - id: "from_iterator_optimization"
+    name: "FromIterator 実装の最適化"
+    description: |
+      FromIterator の実装自体を最適化し、イテレータが Vec の場合は
+      直接 build_from_vec を呼び出すようにする。
+    rationale: |
+      今回の修正は Visitor 側での最適化のみを行う。
+      FromIterator の最適化は影響範囲が広く、別途検討が必要。
