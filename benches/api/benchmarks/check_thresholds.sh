@@ -241,30 +241,24 @@ check_validation_gate() {
     export CONFLICT_ERROR_RATE_CALCULATED
 }
 
-# IMPL-TBLR-002: Enforce merge_path_detail fail gate
-# Ensures tasks_bulk is using the optimized with_arena merge path
 check_merge_path_gate() {
     local MIN_WITH_ARENA_RATIO=0.90
-    local BULK_WITH_ARENA
-    local BULK_WITHOUT_ARENA
-    local BULK_WITH_ARENA_RATIO
 
-    # Check if merge_path_detail exists in meta.json
-    if ! jq -e '.results.merge_path_detail' "${META_FILE}" >/dev/null 2>&1; then
-        echo "FAIL: .results.merge_path_detail not found in meta.json"
-        echo "  merge_path_detail is required for tasks_bulk to ensure with_arena path is used"
+    if ! jq -e '.results.merge_path_detail | type == "object"' "${META_FILE}" >/dev/null 2>&1; then
+        echo "FAIL: .results.merge_path_detail not found or not an object in meta.json"
+        echo "  merge_path_detail must be a JSON object for tasks_bulk to ensure with_arena path is used"
         echo "  This indicates profiling is disabled or stacks.folded generation failed"
-        exit 3
+        exit 2
     fi
 
-    BULK_WITH_ARENA=$(jq -r '.results.merge_path_detail.bulk_with_arena // empty' "${META_FILE}")
-    BULK_WITHOUT_ARENA=$(jq -r '.results.merge_path_detail.bulk_without_arena // empty' "${META_FILE}")
+    local BULK_WITH_ARENA=$(jq -r '.results.merge_path_detail.bulk_with_arena // empty' "${META_FILE}")
+    local BULK_WITHOUT_ARENA=$(jq -r '.results.merge_path_detail.bulk_without_arena // empty' "${META_FILE}")
 
     if [[ -z "${BULK_WITH_ARENA}" ]] || [[ -z "${BULK_WITHOUT_ARENA}" ]]; then
         echo "FAIL: merge_path_detail fields incomplete (bulk_with_arena=${BULK_WITH_ARENA}, bulk_without_arena=${BULK_WITHOUT_ARENA})"
         echo "  Both bulk_with_arena and bulk_without_arena must be present"
         echo "  This may indicate merge_path_error occurred or stacks.folded has no merge samples"
-        exit 3
+        exit 2
     fi
 
     if [[ ! "${BULK_WITH_ARENA}" =~ ^[0-9]+$ ]] || [[ ! "${BULK_WITHOUT_ARENA}" =~ ^[0-9]+$ ]]; then
@@ -272,24 +266,23 @@ check_merge_path_gate() {
         exit 2
     fi
 
-    # Recalculate ratio from sample counts (do not trust stored ratio)
     local TOTAL=$((BULK_WITH_ARENA + BULK_WITHOUT_ARENA))
+    local BULK_WITH_ARENA_RATIO
     if [[ ${TOTAL} -gt 0 ]]; then
-        BULK_WITH_ARENA_RATIO=$(awk -v w="${BULK_WITH_ARENA}" -v t="${TOTAL}" 'BEGIN{printf "%.6f", w/t}')
+        BULK_WITH_ARENA_RATIO=$(awk -v w="${BULK_WITH_ARENA}" -v t="${TOTAL}" 'BEGIN{printf "%.9f", w/t}')
     else
-        BULK_WITH_ARENA_RATIO="0.000000"
+        BULK_WITH_ARENA_RATIO="0.000000000"
     fi
 
     echo "Merge path telemetry:"
     echo "  bulk_with_arena = ${BULK_WITH_ARENA}"
     echo "  bulk_without_arena = ${BULK_WITHOUT_ARENA}"
-    echo "  bulk_with_arena_ratio = ${BULK_WITH_ARENA_RATIO}"
+    echo "  bulk_with_arena_ratio = ${BULK_WITH_ARENA_RATIO} (${BULK_WITH_ARENA}/${TOTAL})"
     echo ""
 
-    # Check if bulk_with_arena_ratio meets the threshold
-    if awk -v r="${BULK_WITH_ARENA_RATIO}" -v m="${MIN_WITH_ARENA_RATIO}" 'BEGIN{exit (r < m) ? 0 : 1}'; then
+    if awk -v w="${BULK_WITH_ARENA}" -v t="${TOTAL}" -v m="${MIN_WITH_ARENA_RATIO}" 'BEGIN{exit (t==0 || (w/t) < m) ? 0 : 1}'; then
         echo "FAIL: Merge path regression detected"
-        echo "  bulk_with_arena_ratio = ${BULK_WITH_ARENA_RATIO} (must be >= ${MIN_WITH_ARENA_RATIO})"
+        echo "  bulk_with_arena_ratio = ${BULK_WITH_ARENA_RATIO} (${BULK_WITH_ARENA}/${TOTAL}, must be >= ${MIN_WITH_ARENA_RATIO})"
         echo "  This indicates tasks_bulk is not using the optimized with_arena path"
         exit 3
     fi
@@ -298,51 +291,40 @@ check_merge_path_gate() {
     echo ""
 }
 
-# IMPL-TBLR-003: Staged regression guard for tasks_bulk
-# Prevents regression to pre-optimization performance levels
-# Revert thresholds based on Run 21886689088 baseline
 check_bulk_regression_guard() {
     local MAX_P99_REVERT=9550
     local MIN_RPS_REVERT=341.36
-    local CURRENT_P99
-    local CURRENT_RPS
-
-    # P99 is already set as a global variable
-    CURRENT_P99="${P99}"
-
-    # Read RPS from meta.json
-    CURRENT_RPS=$(jq -r '.results.rps // empty' "${META_FILE}")
+    local CURRENT_RPS=$(jq -r '.results.rps // empty' "${META_FILE}")
 
     if [[ -z "${CURRENT_RPS}" ]]; then
         echo "FAIL: RPS not found in meta.json"
         echo "  RPS is required for regression guard to prevent performance degradation"
-        exit 3
+        exit 2
+    fi
+
+    if [[ ! "${CURRENT_RPS}" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+        echo "ERROR: results.rps must be numeric (got: ${CURRENT_RPS})"
+        exit 2
     fi
 
     echo "Regression guard (tasks_bulk):"
-    echo "  p99 = ${CURRENT_P99}ms (revert threshold: <= ${MAX_P99_REVERT}ms)"
+    echo "  p99 = ${P99}ms (revert threshold: <= ${MAX_P99_REVERT}ms)"
     echo "  rps = ${CURRENT_RPS} (revert threshold: >= ${MIN_RPS_REVERT})"
     echo ""
 
-    local P99_VIOLATION=0
-    local RPS_VIOLATION=0
-
-    if (( $(echo "${CURRENT_P99} > ${MAX_P99_REVERT}" | bc -l) )); then
-        P99_VIOLATION=1
+    local p99_failed=0
+    local rps_failed=0
+    if (( $(echo "${P99} > ${MAX_P99_REVERT}" | bc -l) )); then
+        p99_failed=1
     fi
-
     if (( $(echo "${CURRENT_RPS} < ${MIN_RPS_REVERT}" | bc -l) )); then
-        RPS_VIOLATION=1
+        rps_failed=1
     fi
 
-    if [[ ${P99_VIOLATION} -eq 1 ]] || [[ ${RPS_VIOLATION} -eq 1 ]]; then
+    if [[ ${p99_failed} -eq 1 ]] || [[ ${rps_failed} -eq 1 ]]; then
         echo "FAIL: Regression guard violation detected"
-        if [[ ${P99_VIOLATION} -eq 1 ]]; then
-            echo "  p99 = ${CURRENT_P99}ms exceeds revert threshold ${MAX_P99_REVERT}ms"
-        fi
-        if [[ ${RPS_VIOLATION} -eq 1 ]]; then
-            echo "  rps = ${CURRENT_RPS} is below revert threshold ${MIN_RPS_REVERT}"
-        fi
+        [[ ${p99_failed} -eq 1 ]] && echo "  p99 = ${P99}ms exceeds revert threshold ${MAX_P99_REVERT}ms"
+        [[ ${rps_failed} -eq 1 ]] && echo "  rps = ${CURRENT_RPS} is below revert threshold ${MIN_RPS_REVERT}"
         echo "  This indicates performance has regressed to pre-optimization levels"
         exit 3
     fi
@@ -357,7 +339,6 @@ elif [[ "${SCENARIO}" == "tasks_update_status" ]]; then
     check_validation_gate "Transition validation error - invalid status transition in PATCH payload"
 fi
 
-# Check merge path telemetry for tasks_bulk scenario (IMPL-TBPA2-003)
 if [[ "${SCENARIO}" == "tasks_bulk" ]]; then
     check_merge_path_gate
     check_bulk_regression_guard
