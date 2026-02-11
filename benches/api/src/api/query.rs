@@ -5709,7 +5709,7 @@ impl SearchIndex {
 
         if self.config.use_apply_bulk
             && all_adds
-            && let Ok(new_index) = self.apply_bulk(changes)
+            && let Ok(new_index) = self.apply_bulk_with_arena(changes, arena)
         {
             return new_index;
         }
@@ -5806,6 +5806,30 @@ impl SearchIndex {
 
         // Use the bulk path directly (avoids infinite recursion with apply_changes)
         self.apply_changes_bulk(changes)
+    }
+
+    /// Like [`apply_bulk`] but reuses scratch from the [`MergeArena`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SearchIndexError::BulkBuildFailed`] if the bulk builder fails, or
+    /// [`SearchIndexError::InvalidChanges`] if non-Add changes are present.
+    fn apply_bulk_with_arena(
+        &self,
+        changes: &[TaskChange],
+        arena: &mut MergeArena,
+    ) -> Result<Self, SearchIndexError> {
+        if changes.is_empty() {
+            return Ok(self.clone());
+        }
+
+        validate_changes_for_bulk(changes)?;
+
+        if self.config.infix_mode != InfixMode::Ngram {
+            return Ok(self.apply_changes_delta_with_arena(changes, arena));
+        }
+
+        self.apply_changes_bulk_with_arena(changes, arena)
     }
 
     /// Applies changes using the delta path (handles Add, Remove, and Update).

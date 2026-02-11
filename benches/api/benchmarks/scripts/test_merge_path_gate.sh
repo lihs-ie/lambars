@@ -253,4 +253,97 @@ else
 fi
 
 echo ""
+echo "Test 7: Reverse mismatch case (stored ratio high but recalculated is low, should FAIL)"
+mkdir -p "${TEMP_DIR}/reverse_mismatch_case"
+cat > "${TEMP_DIR}/reverse_mismatch_case/meta.json" <<'EOF'
+{
+  "results": {
+    "http_status": {
+      "200": 1000
+    },
+    "requests": 1000,
+    "duration_seconds": 30,
+    "latency_ms": {
+      "p50": 5.0,
+      "p90": 10.0,
+      "p99": 20.0
+    },
+    "error_rate": 0.0,
+    "merge_path_detail": {
+      "bulk_with_arena": 100,
+      "bulk_without_arena": 900,
+      "bulk_with_arena_ratio": 0.99
+    }
+  }
+}
+EOF
+
+if "${CHECK_THRESHOLDS}" "${TEMP_DIR}/reverse_mismatch_case" "tasks_bulk" > "${TEMP_DIR}/output_reverse_mismatch.txt" 2>&1; then
+    echo "  FAIL: Gate should have failed when recalculated ratio is low (0.10) despite stored 0.99"
+    cat "${TEMP_DIR}/output_reverse_mismatch.txt"
+    exit 1
+else
+    EXIT_CODE=$?
+    if [[ ${EXIT_CODE} -ne 3 ]]; then
+        echo "  FAIL: Gate failed with unexpected exit code ${EXIT_CODE} (expected 3)"
+        cat "${TEMP_DIR}/output_reverse_mismatch.txt"
+        exit 1
+    fi
+
+    echo "  PASS: Gate failed with exit 3 as expected (recalculated ratio 0.10 < 0.90)"
+    # Calculated ratio should be 100/(100+900) = 0.10
+    if ! grep -q "bulk_with_arena_ratio = 0.100000 (must be >= 0.90)" "${TEMP_DIR}/output_reverse_mismatch.txt"; then
+        echo "  ERROR: Expected recalculated ratio 0.100000 not found"
+        cat "${TEMP_DIR}/output_reverse_mismatch.txt"
+        exit 1
+    fi
+fi
+
+echo ""
+echo "Test 8: Invalid numeric fields should exit 2"
+mkdir -p "${TEMP_DIR}/invalid_numeric_case"
+cat > "${TEMP_DIR}/invalid_numeric_case/meta.json" <<'EOF'
+{
+  "results": {
+    "http_status": {
+      "200": 1000
+    },
+    "requests": 1000,
+    "duration_seconds": 30,
+    "latency_ms": {
+      "p50": 5.0,
+      "p90": 10.0,
+      "p99": 20.0
+    },
+    "error_rate": 0.0,
+    "merge_path_detail": {
+      "bulk_with_arena": "12x",
+      "bulk_without_arena": 10,
+      "bulk_with_arena_ratio": 0.50
+    }
+  }
+}
+EOF
+
+if "${CHECK_THRESHOLDS}" "${TEMP_DIR}/invalid_numeric_case" "tasks_bulk" > "${TEMP_DIR}/output_invalid_numeric.txt" 2>&1; then
+    echo "  FAIL: Gate should have failed with exit 2 for invalid numeric fields"
+    cat "${TEMP_DIR}/output_invalid_numeric.txt"
+    exit 1
+else
+    EXIT_CODE=$?
+    if [[ ${EXIT_CODE} -ne 2 ]]; then
+        echo "  FAIL: Gate failed with unexpected exit code ${EXIT_CODE} (expected 2)"
+        cat "${TEMP_DIR}/output_invalid_numeric.txt"
+        exit 1
+    fi
+
+    echo "  PASS: Gate failed with exit 2 as expected (invalid numeric fields)"
+    if ! grep -q "merge_path_detail.bulk_\\* must be non-negative integers" "${TEMP_DIR}/output_invalid_numeric.txt"; then
+        echo "  ERROR: Expected error message not found"
+        cat "${TEMP_DIR}/output_invalid_numeric.txt"
+        exit 1
+    fi
+fi
+
+echo ""
 echo "All tests passed!"

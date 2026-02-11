@@ -263,6 +263,11 @@ check_merge_path_gate() {
         return 0
     fi
 
+    if [[ ! "${BULK_WITH_ARENA}" =~ ^[0-9]+$ ]] || [[ ! "${BULK_WITHOUT_ARENA}" =~ ^[0-9]+$ ]]; then
+        echo "ERROR: merge_path_detail.bulk_* must be non-negative integers (got: bulk_with_arena=${BULK_WITH_ARENA}, bulk_without_arena=${BULK_WITHOUT_ARENA})"
+        exit 2
+    fi
+
     # Recalculate ratio from sample counts (do not trust stored ratio)
     local TOTAL=$((BULK_WITH_ARENA + BULK_WITHOUT_ARENA))
     if [[ ${TOTAL} -gt 0 ]]; then

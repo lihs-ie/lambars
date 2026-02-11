@@ -1,0 +1,375 @@
+# tasks_bulk bulk経路 arena統合 Phase2 要件定義（実装詳細版）
+#
+# 概要:
+#   Run 21886689088 の再分析で、tasks_update 系は品質閾値を満たした一方、
+#   tasks_bulk の tail latency (p99) が閾値 500ms を大幅超過した。
+#
+# 設計方針:
+#   1. bulk 経路を end-to-end で with_arena 化し、arena 導入効果を実際のホットパスへ到達させる。
+#   2. merge ホットパスに容量計画（preallocation + two-pass）を適用し、grow/allocator 負荷を削減する。
+#   3. merge 経路選択率をメトリクス化し、以後の効果検証を「推測」ではなく数値で判定する。
+#
+# 参照:
+#   - profiling-results/github-21886689088/api-profiling-all-02b1c7a38fa86fd6b0f9ce26242e1d2d89498869/tasks_bulk
+#   - benches/api/src/api/query.rs
+#   - benches/api/benchmarks/scenarios/tasks_bulk.yaml
+
+version: "1.1.0"
+name: "tasks_bulk_bulkpath_arena_phase2"
+description: |
+  最新 Run 21886689088 (head_sha: 638ce5c8f22f663bbc177569778b446c98f3716b) では、
+  tasks_update / tasks_update_status / tasks_update_conflict は error_rate=0 を達成した。
+  しかし tasks_bulk は p99=8320ms で閾値 p99<=500ms を大幅超過しており、
+  本番運用判定は不合格である。
+
+analysis_scope:
+  target_run:
+    run_id: "21886689088"
+    head_sha: "638ce5c8f22f663bbc177569778b446c98f3716b"
+    artifact_root: "profiling-results/github-21886689088/api-profiling-all-02b1c7a38fa86fd6b0f9ce26242e1d2d89498869"
+  measured_scenarios:
+    - "tasks_update"
+    - "tasks_update_status"
+    - "tasks_update_conflict"
+    - "tasks_bulk"
+  reproducible_measurements:
+    - id: MEAS-TBPA2-001
+      purpose: "tasks_bulk の閾値未達確認"
+      command: |
+        jq '.results | {rps,error_rate,p99_latency_ms:.latency_ms.p99}' \
+          profiling-results/github-21886689088/api-profiling-all-02b1c7a38fa86fd6b0f9ce26242e1d2d89498869/tasks_bulk/benchmark/meta/tasks_bulk.json
+      observed_value: |
+        {"rps":361.48,"error_rate":0.000000,"p99_latency_ms":8320.000000}
+    - id: MEAS-TBPA2-002
+      purpose: "arena 経路が bulk ホットパスで使われていないことの定量化"
+      command: |
+        awk '{c=$NF; t+=c; if($0~/SearchIndex::merge_index_delta_add_only_owned(;|$)/) m1+=c; if($0~/SearchIndex::merge_index_delta_add_only_owned_with_arena/) m2+=c} END{printf("no_arena=%0.4f%% with_arena=%0.4f%%\n",100*m1/t,100*m2/t)}' \
+          profiling-results/github-21886689088/api-profiling-all-02b1c7a38fa86fd6b0f9ce26242e1d2d89498869/tasks_bulk/stacks.folded
+      observed_value: |
+        no_arena=0.7716% with_arena=0.0037%
+    - id: MEAS-TBPA2-003
+      purpose: "allocator/grow 負荷の定量化"
+      command: |
+        awk '{c=$NF; t+=c; if($0~/;malloc([; ]|$)/) m+=c; if($0~/;cfree([; ]|$)/) f+=c; if($0~/;realloc([; ]|$)/) r+=c; if($0~/RawVecInner.*finish_grow/) g+=c} END{printf("malloc=%0.4f%% cfree=%0.4f%% realloc=%0.4f%% alloc_total=%0.4f%% finish_grow=%0.4f%%\n",100*m/t,100*f/t,100*r/t,100*(m+f+r)/t,100*g/t)}' \
+          profiling-results/github-21886689088/api-profiling-all-02b1c7a38fa86fd6b0f9ce26242e1d2d89498869/tasks_bulk/stacks.folded
+      observed_value: |
+        malloc=15.8007% cfree=6.7410% realloc=2.0683% alloc_total=24.6100% finish_grow=4.5681%
+
+background:
+  problem: |
+    `apply_changes_with_arena` は bulk 条件で `apply_changes_bulk`（非 arena 実装）に分岐しており、
+    with_arena 実装群（`apply_delta_owned_with_arena`, `append_and_compact_with_arena`,
+    `merge_index_delta_add_only_owned_with_arena`）が bulk 主経路で利用されない。
+    その結果、allocator/grow 負荷が高止まりし、tasks_bulk の tail latency が秒オーダーになっている。
+  motivation: |
+    既に改善済みの tasks_update 系を崩さず、未達成の tasks_bulk p99 を閾値内に戻す。
+    改善内容は将来ランでも再現検証可能な形（path 比率 + プロファイル）で定義する。
+  prior_art:
+    - name: "Arena-first Bulk Pipeline"
+      description: "bulk path でも scratch 再利用を強制し、ヒープ再確保を抑える。"
+    - name: "Two-pass Capacity Planning"
+      description: "merge 前に必要容量を見積もり、grow を回避する。"
+    - name: "Profile-driven Gate"
+      description: "ホットパス選択率をCIゲートにし、経路退行を防ぐ。"
+
+requirements:
+  - id: REQ-TBPA2-001
+    name: "bulk 経路を end-to-end with_arena 化する"
+    description: |
+      bulk 条件で非 arena 実装へ落ちる現状を解消し、writer_loop から merge/compaction まで
+      すべて arena 経路で処理する。
+      根本設計変更: "arena entry + non-arena bulk" を "arena-consistent bulk pipeline" に置換する。
+    methods:
+      - name: "apply_changes_bulk_with_arena"
+        signature: "fn apply_changes_bulk_with_arena(&self, changes: &[TaskChange], arena: &mut MergeArena) -> Result<Self, SearchIndexError>"
+        description: |
+          `apply_changes_bulk` と同じ idempotency 条件を維持しつつ、
+          ngram compaction と delta apply を with_arena 系へ差し替える。
+        examples:
+          - description: "bulk ngram compaction を with_arena へ切替"
+            code: |
+              let title_word_ngram_index = self
+                  .title_word_ngram_index
+                  .append_and_compact_with_arena(title_word_bulk, arena);
+              let mut delta = SearchIndexDelta::from_changes_without_ngrams(changes, &self.config, &self.tasks_by_id);
+              delta.prepare_posting_lists();
+              let base_result = self.apply_delta_owned_with_arena(delta, changes, arena);
+      - name: "apply_changes_with_arena (routing fix)"
+        signature: "fn apply_changes_with_arena(&self, changes: &[TaskChange], arena: &mut MergeArena) -> Self"
+        description: |
+          bulk 条件分岐の呼び先を `apply_changes_bulk` から
+          `apply_changes_bulk_with_arena` に変更する。
+    implementations:
+      - type: "benches/api/src/api/query.rs"
+        description: |
+          以下の差分を必須とする（関数名・戻り値・フォールバック契約を維持すること）。
+
+          1) `apply_changes_with_arena` の bulk 分岐修正
+             BEFORE:
+               self.apply_changes_bulk(changes)
+                 .unwrap_or_else(|_| self.apply_changes_delta_with_arena(changes, arena))
+             AFTER:
+               self.apply_changes_bulk_with_arena(changes, arena)
+                 .unwrap_or_else(|_| self.apply_changes_delta_with_arena(changes, arena))
+
+          2) `apply_changes_bulk_with_arena` を `apply_changes_bulk` 直下に追加
+             - dedup/filter 処理: `apply_changes_bulk` と同一ロジック
+             - `append_and_compact` -> `append_and_compact_with_arena`
+             - `apply_delta_owned` -> `apply_delta_owned_with_arena`
+
+          3) 既存 `apply_changes_bulk` は互換目的で残す（非 arena 呼び出し元のため）。
+
+  - id: REQ-TBPA2-002
+    name: "merge ホットパスに容量計画アルゴリズムを導入する"
+    description: |
+      `RawVecInner::finish_grow` の高負荷(4.5681%)と allocator 合計24.61%を根拠に、
+      add-only merge と segment merge に preallocation + two-pass を導入する。
+      目的は「不要な grow を減らす」ことであり、検索結果同値性は必須保持。
+    methods:
+      - name: "estimate_union_len_sorted"
+        signature: "fn estimate_union_len_sorted(existing: &[TaskId], add: &[TaskId]) -> usize"
+        description: |
+          2-pointer で重複除去後サイズを算出する。
+          アルゴリズム名: Sorted Union Cardinality (two-pass first stage)。
+      - name: "merge_posting_add_only_into_slice_planned"
+        signature: "fn merge_posting_add_only_into_slice_planned(existing: &[TaskId], add: &[TaskId], output: &mut Vec<TaskId>) -> ()"
+        description: |
+          1st pass: `estimate_union_len_sorted`。
+          2nd pass: `output.reserve_exact(estimated)` した上で merge 本体を実行する。
+          アルゴリズム名: Two-pass Capacity-planned Merge。
+      - name: "merge_segment_into_capacity_planned"
+        signature: "fn merge_segment_into(base: NgramIndex, segment: &NgramIndex, scratch: &mut Vec<TaskId>) -> NgramIndex"
+        description: |
+          `merge_posting_slice_or_fallback` の slice/slice 分岐で、
+          既存の `reserve(existing+segment)` を `reserve_exact(estimate_union_len_sorted(...))` へ置換する。
+    implementations:
+      - type: "benches/api/src/api/query.rs"
+        description: |
+          実装者は以下を必ず実施する。
+
+          A. `merge_posting_add_only_two_pointer` の事前確保
+             - 関数冒頭で `output.reserve(existing_size + add.len())` 相当を保証する。
+             - 既存 iterator 仕様を崩さないため、`merge_posting_add_only_into` 側で
+               `size_hint` から上界確保を先に実施してもよい。
+
+          B. slice/slice merge の two-pass 化
+             - 対象: `merge_posting_slice_or_fallback` の `(Some(existing_slice), Some(segment_slice))` 分岐。
+             - 現状: `scratch.reserve(existing_slice.len() + segment_slice.len())`
+             - 変更: `estimate_union_len_sorted` を用いた `reserve_exact`。
+
+          C. add-only owned merge の scratch 再利用一貫化
+             - 対象: `merge_index_delta_add_only_owned` と `merge_index_delta_add_only_owned_with_arena`。
+             - 同じ容量計画ヘルパを共用し、両実装で結果同値・容量戦略同一を担保する。
+
+  - id: REQ-TBPA2-003
+    name: "merge 経路選択率を meta に常時出力し CI ゲート化する"
+    description: |
+      今回の不具合は「with_arena 実装が存在しても経路に乗っていない」ことが原因であり、
+      経路選択率を出さない限り再発を検知できない。
+      `meta.json` に path カウンタを追加し、しきい値未達を fail にする。
+    methods:
+      - name: "record_merge_path_counter"
+        signature: "fn record_merge_path_counter(kind: MergePathKind) -> ()"
+        description: |
+          少なくとも以下を計測する:
+          `bulk_with_arena`, `bulk_without_arena`, `delta_with_arena`,
+          `merge_owned_with_arena`, `merge_owned_without_arena`。
+      - name: "emit_merge_path_detail"
+        signature: "fn emit_merge_path_detail(meta: &mut serde_json::Value, counters: MergePathCounters) -> ()"
+        description: |
+          出力先: `meta.results.merge_path_detail`。
+    implementations:
+      - type: "benches/api/src/api/query.rs"
+        description: |
+          writer loop 適用時に path カウンタを更新する。
+          `apply_changes_with_arena` の bulk/delta 分岐で必ず記録する。
+      - type: "benches/api/benchmarks/run_benchmark.sh"
+        description: |
+          `meta.json` 生成時に `merge_path_detail` を追加する。
+          欠落時は空オブジェクトでなくエラー扱いにする。
+      - type: "benches/api/benchmarks/check_thresholds.sh"
+        description: |
+          tasks_bulk では `merge_path_detail.bulk_with_arena_ratio >= 0.90` を必須ゲート化する。
+          比率は `bulk_with_arena / (bulk_with_arena + bulk_without_arena)` で計算する。
+
+non_functional_requirements:
+  performance:
+    - "tasks_bulk: p99_latency_ms <= 500（ベンチ閾値）"
+    - "tasks_bulk: merge_index_delta_add_only_owned_with_arena 比率 >= 0.90（新設ゲート）"
+    - "tasks_bulk: allocator 合計比率(malloc+cfree+realloc) が現状24.61%を上回らない"
+    - "tasks_bulk: RawVecInner::finish_grow 比率が現状4.5681%を上回らない"
+  compatibility:
+    - "POST /tasks/bulk の HTTP 207 応答契約を維持する"
+    - "SearchIndex の検索結果同値性（index内容一致）を維持する"
+  testing:
+    - "apply_changes_bulk_with_arena と apply_changes_bulk の同値性テスト"
+    - "capacity-planned merge の property test（順序・重複除去・要素一致）"
+    - "merge_path_detail 出力の回帰テスト（キー欠落時failを含む）"
+
+# 確固たる裏付け（ファイル行 + 再現コマンド）
+evidence:
+  run:
+    - id: EV-TBPA2-R1
+      description: "分析対象は Run 21886689088。"
+      source: "profiling-results/github-21886689088"
+  metrics:
+    - id: EV-TBPA2-M1
+      description: "tasks_update は error_rate=0。"
+      source: "profiling-results/github-21886689088/api-profiling-all-02b1c7a38fa86fd6b0f9ce26242e1d2d89498869/tasks_update/benchmark/meta/tasks_update.json:30"
+    - id: EV-TBPA2-M2
+      description: "tasks_update_status は error_rate=0。"
+      source: "profiling-results/github-21886689088/api-profiling-all-02b1c7a38fa86fd6b0f9ce26242e1d2d89498869/tasks_update_status/benchmark/meta/tasks_update_status.json:30"
+    - id: EV-TBPA2-M3
+      description: "tasks_update_conflict は error_rate=0。"
+      source: "profiling-results/github-21886689088/api-profiling-all-02b1c7a38fa86fd6b0f9ce26242e1d2d89498869/tasks_update_conflict/benchmark/meta/tasks_update.json:30"
+    - id: EV-TBPA2-M4
+      description: "tasks_bulk は p99=8320ms。"
+      source: "profiling-results/github-21886689088/api-profiling-all-02b1c7a38fa86fd6b0f9ce26242e1d2d89498869/tasks_bulk/benchmark/meta/tasks_bulk.json:37"
+    - id: EV-TBPA2-M5
+      description: "tasks_bulk は rps=361.48。"
+      source: "profiling-results/github-21886689088/api-profiling-all-02b1c7a38fa86fd6b0f9ce26242e1d2d89498869/tasks_bulk/benchmark/meta/tasks_bulk.json:31"
+  thresholds:
+    - id: EV-TBPA2-T1
+      description: "tasks_bulk の p99 閾値は 500ms。"
+      source: "benches/api/benchmarks/scenarios/tasks_bulk.yaml:72"
+    - id: EV-TBPA2-T2
+      description: "tasks_bulk の min_rps 閾値は 200。"
+      source: "benches/api/benchmarks/scenarios/tasks_bulk.yaml:73"
+  code_path:
+    - id: EV-TBPA2-C1
+      description: "writer loop は apply_changes_with_arena を呼ぶ。"
+      source: "benches/api/src/api/query.rs:7932"
+    - id: EV-TBPA2-C2
+      description: "apply_changes_with_arena の bulk 分岐先が apply_changes_bulk（非 arena）。"
+      source: "benches/api/src/api/query.rs:5685"
+    - id: EV-TBPA2-C3
+      description: "apply_changes_bulk は append_and_compact（非 arena）を使う。"
+      source: "benches/api/src/api/query.rs:5858"
+    - id: EV-TBPA2-C4
+      description: "apply_changes_bulk は apply_delta_owned（非 arena）を使う。"
+      source: "benches/api/src/api/query.rs:5868"
+    - id: EV-TBPA2-C5
+      description: "with_arena 実装は既に存在（merge/compaction/delta）。"
+      source: "benches/api/src/api/query.rs:6155"
+  profile_hotspots:
+    - id: EV-TBPA2-P1
+      description: "stacks.folded 上で merge_index_delta_add_only_owned が優勢、with_arena は極小。"
+      source: "profiling-results/github-21886689088/api-profiling-all-02b1c7a38fa86fd6b0f9ce26242e1d2d89498869/tasks_bulk/stacks.folded:614"
+      measurement_id: "MEAS-TBPA2-002"
+    - id: EV-TBPA2-P2
+      description: "NgramSegmentOverlay::merge_segment_into がホット。"
+      source: "profiling-results/github-21886689088/api-profiling-all-02b1c7a38fa86fd6b0f9ce26242e1d2d89498869/tasks_bulk/stacks.folded:311"
+    - id: EV-TBPA2-P3
+      description: "RawVecInner::finish_grow がホット。"
+      source: "profiling-results/github-21886689088/api-profiling-all-02b1c7a38fa86fd6b0f9ce26242e1d2d89498869/tasks_bulk/stacks.folded:170"
+      measurement_id: "MEAS-TBPA2-003"
+    - id: EV-TBPA2-P4
+      description: "malloc/cfree/realloc 合計24.61%と allocator 負荷が高い。"
+      source: "profiling-results/github-21886689088/api-profiling-all-02b1c7a38fa86fd6b0f9ce26242e1d2d89498869/tasks_bulk/stacks.folded"
+      measurement_id: "MEAS-TBPA2-003"
+
+implementation_tasks:
+  - id: IMPL-TBPA2-001
+    priority: 1
+    requirement_ids:
+      - REQ-TBPA2-001
+    evidence_ids:
+      - EV-TBPA2-C1
+      - EV-TBPA2-C2
+      - EV-TBPA2-C3
+      - EV-TBPA2-C4
+      - EV-TBPA2-C5
+      - EV-TBPA2-P1
+    objective: "bulk 条件時でも merge/compaction/delta を with_arena 経路で実行する。"
+    scope_files:
+      - "benches/api/src/api/query.rs"
+    preconditions:
+      - "`apply_changes_bulk_with_arena` が未実装であること（現状 true）。"
+      - "既存 `apply_changes_bulk` の契約（Result返却・idempotency）を維持すること。"
+    actions:
+      - "`apply_changes_bulk_with_arena` を新規追加（戻り値は Result<Self, SearchIndexError>）。"
+      - "`append_and_compact` 呼び出し3箇所を `append_and_compact_with_arena(..., arena)` に置換。"
+      - "`apply_delta_owned` 呼び出しを `apply_delta_owned_with_arena(..., arena)` に置換。"
+      - "`apply_changes_with_arena` の bulk 分岐呼び先を `apply_changes_bulk_with_arena` に変更。"
+      - "フォールバックは現行通り `apply_changes_delta_with_arena` を維持。"
+    code_level_acceptance:
+      - "`apply_changes_with_arena` 内に `self.apply_changes_bulk(changes)` が残存しない。"
+      - "`apply_changes_bulk_with_arena` で非 arena API（append_and_compact / apply_delta_owned）を呼ばない。"
+      - "既存テスト（merge_arena_integration_tests）を壊さない。"
+    verification_commands:
+      - "rg -n 'apply_changes_with_arena|apply_changes_bulk_with_arena|self.apply_changes_bulk\\(' benches/api/src/api/query.rs"
+      - "pnpm type-check"
+      - "pnpm e2e --filter tasks_bulk --profile"
+      - |
+        awk '{c=$NF; t+=c; if($0~/merge_index_delta_add_only_owned_with_arena/) a+=c; if($0~/merge_index_delta_add_only_owned(;|$)/) b+=c} END{printf("with_arena=%0.4f%% no_arena=%0.4f%%\n",100*a/t,100*b/t)}' <tasks_bulk/stacks.folded>
+    completion_criteria:
+      - "tasks_bulk の merge path で with_arena 比率が no_arena 比率を上回る。"
+      - "tasks_bulk の p99 が現状 8320ms を下回る。"
+
+  - id: IMPL-TBPA2-002
+    priority: 2
+    requirement_ids:
+      - REQ-TBPA2-002
+    evidence_ids:
+      - EV-TBPA2-P2
+      - EV-TBPA2-P3
+      - EV-TBPA2-P4
+    objective: "merge時の grow/allocator 負荷を削減し、tail latency をさらに下げる。"
+    scope_files:
+      - "benches/api/src/api/query.rs"
+    preconditions:
+      - "IMPL-TBPA2-001 の routing 修正が適用済みであること。"
+    actions:
+      - "`estimate_union_len_sorted` を追加し、slice merge で `reserve_exact` に利用。"
+      - "`merge_posting_add_only_two_pointer` 実行前に上界容量を確保（`existing+add`）。"
+      - "`merge_posting_slice_or_fallback` の slice/slice 分岐を two-pass capacity planned merge に変更。"
+      - "`merge_index_delta_add_only_owned` と `_with_arena` で容量計画ヘルパを共用。"
+    code_level_acceptance:
+      - "`RawVecInner::finish_grow` のサンプル比率が現状4.5681%を上回らない。"
+      - "`malloc+cfree+realloc` 合計比率が現状24.61%を上回らない。"
+      - "merge結果の順序・重複除去・要素集合が既存実装と同値。"
+    verification_commands:
+      - "cargo test merge_arena_integration_tests --package task_management_benchmark_api"
+      - "pnpm e2e --filter tasks_bulk --profile"
+      - |
+        awk '{c=$NF; t+=c; if($0~/RawVecInner.*finish_grow/) g+=c; if($0~/;malloc([; ]|$)/) m+=c; if($0~/;cfree([; ]|$)/) f+=c; if($0~/;realloc([; ]|$)/) r+=c} END{printf("finish_grow=%0.4f%% alloc_total=%0.4f%%\n",100*g/t,100*(m+f+r)/t)}' <tasks_bulk/stacks.folded>
+    completion_criteria:
+      - "tasks_bulk p99 <= 500ms（最終受入基準）。"
+
+  - id: IMPL-TBPA2-003
+    priority: 3
+    requirement_ids:
+      - REQ-TBPA2-003
+    evidence_ids:
+      - EV-TBPA2-C2
+      - EV-TBPA2-P1
+      - MEAS-TBPA2-002
+    objective: "merge 経路退行を CI で自動検知できる状態にする。"
+    scope_files:
+      - "benches/api/src/api/query.rs"
+      - "benches/api/benchmarks/run_benchmark.sh"
+      - "benches/api/benchmarks/check_thresholds.sh"
+    preconditions:
+      - "meta.json schema 追加を許容すること（後方互換が必要なら optional field とする）。"
+    actions:
+      - "`merge_path_detail` を meta.results に追加（bulk_with_arena/bulk_without_arena 等）。"
+      - "`check_thresholds.sh` に tasks_bulk 専用の path 比率ゲートを追加。"
+      - "path_detail 欠落時を warning ではなく fail とする。"
+    code_level_acceptance:
+      - "tasks_bulk の meta.json に `results.merge_path_detail` が必ず存在。"
+      - "`bulk_with_arena_ratio` 未達時に check_thresholds が exit code 3 を返す。"
+    verification_commands:
+      - "jq '.results.merge_path_detail' <tasks_bulk/benchmark/meta/tasks_bulk.json>"
+      - "bash benches/api/benchmarks/check_thresholds.sh <results_dir> tasks_bulk"
+    completion_criteria:
+      - "経路未適用の再発をCIで即時検知できる。"
+
+future_extensions:
+  - id: TBPA2-FUTURE-001
+    name: "Adaptive merge policy by batch profile"
+    description: |
+      バッチサイズ・キー分布に応じて two-pointer / galloping / binary-insert の
+      しきい値を自動調整する。
+    rationale: |
+      まずは本要件で bulk 経路未適用と容量計画不足という
+      「確定した原因」を解消することが先決である。
