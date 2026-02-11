@@ -25,6 +25,7 @@ cat > "${TEMP_DIR}/pass_case/meta.json" <<'EOF'
       "p99": 20.0
     },
     "error_rate": 0.0,
+    "rps": 400,
     "merge_path_detail": {
       "bulk_with_arena": 950,
       "bulk_without_arena": 50,
@@ -66,6 +67,7 @@ cat > "${TEMP_DIR}/fail_case/meta.json" <<'EOF'
       "p99": 20.0
     },
     "error_rate": 0.0,
+    "rps": 400,
     "merge_path_detail": {
       "bulk_with_arena": 500,
       "bulk_without_arena": 500,
@@ -99,9 +101,9 @@ else
 fi
 
 echo ""
-echo "Test 3: WARNING case (merge_path_detail missing, tasks_bulk scenario)"
-mkdir -p "${TEMP_DIR}/warning_case"
-cat > "${TEMP_DIR}/warning_case/meta.json" <<'EOF'
+echo "Test 3: FAIL case (merge_path_detail missing, tasks_bulk scenario)"
+mkdir -p "${TEMP_DIR}/fail_missing_case"
+cat > "${TEMP_DIR}/fail_missing_case/meta.json" <<'EOF'
 {
   "results": {
     "http_status": {
@@ -114,22 +116,30 @@ cat > "${TEMP_DIR}/warning_case/meta.json" <<'EOF'
       "p90": 10.0,
       "p99": 20.0
     },
-    "error_rate": 0.0
+    "error_rate": 0.0,
+    "rps": 400
   }
 }
 EOF
 
-if "${CHECK_THRESHOLDS}" "${TEMP_DIR}/warning_case" "tasks_bulk" > "${TEMP_DIR}/output_warning.txt" 2>&1; then
-    echo "  PASS: Gate passed with warning as expected (merge_path_detail missing)"
-    if ! grep -q "WARNING: .results.merge_path_detail not found in meta.json" "${TEMP_DIR}/output_warning.txt"; then
-        echo "  ERROR: Expected warning not found"
-        cat "${TEMP_DIR}/output_warning.txt"
+if "${CHECK_THRESHOLDS}" "${TEMP_DIR}/fail_missing_case" "tasks_bulk" > "${TEMP_DIR}/output_fail_missing.txt" 2>&1; then
+    echo "  FAIL: Gate should have failed when merge_path_detail is missing"
+    cat "${TEMP_DIR}/output_fail_missing.txt"
+    exit 1
+else
+    EXIT_CODE=$?
+    if [[ ${EXIT_CODE} -ne 3 ]]; then
+        echo "  FAIL: Gate failed with unexpected exit code ${EXIT_CODE} (expected 3)"
+        cat "${TEMP_DIR}/output_fail_missing.txt"
         exit 1
     fi
-else
-    echo "  FAIL: Gate should have passed with warning when merge_path_detail is missing"
-    cat "${TEMP_DIR}/output_warning.txt"
-    exit 1
+
+    echo "  PASS: Gate failed with exit 3 as expected (merge_path_detail missing)"
+    if ! grep -q "FAIL.*merge_path_detail not found" "${TEMP_DIR}/output_fail_missing.txt"; then
+        echo "  ERROR: Expected FAIL message not found"
+        cat "${TEMP_DIR}/output_fail_missing.txt"
+        exit 1
+    fi
 fi
 
 echo ""
@@ -190,6 +200,7 @@ cat > "${TEMP_DIR}/boundary_case/meta.json" <<'EOF'
       "p99": 20.0
     },
     "error_rate": 0.0,
+    "rps": 400,
     "merge_path_detail": {
       "bulk_with_arena": 900,
       "bulk_without_arena": 100,
@@ -229,6 +240,7 @@ cat > "${TEMP_DIR}/mismatch_case/meta.json" <<'EOF'
       "p99": 20.0
     },
     "error_rate": 0.0,
+    "rps": 400,
     "merge_path_detail": {
       "bulk_with_arena": 920,
       "bulk_without_arena": 80,
@@ -269,6 +281,7 @@ cat > "${TEMP_DIR}/reverse_mismatch_case/meta.json" <<'EOF'
       "p99": 20.0
     },
     "error_rate": 0.0,
+    "rps": 400,
     "merge_path_detail": {
       "bulk_with_arena": 100,
       "bulk_without_arena": 900,
@@ -316,6 +329,7 @@ cat > "${TEMP_DIR}/invalid_numeric_case/meta.json" <<'EOF'
       "p99": 20.0
     },
     "error_rate": 0.0,
+    "rps": 400,
     "merge_path_detail": {
       "bulk_with_arena": "12x",
       "bulk_without_arena": 10,
@@ -343,6 +357,258 @@ else
         cat "${TEMP_DIR}/output_invalid_numeric.txt"
         exit 1
     fi
+fi
+
+echo ""
+echo "Test 9: FAIL case (bulk_with_arena and bulk_without_arena are empty strings)"
+mkdir -p "${TEMP_DIR}/empty_fields_case"
+cat > "${TEMP_DIR}/empty_fields_case/meta.json" <<'EOF'
+{
+  "results": {
+    "http_status": {
+      "200": 1000
+    },
+    "requests": 1000,
+    "duration_seconds": 30,
+    "latency_ms": {
+      "p50": 5.0,
+      "p90": 10.0,
+      "p99": 20.0
+    },
+    "error_rate": 0.0,
+    "rps": 400,
+    "merge_path_detail": {
+      "bulk_with_arena": "",
+      "bulk_without_arena": ""
+    }
+  }
+}
+EOF
+
+if "${CHECK_THRESHOLDS}" "${TEMP_DIR}/empty_fields_case" "tasks_bulk" > "${TEMP_DIR}/output_empty_fields.txt" 2>&1; then
+    echo "  FAIL: Gate should have failed when bulk_with_arena/bulk_without_arena are empty strings"
+    cat "${TEMP_DIR}/output_empty_fields.txt"
+    exit 1
+else
+    EXIT_CODE=$?
+    if [[ ${EXIT_CODE} -ne 3 ]]; then
+        echo "  FAIL: Gate failed with unexpected exit code ${EXIT_CODE} (expected 3)"
+        cat "${TEMP_DIR}/output_empty_fields.txt"
+        exit 1
+    fi
+
+    echo "  PASS: Gate failed with exit 3 as expected (empty fields)"
+    if ! grep -q "FAIL.*merge_path_detail fields incomplete" "${TEMP_DIR}/output_empty_fields.txt"; then
+        echo "  ERROR: Expected FAIL message not found"
+        cat "${TEMP_DIR}/output_empty_fields.txt"
+        exit 1
+    fi
+fi
+
+echo ""
+echo "Test 10: FAIL case (merge_path_error field only, no bulk fields)"
+mkdir -p "${TEMP_DIR}/merge_path_error_case"
+cat > "${TEMP_DIR}/merge_path_error_case/meta.json" <<'EOF'
+{
+  "results": {
+    "http_status": {
+      "200": 1000
+    },
+    "requests": 1000,
+    "duration_seconds": 30,
+    "latency_ms": {
+      "p50": 5.0,
+      "p90": 10.0,
+      "p99": 20.0
+    },
+    "error_rate": 0.0,
+    "rps": 400,
+    "merge_path_detail": {
+      "merge_path_error": "stacks.folded not found"
+    }
+  }
+}
+EOF
+
+if "${CHECK_THRESHOLDS}" "${TEMP_DIR}/merge_path_error_case" "tasks_bulk" > "${TEMP_DIR}/output_merge_path_error.txt" 2>&1; then
+    echo "  FAIL: Gate should have failed when only merge_path_error exists"
+    cat "${TEMP_DIR}/output_merge_path_error.txt"
+    exit 1
+else
+    EXIT_CODE=$?
+    if [[ ${EXIT_CODE} -ne 3 ]]; then
+        echo "  FAIL: Gate failed with unexpected exit code ${EXIT_CODE} (expected 3)"
+        cat "${TEMP_DIR}/output_merge_path_error.txt"
+        exit 1
+    fi
+
+    echo "  PASS: Gate failed with exit 3 as expected (merge_path_error only)"
+    if ! grep -q "FAIL.*merge_path_detail fields incomplete" "${TEMP_DIR}/output_merge_path_error.txt"; then
+        echo "  ERROR: Expected FAIL message not found"
+        cat "${TEMP_DIR}/output_merge_path_error.txt"
+        exit 1
+    fi
+fi
+
+echo ""
+echo "Test 11: PASS case (regression guard passes with p99=8000ms, rps=400)"
+mkdir -p "${TEMP_DIR}/regression_pass_case"
+cat > "${TEMP_DIR}/regression_pass_case/meta.json" <<'EOF'
+{
+  "results": {
+    "http_status": {
+      "200": 1000
+    },
+    "requests": 1000,
+    "duration_seconds": 30,
+    "latency_ms": {
+      "p50": 5.0,
+      "p90": 10.0,
+      "p99": 8000.0
+    },
+    "error_rate": 0.0,
+    "rps": 400,
+    "merge_path_detail": {
+      "bulk_with_arena": 950,
+      "bulk_without_arena": 50,
+      "bulk_with_arena_ratio": 0.95
+    }
+  }
+}
+EOF
+
+if "${CHECK_THRESHOLDS}" "${TEMP_DIR}/regression_pass_case" "tasks_bulk" > "${TEMP_DIR}/output_regression_pass.txt" 2>&1; then
+    echo "  PASS: Gate passed (p99=8000ms <= 9550ms, rps=400 >= 341.36)"
+else
+    echo "  FAIL: Gate should have passed when regression guard thresholds are met"
+    cat "${TEMP_DIR}/output_regression_pass.txt"
+    exit 1
+fi
+
+echo ""
+echo "Test 12: FAIL case (regression guard fails with p99=10000ms exceeding revert)"
+mkdir -p "${TEMP_DIR}/regression_fail_p99_case"
+cat > "${TEMP_DIR}/regression_fail_p99_case/meta.json" <<'EOF'
+{
+  "results": {
+    "http_status": {
+      "200": 1000
+    },
+    "requests": 1000,
+    "duration_seconds": 30,
+    "latency_ms": {
+      "p50": 5.0,
+      "p90": 10.0,
+      "p99": 10000.0
+    },
+    "error_rate": 0.0,
+    "rps": 400,
+    "merge_path_detail": {
+      "bulk_with_arena": 950,
+      "bulk_without_arena": 50,
+      "bulk_with_arena_ratio": 0.95
+    }
+  }
+}
+EOF
+
+if "${CHECK_THRESHOLDS}" "${TEMP_DIR}/regression_fail_p99_case" "tasks_bulk" > "${TEMP_DIR}/output_regression_fail_p99.txt" 2>&1; then
+    echo "  FAIL: Gate should have failed when p99 exceeds revert threshold"
+    cat "${TEMP_DIR}/output_regression_fail_p99.txt"
+    exit 1
+else
+    EXIT_CODE=$?
+    if [[ ${EXIT_CODE} -ne 3 ]]; then
+        echo "  FAIL: Gate failed with unexpected exit code ${EXIT_CODE} (expected 3)"
+        cat "${TEMP_DIR}/output_regression_fail_p99.txt"
+        exit 1
+    fi
+
+    echo "  PASS: Gate failed with exit 3 as expected (p99=10000ms > 9550ms)"
+fi
+
+echo ""
+echo "Test 13: FAIL case (regression guard fails with rps=300 below revert)"
+mkdir -p "${TEMP_DIR}/regression_fail_rps_case"
+cat > "${TEMP_DIR}/regression_fail_rps_case/meta.json" <<'EOF'
+{
+  "results": {
+    "http_status": {
+      "200": 1000
+    },
+    "requests": 1000,
+    "duration_seconds": 30,
+    "latency_ms": {
+      "p50": 5.0,
+      "p90": 10.0,
+      "p99": 5000.0
+    },
+    "error_rate": 0.0,
+    "rps": 300,
+    "merge_path_detail": {
+      "bulk_with_arena": 950,
+      "bulk_without_arena": 50,
+      "bulk_with_arena_ratio": 0.95
+    }
+  }
+}
+EOF
+
+if "${CHECK_THRESHOLDS}" "${TEMP_DIR}/regression_fail_rps_case" "tasks_bulk" > "${TEMP_DIR}/output_regression_fail_rps.txt" 2>&1; then
+    echo "  FAIL: Gate should have failed when rps is below revert threshold"
+    cat "${TEMP_DIR}/output_regression_fail_rps.txt"
+    exit 1
+else
+    EXIT_CODE=$?
+    if [[ ${EXIT_CODE} -ne 3 ]]; then
+        echo "  FAIL: Gate failed with unexpected exit code ${EXIT_CODE} (expected 3)"
+        cat "${TEMP_DIR}/output_regression_fail_rps.txt"
+        exit 1
+    fi
+
+    echo "  PASS: Gate failed with exit 3 as expected (rps=300 < 341.36)"
+fi
+
+echo ""
+echo "Test 14: FAIL case (regression guard fails with both p99 and rps violations)"
+mkdir -p "${TEMP_DIR}/regression_fail_both_case"
+cat > "${TEMP_DIR}/regression_fail_both_case/meta.json" <<'EOF'
+{
+  "results": {
+    "http_status": {
+      "200": 1000
+    },
+    "requests": 1000,
+    "duration_seconds": 30,
+    "latency_ms": {
+      "p50": 5.0,
+      "p90": 10.0,
+      "p99": 15000.0
+    },
+    "error_rate": 0.0,
+    "rps": 200,
+    "merge_path_detail": {
+      "bulk_with_arena": 950,
+      "bulk_without_arena": 50,
+      "bulk_with_arena_ratio": 0.95
+    }
+  }
+}
+EOF
+
+if "${CHECK_THRESHOLDS}" "${TEMP_DIR}/regression_fail_both_case" "tasks_bulk" > "${TEMP_DIR}/output_regression_fail_both.txt" 2>&1; then
+    echo "  FAIL: Gate should have failed when both p99 and rps violate revert thresholds"
+    cat "${TEMP_DIR}/output_regression_fail_both.txt"
+    exit 1
+else
+    EXIT_CODE=$?
+    if [[ ${EXIT_CODE} -ne 3 ]]; then
+        echo "  FAIL: Gate failed with unexpected exit code ${EXIT_CODE} (expected 3)"
+        cat "${TEMP_DIR}/output_regression_fail_both.txt"
+        exit 1
+    fi
+
+    echo "  PASS: Gate failed with exit 3 as expected (p99=15000ms > 9550ms, rps=200 < 341.36)"
 fi
 
 echo ""
