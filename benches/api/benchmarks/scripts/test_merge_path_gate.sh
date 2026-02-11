@@ -451,7 +451,7 @@ else
 fi
 
 echo ""
-echo "Test 11: PASS case (regression guard passes with p99=8000ms, rps=400)"
+echo "Test 11: PASS case (regression guard passes with p99=50ms, rps=400)"
 mkdir -p "${TEMP_DIR}/regression_pass_case"
 cat > "${TEMP_DIR}/regression_pass_case/meta.json" <<'EOF'
 {
@@ -464,7 +464,7 @@ cat > "${TEMP_DIR}/regression_pass_case/meta.json" <<'EOF'
     "latency_ms": {
       "p50": 5.0,
       "p90": 10.0,
-      "p99": 8000.0
+      "p99": 50.0
     },
     "error_rate": 0.0,
     "rps": 400,
@@ -478,7 +478,7 @@ cat > "${TEMP_DIR}/regression_pass_case/meta.json" <<'EOF'
 EOF
 
 if "${CHECK_THRESHOLDS}" "${TEMP_DIR}/regression_pass_case" "tasks_bulk" > "${TEMP_DIR}/output_regression_pass.txt" 2>&1; then
-    echo "  PASS: Gate passed (p99=8000ms <= 9550ms, rps=400 >= 341.36)"
+    echo "  PASS: Gate passed (p99=50ms <= 9550ms, rps=400 >= 341.36)"
 else
     echo "  FAIL: Gate should have passed when regression guard thresholds are met"
     cat "${TEMP_DIR}/output_regression_pass.txt"
