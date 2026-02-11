@@ -5682,7 +5682,7 @@ impl SearchIndex {
             && changes.len() >= self.config.bulk_threshold
             && all_adds
         {
-            self.apply_changes_bulk(changes)
+            self.apply_changes_bulk_with_arena(changes, arena)
                 .unwrap_or_else(|_| self.apply_changes_delta_with_arena(changes, arena))
         } else {
             self.apply_changes_delta_with_arena(changes, arena)
@@ -5866,6 +5866,110 @@ impl SearchIndex {
             SearchIndexDelta::from_changes_without_ngrams(changes, &self.config, &self.tasks_by_id);
         delta.prepare_posting_lists();
         let base_result = self.apply_delta_owned(delta, changes);
+
+        Ok(Self {
+            title_word_ngram_index,
+            title_full_ngram_index,
+            tag_ngram_index,
+            title_word_index: base_result.title_word_index,
+            title_full_index: base_result.title_full_index,
+            title_full_all_suffix_index: base_result.title_full_all_suffix_index,
+            title_word_all_suffix_index: base_result.title_word_all_suffix_index,
+            tag_index: base_result.tag_index,
+            tag_all_suffix_index: base_result.tag_all_suffix_index,
+            tasks_by_id: base_result.tasks_by_id,
+            config: base_result.config,
+        })
+    }
+
+    /// Like [`apply_changes_bulk`] but reuses scratch from the [`MergeArena`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SearchIndexError::BulkBuildFailed`] if the bulk builder fails to construct
+    /// the n-gram index.
+    ///
+    /// # Idempotency
+    ///
+    /// Same idempotency guarantees as [`apply_changes_bulk`]:
+    /// - Skipping tasks that already exist in the index (checked via `tasks_by_id`)
+    /// - Deduplicating Add operations for the same `TaskId` within the batch (first wins)
+    fn apply_changes_bulk_with_arena(
+        &self,
+        changes: &[TaskChange],
+        arena: &mut MergeArena,
+    ) -> Result<Self, SearchIndexError> {
+        let mut seen: std::collections::HashSet<TaskId> =
+            std::collections::HashSet::with_capacity(changes.len());
+        let tasks: Vec<&Task> = changes
+            .iter()
+            .filter_map(|change| match change {
+                TaskChange::Add(task)
+                    if !self.tasks_by_id.contains_key(&task.task_id)
+                        && seen.insert(task.task_id.clone()) =>
+                {
+                    Some(task)
+                }
+                _ => None,
+            })
+            .collect();
+
+        if tasks.is_empty() {
+            return Ok(self.clone());
+        }
+
+        let estimated_word_entries = tasks.len() * self.config.max_tokens_per_task;
+        let estimated_tag_entries = tasks.len() * self.config.max_tokens_per_task;
+
+        let mut title_word_builder =
+            SearchIndexBulkBuilder::with_capacity(self.config.clone(), estimated_word_entries);
+        let mut title_full_builder =
+            SearchIndexBulkBuilder::with_capacity(self.config.clone(), tasks.len());
+        let mut tag_builder =
+            SearchIndexBulkBuilder::with_capacity(self.config.clone(), estimated_tag_entries);
+
+        for task in &tasks {
+            let normalized = NormalizedTaskData::from_task(task);
+            let (word_limit, tag_limit) =
+                SearchIndexDelta::compute_token_limits(&normalized, &self.config);
+
+            title_full_builder =
+                title_full_builder.add_entry(normalized.title_key.clone(), task.task_id.clone());
+
+            for word in normalized.title_words.iter().take(word_limit) {
+                title_word_builder =
+                    title_word_builder.add_entry(word.clone(), task.task_id.clone());
+            }
+
+            for tag in normalized.tags.iter().take(tag_limit) {
+                tag_builder = tag_builder.add_entry(tag.clone(), task.task_id.clone());
+            }
+        }
+
+        let title_word_bulk = title_word_builder
+            .build()
+            .map_err(SearchIndexError::BulkBuildFailed)?;
+        let title_full_bulk = title_full_builder
+            .build()
+            .map_err(SearchIndexError::BulkBuildFailed)?;
+        let tag_bulk = tag_builder
+            .build()
+            .map_err(SearchIndexError::BulkBuildFailed)?;
+
+        let title_word_ngram_index = self
+            .title_word_ngram_index
+            .append_and_compact_with_arena(title_word_bulk, arena);
+        let title_full_ngram_index = self
+            .title_full_ngram_index
+            .append_and_compact_with_arena(title_full_bulk, arena);
+        let tag_ngram_index = self
+            .tag_ngram_index
+            .append_and_compact_with_arena(tag_bulk, arena);
+
+        let mut delta =
+            SearchIndexDelta::from_changes_without_ngrams(changes, &self.config, &self.tasks_by_id);
+        delta.prepare_posting_lists();
+        let base_result = self.apply_delta_owned_with_arena(delta, changes, arena);
 
         Ok(Self {
             title_word_ngram_index,

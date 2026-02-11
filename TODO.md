@@ -1,7 +1,7 @@
 # TODO - Tasks Bulk/Tasks Update ボトルネック改善
 
 ## In Progress
-- [🔴 RED] [IMPL-TBPA2-001] bulk 経路を end-to-end with_arena 化
+- [🟢 GREEN] [IMPL-TBPA2-001] bulk 経路を end-to-end with_arena 化
   - Started: 2026-02-11
   - Goal: apply_changes_bulk_with_arena 新設、bulk 分岐の arena 経路統合
 
