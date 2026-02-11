@@ -1592,6 +1592,40 @@ generate_meta_json() {
         fi
     fi
 
+    # v4: Calculate merge_path_detail from stacks.folded (IMPL-TBPA2-003)
+    # This tracks whether tasks_bulk uses the optimized with_arena path
+    local merge_path_detail_json="{}"
+    local stacks_folded_file="${RESULTS_DIR}/stacks.folded"
+    if [[ -f "${stacks_folded_file}" ]]; then
+        local with_arena_samples without_arena_samples total_merge with_arena_ratio
+
+        # Count samples for with_arena path (merge_index_delta_add_only_owned_with_arena)
+        with_arena_samples=$(awk '$0~/merge_index_delta_add_only_owned_with_arena/{s+=$NF} END{print s+0}' "${stacks_folded_file}")
+
+        # Count samples for without_arena path (merge_index_delta_add_only_owned but NOT with_arena)
+        # Regex: merge_index_delta_add_only_owned[^_] ensures we don't match _with_arena suffix
+        without_arena_samples=$(awk '$0~/merge_index_delta_add_only_owned[^_]/{s+=$NF} END{print s+0}' "${stacks_folded_file}")
+
+        total_merge=$((with_arena_samples + without_arena_samples))
+
+        if [[ ${total_merge} -gt 0 ]]; then
+            with_arena_ratio=$(awk -v w="${with_arena_samples}" -v t="${total_merge}" 'BEGIN{printf "%.6f", w / t}')
+        else
+            with_arena_ratio="0.000000"
+        fi
+
+        # Generate JSON using jq for proper escaping
+        merge_path_detail_json=$(jq -n \
+            --argjson with_arena "${with_arena_samples}" \
+            --argjson without_arena "${without_arena_samples}" \
+            --arg ratio "${with_arena_ratio}" \
+            '{
+                with_arena_samples: $with_arena,
+                without_arena_samples: $without_arena,
+                with_arena_ratio: ($ratio | tonumber)
+            }')
+    fi
+
     # v3: Calculate error_rate using single-source formula (REQ-MET-P3-002)
     # error_rate = (http_4xx + http_5xx + socket_errors) / requests
     # http_4xx, http_5xx are already extracted from lua_metrics.json above
@@ -1904,6 +1938,7 @@ generate_meta_json() {
         --argjson http_status "${http_status_json}" \
         --argjson retries "${retries}" \
         --argjson conflict_detail "${conflict_detail_json}" \
+        --argjson merge_path_detail "${merge_path_detail_json}" \
         --argjson connect_err "${connect_err:-0}" \
         --argjson read_err "${read_err:-0}" \
         --argjson write_err "${write_err:-0}" \
@@ -1969,7 +2004,8 @@ generate_meta_json() {
     },
     "http_status": $http_status,
     "retries": $retries,
-    "conflict_detail": $conflict_detail
+    "conflict_detail": $conflict_detail,
+    "merge_path_detail": $merge_path_detail
   },
   "errors": {
     "socket_errors": {

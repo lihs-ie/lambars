@@ -241,10 +241,56 @@ check_validation_gate() {
     export CONFLICT_ERROR_RATE_CALCULATED
 }
 
+check_merge_path_gate() {
+    local MIN_WITH_ARENA_RATIO=0.90
+    local WITH_ARENA_SAMPLES
+    local WITHOUT_ARENA_SAMPLES
+    local WITH_ARENA_RATIO
+
+    # Check if merge_path_detail exists in meta.json
+    if ! jq -e '.results.merge_path_detail' "${META_FILE}" >/dev/null 2>&1; then
+        echo "WARNING: .results.merge_path_detail not found in meta.json (profiling may be disabled)"
+        echo ""
+        return 0
+    fi
+
+    WITH_ARENA_SAMPLES=$(jq -r '.results.merge_path_detail.with_arena_samples // empty' "${META_FILE}")
+    WITHOUT_ARENA_SAMPLES=$(jq -r '.results.merge_path_detail.without_arena_samples // empty' "${META_FILE}")
+    WITH_ARENA_RATIO=$(jq -r '.results.merge_path_detail.with_arena_ratio // empty' "${META_FILE}")
+
+    if [[ -z "${WITH_ARENA_SAMPLES}" ]] || [[ -z "${WITHOUT_ARENA_SAMPLES}" ]] || [[ -z "${WITH_ARENA_RATIO}" ]]; then
+        echo "WARNING: merge_path_detail fields incomplete (with_arena_samples=${WITH_ARENA_SAMPLES}, without_arena_samples=${WITHOUT_ARENA_SAMPLES}, ratio=${WITH_ARENA_RATIO})"
+        echo ""
+        return 0
+    fi
+
+    echo "Merge path telemetry:"
+    echo "  with_arena_samples = ${WITH_ARENA_SAMPLES}"
+    echo "  without_arena_samples = ${WITHOUT_ARENA_SAMPLES}"
+    echo "  with_arena_ratio = ${WITH_ARENA_RATIO}"
+    echo ""
+
+    # Check if with_arena_ratio meets the threshold
+    if (( $(echo "${WITH_ARENA_RATIO} < ${MIN_WITH_ARENA_RATIO}" | bc -l) )); then
+        echo "FAIL: Merge path regression detected"
+        echo "  with_arena_ratio = ${WITH_ARENA_RATIO} (must be >= ${MIN_WITH_ARENA_RATIO})"
+        echo "  This indicates tasks_bulk is not using the optimized with_arena path"
+        exit 3
+    fi
+
+    echo "PASS: Merge path telemetry within acceptable range (ratio >= ${MIN_WITH_ARENA_RATIO})"
+    echo ""
+}
+
 if [[ "${SCENARIO}" == "tasks_update" || "${SCENARIO}" == "tasks_update_steady" || "${SCENARIO}" == "tasks_update_conflict" ]]; then
     check_validation_gate "Contract violation detected - status field included in PUT payload"
 elif [[ "${SCENARIO}" == "tasks_update_status" ]]; then
     check_validation_gate "Transition validation error - invalid status transition in PATCH payload"
+fi
+
+# Check merge path telemetry for tasks_bulk scenario (IMPL-TBPA2-003)
+if [[ "${SCENARIO}" == "tasks_bulk" ]]; then
+    check_merge_path_gate
 fi
 FAILED=0
 FAILURES=""
