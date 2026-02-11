@@ -1,11 +1,15 @@
 # TODO - Tasks Bulk/Tasks Update ボトルネック改善
 
 ## In Progress
-- [🟢 GREEN] [IMPL-TBPA2-001] bulk 経路を end-to-end with_arena 化
+- [🔴 RED] [IMPL-TBPA2-002] merge ホットパスに容量計画アルゴリズムを導入 - 失敗テスト作成中
   - Started: 2026-02-11
-  - Goal: apply_changes_bulk_with_arena 新設、bulk 分岐の arena 経路統合
+  - Goal: estimate_union_len_sorted + two-pass capacity-planned merge で grow/allocator 負荷を削減
 
 ## Done
+- [x] [IMPL-TBPA2-001] bulk 経路を end-to-end with_arena 化 (2026-02-11)
+  - apply_changes_bulk_with_arena 新設 (arena-backed compaction + delta)
+  - apply_changes_with_arena の bulk 分岐を arena 経路に統合
+  - 同値性テスト + idempotency テスト追加
 - [x] [IMPL-PRB1-001] PUT stale-version read-repair (2026-02-11)
   - ConflictKind enum + classify_conflict_kind 純粋関数
   - RebaseError + rebase_update_request 3-way merge 純粋関数

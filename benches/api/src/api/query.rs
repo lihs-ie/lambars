@@ -6984,6 +6984,16 @@ impl SearchIndex {
         }
     }
 
+    /// Estimate the cardinality of the union of two sorted slices using a
+    /// two-pointer scan.  Both inputs must be sorted and deduplicated.
+    ///
+    /// This is the first pass of the two-pass capacity-planned merge: it
+    /// computes the exact output size so that the caller can `reserve_exact`
+    /// before the actual merge, eliminating intermediate `grow` calls.
+    fn estimate_union_len_sorted(_existing: &[TaskId], _add: &[TaskId]) -> usize {
+        todo!("IMPL-TBPA2-002: implement estimate_union_len_sorted")
+    }
+
     /// Standard two-pointer merge for `existing ∪ add`.
     ///
     /// Both inputs must be sorted and deduplicated. Runs in O(n + m) time.
@@ -7722,6 +7732,12 @@ impl SearchIndex {
         add: MutableIndex,
     ) -> MergeNgramDeltaResult {
         Self::merge_ngram_delta_add_only_bulk_owned(index, add)
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub fn estimate_union_len_sorted_for_test(existing: &[TaskId], add: &[TaskId]) -> usize {
+        Self::estimate_union_len_sorted(existing, add)
     }
 }
 
@@ -25266,5 +25282,193 @@ mod merge_arena_integration_tests {
         // Only one copy of the task should exist
         assert_eq!(result.tasks_by_id.len(), 1, "Duplicate should be deduplicated");
         assert!(result.tasks_by_id.contains_key(&task.task_id));
+    }
+}
+
+// =============================================================================
+// Tests: Capacity-Planned Merge (IMPL-TBPA2-002)
+// =============================================================================
+
+#[cfg(test)]
+mod capacity_planned_merge_tests {
+    use super::*;
+    use rstest::rstest;
+    use uuid::Uuid;
+
+    // -------------------------------------------------------------------------
+    // estimate_union_len_sorted unit tests
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn estimate_union_len_sorted_both_empty() {
+        let result = SearchIndex::estimate_union_len_sorted_for_test(&[], &[]);
+        assert_eq!(result, 0, "empty/empty should be 0");
+    }
+
+    #[rstest]
+    fn estimate_union_len_sorted_left_empty() {
+        let ids: Vec<TaskId> = (1..=5_u128)
+            .map(|i| TaskId::from_uuid(Uuid::from_u128(i)))
+            .collect();
+        let result = SearchIndex::estimate_union_len_sorted_for_test(&[], &ids);
+        assert_eq!(result, 5, "empty/5 should be 5");
+    }
+
+    #[rstest]
+    fn estimate_union_len_sorted_right_empty() {
+        let ids: Vec<TaskId> = (1..=3_u128)
+            .map(|i| TaskId::from_uuid(Uuid::from_u128(i)))
+            .collect();
+        let result = SearchIndex::estimate_union_len_sorted_for_test(&ids, &[]);
+        assert_eq!(result, 3, "3/empty should be 3");
+    }
+
+    #[rstest]
+    fn estimate_union_len_sorted_full_overlap() {
+        let ids: Vec<TaskId> = (1..=4_u128)
+            .map(|i| TaskId::from_uuid(Uuid::from_u128(i)))
+            .collect();
+        let result = SearchIndex::estimate_union_len_sorted_for_test(&ids, &ids);
+        assert_eq!(result, 4, "identical sets should have union = one set size");
+    }
+
+    #[rstest]
+    fn estimate_union_len_sorted_no_overlap() {
+        let left: Vec<TaskId> = (1..=3_u128)
+            .map(|i| TaskId::from_uuid(Uuid::from_u128(i * 2)))
+            .collect();
+        let right: Vec<TaskId> = (1..=3_u128)
+            .map(|i| TaskId::from_uuid(Uuid::from_u128(i * 2 + 1)))
+            .collect();
+        let result = SearchIndex::estimate_union_len_sorted_for_test(&left, &right);
+        assert_eq!(result, 6, "disjoint sets should have union = sum");
+    }
+
+    #[rstest]
+    fn estimate_union_len_sorted_partial_overlap() {
+        // left:  {1, 2, 3, 4}
+        // right: {3, 4, 5, 6}
+        // union: {1, 2, 3, 4, 5, 6} = 6
+        let left: Vec<TaskId> = (1..=4_u128)
+            .map(|i| TaskId::from_uuid(Uuid::from_u128(i)))
+            .collect();
+        let right: Vec<TaskId> = (3..=6_u128)
+            .map(|i| TaskId::from_uuid(Uuid::from_u128(i)))
+            .collect();
+        let result = SearchIndex::estimate_union_len_sorted_for_test(&left, &right);
+        assert_eq!(result, 6, "partial overlap {{1..4}} U {{3..6}} should be 6");
+    }
+
+    // -------------------------------------------------------------------------
+    // Capacity-planned merge produces same results as existing merge
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn capacity_planned_merge_two_pointer_equivalence() {
+        // Verify that two-pointer merge with capacity planning produces
+        // identical output to the existing implementation.
+        let existing: Vec<TaskId> = (0..100_u128)
+            .map(|i| TaskId::from_uuid(Uuid::from_u128(i * 3)))
+            .collect();
+        let add: Vec<TaskId> = (0..50_u128)
+            .map(|i| TaskId::from_uuid(Uuid::from_u128(i * 5)))
+            .collect();
+
+        let mut output = Vec::new();
+        SearchIndex::merge_posting_add_only_two_pointer_for_test(&existing, &add, &mut output);
+
+        // The result should be sorted and deduplicated
+        for window in output.windows(2) {
+            assert!(
+                window[0] < window[1],
+                "Output must be strictly sorted: {:?} >= {:?}",
+                window[0],
+                window[1]
+            );
+        }
+
+        // All elements from both inputs should be present
+        for item in &existing {
+            assert!(output.contains(item), "Missing existing element: {item:?}");
+        }
+        for item in &add {
+            assert!(output.contains(item), "Missing add element: {item:?}");
+        }
+    }
+
+    #[rstest]
+    fn capacity_planned_merge_slice_or_fallback_equivalence() {
+        // Ensure merge_posting_slice_or_fallback with capacity planning
+        // yields the same result as a naive sorted union.
+        let existing_ids: Vec<TaskId> = (0..20_u128)
+            .map(|i| TaskId::from_uuid(Uuid::from_u128(i * 2)))
+            .collect();
+        let segment_ids: Vec<TaskId> = (0..20_u128)
+            .map(|i| TaskId::from_uuid(Uuid::from_u128(i * 2 + 1)))
+            .collect();
+
+        let existing_collection = TaskIdCollection::from_sorted_vec(existing_ids.clone());
+        let segment_collection = TaskIdCollection::from_sorted_vec(segment_ids.clone());
+
+        let mut scratch = Vec::new();
+        let merged = NgramSegmentOverlay::merge_posting_slice_or_fallback(
+            &existing_collection,
+            &segment_collection,
+            &mut scratch,
+        );
+
+        // Naive union
+        let mut expected: Vec<TaskId> = existing_ids;
+        expected.extend(segment_ids);
+        expected.sort();
+        expected.dedup();
+
+        let merged_vec: Vec<TaskId> = merged.iter_sorted().cloned().collect();
+        assert_eq!(
+            merged_vec, expected,
+            "Capacity-planned slice merge should be equivalent to naive union"
+        );
+    }
+
+    #[rstest]
+    fn capacity_planned_owned_merge_equivalence() {
+        // Verify that merge_index_delta_add_only_owned with capacity planning
+        // matches merge_index_delta_add_only_owned_with_arena.
+        let index = PrefixIndex::new();
+        let mut add: MutableIndex = std::collections::HashMap::new();
+
+        let id_1 = TaskId::from_uuid(Uuid::from_u128(1));
+        let id_2 = TaskId::from_uuid(Uuid::from_u128(2));
+        let id_3 = TaskId::from_uuid(Uuid::from_u128(3));
+        let id_4 = TaskId::from_uuid(Uuid::from_u128(4));
+        let id_5 = TaskId::from_uuid(Uuid::from_u128(5));
+
+        add.insert(NgramKey::new("alpha"), vec![id_1.clone(), id_3.clone()]);
+        add.insert(NgramKey::new("beta"), vec![id_2.clone(), id_4.clone(), id_5.clone()]);
+
+        let add_clone = add.clone();
+
+        let result_owned =
+            SearchIndex::merge_index_delta_add_only_owned_for_test(&index, add);
+
+        let mut arena = MergeArena::new();
+        let result_arena = SearchIndex::merge_index_delta_add_only_owned_with_arena_for_test(
+            &index, add_clone, &mut arena,
+        );
+
+        assert_eq!(result_owned.len(), result_arena.len());
+
+        for (key, collection_owned) in &result_owned {
+            let collection_arena = result_arena
+                .get(key.as_str())
+                .expect("Key should exist in arena result");
+            let owned_elements: Vec<_> = collection_owned.iter_sorted().cloned().collect();
+            let arena_elements: Vec<_> = collection_arena.iter_sorted().cloned().collect();
+            assert_eq!(
+                owned_elements, arena_elements,
+                "Posting list mismatch for key '{}'",
+                key.as_str()
+            );
+        }
     }
 }
