@@ -1,7 +1,7 @@
 # TODO - Tasks Bulk/Tasks Update ボトルネック改善
 
 ## In Progress
-- [🔴 RED] [IMPL-TBPA2-002] merge ホットパスに容量計画アルゴリズムを導入 - 失敗テスト作成中
+- [🟢 GREEN] [IMPL-TBPA2-002] merge ホットパスに容量計画アルゴリズムを導入 - 最小実装中
   - Started: 2026-02-11
   - Goal: estimate_union_len_sorted + two-pass capacity-planned merge で grow/allocator 負荷を削減
 

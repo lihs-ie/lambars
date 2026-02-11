@@ -1592,15 +1592,23 @@ impl NgramSegmentOverlay {
                         .is_some_and(|(segment_max, existing_min)| segment_max < existing_min);
 
                 scratch.clear();
-                scratch.reserve(existing_slice.len() + segment_slice.len());
 
                 if can_concat {
+                    scratch.reserve_exact(existing_slice.len() + segment_slice.len());
                     scratch.extend_from_slice(existing_slice);
                     scratch.extend_from_slice(segment_slice);
                 } else if can_concat_reversed {
+                    scratch.reserve_exact(existing_slice.len() + segment_slice.len());
                     scratch.extend_from_slice(segment_slice);
                     scratch.extend_from_slice(existing_slice);
                 } else {
+                    // Two-pass capacity planning: compute exact union size
+                    // before allocating to avoid intermediate grow calls.
+                    let union_len = SearchIndex::estimate_union_len_sorted(
+                        existing_slice,
+                        segment_slice,
+                    );
+                    scratch.reserve_exact(union_len);
                     SearchIndex::merge_posting_add_only_into_slice(
                         existing_slice,
                         segment_slice,
@@ -1628,7 +1636,8 @@ impl NgramSegmentOverlay {
         scratch: &mut Vec<TaskId>,
     ) -> TaskIdCollection {
         scratch.clear();
-        scratch.reserve(left.len() + right.len());
+        let union_len = SearchIndex::estimate_union_len_sorted(left, right);
+        scratch.reserve_exact(union_len);
         SearchIndex::merge_posting_add_only_into_slice(left, right, scratch);
         TaskIdCollection::from_sorted_vec(std::mem::take(scratch))
     }
@@ -6990,8 +6999,23 @@ impl SearchIndex {
     /// This is the first pass of the two-pass capacity-planned merge: it
     /// computes the exact output size so that the caller can `reserve_exact`
     /// before the actual merge, eliminating intermediate `grow` calls.
-    fn estimate_union_len_sorted(_existing: &[TaskId], _add: &[TaskId]) -> usize {
-        todo!("IMPL-TBPA2-002: implement estimate_union_len_sorted")
+    fn estimate_union_len_sorted(existing: &[TaskId], add: &[TaskId]) -> usize {
+        let mut count = 0usize;
+        let mut i = 0;
+        let mut j = 0;
+        while i < existing.len() && j < add.len() {
+            count += 1;
+            match existing[i].cmp(&add[j]) {
+                std::cmp::Ordering::Less => i += 1,
+                std::cmp::Ordering::Greater => j += 1,
+                std::cmp::Ordering::Equal => {
+                    i += 1;
+                    j += 1;
+                }
+            }
+        }
+        count += (existing.len() - i) + (add.len() - j);
+        count
     }
 
     /// Standard two-pointer merge for `existing ∪ add`.
@@ -7005,6 +7029,10 @@ impl SearchIndex {
         output.clear();
 
         let mut existing_iterator = existing.peekable();
+        // Pre-allocate using size_hint upper bound to avoid intermediate grows.
+        // ExactSizeIterator implementations provide accurate lower bounds.
+        let existing_hint = existing_iterator.size_hint().0;
+        output.reserve(existing_hint + add.len());
         let mut add_iterator = add.iter().peekable();
 
         loop {
@@ -7064,6 +7092,14 @@ impl SearchIndex {
                         transient
                             .insert(key.clone(), TaskIdCollection::from_sorted_vec(result_vec));
                     } else if let Some(existing_slice) = collection.as_sorted_slice() {
+                        // Capacity planning: pre-allocate scratch with exact
+                        // union size to avoid grow during merge.
+                        let union_len = Self::estimate_union_len_sorted(
+                            existing_slice,
+                            add_list.as_slice(),
+                        );
+                        scratch.clear();
+                        scratch.reserve_exact(union_len);
                         Self::merge_posting_add_only_into_slice(
                             existing_slice,
                             add_list.as_slice(),
@@ -7127,6 +7163,14 @@ impl SearchIndex {
                         result_vec.extend(add_list);
                         transient.insert(key, TaskIdCollection::from_sorted_vec(result_vec));
                     } else if let Some(existing_slice) = collection.as_sorted_slice() {
+                        // Capacity planning: pre-allocate scratch with exact
+                        // union size to avoid grow during merge.
+                        let union_len = Self::estimate_union_len_sorted(
+                            existing_slice,
+                            add_list.as_slice(),
+                        );
+                        scratch.clear();
+                        scratch.reserve_exact(union_len);
                         Self::merge_posting_add_only_into_slice(
                             existing_slice,
                             add_list.as_slice(),
@@ -7189,6 +7233,14 @@ impl SearchIndex {
                         result_vec.extend(add_list);
                         transient.insert(key, TaskIdCollection::from_sorted_vec(result_vec));
                     } else if let Some(existing_slice) = collection.as_sorted_slice() {
+                        // Capacity planning: pre-allocate scratch with exact
+                        // union size to avoid grow during merge.
+                        let union_len = Self::estimate_union_len_sorted(
+                            existing_slice,
+                            add_list.as_slice(),
+                        );
+                        scratch.clear();
+                        scratch.reserve_exact(union_len);
                         Self::merge_posting_add_only_into_slice(
                             existing_slice,
                             add_list.as_slice(),
