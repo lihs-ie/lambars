@@ -241,6 +241,8 @@ check_validation_gate() {
     export CONFLICT_ERROR_RATE_CALCULATED
 }
 
+# IMPL-TBLR-002: Enforce merge_path_detail fail gate
+# Ensures tasks_bulk is using the optimized with_arena merge path
 check_merge_path_gate() {
     local MIN_WITH_ARENA_RATIO=0.90
     local BULK_WITH_ARENA
@@ -296,6 +298,9 @@ check_merge_path_gate() {
     echo ""
 }
 
+# IMPL-TBLR-003: Staged regression guard for tasks_bulk
+# Prevents regression to pre-optimization performance levels
+# Revert thresholds based on Run 21886689088 baseline
 check_bulk_regression_guard() {
     local MAX_P99_REVERT=9550
     local MIN_RPS_REVERT=341.36
