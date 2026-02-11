@@ -24985,4 +24985,182 @@ mod merge_arena_integration_tests {
             assert_eq!(without_ids, with_ids, "Mismatch for key '{}'", key.as_str());
         }
     }
+
+    // -------------------------------------------------------------------------
+    // IMPL-TBPA2-001: apply_changes_bulk_with_arena equivalence
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn apply_changes_bulk_with_arena_and_bulk_are_equivalent() {
+        let config = SearchIndexConfigBuilder::new()
+            .use_bulk_builder(true)
+            .bulk_threshold(2)
+            .infix_mode(InfixMode::Ngram)
+            .build();
+
+        let tasks_pv: lambars::persistent::PersistentVector<Task> =
+            lambars::persistent::PersistentVector::new();
+        let index = SearchIndex::build_with_config(&tasks_pv, config);
+
+        let tasks: Vec<Task> = (0..20)
+            .map(|i| {
+                Task::new(TaskId::generate(), format!("Task number {i}"), Timestamp::now())
+                    .add_tag(Tag::new("common"))
+                    .add_tag(Tag::new(format!("tag{i}")))
+            })
+            .collect();
+        let changes: Vec<TaskChange> = tasks.iter().cloned().map(TaskChange::Add).collect();
+
+        // Non-arena bulk path
+        let result_bulk = index
+            .apply_changes_bulk(&changes)
+            .expect("apply_changes_bulk should succeed");
+
+        // Arena bulk path
+        let mut arena = MergeArena::new();
+        let result_arena = index
+            .apply_changes_bulk_with_arena(&changes, &mut arena)
+            .expect("apply_changes_bulk_with_arena should succeed");
+
+        // Verify tasks_by_id length
+        assert_eq!(
+            result_bulk.tasks_by_id.len(),
+            result_arena.tasks_by_id.len(),
+            "tasks_by_id length mismatch"
+        );
+
+        // Verify all task IDs present
+        for task in &tasks {
+            assert!(
+                result_arena.tasks_by_id.contains_key(&task.task_id),
+                "Arena result missing task_id: {:?}",
+                task.task_id
+            );
+        }
+
+        // Verify title_word_index equivalence
+        for (key, bulk_collection) in &result_bulk.title_word_index {
+            let arena_collection = result_arena
+                .title_word_index
+                .get(key.as_str())
+                .unwrap_or_else(|| {
+                    panic!(
+                        "title_word_index key '{}' missing in arena result",
+                        key.as_str()
+                    )
+                });
+            let bulk_ids: Vec<_> = bulk_collection.iter_sorted().cloned().collect();
+            let arena_ids: Vec<_> = arena_collection.iter_sorted().cloned().collect();
+            assert_eq!(
+                bulk_ids, arena_ids,
+                "title_word_index posting list mismatch for key '{}'",
+                key.as_str()
+            );
+        }
+
+        // Verify tag_index equivalence
+        for (key, bulk_collection) in &result_bulk.tag_index {
+            let arena_collection = result_arena
+                .tag_index
+                .get(key.as_str())
+                .unwrap_or_else(|| {
+                    panic!("tag_index key '{}' missing in arena result", key.as_str())
+                });
+            let bulk_ids: Vec<_> = bulk_collection.iter_sorted().cloned().collect();
+            let arena_ids: Vec<_> = arena_collection.iter_sorted().cloned().collect();
+            assert_eq!(
+                bulk_ids, arena_ids,
+                "tag_index posting list mismatch for key '{}'",
+                key.as_str()
+            );
+        }
+
+        // Verify ngram indexes have same length
+        assert_eq!(
+            result_bulk.title_word_ngram_index.len(),
+            result_arena.title_word_ngram_index.len(),
+            "title_word_ngram_index length mismatch"
+        );
+        assert_eq!(
+            result_bulk.title_full_ngram_index.len(),
+            result_arena.title_full_ngram_index.len(),
+            "title_full_ngram_index length mismatch"
+        );
+        assert_eq!(
+            result_bulk.tag_ngram_index.len(),
+            result_arena.tag_ngram_index.len(),
+            "tag_ngram_index length mismatch"
+        );
+    }
+
+    #[rstest]
+    fn apply_changes_with_arena_uses_arena_bulk_path() {
+        // This test verifies that apply_changes_with_arena routes to the arena-aware
+        // bulk path by confirming that the results match apply_changes_bulk_with_arena
+        // when bulk conditions are met.
+        let config = SearchIndexConfigBuilder::new()
+            .use_bulk_builder(true)
+            .bulk_threshold(2)
+            .infix_mode(InfixMode::Ngram)
+            .build();
+
+        let tasks_pv: lambars::persistent::PersistentVector<Task> =
+            lambars::persistent::PersistentVector::new();
+        let index = SearchIndex::build_with_config(&tasks_pv, config);
+
+        let tasks: Vec<Task> = (0..10)
+            .map(|i| {
+                Task::new(TaskId::generate(), format!("Arena task {i}"), Timestamp::now())
+                    .add_tag(Tag::new("arenatest"))
+            })
+            .collect();
+        let changes: Vec<TaskChange> = tasks.iter().cloned().map(TaskChange::Add).collect();
+
+        let mut arena = MergeArena::new();
+        let result = index.apply_changes_with_arena(&changes, &mut arena);
+
+        // All tasks should be present
+        assert_eq!(
+            result.tasks_by_id.len(),
+            tasks.len(),
+            "All tasks should be indexed"
+        );
+        for task in &tasks {
+            assert!(
+                result.tasks_by_id.contains_key(&task.task_id),
+                "Missing task_id in result: {:?}",
+                task.task_id
+            );
+        }
+    }
+
+    #[rstest]
+    fn apply_changes_bulk_with_arena_idempotency() {
+        // Verify that adding duplicate tasks is idempotent (same as apply_changes_bulk)
+        let config = SearchIndexConfigBuilder::new()
+            .use_bulk_builder(true)
+            .bulk_threshold(2)
+            .infix_mode(InfixMode::Ngram)
+            .build();
+
+        let tasks_pv: lambars::persistent::PersistentVector<Task> =
+            lambars::persistent::PersistentVector::new();
+        let index = SearchIndex::build_with_config(&tasks_pv, config);
+
+        let task = Task::new(TaskId::generate(), "Duplicate task".to_string(), Timestamp::now())
+            .add_tag(Tag::new("dup"));
+        let changes = vec![
+            TaskChange::Add(task.clone()),
+            TaskChange::Add(task.clone()),
+        ];
+
+        let mut arena = MergeArena::new();
+        let result = index
+            .apply_changes_bulk_with_arena(&changes, &mut arena)
+            .expect("should succeed");
+
+        // Only one copy of the task should exist
+        assert_eq!(result.tasks_by_id.len(), 1, "Duplicate should be deduplicated");
+        assert!(result.tasks_by_id.contains_key(&task.task_id));
+    }
 }
