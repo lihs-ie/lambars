@@ -8075,7 +8075,9 @@ impl SearchIndexWriter {
         // Ensure at least 1ms to prevent spin-loop when batch_timeout_milliseconds=0.
         let batch_timeout =
             std::time::Duration::from_millis(config.batch_timeout_milliseconds.max(1));
-        let idle_poll_interval = batch_timeout.saturating_mul(2);
+        let idle_poll_interval = batch_timeout
+            .saturating_mul(2)
+            .max(std::time::Duration::from_millis(10));
         let mut arena = MergeArena::new();
 
         loop {
@@ -25045,14 +25047,21 @@ mod search_index_writer_tests {
             .send_change(TaskChange::Add(task))
             .expect("send should succeed");
 
-        // Allow the writer thread enough time to process.
-        std::thread::sleep(std::time::Duration::from_millis(50));
-
-        let index = search_index.load();
-        assert!(
-            index.search_by_title("zero-timeout-safe").is_some(),
-            "Task should be indexed even with batch_timeout_milliseconds=0"
-        );
+        // Poll until the writer thread processes the change (avoids flaky sleep).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        loop {
+            if search_index
+                .load()
+                .search_by_title("zero-timeout-safe")
+                .is_some()
+            {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!("task was not indexed within deadline");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
 
         writer.shutdown();
     }
