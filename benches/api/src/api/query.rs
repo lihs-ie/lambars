@@ -2683,6 +2683,50 @@ impl SearchIndexDelta {
         Self::build_delta_with_mode(changes, config, tasks_by_id, DeltaMode::WithoutNgram).0
     }
 
+    /// Constructs a delta from pre-normalized Add-only task data without collecting n-grams.
+    ///
+    /// This is an optimized variant of [`from_changes_without_ngrams`] that accepts
+    /// already-normalized task data, avoiding redundant `NormalizedTaskData::from_task` calls.
+    ///
+    /// # Preconditions
+    ///
+    /// - All entries in `normalized_adds` must represent **Add** operations only.
+    /// - Tasks must already be deduplicated and filtered (tasks that already exist
+    ///   in the index should not be included).
+    /// - `config.infix_mode` must be `InfixMode::Ngram`.
+    ///
+    /// # Panics (debug only)
+    ///
+    /// Debug-asserts that `config.infix_mode == InfixMode::Ngram`.
+    #[must_use]
+    #[inline]
+    pub(crate) fn from_pre_normalized_adds_without_ngrams(
+        normalized_adds: &[(&Task, &NormalizedTaskData)],
+        config: &SearchIndexConfig,
+    ) -> Self {
+        debug_assert!(
+            config.infix_mode == InfixMode::Ngram,
+            "from_pre_normalized_adds_without_ngrams is designed for InfixMode::Ngram only; \
+             LegacyAllSuffix suffix indexes would be skipped"
+        );
+
+        let estimated_capacity = normalized_adds.len().saturating_mul(10);
+        let mut delta = Self::with_capacity(estimated_capacity);
+        let mut pool = KeyPool::new();
+
+        for &(task, normalized) in normalized_adds {
+            delta.collect_add(
+                normalized,
+                &task.task_id,
+                config,
+                &mut pool,
+                DeltaMode::WithoutNgram,
+            );
+        }
+
+        delta
+    }
+
     /// Constructs a delta from task changes and returns metrics (REQ-SEARCH-NGRAM-MEM-005).
     ///
     /// Duplicates for the same `TaskId` are resolved by input order:
@@ -6000,19 +6044,24 @@ impl SearchIndex {
             return Ok(self.clone());
         }
 
-        let estimated_entries_per_index = tasks.len() * self.config.max_tokens_per_task;
+        // Normalize each task exactly once and reuse for both n-gram building and delta construction.
+        let normalized_tasks: Vec<(&Task, NormalizedTaskData)> = tasks
+            .iter()
+            .map(|task| (*task, NormalizedTaskData::from_task(task)))
+            .collect();
+
+        let estimated_entries_per_index = normalized_tasks.len() * self.config.max_tokens_per_task;
 
         let mut title_word_builder =
             SearchIndexBulkBuilder::with_capacity(self.config.clone(), estimated_entries_per_index);
         let mut title_full_builder =
-            SearchIndexBulkBuilder::with_capacity(self.config.clone(), tasks.len());
+            SearchIndexBulkBuilder::with_capacity(self.config.clone(), normalized_tasks.len());
         let mut tag_builder =
             SearchIndexBulkBuilder::with_capacity(self.config.clone(), estimated_entries_per_index);
 
-        for task in &tasks {
-            let normalized = NormalizedTaskData::from_task(task);
+        for (task, normalized) in &normalized_tasks {
             let (word_limit, tag_limit) =
-                SearchIndexDelta::compute_token_limits(&normalized, &self.config);
+                SearchIndexDelta::compute_token_limits(normalized, &self.config);
 
             title_full_builder =
                 title_full_builder.add_entry(normalized.title_key.clone(), task.task_id.clone());
@@ -6047,8 +6096,15 @@ impl SearchIndex {
             .tag_ngram_index
             .append_and_compact_with_arena(tag_bulk, arena);
 
-        let mut delta =
-            SearchIndexDelta::from_changes_without_ngrams(changes, &self.config, &self.tasks_by_id);
+        // Reuse pre-normalized data to avoid redundant NormalizedTaskData::from_task calls.
+        let normalized_refs: Vec<(&Task, &NormalizedTaskData)> = normalized_tasks
+            .iter()
+            .map(|(task, normalized)| (*task, normalized))
+            .collect();
+        let mut delta = SearchIndexDelta::from_pre_normalized_adds_without_ngrams(
+            &normalized_refs,
+            &self.config,
+        );
         delta.prepare_posting_lists();
         let base_result = self.apply_delta_owned_with_arena(delta, changes, arena);
 
@@ -16617,6 +16673,91 @@ mod search_index_delta_tests {
 
         assert!(!delta.is_add_only());
     }
+
+    #[rstest]
+    fn from_pre_normalized_adds_produces_same_delta_as_from_changes_without_ngrams() {
+        let tasks: Vec<Task> = (0..5)
+            .map(|i| {
+                let base = Task::new(
+                    task_id_from_u128(i + 1),
+                    format!("Task Title {i}"),
+                    Timestamp::now(),
+                );
+                base.add_tag(Tag::new(format!("tag-{i}")))
+            })
+            .collect();
+        let config = SearchIndexConfig::default();
+        let empty_tasks_by_id: PersistentTreeMap<TaskId, Task> = PersistentTreeMap::new();
+
+        let changes: Vec<TaskChange> = tasks.iter().map(|t| TaskChange::Add(t.clone())).collect();
+
+        let mut expected =
+            SearchIndexDelta::from_changes_without_ngrams(&changes, &config, &empty_tasks_by_id);
+        expected.prepare_posting_lists();
+
+        let normalized: Vec<(&Task, NormalizedTaskData)> = tasks
+            .iter()
+            .map(|task| (task, NormalizedTaskData::from_task(task)))
+            .collect();
+        let normalized_refs: Vec<(&Task, &NormalizedTaskData)> = normalized
+            .iter()
+            .map(|(task, data)| (*task, data))
+            .collect();
+        let mut actual =
+            SearchIndexDelta::from_pre_normalized_adds_without_ngrams(&normalized_refs, &config);
+        actual.prepare_posting_lists();
+
+        // Compare prefix indexes (title_full, title_word, tag)
+        assert_eq!(expected.title_full_add, actual.title_full_add);
+        assert_eq!(expected.title_word_add, actual.title_word_add);
+        assert_eq!(expected.tag_add, actual.tag_add);
+
+        // Ngram indexes should both be empty (WithoutNgram mode)
+        assert!(actual.title_full_ngram_add.is_empty());
+        assert!(actual.title_word_ngram_add.is_empty());
+        assert!(actual.tag_ngram_add.is_empty());
+
+        // Remove indexes should be empty for add-only operations
+        assert!(actual.title_full_remove.is_empty());
+        assert!(actual.title_word_remove.is_empty());
+        assert!(actual.tag_remove.is_empty());
+    }
+
+    #[rstest]
+    fn from_pre_normalized_adds_with_empty_input_produces_empty_delta() {
+        let config = SearchIndexConfig::default();
+        let normalized_adds: Vec<(&Task, &NormalizedTaskData)> = vec![];
+
+        let delta =
+            SearchIndexDelta::from_pre_normalized_adds_without_ngrams(&normalized_adds, &config);
+
+        assert!(delta.title_full_add.is_empty());
+        assert!(delta.title_word_add.is_empty());
+        assert!(delta.tag_add.is_empty());
+        assert!(delta.title_full_ngram_add.is_empty());
+        assert!(delta.title_word_ngram_add.is_empty());
+        assert!(delta.tag_ngram_add.is_empty());
+    }
+
+    #[rstest]
+    fn from_pre_normalized_adds_single_task() {
+        let task = Task::new(task_id_from_u128(42), "Buy Groceries", Timestamp::now())
+            .add_tag(Tag::new("shopping"));
+        let config = SearchIndexConfig::default();
+        let normalized = NormalizedTaskData::from_task(&task);
+        let normalized_adds: Vec<(&Task, &NormalizedTaskData)> = vec![(&task, &normalized)];
+
+        let mut delta =
+            SearchIndexDelta::from_pre_normalized_adds_without_ngrams(&normalized_adds, &config);
+        delta.prepare_posting_lists();
+
+        // title_full_add should contain the normalized title key
+        assert_eq!(delta.title_full_add.len(), 1);
+        // title_word_add should contain each word
+        assert!(!delta.title_word_add.is_empty());
+        // tag_add should contain the tag
+        assert_eq!(delta.tag_add.len(), 1);
+    }
 }
 
 #[cfg(test)]
@@ -25084,9 +25225,10 @@ mod search_index_writer_tests {
             {
                 break;
             }
-            if std::time::Instant::now() >= deadline {
-                panic!("task was not indexed within deadline");
-            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "task was not indexed within deadline"
+            );
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
 
@@ -25627,11 +25769,7 @@ mod merge_arena_integration_tests {
                 &result_arena_forward,
             ),
         ] {
-            assert_eq!(
-                result_a.len(),
-                result_b.len(),
-                "{label}: length mismatch"
-            );
+            assert_eq!(result_a.len(), result_b.len(), "{label}: length mismatch");
             for (key, collection_a) in result_a {
                 let collection_b = result_b
                     .get(key.as_str())
