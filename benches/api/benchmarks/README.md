@@ -109,36 +109,30 @@ benchmarks/
 ./run_benchmark.sh --scenario scenarios/tasks_eff.yaml
 ```
 
-### シナリオ設定: docker_build vs metadata.api_features
+### シナリオ設定
 
-シナリオ YAML ファイルには2種類の API 機能設定があります。
+シナリオ YAML ファイルには複数のレイヤーで設定を記述します。
 
-#### `metadata.api_features` (テスト対象の機能)
+#### `metadata.api_features` (ドキュメント用)
 ```yaml
 metadata:
-  api_features:
-    - for_!
-    - Alternative
+  api_features: [for_!, Alternative]
 ```
-- **目的**: ベンチマークが測定対象とする lambars API の機能を記述
-- **用途**: ドキュメント、レポート生成、結果の分類
+ベンチマークが測定対象とする lambars API の機能を記述（レポート生成、結果分類用）。
 
-#### `docker_build.api_features` (ビルド時の Cargo features)
+#### `docker_build.api_features` (ビルド時)
 ```yaml
 docker_build:
   api_features: "mimalloc,fast-hash"
 ```
-- **目的**: Docker ビルド時に有効化する Cargo features を指定
-- **用途**: パフォーマンス最適化（allocator, hasher など）の有効化
-- **CI での利用**: nightly ジョブでシナリオごとに異なるビルド設定を適用
+Docker ビルド時の Cargo features（allocator, hasher など）。CI nightly でシナリオごとに適用。
 
-#### `docker_runtime.writer_profile` (実行時の環境変数)
+#### `docker_runtime.writer_profile` (実行時)
 ```yaml
 docker_runtime:
   writer_profile: "bulk"
 ```
-- **目的**: Docker コンテナ実行時の環境変数を指定
-- **用途**: API サーバーの動作設定（バッチサイズ、タイムアウトなど）
+コンテナ実行時の環境変数（API サーバーのバッチサイズ、タイムアウトなど）。
 
 ### 環境変数
 

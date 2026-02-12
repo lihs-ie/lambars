@@ -737,30 +737,21 @@ jobs:
           for scenario in "${SCENARIOS[@]}"; do
             echo "=== Running scenario: ${scenario} ==="
 
-            # Extract scenario-specific build and runtime configuration
             SCENARIO_PATH="scenarios/${scenario}"
-            API_FEATURES=""
-            WRITER_PROFILE=""
 
+            # Extract scenario-specific configuration
             if [[ -f "${SCENARIO_PATH}" ]]; then
-              # Read docker_build.api_features if present
               API_FEATURES=$(yq '.docker_build.api_features // ""' "${SCENARIO_PATH}")
-              # Read docker_runtime.writer_profile if present
               WRITER_PROFILE=$(yq '.docker_runtime.writer_profile // ""' "${SCENARIO_PATH}")
+            else
+              API_FEATURES=""
+              WRITER_PROFILE=""
             fi
 
-            # Start services in subshell to isolate scenario-specific environment
+            # Start services with scenario-specific environment
             (
-              # Export scenario-specific configuration for Docker build and runtime
-              if [[ -n "${API_FEATURES}" ]]; then
-                export API_FEATURES="${API_FEATURES}"
-                echo "API_FEATURES=${API_FEATURES}"
-              fi
-              if [[ -n "${WRITER_PROFILE}" ]]; then
-                export WRITER_PROFILE="${WRITER_PROFILE}"
-                echo "WRITER_PROFILE=${WRITER_PROFILE}"
-              fi
-
+              [[ -n "${API_FEATURES}" ]] && export API_FEATURES="${API_FEATURES}" && echo "API_FEATURES=${API_FEATURES}"
+              [[ -n "${WRITER_PROFILE}" ]] && export WRITER_PROFILE="${WRITER_PROFILE}" && echo "WRITER_PROFILE=${WRITER_PROFILE}"
               cd ../docker && docker compose -f compose.ci.yaml up -d --build --wait
             )
             cd ../benchmarks
@@ -768,46 +759,39 @@ jobs:
             # Setup data
             ./setup_test_data.sh --scale medium
 
-            # Run baseline with default environment (reset any previous variant settings)
+            # Run baseline (reset variant environment)
             unset HIT_RATE FAIL_RATE PAYLOAD
             ./run_benchmark.sh --scenario "${SCENARIO_PATH}"
 
-            # Fail-closed RPS gate check (immediately after baseline)
+            # RPS gate check (fail-closed)
             BASELINE_META_DIR=$(ls -td results/*/$(basename "${scenario}" .yaml)/ 2>/dev/null | head -1)
-            if [[ -n "${BASELINE_META_DIR}" ]]; then
-              # Find meta.json in script subdirectories
-              BASELINE_META=$(find "${BASELINE_META_DIR}" -name "meta.json" -type f | head -1)
-              if [[ -f "${BASELINE_META}" ]]; then
-                ACTUAL_RPS=$(jq -r '.results.rps // 0' "${BASELINE_META}")
-                MIN_RPS=$(yq '.thresholds.min_rps_achieved // 0' "${SCENARIO_PATH}")
-                echo "RPS Gate Check: actual=${ACTUAL_RPS}, min_required=${MIN_RPS}"
-                if (( $(echo "${ACTUAL_RPS} < ${MIN_RPS}" | bc -l) )); then
-                  echo "ERROR: RPS ${ACTUAL_RPS} below threshold ${MIN_RPS} for scenario ${scenario}"
-                  # Cleanup before exit
-                  cd ../docker && docker compose -f compose.ci.yaml down -v
-                  exit 1
-                fi
-              else
-                echo "ERROR: meta.json not found for scenario ${scenario} (fail-closed)"
-                # Cleanup before exit
-                cd ../docker && docker compose -f compose.ci.yaml down -v
-                exit 1
-              fi
-            else
-              echo "ERROR: Baseline results not found for scenario ${scenario} (fail-closed)"
-              # Cleanup before exit
+            if [[ -z "${BASELINE_META_DIR}" ]]; then
+              echo "ERROR: Baseline results not found for scenario ${scenario}"
               cd ../docker && docker compose -f compose.ci.yaml down -v
               exit 1
             fi
 
-            # Run variants in subshells to isolate environment changes
+            BASELINE_META=$(find "${BASELINE_META_DIR}" -name "meta.json" -type f | head -1)
+            if [[ ! -f "${BASELINE_META}" ]]; then
+              echo "ERROR: meta.json not found for scenario ${scenario}"
+              cd ../docker && docker compose -f compose.ci.yaml down -v
+              exit 1
+            fi
+
+            ACTUAL_RPS=$(jq -r '.results.rps // 0' "${BASELINE_META}")
+            MIN_RPS=$(yq '.thresholds.min_rps_achieved // 0' "${SCENARIO_PATH}")
+            echo "RPS Gate: actual=${ACTUAL_RPS}, min=${MIN_RPS}"
+
+            if (( $(echo "${ACTUAL_RPS} < ${MIN_RPS}" | bc -l) )); then
+              echo "ERROR: RPS ${ACTUAL_RPS} below threshold ${MIN_RPS}"
+              cd ../docker && docker compose -f compose.ci.yaml down -v
+              exit 1
+            fi
+
+            # Run variants (isolated environment)
             for variant in "${VARIANTS[@]}"; do
               echo "--- Variant: ${variant} ---"
-              (
-                # Run in subshell to prevent environment pollution
-                export ${variant}
-                ./run_benchmark.sh --scenario "${SCENARIO_PATH}"
-              )
+              ( export ${variant}; ./run_benchmark.sh --scenario "${SCENARIO_PATH}" )
             done
 
             # Cleanup
