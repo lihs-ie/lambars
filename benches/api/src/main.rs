@@ -15,6 +15,14 @@
 //! - `WORKER_THREADS`: Number of tokio worker threads (default: logical CPU count)
 //! - `ENABLE_DEBUG_ENDPOINTS`: Enable debug endpoints like `/debug/config` (default: `false`)
 
+// Safety gate: `fast-hash` implies `trusted-input`. If someone manually enables
+// `fast-hash` without `trusted-input`, this compile-time check catches it.
+#[cfg(all(feature = "fast-hash", not(feature = "trusted-input")))]
+compile_error!(
+    "The `fast-hash` feature requires `trusted-input`. \
+     FxHash is NOT HashDoS-resistant and must only be used for trusted-input benchmark workloads."
+);
+
 #[cfg(feature = "mimalloc")]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;

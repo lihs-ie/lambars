@@ -447,11 +447,7 @@ impl AppState {
 
         let search_index_arc = Arc::new(ArcSwap::from_pointee(search_index));
 
-        let writer_config = if std::env::var("WRITER_PROFILE").as_deref() == Ok("bulk") {
-            SearchIndexWriterConfig::for_bulk_workload()
-        } else {
-            SearchIndexWriterConfig::default()
-        };
+        let writer_config = writer_config_from_env();
 
         let search_index_writer = Arc::new(SearchIndexWriter::new(
             Arc::clone(&search_index_arc),
@@ -628,6 +624,35 @@ pub fn create_stub_external_sources() -> ExternalSources {
     ExternalSources {
         secondary_source: Arc::new(StubExternalDataSource::not_found("secondary")),
         external_source: Arc::new(StubExternalDataSource::not_found("external")),
+    }
+}
+
+// =============================================================================
+// Writer Config Parsing
+// =============================================================================
+
+/// Parses the `WRITER_PROFILE` environment variable and returns the
+/// corresponding [`SearchIndexWriterConfig`].
+///
+/// Recognized values (case-insensitive, trimmed):
+/// - `"bulk"` -- [`SearchIndexWriterConfig::for_bulk_workload()`]
+/// - `"default"` or unset -- [`SearchIndexWriterConfig::default()`]
+/// - anything else -- logs a warning and falls back to default.
+fn writer_config_from_env() -> SearchIndexWriterConfig {
+    match std::env::var("WRITER_PROFILE")
+        .ok()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("bulk") => SearchIndexWriterConfig::for_bulk_workload(),
+        Some("default") | None => SearchIndexWriterConfig::default(),
+        Some(other) => {
+            tracing::warn!(
+                profile = %other,
+                "Unknown WRITER_PROFILE value, falling back to default"
+            );
+            SearchIndexWriterConfig::default()
+        }
     }
 }
 
