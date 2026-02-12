@@ -206,6 +206,14 @@ jobs:
           DATA_SCALE: small
           PROFILE: false
         run: |
+          # Restart Docker to ensure clean server state matching baseline conditions.
+          # Without restart, the server has accumulated state from Lua compatibility test
+          # and RPS smoke tests, causing systematic latency bias (ordered: +625%).
+          cd ../docker && docker compose -f compose.ci.yaml down -v
+          docker compose -f compose.ci.yaml up -d --wait
+          cd ../benchmarks
+          # Re-seed test data on fresh server
+          ./setup_test_data.sh --scale small
           # Run main benchmark scenario
           ./run_benchmark.sh --scenario scenarios/in_memory_read_heavy_warm.yaml --quick
           # Get results directory (scenario directory level for compare_results.sh)
