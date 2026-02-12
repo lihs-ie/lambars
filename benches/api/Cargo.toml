@@ -10,6 +10,10 @@ license = "MIT OR Apache-2.0"
 default = []
 demo = []  # Demo endpoints for development/debugging
 mimalloc = ["dep:mimalloc"]  # Use mimalloc as global allocator for reduced fragmentation
+# Use FxHash instead of SipHash for PersistentHashMap/PersistentHashSet.
+# WARNING: FxHash is NOT HashDoS-resistant. Only enable for trusted-input
+# benchmark workloads, never for public-facing API builds.
+fast-hash = ["lambars/fxhash"]
 
 [dependencies]
 lambars = { path = "../../", features = ["full", "arc"] }
