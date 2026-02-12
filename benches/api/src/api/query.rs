@@ -1281,33 +1281,26 @@ pub struct MergeArena {
     idle_counter: usize,
 }
 
-/// Default growth factor for `reserve_with_hysteresis`.
-const DEFAULT_GROWTH_FACTOR: f32 = 1.5;
-
 impl MergeArena {
     pub const fn new() -> Self {
         Self {
             scratch: Vec::new(),
             shrink_threshold: 16_384,
-            // const fn cannot use f32 operations, so we store the bit pattern
-            // and convert in methods. For the default path we use
-            // DEFAULT_GROWTH_FACTOR via `default()`.
             growth_factor: 1.5,
             idle_counter: 0,
         }
     }
 
-    /// Returns the scratch buffer (cleared but capacity preserved).
+    /// Returns the scratch buffer cleared (capacity preserved), resetting the
+    /// idle counter.
     pub fn scratch(&mut self) -> &mut Vec<TaskId> {
         self.scratch.clear();
         self.idle_counter = 0;
         &mut self.scratch
     }
 
-    /// Returns the scratch buffer pre-reserved to at least `required` capacity.
-    ///
-    /// The buffer is cleared first, then capacity is ensured via
-    /// [`reserve_with_hysteresis`](Self::reserve_with_hysteresis).
+    /// Returns the scratch buffer cleared and pre-reserved to at least
+    /// `required` capacity via [`reserve_with_hysteresis`](Self::reserve_with_hysteresis).
     pub fn scratch_with_capacity(&mut self, required: usize) -> &mut Vec<TaskId> {
         self.scratch.clear();
         self.idle_counter = 0;
@@ -1315,11 +1308,9 @@ impl MergeArena {
         &mut self.scratch
     }
 
-    /// Ensures `buf` has at least `required` capacity, growing by `growth_factor`
-    /// to amortise future allocations.
-    ///
-    /// If the current capacity already meets `required`, this is a no-op.
-    /// Otherwise, the target capacity is `max(required, capacity * growth_factor)`.
+    /// Grows `buffer` to at least `required` capacity, overshooting by
+    /// `growth_factor` to amortise future allocations. No-op when capacity
+    /// already suffices.
     #[inline]
     fn reserve_with_hysteresis(buffer: &mut Vec<TaskId>, required: usize, growth_factor: f32) {
         if buffer.capacity() >= required {
@@ -1332,15 +1323,10 @@ impl MergeArena {
         )]
         let grown = (buffer.capacity() as f32 * growth_factor) as usize;
         let target = required.max(grown);
-        // `Vec::reserve` takes *additional* capacity relative to `len()`.
         buffer.reserve(target.saturating_sub(buffer.len()));
     }
 
-    /// Shrinks the scratch buffer when capacity exceeds twice the threshold.
-    ///
-    /// Uses a hysteresis band to avoid allocation thrashing: the buffer is
-    /// only shrunk when capacity exceeds `2 * shrink_threshold`, and it is
-    /// shrunk back to `shrink_threshold` using `Vec::shrink_to`.
+    /// Shrinks the scratch buffer when capacity exceeds `2 * shrink_threshold`.
     pub fn maybe_shrink(&mut self) {
         let hysteresis_limit = self.shrink_threshold.saturating_mul(2);
         if self.scratch.capacity() > hysteresis_limit {
@@ -1349,12 +1335,8 @@ impl MergeArena {
     }
 
     /// Compacts the scratch buffer only after `idle_threshold` consecutive idle
-    /// cycles.
-    ///
-    /// Call this at the end of each writer-loop iteration. The counter is reset
-    /// to zero whenever [`scratch()`](Self::scratch) or
-    /// [`scratch_with_capacity()`](Self::scratch_with_capacity) is called,
-    /// so an active merge loop never triggers compaction.
+    /// cycles. The counter resets whenever [`scratch`](Self::scratch) or
+    /// [`scratch_with_capacity`](Self::scratch_with_capacity) is called.
     pub fn compact_when_idle(&mut self, idle_threshold: usize) {
         self.idle_counter += 1;
         if self.idle_counter >= idle_threshold && self.scratch.capacity() > self.shrink_threshold {
@@ -1366,12 +1348,7 @@ impl MergeArena {
 
 impl Default for MergeArena {
     fn default() -> Self {
-        Self {
-            scratch: Vec::new(),
-            shrink_threshold: 16_384,
-            growth_factor: DEFAULT_GROWTH_FACTOR,
-            idle_counter: 0,
-        }
+        Self::new()
     }
 }
 
@@ -6955,17 +6932,10 @@ impl SearchIndex {
                 .unwrap_or_else(|position| position)
     }
 
-    /// Threshold for using binary-search insert: `add.len() <= 4` uses binary insert.
     const BINARY_INSERT_THRESHOLD: usize = 4;
-
-    /// Ratio threshold for galloping merge: `add.len() * 8 < existing.len()` uses galloping.
     const GALLOPING_RATIO: usize = 8;
 
     /// Selects the optimal merge strategy based on input sizes.
-    ///
-    /// - `BinaryInsert`: when `add` is very small (<= 4 elements)
-    /// - `Galloping`: when `add` is much smaller than `existing` (ratio >= 8:1)
-    /// - `TwoPointer`: for all other cases (balanced or large `add`)
     #[inline]
     const fn choose_merge_plan(existing_length: usize, add_length: usize) -> MergePlan {
         if add_length == 0 || existing_length == 0 {
@@ -6981,9 +6951,7 @@ impl SearchIndex {
 
     /// Dispatches a posting-list merge to the algorithm selected by [`MergePlan`].
     ///
-    /// All inputs must be sorted and deduplicated. Clears `output` before writing.
-    /// The result is always identical regardless of which plan is chosen; only
-    /// the computational cost differs.
+    /// All inputs must be sorted and deduplicated.
     #[inline]
     fn merge_postings_adaptive(
         existing: &[TaskId],
@@ -7104,8 +7072,7 @@ impl SearchIndex {
 
     /// Slice-based variant of [`merge_posting_add_only_into`].
     ///
-    /// When the caller already has a `&[TaskId]` (e.g. from
-    /// [`OrderedUniqueSet::as_sorted_slice`]), this avoids the `collect()`
+    /// When the caller already has a `&[TaskId]`, this avoids the `collect()`
     /// allocation that the iterator-based variant requires for galloping and
     /// binary-search paths.
     fn merge_posting_add_only_into_slice(
@@ -7132,6 +7099,36 @@ impl SearchIndex {
 
         let plan = Self::choose_merge_plan(existing.len(), add.len());
         Self::merge_postings_adaptive(existing, add, output, plan);
+    }
+
+    /// Merges `collection` with `add_list` into `scratch`, then drains scratch
+    /// into a new [`TaskIdCollection`].
+    ///
+    /// Dispatches to the slice-based or iterator-based merge depending on
+    /// whether the collection exposes a contiguous sorted slice.
+    fn merge_collection_into_scratch(
+        collection: &TaskIdCollection,
+        add_list: &[TaskId],
+        scratch: &mut Vec<TaskId>,
+    ) -> Option<TaskIdCollection> {
+        if let Some(existing_slice) = collection.as_sorted_slice() {
+            Self::merge_posting_add_only_into_slice(existing_slice, add_list, scratch);
+        } else {
+            Self::merge_posting_add_only_into(collection.iter_sorted(), add_list, scratch);
+        }
+        Self::take_scratch_as_collection(scratch)
+    }
+
+    /// Drains `scratch` into a new [`TaskIdCollection`], returning `None` if
+    /// the scratch buffer is empty.
+    #[inline]
+    fn take_scratch_as_collection(scratch: &mut Vec<TaskId>) -> Option<TaskIdCollection> {
+        if scratch.is_empty() {
+            return None;
+        }
+        let mut collected = Vec::with_capacity(scratch.len());
+        collected.append(scratch);
+        Some(TaskIdCollection::from_sorted_vec(collected))
     }
 
     /// Standard two-pointer merge for `existing ∪ add`.
@@ -7189,7 +7186,6 @@ impl SearchIndex {
             return index.clone();
         }
 
-        // Sort entries by key to improve BTree path locality during transient insert.
         let mut sorted_keys: Vec<&NgramKey> = add.keys().collect();
         sorted_keys.sort_unstable();
 
@@ -7198,9 +7194,12 @@ impl SearchIndex {
 
         for key in sorted_keys {
             let add_list = &add[key];
+            if add_list.is_empty() {
+                continue;
+            }
             let key_str = key.as_str();
             match transient.get(key_str) {
-                Some(collection) if !add_list.is_empty() => {
+                Some(collection) => {
                     let can_concat = collection
                         .last_sorted()
                         .zip(add_list.first())
@@ -7212,47 +7211,28 @@ impl SearchIndex {
                         result_vec.extend(add_list.iter().cloned());
                         transient
                             .insert(key.clone(), TaskIdCollection::from_sorted_vec(result_vec));
-                    } else if let Some(existing_slice) = collection.as_sorted_slice() {
-                        Self::merge_posting_add_only_into_slice(
-                            existing_slice,
-                            add_list.as_slice(),
-                            &mut scratch,
-                        );
-                        if !scratch.is_empty() {
-                            let mut collected = Vec::with_capacity(scratch.len());
-                            collected.append(&mut scratch);
-                            transient
-                                .insert(key.clone(), TaskIdCollection::from_sorted_vec(collected));
-                        }
-                    } else {
-                        Self::merge_posting_add_only_into(
-                            collection.iter_sorted(),
-                            add_list.as_slice(),
-                            &mut scratch,
-                        );
-                        if !scratch.is_empty() {
-                            let mut collected = Vec::with_capacity(scratch.len());
-                            collected.append(&mut scratch);
-                            transient
-                                .insert(key.clone(), TaskIdCollection::from_sorted_vec(collected));
-                        }
+                    } else if let Some(merged) = Self::merge_collection_into_scratch(
+                        collection,
+                        add_list.as_slice(),
+                        &mut scratch,
+                    ) {
+                        transient.insert(key.clone(), merged);
                     }
                 }
-                None if !add_list.is_empty() => {
+                None => {
                     transient.insert(
                         key.clone(),
                         TaskIdCollection::from_sorted_vec(add_list.clone()),
                     );
                 }
-                Some(_) | None => {}
             }
         }
 
         transient.persistent()
     }
 
-    /// Owned variant of [`merge_index_delta_add_only`] that consumes the `MutableIndex`
-    /// via `into_iter()`, eliminating `add_list.clone()` on the miss path.
+    /// Owned variant of [`merge_index_delta_add_only`] that consumes the `MutableIndex`,
+    /// eliminating `add_list.clone()` on the miss path.
     ///
     /// Entries are sorted by key before insertion for `BTree` path locality.
     fn merge_index_delta_add_only_owned(index: &PrefixIndex, add: MutableIndex) -> PrefixIndex {
@@ -7260,7 +7240,6 @@ impl SearchIndex {
             return index.clone();
         }
 
-        // Sort entries by key to improve BTree path locality during transient insert.
         let mut sorted_entries: Vec<(NgramKey, Vec<TaskId>)> = add.into_iter().collect();
         sorted_entries.sort_unstable_by(|(key_a, _), (key_b, _)| key_a.cmp(key_b));
 
@@ -7268,9 +7247,11 @@ impl SearchIndex {
         let mut scratch: Vec<TaskId> = Vec::new();
 
         for (key, add_list) in sorted_entries {
-            let key_str = key.as_str();
-            match transient.get(key_str) {
-                Some(collection) if !add_list.is_empty() => {
+            if add_list.is_empty() {
+                continue;
+            }
+            match transient.get(key.as_str()) {
+                Some(collection) => {
                     let can_concat = collection
                         .last_sorted()
                         .zip(add_list.first())
@@ -7281,35 +7262,17 @@ impl SearchIndex {
                         Self::extend_sorted_into(collection, &mut result_vec);
                         result_vec.extend(add_list);
                         transient.insert(key, TaskIdCollection::from_sorted_vec(result_vec));
-                    } else if let Some(existing_slice) = collection.as_sorted_slice() {
-                        Self::merge_posting_add_only_into_slice(
-                            existing_slice,
-                            add_list.as_slice(),
-                            &mut scratch,
-                        );
-                        if !scratch.is_empty() {
-                            let mut collected = Vec::with_capacity(scratch.len());
-                            collected.append(&mut scratch);
-                            transient.insert(key, TaskIdCollection::from_sorted_vec(collected));
-                        }
-                    } else {
-                        Self::merge_posting_add_only_into(
-                            collection.iter_sorted(),
-                            add_list.as_slice(),
-                            &mut scratch,
-                        );
-                        if !scratch.is_empty() {
-                            let mut collected = Vec::with_capacity(scratch.len());
-                            collected.append(&mut scratch);
-                            transient.insert(key, TaskIdCollection::from_sorted_vec(collected));
-                        }
+                    } else if let Some(merged) = Self::merge_collection_into_scratch(
+                        collection,
+                        add_list.as_slice(),
+                        &mut scratch,
+                    ) {
+                        transient.insert(key, merged);
                     }
                 }
-                None if !add_list.is_empty() => {
-                    let collection = TaskIdCollection::from_sorted_vec(add_list);
-                    transient.insert(key, collection);
+                None => {
+                    transient.insert(key, TaskIdCollection::from_sorted_vec(add_list));
                 }
-                Some(_) | None => {}
             }
         }
 
@@ -7318,9 +7281,7 @@ impl SearchIndex {
 
     /// Like [`merge_index_delta_add_only_owned`] but reuses scratch from the [`MergeArena`].
     ///
-    /// Entries are sorted by key before insertion so that the underlying
-    /// `PersistentTreeMap` (`BTree`) traverses structurally adjacent paths,
-    /// improving cache locality and reducing COW clone overhead.
+    /// Entries are sorted by key for `BTree` path locality and reduced COW overhead.
     fn merge_index_delta_add_only_owned_with_arena(
         index: &PrefixIndex,
         add: MutableIndex,
@@ -7330,7 +7291,6 @@ impl SearchIndex {
             return index.clone();
         }
 
-        // Sort entries by key to improve BTree path locality during transient insert.
         let mut sorted_entries: Vec<(NgramKey, Vec<TaskId>)> = add.into_iter().collect();
         sorted_entries.sort_unstable_by(|(key_a, _), (key_b, _)| key_a.cmp(key_b));
 
@@ -7338,9 +7298,11 @@ impl SearchIndex {
         let scratch = arena.scratch();
 
         for (key, add_list) in sorted_entries {
-            let key_str = key.as_str();
-            match transient.get(key_str) {
-                Some(collection) if !add_list.is_empty() => {
+            if add_list.is_empty() {
+                continue;
+            }
+            match transient.get(key.as_str()) {
+                Some(collection) => {
                     let can_concat = collection
                         .last_sorted()
                         .zip(add_list.first())
@@ -7351,35 +7313,17 @@ impl SearchIndex {
                         Self::extend_sorted_into(collection, &mut result_vec);
                         result_vec.extend(add_list);
                         transient.insert(key, TaskIdCollection::from_sorted_vec(result_vec));
-                    } else if let Some(existing_slice) = collection.as_sorted_slice() {
-                        Self::merge_posting_add_only_into_slice(
-                            existing_slice,
-                            add_list.as_slice(),
-                            scratch,
-                        );
-                        if !scratch.is_empty() {
-                            let mut collected = Vec::with_capacity(scratch.len());
-                            collected.append(scratch);
-                            transient.insert(key, TaskIdCollection::from_sorted_vec(collected));
-                        }
-                    } else {
-                        Self::merge_posting_add_only_into(
-                            collection.iter_sorted(),
-                            add_list.as_slice(),
-                            scratch,
-                        );
-                        if !scratch.is_empty() {
-                            let mut collected = Vec::with_capacity(scratch.len());
-                            collected.append(scratch);
-                            transient.insert(key, TaskIdCollection::from_sorted_vec(collected));
-                        }
+                    } else if let Some(merged) = Self::merge_collection_into_scratch(
+                        collection,
+                        add_list.as_slice(),
+                        scratch,
+                    ) {
+                        transient.insert(key, merged);
                     }
                 }
-                None if !add_list.is_empty() => {
-                    let collection = TaskIdCollection::from_sorted_vec(add_list);
-                    transient.insert(key, collection);
+                None => {
+                    transient.insert(key, TaskIdCollection::from_sorted_vec(add_list));
                 }
-                Some(_) | None => {}
             }
         }
 
@@ -7413,9 +7357,11 @@ impl SearchIndex {
         let mut scratch: Vec<TaskId> = Vec::new();
 
         for (key, add_list) in add {
-            let key_str = key.as_str();
-            match result.get(key_str) {
-                Some(collection) if !add_list.is_empty() => {
+            if add_list.is_empty() {
+                continue;
+            }
+            match result.get(key.as_str()) {
+                Some(collection) => {
                     let can_concat = collection
                         .last_sorted()
                         .zip(add_list.first())
@@ -7426,27 +7372,20 @@ impl SearchIndex {
                         Self::extend_sorted_into(collection, &mut result_vec);
                         result_vec.extend(add_list.iter().cloned());
                         result.insert(key.clone(), TaskIdCollection::from_sorted_vec(result_vec));
-                    } else {
-                        Self::merge_posting_add_only_into(
-                            collection.iter_sorted(),
-                            add_list.as_slice(),
-                            &mut scratch,
-                        );
-                        if !scratch.is_empty() {
-                            let mut collected = Vec::with_capacity(scratch.len());
-                            collected.append(&mut scratch);
-                            result
-                                .insert(key.clone(), TaskIdCollection::from_sorted_vec(collected));
-                        }
+                    } else if let Some(merged) = Self::merge_collection_into_scratch(
+                        collection,
+                        add_list.as_slice(),
+                        &mut scratch,
+                    ) {
+                        result.insert(key.clone(), merged);
                     }
                 }
-                None if !add_list.is_empty() => {
+                None => {
                     result.insert(
                         key.clone(),
                         TaskIdCollection::from_sorted_vec(add_list.clone()),
                     );
                 }
-                Some(_) | None => {}
             }
         }
 
@@ -7465,9 +7404,11 @@ impl SearchIndex {
         let mut scratch: Vec<TaskId> = Vec::new();
 
         for (key, add_list) in add {
-            let key_str = key.as_str();
-            match result.get(key_str) {
-                Some(collection) if !add_list.is_empty() => {
+            if add_list.is_empty() {
+                continue;
+            }
+            match result.get(key.as_str()) {
+                Some(collection) => {
                     let can_concat = collection
                         .last_sorted()
                         .zip(add_list.first())
@@ -7479,39 +7420,20 @@ impl SearchIndex {
                         result_vec.extend(add_list.iter().cloned());
                         entries_to_insert
                             .push((key.clone(), TaskIdCollection::from_sorted_vec(result_vec)));
-                    } else if let Some(existing_slice) = collection.as_sorted_slice() {
-                        Self::merge_posting_add_only_into_slice(
-                            existing_slice,
-                            add_list.as_slice(),
-                            &mut scratch,
-                        );
-                        if !scratch.is_empty() {
-                            let mut collected = Vec::with_capacity(scratch.len());
-                            collected.append(&mut scratch);
-                            entries_to_insert
-                                .push((key.clone(), TaskIdCollection::from_sorted_vec(collected)));
-                        }
-                    } else {
-                        Self::merge_posting_add_only_into(
-                            collection.iter_sorted(),
-                            add_list.as_slice(),
-                            &mut scratch,
-                        );
-                        if !scratch.is_empty() {
-                            let mut collected = Vec::with_capacity(scratch.len());
-                            collected.append(&mut scratch);
-                            entries_to_insert
-                                .push((key.clone(), TaskIdCollection::from_sorted_vec(collected)));
-                        }
+                    } else if let Some(merged) = Self::merge_collection_into_scratch(
+                        collection,
+                        add_list.as_slice(),
+                        &mut scratch,
+                    ) {
+                        entries_to_insert.push((key.clone(), merged));
                     }
                 }
-                None if !add_list.is_empty() => {
+                None => {
                     entries_to_insert.push((
                         key.clone(),
                         TaskIdCollection::from_sorted_vec(add_list.clone()),
                     ));
                 }
-                Some(_) | None => {}
             }
         }
 
@@ -7567,9 +7489,11 @@ impl SearchIndex {
         let mut scratch: Vec<TaskId> = Vec::new();
 
         for (key, add_list) in add {
-            let key_str = key.as_str();
-            match result.get(key_str) {
-                Some(collection) if !add_list.is_empty() => {
+            if add_list.is_empty() {
+                continue;
+            }
+            match result.get(key.as_str()) {
+                Some(collection) => {
                     let can_concat = collection
                         .last_sorted()
                         .zip(add_list.first())
@@ -7580,24 +7504,17 @@ impl SearchIndex {
                         Self::extend_sorted_into(collection, &mut result_vec);
                         result_vec.extend(add_list);
                         result.insert(key, TaskIdCollection::from_sorted_vec(result_vec));
-                    } else {
-                        Self::merge_posting_add_only_into(
-                            collection.iter_sorted(),
-                            add_list.as_slice(),
-                            &mut scratch,
-                        );
-                        if !scratch.is_empty() {
-                            let mut collected = Vec::with_capacity(scratch.len());
-                            collected.append(&mut scratch);
-                            result.insert(key, TaskIdCollection::from_sorted_vec(collected));
-                        }
+                    } else if let Some(merged) = Self::merge_collection_into_scratch(
+                        collection,
+                        add_list.as_slice(),
+                        &mut scratch,
+                    ) {
+                        result.insert(key, merged);
                     }
                 }
-                None if !add_list.is_empty() => {
-                    let collection = TaskIdCollection::from_sorted_vec(add_list);
-                    result.insert(key, collection);
+                None => {
+                    result.insert(key, TaskIdCollection::from_sorted_vec(add_list));
                 }
-                Some(_) | None => {}
             }
         }
 
@@ -7616,9 +7533,11 @@ impl SearchIndex {
         let mut scratch: Vec<TaskId> = Vec::new();
 
         for (key, add_list) in add {
-            let key_str = key.as_str();
-            match result.get(key_str) {
-                Some(collection) if !add_list.is_empty() => {
+            if add_list.is_empty() {
+                continue;
+            }
+            match result.get(key.as_str()) {
+                Some(collection) => {
                     let can_concat = collection
                         .last_sorted()
                         .zip(add_list.first())
@@ -7630,37 +7549,17 @@ impl SearchIndex {
                         result_vec.extend(add_list);
                         entries_to_insert
                             .push((key, TaskIdCollection::from_sorted_vec(result_vec)));
-                    } else if let Some(existing_slice) = collection.as_sorted_slice() {
-                        Self::merge_posting_add_only_into_slice(
-                            existing_slice,
-                            add_list.as_slice(),
-                            &mut scratch,
-                        );
-                        if !scratch.is_empty() {
-                            let mut collected = Vec::with_capacity(scratch.len());
-                            collected.append(&mut scratch);
-                            entries_to_insert
-                                .push((key, TaskIdCollection::from_sorted_vec(collected)));
-                        }
-                    } else {
-                        Self::merge_posting_add_only_into(
-                            collection.iter_sorted(),
-                            add_list.as_slice(),
-                            &mut scratch,
-                        );
-                        if !scratch.is_empty() {
-                            let mut collected = Vec::with_capacity(scratch.len());
-                            collected.append(&mut scratch);
-                            entries_to_insert
-                                .push((key, TaskIdCollection::from_sorted_vec(collected)));
-                        }
+                    } else if let Some(merged) = Self::merge_collection_into_scratch(
+                        collection,
+                        add_list.as_slice(),
+                        &mut scratch,
+                    ) {
+                        entries_to_insert.push((key, merged));
                     }
                 }
-                None if !add_list.is_empty() => {
-                    let collection = TaskIdCollection::from_sorted_vec(add_list);
-                    entries_to_insert.push((key, collection));
+                None => {
+                    entries_to_insert.push((key, TaskIdCollection::from_sorted_vec(add_list)));
                 }
-                Some(_) | None => {}
             }
         }
 
@@ -24267,16 +24166,21 @@ mod ngram_segment_overlay_tests {
     // IMPL-TB219-003b: compact_when_idle tests
     // =========================================================================
 
-    #[rstest]
-    fn compact_when_idle_does_not_shrink_below_threshold() {
+    /// Grows arena scratch beyond `shrink_threshold`, clears it, and returns
+    /// the capacity before any compaction.
+    fn arena_with_oversized_scratch() -> (MergeArena, usize) {
         let mut arena = MergeArena::new();
-        // Grow scratch beyond shrink_threshold
         let scratch = arena.scratch();
         scratch.extend((0..40_000).map(|i| TaskId::from_uuid(Uuid::from_u128(i))));
         arena.scratch.clear();
         let capacity_before = arena.scratch.capacity();
+        (arena, capacity_before)
+    }
 
-        // Call compact_when_idle fewer than threshold times
+    #[rstest]
+    fn compact_when_idle_does_not_shrink_below_threshold() {
+        let (mut arena, capacity_before) = arena_with_oversized_scratch();
+
         for _ in 0..7 {
             arena.compact_when_idle(8);
         }
@@ -24290,14 +24194,8 @@ mod ngram_segment_overlay_tests {
 
     #[rstest]
     fn compact_when_idle_shrinks_at_threshold() {
-        let mut arena = MergeArena::new();
-        // Grow scratch beyond shrink_threshold
-        let scratch = arena.scratch();
-        scratch.extend((0..40_000).map(|i| TaskId::from_uuid(Uuid::from_u128(i))));
-        arena.scratch.clear();
-        let capacity_before = arena.scratch.capacity();
+        let (mut arena, capacity_before) = arena_with_oversized_scratch();
 
-        // Call compact_when_idle exactly threshold times
         for _ in 0..8 {
             arena.compact_when_idle(8);
         }
@@ -24309,24 +24207,17 @@ mod ngram_segment_overlay_tests {
         );
     }
 
-    #[rstest]
-    fn compact_when_idle_counter_resets_on_scratch() {
-        let mut arena = MergeArena::new();
-        // Grow scratch beyond shrink_threshold
-        let scratch = arena.scratch();
-        scratch.extend((0..40_000).map(|i| TaskId::from_uuid(Uuid::from_u128(i))));
-        arena.scratch.clear();
-        let capacity_before = arena.scratch.capacity();
+    /// Verifies that the idle counter resets when the given `reset_action`
+    /// accesses the scratch buffer, preventing compaction.
+    fn assert_counter_resets_after(reset_action: impl FnOnce(&mut MergeArena)) {
+        let (mut arena, capacity_before) = arena_with_oversized_scratch();
 
-        // Call compact_when_idle 6 times (below threshold of 8)
         for _ in 0..6 {
             arena.compact_when_idle(8);
         }
 
-        // Access scratch (should reset counter)
-        let _scratch = arena.scratch();
+        reset_action(&mut arena);
 
-        // Call compact_when_idle 7 more times (total since reset: 7, below 8)
         for _ in 0..7 {
             arena.compact_when_idle(8);
         }
@@ -24339,32 +24230,17 @@ mod ngram_segment_overlay_tests {
     }
 
     #[rstest]
+    fn compact_when_idle_counter_resets_on_scratch() {
+        assert_counter_resets_after(|arena| {
+            let _scratch = arena.scratch();
+        });
+    }
+
+    #[rstest]
     fn compact_when_idle_counter_resets_on_scratch_with_capacity() {
-        let mut arena = MergeArena::new();
-        // Grow scratch beyond shrink_threshold
-        let scratch = arena.scratch();
-        scratch.extend((0..40_000).map(|i| TaskId::from_uuid(Uuid::from_u128(i))));
-        arena.scratch.clear();
-        let capacity_before = arena.scratch.capacity();
-
-        // Call compact_when_idle 6 times
-        for _ in 0..6 {
-            arena.compact_when_idle(8);
-        }
-
-        // Access scratch_with_capacity (should reset counter)
-        let _scratch = arena.scratch_with_capacity(10);
-
-        // Call compact_when_idle 7 more times (total since reset: 7, below 8)
-        for _ in 0..7 {
-            arena.compact_when_idle(8);
-        }
-
-        assert!(
-            arena.scratch.capacity() >= capacity_before,
-            "Should not shrink because counter was reset by scratch_with_capacity: was {capacity_before}, now {}",
-            arena.scratch.capacity()
-        );
+        assert_counter_resets_after(|arena| {
+            let _scratch = arena.scratch_with_capacity(10);
+        });
     }
 }
 
@@ -24395,94 +24271,24 @@ mod adaptive_merge_tests {
     // =========================================================================
 
     #[rstest]
-    fn choose_merge_plan_empty_add_returns_two_pointer() {
+    #[case::empty_add(100, 0, MergePlan::TwoPointer)]
+    #[case::empty_existing(0, 10, MergePlan::TwoPointer)]
+    #[case::both_empty(0, 0, MergePlan::TwoPointer)]
+    #[case::at_binary_insert_threshold(100, 4, MergePlan::BinaryInsert)]
+    #[case::below_binary_insert_threshold(100, 1, MergePlan::BinaryInsert)]
+    #[case::above_threshold_galloping(100, 5, MergePlan::Galloping)]
+    #[case::exact_galloping_boundary(40, 5, MergePlan::TwoPointer)]
+    #[case::just_below_galloping_boundary(41, 5, MergePlan::Galloping)]
+    #[case::large_add(100, 50, MergePlan::TwoPointer)]
+    #[case::equal_sizes(10, 10, MergePlan::TwoPointer)]
+    fn choose_merge_plan_selects_correct_strategy(
+        #[case] existing_length: usize,
+        #[case] add_length: usize,
+        #[case] expected: MergePlan,
+    ) {
         assert_eq!(
-            SearchIndex::choose_merge_plan_for_test(100, 0),
-            MergePlan::TwoPointer
-        );
-    }
-
-    #[rstest]
-    fn choose_merge_plan_empty_existing_returns_two_pointer() {
-        assert_eq!(
-            SearchIndex::choose_merge_plan_for_test(0, 10),
-            MergePlan::TwoPointer
-        );
-    }
-
-    #[rstest]
-    fn choose_merge_plan_both_empty_returns_two_pointer() {
-        assert_eq!(
-            SearchIndex::choose_merge_plan_for_test(0, 0),
-            MergePlan::TwoPointer
-        );
-    }
-
-    #[rstest]
-    fn choose_merge_plan_add_at_binary_insert_threshold() {
-        // add_len == 4 (== BINARY_INSERT_THRESHOLD) -> BinaryInsert
-        assert_eq!(
-            SearchIndex::choose_merge_plan_for_test(100, 4),
-            MergePlan::BinaryInsert
-        );
-    }
-
-    #[rstest]
-    fn choose_merge_plan_add_below_binary_insert_threshold() {
-        // add_len == 1 -> BinaryInsert
-        assert_eq!(
-            SearchIndex::choose_merge_plan_for_test(100, 1),
-            MergePlan::BinaryInsert
-        );
-    }
-
-    #[rstest]
-    fn choose_merge_plan_add_above_binary_insert_threshold_galloping() {
-        // add_len == 5, existing_len == 100
-        // 5 * 8 = 40 < 100 -> Galloping
-        assert_eq!(
-            SearchIndex::choose_merge_plan_for_test(100, 5),
-            MergePlan::Galloping
-        );
-    }
-
-    #[rstest]
-    fn choose_merge_plan_exact_galloping_boundary_returns_two_pointer() {
-        // add_len == 5, existing_len == 40
-        // 5 * 8 = 40, 40 < 40 is false -> TwoPointer
-        assert_eq!(
-            SearchIndex::choose_merge_plan_for_test(40, 5),
-            MergePlan::TwoPointer
-        );
-    }
-
-    #[rstest]
-    fn choose_merge_plan_just_below_galloping_boundary_returns_galloping() {
-        // add_len == 5, existing_len == 41
-        // 5 * 8 = 40 < 41 -> Galloping
-        assert_eq!(
-            SearchIndex::choose_merge_plan_for_test(41, 5),
-            MergePlan::Galloping
-        );
-    }
-
-    #[rstest]
-    fn choose_merge_plan_large_add_returns_two_pointer() {
-        // add_len == 50, existing_len == 100
-        // 50 * 8 = 400, 400 < 100 is false -> TwoPointer
-        assert_eq!(
-            SearchIndex::choose_merge_plan_for_test(100, 50),
-            MergePlan::TwoPointer
-        );
-    }
-
-    #[rstest]
-    fn choose_merge_plan_equal_sizes_returns_two_pointer() {
-        // add_len == 10, existing_len == 10
-        // 10 * 8 = 80 < 10 is false -> TwoPointer
-        assert_eq!(
-            SearchIndex::choose_merge_plan_for_test(10, 10),
-            MergePlan::TwoPointer
+            SearchIndex::choose_merge_plan_for_test(existing_length, add_length),
+            expected
         );
     }
 
@@ -24491,92 +24297,25 @@ mod adaptive_merge_tests {
     // =========================================================================
 
     #[rstest]
-    fn galloping_search_empty_slice() {
-        let empty: Vec<TaskId> = vec![];
+    #[case::empty_slice(&[], 5, 0)]
+    #[case::target_before_all(&[10, 20, 30], 5, 0)]
+    #[case::target_at_beginning(&[10, 20, 30], 10, 0)]
+    #[case::target_in_middle(&[10, 20, 30, 40, 50], 30, 2)]
+    #[case::target_at_end(&[10, 20, 30], 30, 2)]
+    #[case::target_after_all(&[10, 20, 30], 35, 3)]
+    #[case::target_between_elements(&[10, 20, 30, 40, 50], 25, 2)]
+    #[case::single_element_match(&[42], 42, 0)]
+    #[case::single_element_before(&[42], 10, 0)]
+    #[case::single_element_after(&[42], 100, 1)]
+    fn galloping_search_returns_correct_position(
+        #[case] slice_values: &[u128],
+        #[case] target_value: u128,
+        #[case] expected_position: usize,
+    ) {
+        let slice = task_ids(slice_values);
         assert_eq!(
-            SearchIndex::galloping_search_for_test(&empty, &task_id(5)),
-            0
-        );
-    }
-
-    #[rstest]
-    fn galloping_search_target_before_all() {
-        let slice = task_ids(&[10, 20, 30]);
-        assert_eq!(
-            SearchIndex::galloping_search_for_test(&slice, &task_id(5)),
-            0
-        );
-    }
-
-    #[rstest]
-    fn galloping_search_target_at_beginning() {
-        let slice = task_ids(&[10, 20, 30]);
-        assert_eq!(
-            SearchIndex::galloping_search_for_test(&slice, &task_id(10)),
-            0
-        );
-    }
-
-    #[rstest]
-    fn galloping_search_target_in_middle() {
-        let slice = task_ids(&[10, 20, 30, 40, 50]);
-        assert_eq!(
-            SearchIndex::galloping_search_for_test(&slice, &task_id(30)),
-            2
-        );
-    }
-
-    #[rstest]
-    fn galloping_search_target_at_end() {
-        let slice = task_ids(&[10, 20, 30]);
-        assert_eq!(
-            SearchIndex::galloping_search_for_test(&slice, &task_id(30)),
-            2
-        );
-    }
-
-    #[rstest]
-    fn galloping_search_target_after_all() {
-        let slice = task_ids(&[10, 20, 30]);
-        assert_eq!(
-            SearchIndex::galloping_search_for_test(&slice, &task_id(35)),
-            3
-        );
-    }
-
-    #[rstest]
-    fn galloping_search_target_between_elements() {
-        let slice = task_ids(&[10, 20, 30, 40, 50]);
-        assert_eq!(
-            SearchIndex::galloping_search_for_test(&slice, &task_id(25)),
-            2
-        );
-    }
-
-    #[rstest]
-    fn galloping_search_single_element_match() {
-        let slice = task_ids(&[42]);
-        assert_eq!(
-            SearchIndex::galloping_search_for_test(&slice, &task_id(42)),
-            0
-        );
-    }
-
-    #[rstest]
-    fn galloping_search_single_element_before() {
-        let slice = task_ids(&[42]);
-        assert_eq!(
-            SearchIndex::galloping_search_for_test(&slice, &task_id(10)),
-            0
-        );
-    }
-
-    #[rstest]
-    fn galloping_search_single_element_after() {
-        let slice = task_ids(&[42]);
-        assert_eq!(
-            SearchIndex::galloping_search_for_test(&slice, &task_id(100)),
-            1
+            SearchIndex::galloping_search_for_test(&slice, &task_id(target_value)),
+            expected_position
         );
     }
 
@@ -24585,65 +24324,27 @@ mod adaptive_merge_tests {
     // =========================================================================
 
     #[rstest]
-    fn galloping_merge_empty_both() {
-        let mut output = Vec::new();
-        SearchIndex::merge_posting_add_only_galloping_for_test(&[], &[], &mut output);
-        assert!(output.is_empty());
-    }
-
-    #[rstest]
-    fn galloping_merge_empty_existing() {
-        let add = task_ids(&[2, 4, 6]);
-        let mut output = Vec::new();
-        SearchIndex::merge_posting_add_only_galloping_for_test(&[], &add, &mut output);
-        assert_eq!(output, task_ids(&[2, 4, 6]));
-    }
-
-    #[rstest]
-    fn galloping_merge_empty_add() {
-        let existing = task_ids(&[1, 3, 5]);
-        let mut output = Vec::new();
-        SearchIndex::merge_posting_add_only_galloping_for_test(&existing, &[], &mut output);
-        assert_eq!(output, task_ids(&[1, 3, 5]));
-    }
-
-    #[rstest]
-    fn galloping_merge_small_add_into_large_existing() {
-        let existing = task_ids(&[1, 3, 5, 7, 9, 11, 13, 15, 17, 19]);
-        let add = task_ids(&[4, 12]);
+    #[case::empty_both(&[], &[], &[])]
+    #[case::empty_existing(&[], &[2, 4, 6], &[2, 4, 6])]
+    #[case::empty_add(&[1, 3, 5], &[], &[1, 3, 5])]
+    #[case::small_add_into_large(
+        &[1, 3, 5, 7, 9, 11, 13, 15, 17, 19],
+        &[4, 12],
+        &[1, 3, 4, 5, 7, 9, 11, 12, 13, 15, 17, 19]
+    )]
+    #[case::with_duplicates(&[1, 3, 5, 7, 9], &[3, 7], &[1, 3, 5, 7, 9])]
+    #[case::add_all_at_end(&[1, 2, 3], &[10, 20, 30], &[1, 2, 3, 10, 20, 30])]
+    #[case::add_all_at_beginning(&[10, 20, 30], &[1, 2, 3], &[1, 2, 3, 10, 20, 30])]
+    fn galloping_merge_produces_sorted_union(
+        #[case] existing_values: &[u128],
+        #[case] add_values: &[u128],
+        #[case] expected_values: &[u128],
+    ) {
+        let existing = task_ids(existing_values);
+        let add = task_ids(add_values);
         let mut output = Vec::new();
         SearchIndex::merge_posting_add_only_galloping_for_test(&existing, &add, &mut output);
-        assert_eq!(
-            output,
-            task_ids(&[1, 3, 4, 5, 7, 9, 11, 12, 13, 15, 17, 19])
-        );
-    }
-
-    #[rstest]
-    fn galloping_merge_with_duplicates() {
-        let existing = task_ids(&[1, 3, 5, 7, 9]);
-        let add = task_ids(&[3, 7]);
-        let mut output = Vec::new();
-        SearchIndex::merge_posting_add_only_galloping_for_test(&existing, &add, &mut output);
-        assert_eq!(output, task_ids(&[1, 3, 5, 7, 9]));
-    }
-
-    #[rstest]
-    fn galloping_merge_add_all_at_end() {
-        let existing = task_ids(&[1, 2, 3]);
-        let add = task_ids(&[10, 20, 30]);
-        let mut output = Vec::new();
-        SearchIndex::merge_posting_add_only_galloping_for_test(&existing, &add, &mut output);
-        assert_eq!(output, task_ids(&[1, 2, 3, 10, 20, 30]));
-    }
-
-    #[rstest]
-    fn galloping_merge_add_all_at_beginning() {
-        let existing = task_ids(&[10, 20, 30]);
-        let add = task_ids(&[1, 2, 3]);
-        let mut output = Vec::new();
-        SearchIndex::merge_posting_add_only_galloping_for_test(&existing, &add, &mut output);
-        assert_eq!(output, task_ids(&[1, 2, 3, 10, 20, 30]));
+        assert_eq!(output, task_ids(expected_values));
     }
 
     // =========================================================================
@@ -24651,69 +24352,30 @@ mod adaptive_merge_tests {
     // =========================================================================
 
     #[rstest]
-    fn binary_search_insert_empty_both() {
-        let mut output = Vec::new();
-        SearchIndex::merge_posting_add_only_binary_search_insert_for_test(&[], &[], &mut output);
-        assert!(output.is_empty());
-    }
-
-    #[rstest]
-    fn binary_search_insert_empty_existing() {
-        let add = task_ids(&[2, 4]);
-        let mut output = Vec::new();
-        SearchIndex::merge_posting_add_only_binary_search_insert_for_test(&[], &add, &mut output);
-        assert_eq!(output, task_ids(&[2, 4]));
-    }
-
-    #[rstest]
-    fn binary_search_insert_empty_add() {
-        let existing = task_ids(&[1, 3, 5]);
-        let mut output = Vec::new();
-        SearchIndex::merge_posting_add_only_binary_search_insert_for_test(
-            &existing,
-            &[],
-            &mut output,
-        );
-        assert_eq!(output, task_ids(&[1, 3, 5]));
-    }
-
-    #[rstest]
-    fn binary_search_insert_single_addition() {
-        let existing = task_ids(&[1, 3, 5, 7, 9]);
-        let add = task_ids(&[4]);
+    #[case::empty_both(&[], &[], &[])]
+    #[case::empty_existing(&[], &[2, 4], &[2, 4])]
+    #[case::empty_add(&[1, 3, 5], &[], &[1, 3, 5])]
+    #[case::single_addition(&[1, 3, 5, 7, 9], &[4], &[1, 3, 4, 5, 7, 9])]
+    #[case::four_additions(
+        &[10, 20, 30, 40, 50],
+        &[15, 25, 35, 45],
+        &[10, 15, 20, 25, 30, 35, 40, 45, 50]
+    )]
+    #[case::with_duplicates(&[1, 3, 5, 7], &[3, 5], &[1, 3, 5, 7])]
+    fn binary_search_insert_produces_sorted_union(
+        #[case] existing_values: &[u128],
+        #[case] add_values: &[u128],
+        #[case] expected_values: &[u128],
+    ) {
+        let existing = task_ids(existing_values);
+        let add = task_ids(add_values);
         let mut output = Vec::new();
         SearchIndex::merge_posting_add_only_binary_search_insert_for_test(
             &existing,
             &add,
             &mut output,
         );
-        assert_eq!(output, task_ids(&[1, 3, 4, 5, 7, 9]));
-    }
-
-    #[rstest]
-    fn binary_search_insert_four_additions() {
-        let existing = task_ids(&[10, 20, 30, 40, 50]);
-        let add = task_ids(&[15, 25, 35, 45]);
-        let mut output = Vec::new();
-        SearchIndex::merge_posting_add_only_binary_search_insert_for_test(
-            &existing,
-            &add,
-            &mut output,
-        );
-        assert_eq!(output, task_ids(&[10, 15, 20, 25, 30, 35, 40, 45, 50]));
-    }
-
-    #[rstest]
-    fn binary_search_insert_with_duplicates() {
-        let existing = task_ids(&[1, 3, 5, 7]);
-        let add = task_ids(&[3, 5]);
-        let mut output = Vec::new();
-        SearchIndex::merge_posting_add_only_binary_search_insert_for_test(
-            &existing,
-            &add,
-            &mut output,
-        );
-        assert_eq!(output, task_ids(&[1, 3, 5, 7]));
+        assert_eq!(output, task_ids(expected_values));
     }
 
     // =========================================================================
@@ -24795,7 +24457,10 @@ mod adaptive_merge_tests {
     // =========================================================================
 
     #[rstest]
-    fn merge_postings_adaptive_binary_insert_matches_reference() {
+    #[case::binary_insert(MergePlan::BinaryInsert)]
+    #[case::galloping(MergePlan::Galloping)]
+    #[case::two_pointer(MergePlan::TwoPointer)]
+    fn merge_postings_adaptive_matches_reference(#[case] plan: MergePlan) {
         let existing = task_ids(&[1, 5, 10, 20, 30, 40, 50]);
         let add = task_ids(&[3, 25]);
         let mut reference_output = Vec::new();
@@ -24805,69 +24470,24 @@ mod adaptive_merge_tests {
             &mut reference_output,
         );
         let mut output = Vec::new();
-        SearchIndex::merge_postings_adaptive_for_test(
-            &existing,
-            &add,
-            &mut output,
-            MergePlan::BinaryInsert,
+        SearchIndex::merge_postings_adaptive_for_test(&existing, &add, &mut output, plan);
+        assert_eq!(
+            output, reference_output,
+            "Plan {plan:?} should match two-pointer reference"
         );
-        assert_eq!(output, reference_output);
     }
 
     #[rstest]
-    fn merge_postings_adaptive_galloping_matches_reference() {
-        let existing = task_ids(&[1, 5, 10, 20, 30, 40, 50]);
-        let add = task_ids(&[3, 25]);
-        let mut reference_output = Vec::new();
-        SearchIndex::merge_posting_add_only_two_pointer_for_test(
-            &existing,
-            &add,
-            &mut reference_output,
-        );
+    #[case::binary_insert(MergePlan::BinaryInsert)]
+    #[case::galloping(MergePlan::Galloping)]
+    #[case::two_pointer(MergePlan::TwoPointer)]
+    fn merge_postings_adaptive_empty_inputs(#[case] plan: MergePlan) {
         let mut output = Vec::new();
-        SearchIndex::merge_postings_adaptive_for_test(
-            &existing,
-            &add,
-            &mut output,
-            MergePlan::Galloping,
+        SearchIndex::merge_postings_adaptive_for_test(&[], &[], &mut output, plan);
+        assert!(
+            output.is_empty(),
+            "Plan {plan:?} should produce empty for empty inputs"
         );
-        assert_eq!(output, reference_output);
-    }
-
-    #[rstest]
-    fn merge_postings_adaptive_two_pointer_matches_reference() {
-        let existing = task_ids(&[1, 5, 10, 20, 30, 40, 50]);
-        let add = task_ids(&[3, 25]);
-        let mut reference_output = Vec::new();
-        SearchIndex::merge_posting_add_only_two_pointer_for_test(
-            &existing,
-            &add,
-            &mut reference_output,
-        );
-        let mut output = Vec::new();
-        SearchIndex::merge_postings_adaptive_for_test(
-            &existing,
-            &add,
-            &mut output,
-            MergePlan::TwoPointer,
-        );
-        assert_eq!(output, reference_output);
-    }
-
-    #[rstest]
-    fn merge_postings_adaptive_empty_inputs() {
-        for plan in [
-            MergePlan::BinaryInsert,
-            MergePlan::Galloping,
-            MergePlan::TwoPointer,
-        ] {
-            let mut output = Vec::new();
-            SearchIndex::merge_postings_adaptive_for_test(&[], &[], &mut output, plan);
-            assert!(
-                output.is_empty(),
-                "Plan {plan:?} should produce empty for empty inputs"
-            );
-        }
     }
 
     // =========================================================================
