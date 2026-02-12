@@ -7188,15 +7188,22 @@ impl SearchIndex {
     }
 
     /// Computes `existing ∪ add` for a `PrefixIndex` (add-only fast path).
+    ///
+    /// Entries are sorted by key before insertion for BTree path locality.
     fn merge_index_delta_add_only(index: &PrefixIndex, add: &MutableIndex) -> PrefixIndex {
         if add.is_empty() {
             return index.clone();
         }
 
+        // Sort entries by key to improve BTree path locality during transient insert.
+        let mut sorted_keys: Vec<&NgramKey> = add.keys().collect();
+        sorted_keys.sort_unstable();
+
         let mut transient = index.clone().transient();
         let mut scratch: Vec<TaskId> = Vec::new();
 
-        for (key, add_list) in add {
+        for key in sorted_keys {
+            let add_list = &add[key];
             let key_str = key.as_str();
             match transient.get(key_str) {
                 Some(collection) if !add_list.is_empty() => {
@@ -7250,15 +7257,21 @@ impl SearchIndex {
 
     /// Owned variant of [`merge_index_delta_add_only`] that consumes the `MutableIndex`
     /// via `into_iter()`, eliminating `add_list.clone()` on the miss path.
+    ///
+    /// Entries are sorted by key before insertion for BTree path locality.
     fn merge_index_delta_add_only_owned(index: &PrefixIndex, add: MutableIndex) -> PrefixIndex {
         if add.is_empty() {
             return index.clone();
         }
 
+        // Sort entries by key to improve BTree path locality during transient insert.
+        let mut sorted_entries: Vec<(NgramKey, Vec<TaskId>)> = add.into_iter().collect();
+        sorted_entries.sort_unstable_by(|(key_a, _), (key_b, _)| key_a.cmp(key_b));
+
         let mut transient = index.clone().transient();
         let mut scratch: Vec<TaskId> = Vec::new();
 
-        for (key, add_list) in add {
+        for (key, add_list) in sorted_entries {
             let key_str = key.as_str();
             match transient.get(key_str) {
                 Some(collection) if !add_list.is_empty() => {
@@ -7308,6 +7321,10 @@ impl SearchIndex {
     }
 
     /// Like [`merge_index_delta_add_only_owned`] but reuses scratch from the [`MergeArena`].
+    ///
+    /// Entries are sorted by key before insertion so that the underlying
+    /// `PersistentTreeMap` (BTree) traverses structurally adjacent paths,
+    /// improving cache locality and reducing COW clone overhead.
     fn merge_index_delta_add_only_owned_with_arena(
         index: &PrefixIndex,
         add: MutableIndex,
@@ -7317,10 +7334,14 @@ impl SearchIndex {
             return index.clone();
         }
 
+        // Sort entries by key to improve BTree path locality during transient insert.
+        let mut sorted_entries: Vec<(NgramKey, Vec<TaskId>)> = add.into_iter().collect();
+        sorted_entries.sort_unstable_by(|(key_a, _), (key_b, _)| key_a.cmp(key_b));
+
         let mut transient = index.clone().transient();
         let scratch = arena.scratch();
 
-        for (key, add_list) in add {
+        for (key, add_list) in sorted_entries {
             let key_str = key.as_str();
             match transient.get(key_str) {
                 Some(collection) if !add_list.is_empty() => {
