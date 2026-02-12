@@ -825,10 +825,7 @@ pub(crate) async fn update_task_with_read_repair(
             Err(rebase_error) => {
                 return Err(ApiErrorResponse::new(
                     StatusCode::CONFLICT,
-                    ApiError::new(
-                        NON_COMMUTATIVE_CONFLICT_CODE,
-                        rebase_error.to_string(),
-                    ),
+                    ApiError::new(NON_COMMUTATIVE_CONFLICT_CODE, rebase_error.to_string()),
                 ));
             }
         };
