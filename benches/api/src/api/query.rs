@@ -7930,6 +7930,28 @@ pub struct SearchIndexWriterConfig {
     pub channel_capacity: usize,
 }
 
+impl SearchIndexWriterConfig {
+    /// Returns a configuration tuned for high-throughput bulk workloads.
+    ///
+    /// Compared to [`Default`], this uses larger batches and a wider channel
+    /// to reduce the frequency of copy-on-write index updates, trading a
+    /// small amount of latency for significantly improved throughput.
+    ///
+    /// | Parameter                  | Default | Bulk  |
+    /// |----------------------------|---------|-------|
+    /// | `batch_size`               | 8       | 32    |
+    /// | `batch_timeout_milliseconds` | 5     | 10    |
+    /// | `channel_capacity`         | 32      | 64    |
+    #[must_use]
+    pub const fn for_bulk_workload() -> Self {
+        Self {
+            batch_size: 32,
+            batch_timeout_milliseconds: 10,
+            channel_capacity: 64,
+        }
+    }
+}
+
 impl Default for SearchIndexWriterConfig {
     fn default() -> Self {
         Self {
@@ -25058,6 +25080,36 @@ mod search_index_writer_tests {
         assert_eq!(config.batch_size, 8);
         assert_eq!(config.batch_timeout_milliseconds, 5);
         assert_eq!(config.channel_capacity, 32);
+    }
+
+    #[rstest]
+    fn test_writer_config_for_bulk_workload_values() {
+        let config = SearchIndexWriterConfig::for_bulk_workload();
+        assert_eq!(config.batch_size, 32);
+        assert_eq!(config.batch_timeout_milliseconds, 10);
+        assert_eq!(config.channel_capacity, 64);
+    }
+
+    #[rstest]
+    fn test_writer_config_for_bulk_workload_differs_from_default() {
+        let default_config = SearchIndexWriterConfig::default();
+        let bulk_config = SearchIndexWriterConfig::for_bulk_workload();
+        // Bulk workload should use larger batches for reduced COW update frequency
+        assert!(bulk_config.batch_size > default_config.batch_size);
+        assert!(bulk_config.channel_capacity > default_config.channel_capacity);
+    }
+
+    #[rstest]
+    fn test_writer_config_for_bulk_workload_is_const() {
+        // Verify const fn behavior: two calls return identical values
+        const CONFIG_A: SearchIndexWriterConfig = SearchIndexWriterConfig::for_bulk_workload();
+        const CONFIG_B: SearchIndexWriterConfig = SearchIndexWriterConfig::for_bulk_workload();
+        assert_eq!(CONFIG_A.batch_size, CONFIG_B.batch_size);
+        assert_eq!(
+            CONFIG_A.batch_timeout_milliseconds,
+            CONFIG_B.batch_timeout_milliseconds
+        );
+        assert_eq!(CONFIG_A.channel_capacity, CONFIG_B.channel_capacity);
     }
 
     #[rstest]
