@@ -143,8 +143,9 @@ CI nightly の tasks_bulk シナリオで fail-closed RPS ゲートチェック�
 この値を下回った場合、CI は失敗します（`.github/workflows/benchmark-api.yml` で評価）。
 
 **注意**: `docker_build` / `docker_runtime` / `thresholds.min_rps_achieved` は CI 専用拡張キーです。
-`cargo xtask bench-api` コマンドでは、厳格な `BenchmarkScenario` 型（`serde(deny_unknown_fields)`）
-によりこれらのキーはエラーになります。CI では `yq` で直接読み取るため動作します。
+`cargo xtask bench-api` の `ScenarioConfig` では未知キーは許容されますが、
+API サーバー内部の `BenchmarkScenario` 型（`serde(deny_unknown_fields)`）を使う経路では
+未知キーはエラーになります。CI では `yq` で直接読み取るため動作します。
 
 ### 環境変数
 

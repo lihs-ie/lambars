@@ -736,12 +736,12 @@ jobs:
             (
               # Ensure cleanup on any exit (success or failure)
               cleanup() {
-                cd benches/api/docker 2>/dev/null || cd ../docker 2>/dev/null || true
+                cd ../docker 2>/dev/null || true
                 docker compose -f compose.ci.yaml down -v || true
               }
               trap cleanup EXIT
 
-              cd benches/api/benchmarks
+              # working-directory is already benches/api/benchmarks
 
               echo "=== Running scenario: ${scenario} ==="
 
@@ -780,9 +780,10 @@ jobs:
                   exit 1
                 fi
 
-                BASELINE_META="${BASELINE_META_DIR}/meta.json"
-                if [[ ! -f "${BASELINE_META}" ]]; then
-                  echo "ERROR: ${SCENARIO_NAME}/meta.json not found"
+                # meta.json is under results/<ts>/<scenario>/<script>/meta.json
+                BASELINE_META=$(find "${BASELINE_META_DIR}" -maxdepth 2 -name meta.json -type f 2>/dev/null | head -1)
+                if [[ -z "${BASELINE_META}" || ! -f "${BASELINE_META}" ]]; then
+                  echo "ERROR: ${SCENARIO_NAME}/*/meta.json not found under ${BASELINE_META_DIR}"
                   exit 1
                 fi
 
