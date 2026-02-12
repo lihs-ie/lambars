@@ -461,7 +461,7 @@ fn merge_results_into_original_order(
 impl TaskRepository for PostgresTaskRepository {
     fn find_by_id(&self, id: &TaskId) -> AsyncIO<Result<Option<Task>, RepositoryError>> {
         let pool = self.pool.clone();
-        let task_id = id.clone();
+        let task_id = *id;
 
         AsyncIO::new(move || async move {
             let row: Option<(serde_json::Value,)> =
@@ -584,7 +584,7 @@ impl TaskRepository for PostgresTaskRepository {
 
     fn delete(&self, id: &TaskId) -> AsyncIO<Result<bool, RepositoryError>> {
         let pool = self.pool.clone();
-        let task_id = id.clone();
+        let task_id = *id;
 
         AsyncIO::new(move || async move {
             let result = sqlx::query("DELETE FROM tasks WHERE id = $1")
@@ -1218,7 +1218,7 @@ impl EventStore for PostgresEventStore {
 
     fn load_events(&self, task_id: &TaskId) -> AsyncIO<Result<TaskHistory, RepositoryError>> {
         let pool = self.pool.clone();
-        let task_id = task_id.clone();
+        let task_id = *task_id;
 
         AsyncIO::new(move || async move {
             let rows: Vec<(
@@ -1246,7 +1246,7 @@ impl EventStore for PostgresEventStore {
                     #[allow(clippy::cast_sign_loss)]
                     Ok(TaskEvent::new(
                         EventId::from_uuid(event_id),
-                        task_id.clone(),
+                        task_id,
                         crate::domain::Timestamp::from_datetime(occurred_at),
                         version as u64,
                         kind,
@@ -1264,7 +1264,7 @@ impl EventStore for PostgresEventStore {
         from_version: u64,
     ) -> AsyncIO<Result<TaskHistory, RepositoryError>> {
         let pool = self.pool.clone();
-        let task_id = task_id.clone();
+        let task_id = *task_id;
 
         AsyncIO::new(move || async move {
             #[allow(clippy::cast_possible_wrap)]
@@ -1296,7 +1296,7 @@ impl EventStore for PostgresEventStore {
                     #[allow(clippy::cast_sign_loss)]
                     Ok(TaskEvent::new(
                         EventId::from_uuid(event_id),
-                        task_id.clone(),
+                        task_id,
                         crate::domain::Timestamp::from_datetime(occurred_at),
                         version as u64,
                         kind,
@@ -1310,7 +1310,7 @@ impl EventStore for PostgresEventStore {
 
     fn get_current_version(&self, task_id: &TaskId) -> AsyncIO<Result<u64, RepositoryError>> {
         let pool = self.pool.clone();
-        let task_id = task_id.clone();
+        let task_id = *task_id;
 
         AsyncIO::new(move || async move {
             let row: (Option<i64>,) =
@@ -1440,7 +1440,7 @@ mod tests {
     fn test_detect_duplicate_ids_with_duplicates() {
         let task_id = TaskId::generate();
         let tasks = vec![
-            test_task_with_id(task_id.clone(), "First"),
+            test_task_with_id(task_id, "First"),
             test_task("Different"),
             test_task_with_id(task_id, "Duplicate"),
         ];
@@ -1454,11 +1454,11 @@ mod tests {
         let task_id_1 = TaskId::generate();
         let task_id_2 = TaskId::generate();
         let tasks = vec![
-            test_task_with_id(task_id_1.clone(), "First A"), // index 0
-            test_task_with_id(task_id_2.clone(), "First B"), // index 1
-            test_task_with_id(task_id_1.clone(), "Dup A 1"), // index 2 - duplicate of 0
-            test_task_with_id(task_id_2, "Dup B 1"),         // index 3 - duplicate of 1
-            test_task_with_id(task_id_1, "Dup A 2"),         // index 4 - duplicate of 0
+            test_task_with_id(task_id_1, "First A"), // index 0
+            test_task_with_id(task_id_2, "First B"), // index 1
+            test_task_with_id(task_id_1, "Dup A 1"), // index 2 - duplicate of 0
+            test_task_with_id(task_id_2, "Dup B 1"), // index 3 - duplicate of 1
+            test_task_with_id(task_id_1, "Dup A 2"), // index 4 - duplicate of 0
         ];
 
         let result = detect_duplicate_ids(&tasks);
@@ -1469,7 +1469,7 @@ mod tests {
     fn test_classify_and_serialize_tasks_duplicate_version_conflict() {
         let task_id = TaskId::generate();
         let tasks = vec![
-            test_task_with_id(task_id.clone(), "First"),
+            test_task_with_id(task_id, "First"),
             test_task("Different"),
             test_task_with_id(task_id, "Duplicate"),
         ];
@@ -1547,7 +1547,7 @@ mod tests {
         let repository = PostgresTaskRepository::new(pool);
 
         let task = test_task("Test Task");
-        let task_id = task.task_id.clone();
+        let task_id = task.task_id;
 
         // Save the task
         let save_result = repository.save(&task).await;
@@ -1574,13 +1574,13 @@ mod tests {
         let repository = PostgresTaskRepository::new(pool);
 
         let task = test_task("Original Title");
-        let task_id = task.task_id.clone();
+        let task_id = task.task_id;
 
         // Save the original task
         repository.save(&task).await.unwrap();
 
         // Update the task with incremented version
-        let updated_task = test_task_with_id(task_id.clone(), "Updated Title").increment_version();
+        let updated_task = test_task_with_id(task_id, "Updated Title").increment_version();
         let update_result = repository.save(&updated_task).await;
         assert!(update_result.is_ok());
 
@@ -1603,13 +1603,13 @@ mod tests {
         let repository = PostgresTaskRepository::new(pool);
 
         let task = test_task("Test Task");
-        let task_id = task.task_id.clone();
+        let task_id = task.task_id;
 
         // Save the original task
         repository.save(&task).await.unwrap();
 
         // Try to save with same version (should fail)
-        let conflicting_task = test_task_with_id(task_id.clone(), "Conflicting Task");
+        let conflicting_task = test_task_with_id(task_id, "Conflicting Task");
         let result = repository.save(&conflicting_task).await;
 
         assert!(result.is_err());
@@ -1635,7 +1635,7 @@ mod tests {
         let repository = PostgresTaskRepository::new(pool);
 
         let task = test_task("Test Task");
-        let task_id = task.task_id.clone();
+        let task_id = task.task_id;
 
         // Save the task
         repository.save(&task).await.unwrap();
@@ -1678,7 +1678,7 @@ mod tests {
         let mut task_ids = Vec::new();
         for i in 0..5 {
             let task = test_task(&format!("Task {i}"));
-            task_ids.push(task.task_id.clone());
+            task_ids.push(task.task_id);
             repository.save(&task).await.unwrap();
         }
 
@@ -1763,7 +1763,7 @@ mod tests {
         let event_store = PostgresEventStore::new(pool);
 
         let task_id = TaskId::generate();
-        let event = test_task_event(task_id.clone(), 1);
+        let event = test_task_event(task_id, 1);
 
         // Append the event
         let append_result = event_store.append(&event, 0).await;
@@ -1795,13 +1795,13 @@ mod tests {
         let event_store = PostgresEventStore::new(pool);
 
         let task_id = TaskId::generate();
-        let event1 = test_task_event(task_id.clone(), 1);
+        let event1 = test_task_event(task_id, 1);
 
         // Append first event
         event_store.append(&event1, 0).await.unwrap();
 
         // Try to append with wrong expected version
-        let event2 = test_task_event(task_id.clone(), 2);
+        let event2 = test_task_event(task_id, 2);
         let result = event_store.append(&event2, 0).await;
 
         assert!(result.is_err());
@@ -1834,7 +1834,7 @@ mod tests {
 
         // Append multiple events
         for i in 1..=5 {
-            let event = test_task_event(task_id.clone(), i);
+            let event = test_task_event(task_id, i);
             event_store.append(&event, i - 1).await.unwrap();
         }
 

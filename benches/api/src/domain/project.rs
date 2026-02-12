@@ -242,9 +242,7 @@ impl Project {
     #[must_use]
     pub fn add_task(self, task_summary: TaskSummary) -> Self {
         Self {
-            tasks: self
-                .tasks
-                .insert(task_summary.task_id.clone(), task_summary),
+            tasks: self.tasks.insert(task_summary.task_id, task_summary),
             ..self
         }
     }
@@ -420,12 +418,7 @@ mod tests {
     #[rstest]
     fn test_task_summary_new() {
         let task_id = TaskId::generate();
-        let summary = TaskSummary::new(
-            task_id.clone(),
-            "Test Task",
-            TaskStatus::Pending,
-            Priority::High,
-        );
+        let summary = TaskSummary::new(task_id, "Test Task", TaskStatus::Pending, Priority::High);
         assert_eq!(summary.task_id, task_id);
         assert_eq!(summary.title, "Test Task");
         assert_eq!(summary.status, TaskStatus::Pending);
@@ -460,7 +453,7 @@ mod tests {
     #[rstest]
     fn test_project_add_task() {
         let summary = test_task_summary("Task 1");
-        let task_id = summary.task_id.clone();
+        let task_id = summary.task_id;
         let project = test_project("Test").add_task(summary);
 
         assert_eq!(project.task_count(), 1);
@@ -484,7 +477,7 @@ mod tests {
     #[rstest]
     fn test_project_remove_task() {
         let summary = test_task_summary("Task 1");
-        let task_id = summary.task_id.clone();
+        let task_id = summary.task_id;
         let project = test_project("Test").add_task(summary).remove_task(&task_id);
 
         assert_eq!(project.task_count(), 0);
@@ -494,14 +487,9 @@ mod tests {
     #[rstest]
     fn test_project_update_existing_task() {
         let task_id = TaskId::generate();
-        let summary1 = TaskSummary::new(
-            task_id.clone(),
-            "Task 1",
-            TaskStatus::Pending,
-            Priority::Low,
-        );
+        let summary1 = TaskSummary::new(task_id, "Task 1", TaskStatus::Pending, Priority::Low);
         let summary2 = TaskSummary::new(
-            task_id.clone(),
+            task_id,
             "Updated Task",
             TaskStatus::InProgress,
             Priority::High,

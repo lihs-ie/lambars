@@ -117,7 +117,7 @@ async fn test_get_task_history_pagination() {
     // Add more events to the task
     let event2 = task_management_benchmark_api::domain::TaskEvent::new(
         EventId::generate_v7(),
-        task.task_id.clone(),
+        task.task_id,
         Timestamp::now(),
         2,
         TaskEventKind::StatusChanged(StatusChanged {

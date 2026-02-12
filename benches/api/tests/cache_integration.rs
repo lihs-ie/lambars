@@ -119,7 +119,7 @@ async fn test_cached_task_repository_read_through_miss() {
 
     // Create and save task to primary only
     let task = create_test_task("Read-through miss test");
-    let task_id = task.task_id.clone();
+    let task_id = task.task_id;
 
     // Ensure cache is clean before test
     cleanup_test_keys(&pool, &task_id).await;
@@ -185,7 +185,7 @@ async fn test_cached_task_repository_read_through_hit() {
 
     // Create and save task through cached repository
     let task = create_test_task("Read-through hit test");
-    let task_id = task.task_id.clone();
+    let task_id = task.task_id;
 
     // Ensure cache is clean before test
     cleanup_test_keys(&pool, &task_id).await;
@@ -239,7 +239,7 @@ async fn test_cached_task_repository_write_through() {
 
     // Create and save task
     let task = create_test_task("Write-through test");
-    let task_id = task.task_id.clone();
+    let task_id = task.task_id;
 
     // Ensure cache is clean before test
     cleanup_test_keys(&pool, &task_id).await;
@@ -319,7 +319,7 @@ async fn test_cache_key_version_invalidation() {
 
     // Create and save task
     let task = create_test_task("Version invalidation test");
-    let task_id = task.task_id.clone();
+    let task_id = task.task_id;
 
     // Ensure cache is clean before test
     cleanup_test_keys(&pool, &task_id).await;
@@ -385,7 +385,7 @@ async fn test_redis_failure_fallback() {
 
     // Create and save task to primary only
     let task = create_test_task("Fallback test");
-    let task_id = task.task_id.clone();
+    let task_id = task.task_id;
     primary.save(&task).await.unwrap();
 
     // Read through cached repository - should fall back to primary
@@ -432,7 +432,7 @@ async fn test_cache_disabled_bypass() {
 
     // Create and save task
     let task = create_test_task("Cache disabled test");
-    let task_id = task.task_id.clone();
+    let task_id = task.task_id;
 
     // Ensure cache is clean before test
     cleanup_test_keys(&pool, &task_id).await;
@@ -498,7 +498,7 @@ async fn test_cache_disabled_invalidates_on_write() {
         CachedTaskRepository::new(primary.clone(), pool.clone(), enabled_config);
 
     let task = create_test_task("Invalidation on disabled write test");
-    let task_id = task.task_id.clone();
+    let task_id = task.task_id;
 
     // Ensure cache is clean before test
     cleanup_test_keys(&pool, &task_id).await;

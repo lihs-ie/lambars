@@ -145,7 +145,7 @@ pub fn create_test_app_state_with_fail_injection(
 pub async fn create_and_save_task(state: &AppState, title: &str) -> Task {
     let task_id = TaskId::generate_v7();
     let timestamp = Timestamp::now();
-    let task = Task::new(task_id.clone(), title, timestamp.clone());
+    let task = Task::new(task_id, title, timestamp.clone());
 
     // Save the task
     state
@@ -181,7 +181,7 @@ pub async fn create_task_with_status_priority(
 ) -> Task {
     let task_id = TaskId::generate_v7();
     let timestamp = Timestamp::now();
-    let task = Task::new(task_id.clone(), title, timestamp.clone())
+    let task = Task::new(task_id, title, timestamp.clone())
         .with_status(status)
         .with_priority(priority);
 

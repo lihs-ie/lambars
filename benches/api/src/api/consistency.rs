@@ -129,7 +129,7 @@ impl ConsistencyError {
     /// Call `log_consistency_error()` at the I/O boundary.
     pub fn event_write_failed(task_id: &TaskId, internal_error: impl std::fmt::Display) -> Self {
         Self::EventWriteFailed {
-            task_id: task_id.clone(),
+            task_id: *task_id,
             internal_details: internal_error.to_string(),
         }
     }
@@ -159,7 +159,7 @@ impl ConsistencyError {
             return Err(ConsistencyErrorBuildError::InvalidIncompleteWrite { written, total });
         }
         Ok(Self::IncompleteWrite {
-            task_id: task_id.clone(),
+            task_id: *task_id,
             written,
             total,
             internal_details: internal_error.to_string(),

@@ -885,7 +885,7 @@ impl SearchResult {
     pub fn from_tasks(tasks: PersistentVector<Task>) -> Self {
         let seen_ids = tasks
             .iter()
-            .map(|task| task.task_id.clone())
+            .map(|task| task.task_id)
             .collect::<PersistentHashSet<TaskId>>();
         Self { tasks, seen_ids }
     }
@@ -927,7 +927,7 @@ impl Semigroup for SearchResult {
         for task in &other.tasks {
             if !seen_ids.contains(&task.task_id) {
                 tasks = tasks.push_back(task.clone());
-                seen_ids = seen_ids.insert(task.task_id.clone());
+                seen_ids = seen_ids.insert(task.task_id);
             }
         }
 
@@ -1966,7 +1966,7 @@ pub fn index_ngrams_streaming(
         index
             .entry(pool.intern(ngram_str))
             .or_default()
-            .push(task_id.clone());
+            .push(*task_id);
     }
 }
 
@@ -2788,7 +2788,7 @@ impl SearchIndexDelta {
                         // Cancel the remove entries for keys that are being re-added
                         delta.cancel_remove_for_add(&normalized, &task.task_id, config);
                     }
-                    pending_tasks.insert(task.task_id.clone(), (task.clone(), normalized));
+                    pending_tasks.insert(task.task_id, (task.clone(), normalized));
                 }
                 TaskChange::Update { old, new } => {
                     let was_removed = last_change_is_remove.remove(&new.task_id);
@@ -2804,8 +2804,7 @@ impl SearchIndexDelta {
                             mode,
                         );
                         delta.cancel_remove_for_add(&new_normalized, &new.task_id, config);
-                        pending_tasks
-                            .insert(new.task_id.clone(), (new.clone(), new_normalized.clone()));
+                        pending_tasks.insert(new.task_id, (new.clone(), new_normalized.clone()));
                     } else {
                         // Normal Update: collect diff
                         let old_normalized = NormalizedTaskData::from_task(old);
@@ -2818,7 +2817,7 @@ impl SearchIndexDelta {
                         );
                         // Cancel remove entries for the added keys (handles Update→Update scenarios)
                         delta.cancel_remove_for_keys(&add_keys, &new.task_id);
-                        pending_tasks.insert(new.task_id.clone(), (new.clone(), new_normalized));
+                        pending_tasks.insert(new.task_id, (new.clone(), new_normalized));
                     }
                 }
                 TaskChange::Remove(task_id) => {
@@ -2829,7 +2828,7 @@ impl SearchIndexDelta {
                         let normalized = NormalizedTaskData::from_task(task);
                         delta.collect_remove(&normalized, task_id, config, &mut ngram_pool);
                     }
-                    last_change_is_remove.insert(task_id.clone());
+                    last_change_is_remove.insert(*task_id);
                 }
             }
         }
@@ -2862,13 +2861,13 @@ impl SearchIndexDelta {
         self.title_full_add
             .entry(pool.intern(&data.title_key))
             .or_default()
-            .push(task_id.clone());
+            .push(*task_id);
 
         for word in data.title_words.iter().take(word_limit) {
             self.title_word_add
                 .entry(pool.intern(word))
                 .or_default()
-                .push(task_id.clone());
+                .push(*task_id);
 
             if mode == DeltaMode::Full {
                 match config.infix_mode {
@@ -2898,7 +2897,7 @@ impl SearchIndexDelta {
             self.tag_add
                 .entry(pool.intern(tag))
                 .or_default()
-                .push(task_id.clone());
+                .push(*task_id);
 
             if mode == DeltaMode::Full {
                 match config.infix_mode {
@@ -2948,13 +2947,13 @@ impl SearchIndexDelta {
         self.title_full_remove
             .entry(pool.intern(&data.title_key))
             .or_default()
-            .push(task_id.clone());
+            .push(*task_id);
 
         for word in &data.title_words {
             self.title_word_remove
                 .entry(pool.intern(word))
                 .or_default()
-                .push(task_id.clone());
+                .push(*task_id);
             match config.infix_mode {
                 InfixMode::Ngram => {
                     remove_ngrams_streaming(
@@ -2981,7 +2980,7 @@ impl SearchIndexDelta {
             self.tag_remove
                 .entry(pool.intern(tag))
                 .or_default()
-                .push(task_id.clone());
+                .push(*task_id);
             match config.infix_mode {
                 InfixMode::Ngram => {
                     remove_ngrams_streaming(&mut self.tag_ngram_remove, tag, task_id, config, pool);
@@ -3403,10 +3402,7 @@ impl SearchIndexDelta {
     }
 
     fn push_to_index(index: &mut MutableIndex, key: &str, task_id: &TaskId, pool: &mut KeyPool) {
-        index
-            .entry(pool.intern(key))
-            .or_default()
-            .push(task_id.clone());
+        index.entry(pool.intern(key)).or_default().push(*task_id);
     }
 
     #[allow(dead_code)]
@@ -3469,13 +3465,13 @@ impl SearchIndexDelta {
             remove_index
                 .entry(pool.intern(ngram))
                 .or_default()
-                .push(task_id.clone());
+                .push(*task_id);
         }
         for ngram in new_ngrams.difference(old_ngrams) {
             add_index
                 .entry(pool.intern(ngram))
                 .or_default()
-                .push(task_id.clone());
+                .push(*task_id);
         }
     }
 
@@ -3527,7 +3523,7 @@ impl SearchIndexDelta {
             remove_index
                 .entry(pool.intern(ngram))
                 .or_default()
-                .push(task_id.clone());
+                .push(*task_id);
         }
 
         let added: Vec<String> = new_ngrams.difference(&old_ngrams).cloned().collect();
@@ -3535,7 +3531,7 @@ impl SearchIndexDelta {
             add_index
                 .entry(pool.intern(ngram))
                 .or_default()
-                .push(task_id.clone());
+                .push(*task_id);
         }
 
         added
@@ -3587,7 +3583,7 @@ impl SearchIndexDelta {
             remove_index
                 .entry(pool.intern(ngram))
                 .or_default()
-                .push(task_id.clone());
+                .push(*task_id);
         }
 
         let added: Vec<String> = new_ngrams.difference(&old_ngrams).cloned().collect();
@@ -3595,7 +3591,7 @@ impl SearchIndexDelta {
             add_index
                 .entry(pool.intern(ngram))
                 .or_default()
-                .push(task_id.clone());
+                .push(*task_id);
         }
 
         added
@@ -3620,13 +3616,13 @@ impl SearchIndexDelta {
             remove_index
                 .entry(pool.intern(suffix))
                 .or_default()
-                .push(task_id.clone());
+                .push(*task_id);
         }
         for suffix in new_suffixes.difference(old_suffixes) {
             add_index
                 .entry(pool.intern(suffix))
                 .or_default()
-                .push(task_id.clone());
+                .push(*task_id);
         }
     }
 
@@ -3668,7 +3664,7 @@ impl SearchIndexDelta {
             remove_index
                 .entry(pool.intern(suffix))
                 .or_default()
-                .push(task_id.clone());
+                .push(*task_id);
         }
 
         let added: Vec<String> = new_suffixes.difference(&old_suffixes).cloned().collect();
@@ -3676,7 +3672,7 @@ impl SearchIndexDelta {
             add_index
                 .entry(pool.intern(suffix))
                 .or_default()
-                .push(task_id.clone());
+                .push(*task_id);
         }
 
         added
@@ -3726,7 +3722,7 @@ impl SearchIndexDelta {
             remove_index
                 .entry(pool.intern(suffix))
                 .or_default()
-                .push(task_id.clone());
+                .push(*task_id);
         }
 
         let added: Vec<String> = new_suffixes.difference(&old_suffixes).cloned().collect();
@@ -3734,7 +3730,7 @@ impl SearchIndexDelta {
             add_index
                 .entry(pool.intern(suffix))
                 .or_default()
-                .push(task_id.clone());
+                .push(*task_id);
         }
 
         added
@@ -3994,7 +3990,7 @@ fn index_ngrams(
 
         // TaskIdCollection::insert handles deduplication internally
         // O(n) for Small state (n <= 8), O(log32 n) for Large state (n > 8)
-        transient_index.insert(ngram_key, existing_ids.insert(task_id.clone()));
+        transient_index.insert(ngram_key, existing_ids.insert(*task_id));
     }
 
     // Persist and return
@@ -4056,7 +4052,7 @@ fn index_ngrams_transient(
 
         // TaskIdCollection::insert handles deduplication internally
         // O(n) for Small state (n <= 8), O(log32 n) for Large state (n > 8)
-        transient_index.insert(ngram_key, existing_ids.insert(task_id.clone()));
+        transient_index.insert(ngram_key, existing_ids.insert(*task_id));
     }
 }
 
@@ -4104,7 +4100,7 @@ fn index_ngrams_batch(
         index
             .entry(NgramKey::new(&ngram))
             .or_default()
-            .push(task_id.clone());
+            .push(*task_id);
     }
 }
 
@@ -4119,10 +4115,7 @@ fn index_all_suffixes_batch(
 ) {
     for (byte_index, _) in word.char_indices() {
         let suffix = &word[byte_index..];
-        index
-            .entry(pool.intern(suffix))
-            .or_default()
-            .push(task_id.clone());
+        index.entry(pool.intern(suffix)).or_default().push(*task_id);
     }
 }
 
@@ -4255,7 +4248,7 @@ fn intersect_sorted_vecs(left: &[TaskId], right: &[TaskId]) -> Vec<TaskId> {
     while left_index < left.len() && right_index < right.len() {
         match left[left_index].cmp(&right[right_index]) {
             std::cmp::Ordering::Equal => {
-                result.push(left[left_index].clone());
+                result.push(left[left_index]);
                 left_index += 1;
                 right_index += 1;
             }
@@ -4549,14 +4542,14 @@ impl SearchIndex {
         if let Some(slice) = collection.as_sorted_slice() {
             output.extend_from_slice(slice);
         } else {
-            output.extend(collection.iter_sorted().cloned());
+            output.extend(collection.iter_sorted().copied());
         }
     }
 
     #[inline]
     fn to_sorted_vec(collection: &TaskIdCollection) -> Vec<TaskId> {
         collection.as_sorted_slice().map_or_else(
-            || collection.iter_sorted().cloned().collect(),
+            || collection.iter_sorted().copied().collect(),
             <[TaskId]>::to_vec,
         )
     }
@@ -4633,7 +4626,7 @@ impl SearchIndex {
 
         for task in tasks {
             // Index the task by ID
-            tasks_by_id.insert(task.task_id.clone(), task.clone());
+            tasks_by_id.insert(task.task_id, task.clone());
 
             // Normalize the title using normalize_query() for consistency
             let normalized = normalize_query(&task.title);
@@ -4659,7 +4652,7 @@ impl SearchIndex {
                 .unwrap_or_else(TaskIdCollection::new);
             title_full_index.insert(
                 NgramKey::new(normalized_title),
-                existing_ids.insert(task.task_id.clone()),
+                existing_ids.insert(task.task_id),
             );
 
             // Index infix based on mode
@@ -4693,10 +4686,7 @@ impl SearchIndex {
                     .get(word_str)
                     .cloned()
                     .unwrap_or_else(TaskIdCollection::new);
-                title_word_index.insert(
-                    NgramKey::new(word_str),
-                    task_ids.insert(task.task_id.clone()),
-                );
+                title_word_index.insert(NgramKey::new(word_str), task_ids.insert(task.task_id));
 
                 // Index infix based on mode
                 match config.infix_mode {
@@ -4737,7 +4727,7 @@ impl SearchIndex {
                     .unwrap_or_else(TaskIdCollection::new);
                 tag_index.insert(
                     NgramKey::new(&normalized_tag),
-                    task_ids.insert(task.task_id.clone()),
+                    task_ids.insert(task.task_id),
                 );
 
                 // Index infix based on mode
@@ -4829,7 +4819,7 @@ impl SearchIndex {
                 .cloned()
                 .unwrap_or_else(TaskIdCollection::new);
             // TaskIdCollection::insert returns self if element already exists
-            index = index.insert(NgramKey::new(suffix), existing_ids.insert(task_id.clone()));
+            index = index.insert(NgramKey::new(suffix), existing_ids.insert(*task_id));
         }
         index
     }
@@ -4862,7 +4852,7 @@ impl SearchIndex {
                 .cloned()
                 .unwrap_or_else(TaskIdCollection::new);
             // TaskIdCollection::insert returns a clone if element already exists (idempotent)
-            index.insert(NgramKey::new(suffix), existing_ids.insert(task_id.clone()));
+            index.insert(NgramKey::new(suffix), existing_ids.insert(*task_id));
         }
     }
 
@@ -4896,7 +4886,7 @@ impl SearchIndex {
         } else {
             // Apply max_search_candidates to the final result set
             // Sort by TaskId to ensure deterministic ordering before limiting
-            let mut sorted_ids: Vec<TaskId> = matching_ids.iter().cloned().collect();
+            let mut sorted_ids: Vec<TaskId> = matching_ids.iter().copied().collect();
             sorted_ids.sort();
             let limited_ids: PersistentHashSet<TaskId> = sorted_ids
                 .into_iter()
@@ -5040,7 +5030,7 @@ impl SearchIndex {
                         .any(|field| field.contains(normalized_query))
                 })
             })
-            .cloned()
+            .copied()
             .collect()
     }
 
@@ -5226,7 +5216,7 @@ impl SearchIndex {
         let end_key = NgramKey::new(&format!("{query_lower}\u{10ffff}"));
         for (_key, task_ids) in index.range(start_key..end_key) {
             for task_id in task_ids {
-                matching_ids = matching_ids.insert(task_id.clone());
+                matching_ids = matching_ids.insert(*task_id);
             }
         }
 
@@ -5249,7 +5239,7 @@ impl SearchIndex {
         let end_key = NgramKey::new(&format!("{query_lower}\u{10ffff}"));
         for (_title, task_ids) in index.range(start_key..end_key) {
             for task_id in task_ids {
-                matching_ids = matching_ids.insert(task_id.clone());
+                matching_ids = matching_ids.insert(*task_id);
             }
         }
 
@@ -5528,7 +5518,7 @@ impl SearchIndex {
             SearchIndexDelta::compute_token_limits(normalized, &self.config);
 
         // Add to tasks_by_id
-        let tasks_by_id = self.tasks_by_id.insert(task_id.clone(), task.clone());
+        let tasks_by_id = self.tasks_by_id.insert(*task_id, task.clone());
 
         // Add to title_full_index
         // TaskIdCollection::insert handles deduplication internally
@@ -5539,7 +5529,7 @@ impl SearchIndex {
             .unwrap_or_else(TaskIdCollection::new);
         let title_full_index = self.title_full_index.insert(
             NgramKey::new(&normalized.title_key),
-            existing_ids.insert(task_id.clone()),
+            existing_ids.insert(*task_id),
         );
 
         // Add to infix index based on mode (full title)
@@ -5578,7 +5568,7 @@ impl SearchIndex {
                 .cloned()
                 .unwrap_or_else(TaskIdCollection::new);
             title_word_index =
-                title_word_index.insert(NgramKey::new(word_str), task_ids.insert(task_id.clone()));
+                title_word_index.insert(NgramKey::new(word_str), task_ids.insert(*task_id));
 
             // Add to infix index based on mode
             match self.config.infix_mode {
@@ -5612,10 +5602,8 @@ impl SearchIndex {
                 .get(normalized_tag_str)
                 .cloned()
                 .unwrap_or_else(TaskIdCollection::new);
-            tag_index = tag_index.insert(
-                NgramKey::new(normalized_tag_str),
-                task_ids.insert(task_id.clone()),
-            );
+            tag_index =
+                tag_index.insert(NgramKey::new(normalized_tag_str), task_ids.insert(*task_id));
 
             // Add to infix index based on mode
             match self.config.infix_mode {
@@ -5926,7 +5914,7 @@ impl SearchIndex {
             .filter_map(|change| match change {
                 TaskChange::Add(task)
                     if !self.tasks_by_id.contains_key(&task.task_id)
-                        && seen.insert(task.task_id.clone()) =>
+                        && seen.insert(task.task_id) =>
                 {
                     Some(task)
                 }
@@ -5957,15 +5945,14 @@ impl SearchIndex {
                 SearchIndexDelta::compute_token_limits(&normalized, &self.config);
 
             title_full_builder =
-                title_full_builder.add_entry(normalized.title_key.clone(), task.task_id.clone());
+                title_full_builder.add_entry(normalized.title_key.clone(), task.task_id);
 
             for word in normalized.title_words.iter().take(word_limit) {
-                title_word_builder =
-                    title_word_builder.add_entry(word.clone(), task.task_id.clone());
+                title_word_builder = title_word_builder.add_entry(word.clone(), task.task_id);
             }
 
             for tag in normalized.tags.iter().take(tag_limit) {
-                tag_builder = tag_builder.add_entry(tag.clone(), task.task_id.clone());
+                tag_builder = tag_builder.add_entry(tag.clone(), task.task_id);
             }
         }
 
@@ -6032,7 +6019,7 @@ impl SearchIndex {
             .filter_map(|change| match change {
                 TaskChange::Add(task)
                     if !self.tasks_by_id.contains_key(&task.task_id)
-                        && seen.insert(task.task_id.clone()) =>
+                        && seen.insert(task.task_id) =>
                 {
                     Some(task)
                 }
@@ -6064,15 +6051,14 @@ impl SearchIndex {
                 SearchIndexDelta::compute_token_limits(normalized, &self.config);
 
             title_full_builder =
-                title_full_builder.add_entry(normalized.title_key.clone(), task.task_id.clone());
+                title_full_builder.add_entry(normalized.title_key.clone(), task.task_id);
 
             for word in normalized.title_words.iter().take(word_limit) {
-                title_word_builder =
-                    title_word_builder.add_entry(word.clone(), task.task_id.clone());
+                title_word_builder = title_word_builder.add_entry(word.clone(), task.task_id);
             }
 
             for tag in normalized.tags.iter().take(tag_limit) {
-                tag_builder = tag_builder.add_entry(tag.clone(), task.task_id.clone());
+                tag_builder = tag_builder.add_entry(tag.clone(), task.task_id);
             }
         }
 
@@ -6513,11 +6499,11 @@ impl SearchIndex {
             match change {
                 TaskChange::Add(task) => {
                     if !transient.contains_key(&task.task_id) {
-                        transient.insert(task.task_id.clone(), task.clone());
+                        transient.insert(task.task_id, task.clone());
                     }
                 }
                 TaskChange::Update { old: _, new } => {
-                    transient.insert(new.task_id.clone(), new.clone());
+                    transient.insert(new.task_id, new.clone());
                 }
                 TaskChange::Remove(task_id) => {
                     transient.remove(task_id);
@@ -6801,13 +6787,13 @@ impl SearchIndex {
                 (Some(&existing_element), None) => {
                     existing_iterator.next();
                     if !should_remove(existing_element, &mut remove_iterator) {
-                        result.push(existing_element.clone());
+                        result.push(*existing_element);
                     }
                 }
                 (None, Some(&add_element)) => {
                     add_iterator.next();
                     if !should_remove(add_element, &mut remove_iterator) {
-                        result.push(add_element.clone());
+                        result.push(*add_element);
                     }
                 }
                 (Some(&existing_element), Some(&add_element)) => {
@@ -6815,20 +6801,20 @@ impl SearchIndex {
                         std::cmp::Ordering::Less => {
                             existing_iterator.next();
                             if !should_remove(existing_element, &mut remove_iterator) {
-                                result.push(existing_element.clone());
+                                result.push(*existing_element);
                             }
                         }
                         std::cmp::Ordering::Greater => {
                             add_iterator.next();
                             if !should_remove(add_element, &mut remove_iterator) {
-                                result.push(add_element.clone());
+                                result.push(*add_element);
                             }
                         }
                         std::cmp::Ordering::Equal => {
                             existing_iterator.next();
                             add_iterator.next();
                             if !should_remove(existing_element, &mut remove_iterator) {
-                                result.push(existing_element.clone());
+                                result.push(*existing_element);
                             }
                         }
                     }
@@ -6910,13 +6896,13 @@ impl SearchIndex {
                 (Some(&existing_element), None) => {
                     existing_iterator.next();
                     if !should_remove(existing_element, &mut remove_iterator) {
-                        output.push(existing_element.clone());
+                        output.push(*existing_element);
                     }
                 }
                 (None, Some(&add_element)) => {
                     add_iterator.next();
                     if !should_remove(add_element, &mut remove_iterator) {
-                        output.push(add_element.clone());
+                        output.push(*add_element);
                     }
                 }
                 (Some(&existing_element), Some(&add_element)) => {
@@ -6924,20 +6910,20 @@ impl SearchIndex {
                         std::cmp::Ordering::Less => {
                             existing_iterator.next();
                             if !should_remove(existing_element, &mut remove_iterator) {
-                                output.push(existing_element.clone());
+                                output.push(*existing_element);
                             }
                         }
                         std::cmp::Ordering::Greater => {
                             add_iterator.next();
                             if !should_remove(add_element, &mut remove_iterator) {
-                                output.push(add_element.clone());
+                                output.push(*add_element);
                             }
                         }
                         std::cmp::Ordering::Equal => {
                             existing_iterator.next();
                             add_iterator.next();
                             if !should_remove(existing_element, &mut remove_iterator) {
-                                output.push(existing_element.clone());
+                                output.push(*existing_element);
                             }
                         }
                     }
@@ -7045,12 +7031,12 @@ impl SearchIndex {
                 existing_position += skip;
 
                 if existing_position < existing.len() && existing[existing_position] == *add_item {
-                    output.push(add_item.clone());
+                    output.push(*add_item);
                     existing_position += 1;
                     continue;
                 }
             }
-            output.push(add_item.clone());
+            output.push(*add_item);
         }
 
         if existing_position < existing.len() {
@@ -7074,7 +7060,7 @@ impl SearchIndex {
 
         for add_item in add {
             if let Err(position) = output.binary_search(add_item) {
-                output.insert(position, add_item.clone());
+                output.insert(position, *add_item);
             }
         }
     }
@@ -7100,7 +7086,7 @@ impl SearchIndex {
 
         if add.is_empty() {
             output.clear();
-            output.extend(existing.cloned());
+            output.extend(existing.copied());
             return;
         }
 
@@ -7112,7 +7098,7 @@ impl SearchIndex {
         let plan = Self::choose_merge_plan(existing_size_hint, add.len());
         match plan {
             MergePlan::BinaryInsert | MergePlan::Galloping => {
-                let existing_vec: Vec<TaskId> = existing.cloned().collect();
+                let existing_vec: Vec<TaskId> = existing.copied().collect();
                 Self::merge_postings_adaptive(&existing_vec, add, output, plan);
             }
             MergePlan::TwoPointer => {
@@ -7202,26 +7188,26 @@ impl SearchIndex {
                 (None, None) => break,
                 (Some(&existing_element), None) => {
                     existing_iterator.next();
-                    output.push(existing_element.clone());
+                    output.push(*existing_element);
                 }
                 (None, Some(&add_element)) => {
                     add_iterator.next();
-                    output.push(add_element.clone());
+                    output.push(*add_element);
                 }
                 (Some(&existing_element), Some(&add_element)) => {
                     match existing_element.cmp(add_element) {
                         std::cmp::Ordering::Less => {
                             existing_iterator.next();
-                            output.push(existing_element.clone());
+                            output.push(*existing_element);
                         }
                         std::cmp::Ordering::Greater => {
                             add_iterator.next();
-                            output.push(add_element.clone());
+                            output.push(*add_element);
                         }
                         std::cmp::Ordering::Equal => {
                             existing_iterator.next();
                             add_iterator.next();
-                            output.push(existing_element.clone());
+                            output.push(*existing_element);
                         }
                     }
                 }
@@ -7259,7 +7245,7 @@ impl SearchIndex {
                     if can_concat {
                         let mut result_vec = Vec::with_capacity(collection.len() + add_list.len());
                         Self::extend_sorted_into(collection, &mut result_vec);
-                        result_vec.extend(add_list.iter().cloned());
+                        result_vec.extend(add_list.iter().copied());
                         transient
                             .insert(key.clone(), TaskIdCollection::from_sorted_vec(result_vec));
                     } else if let Some(merged) = Self::merge_collection_into_scratch(
@@ -7427,7 +7413,7 @@ impl SearchIndex {
                     if can_concat {
                         let mut result_vec = Vec::with_capacity(collection.len() + add_list.len());
                         Self::extend_sorted_into(collection, &mut result_vec);
-                        result_vec.extend(add_list.iter().cloned());
+                        result_vec.extend(add_list.iter().copied());
                         result.insert(key.clone(), TaskIdCollection::from_sorted_vec(result_vec));
                     } else if let Some(merged) = Self::merge_collection_into_scratch(
                         collection,
@@ -7474,7 +7460,7 @@ impl SearchIndex {
                     if can_concat {
                         let mut result_vec = Vec::with_capacity(collection.len() + add_list.len());
                         Self::extend_sorted_into(collection, &mut result_vec);
-                        result_vec.extend(add_list.iter().cloned());
+                        result_vec.extend(add_list.iter().copied());
                         entries_to_insert
                             .push((key.clone(), TaskIdCollection::from_sorted_vec(result_vec)));
                     } else if let Some(merged) = Self::merge_collection_into_scratch(
@@ -7658,7 +7644,7 @@ impl SearchIndex {
         let mut merged: Vec<TaskId> = existing
             .chain(add.iter())
             .filter(|id| !remove_set.contains(id))
-            .cloned()
+            .copied()
             .collect();
 
         merged.sort();
@@ -8364,7 +8350,7 @@ fn validate_tasks_with_traversable(tasks: &[Task]) -> Result<Vec<Task>, Paginati
             .find(|task| task.task_id.as_uuid().is_nil())
             .expect("traverse_option returned None, so there must be an invalid task");
         PaginationValidationError {
-            invalid_task_id: invalid_task.task_id.clone(),
+            invalid_task_id: invalid_task.task_id,
             message: "Task has invalid (nil) UUID".to_string(),
         }
     })
@@ -8515,7 +8501,7 @@ fn paginate_tasks(
             .find(|task| task.task_id.as_uuid().is_nil())
             .expect("traverse_option returned None, so there must be an invalid task");
         return Err(PaginationValidationError {
-            invalid_task_id: invalid_task.task_id.clone(),
+            invalid_task_id: invalid_task.task_id,
             message: "Task has invalid (nil) UUID".to_string(),
         });
     };
@@ -9365,7 +9351,7 @@ mod tests {
             .map(|_| {
                 let result = index.search_by_title("important");
                 result
-                    .map(|r| r.tasks.iter().map(|t| t.task_id.clone()).collect())
+                    .map(|r| r.tasks.iter().map(|t| t.task_id).collect())
                     .unwrap_or_default()
             })
             .collect();
@@ -10522,9 +10508,9 @@ mod tests {
         let result3 = search_with_scope_indexed(&index, "", SearchScope::All);
 
         // Extract task IDs for comparison
-        let ids1: Vec<_> = result1.tasks.iter().map(|t| t.task_id.clone()).collect();
-        let ids2: Vec<_> = result2.tasks.iter().map(|t| t.task_id.clone()).collect();
-        let ids3: Vec<_> = result3.tasks.iter().map(|t| t.task_id.clone()).collect();
+        let ids1: Vec<_> = result1.tasks.iter().map(|t| t.task_id).collect();
+        let ids2: Vec<_> = result2.tasks.iter().map(|t| t.task_id).collect();
+        let ids3: Vec<_> = result3.tasks.iter().map(|t| t.task_id).collect();
 
         assert_eq!(ids1, ids2, "Search results should be in stable order");
         assert_eq!(ids2, ids3, "Search results should be in stable order");
@@ -10547,8 +10533,8 @@ mod tests {
         let result1 = search_with_scope_indexed(&index, "important", SearchScope::Title);
         let result2 = search_with_scope_indexed(&index, "important", SearchScope::Title);
 
-        let ids1: Vec<_> = result1.tasks.iter().map(|t| t.task_id.clone()).collect();
-        let ids2: Vec<_> = result2.tasks.iter().map(|t| t.task_id.clone()).collect();
+        let ids1: Vec<_> = result1.tasks.iter().map(|t| t.task_id).collect();
+        let ids2: Vec<_> = result2.tasks.iter().map(|t| t.task_id).collect();
 
         assert_eq!(
             ids1, ids2,
@@ -10654,7 +10640,7 @@ mod tests {
             .iter()
             .skip(1)
             .take(2)
-            .map(|t| t.task_id.clone())
+            .map(|t| t.task_id)
             .collect();
 
         // Second search with same parameters
@@ -10664,7 +10650,7 @@ mod tests {
             .iter()
             .skip(1)
             .take(2)
-            .map(|t| t.task_id.clone())
+            .map(|t| t.task_id)
             .collect();
 
         assert_eq!(
@@ -10949,21 +10935,11 @@ mod tests {
         // Search both indexes
         let result1 = index1
             .search_by_title("important")
-            .map(|r| {
-                r.tasks
-                    .iter()
-                    .map(|t| t.task_id.clone())
-                    .collect::<Vec<_>>()
-            })
+            .map(|r| r.tasks.iter().map(|t| t.task_id).collect::<Vec<_>>())
             .unwrap_or_default();
         let result2 = index2
             .search_by_title("important")
-            .map(|r| {
-                r.tasks
-                    .iter()
-                    .map(|t| t.task_id.clone())
-                    .collect::<Vec<_>>()
-            })
+            .map(|r| r.tasks.iter().map(|t| t.task_id).collect::<Vec<_>>())
             .unwrap_or_default();
 
         // Results should be identical (no sorting needed since task_id ordering is deterministic)
@@ -10980,8 +10956,8 @@ mod tests {
         let task2 = create_test_task("Important task", Priority::Medium);
 
         // Capture task IDs before moving tasks into vector
-        let task1_id = task1.task_id.clone();
-        let task2_id = task2.task_id.clone();
+        let task1_id = task1.task_id;
+        let task2_id = task2.task_id;
 
         let tasks: PersistentVector<Task> = vec![task1, task2].into_iter().collect();
 
@@ -10992,7 +10968,7 @@ mod tests {
             .map(|_| {
                 index
                     .search_by_title("important")
-                    .map(|r| r.tasks.iter().map(|t| t.task_id.clone()).collect())
+                    .map(|r| r.tasks.iter().map(|t| t.task_id).collect())
                     .unwrap_or_default()
             })
             .collect();
@@ -11030,13 +11006,7 @@ mod tests {
 
         // Get all tasks multiple times
         let results: Vec<Vec<TaskId>> = (0..5)
-            .map(|_| {
-                index
-                    .all_tasks()
-                    .iter()
-                    .map(|t| t.task_id.clone())
-                    .collect()
-            })
+            .map(|_| index.all_tasks().iter().map(|t| t.task_id).collect())
             .collect();
 
         // All iterations should return the same order
@@ -11079,9 +11049,9 @@ mod tests {
         let no_match = create_test_task("Unrelated task", Priority::Low);
 
         // Capture task IDs for verification
-        let title_only_id = title_only_match.task_id.clone();
-        let tag_only_id = tag_only_match.task_id.clone();
-        let both_match_id = both_match.task_id.clone();
+        let title_only_id = title_only_match.task_id;
+        let tag_only_id = tag_only_match.task_id;
+        let both_match_id = both_match.task_id;
 
         // Build index with tasks in a specific order
         let tasks: PersistentVector<Task> =
@@ -11097,7 +11067,7 @@ mod tests {
                 search_with_scope_indexed(&index, "important", SearchScope::All)
                     .tasks
                     .iter()
-                    .map(|t| t.task_id.clone())
+                    .map(|t| t.task_id)
                     .collect()
             })
             .collect();
@@ -11561,12 +11531,12 @@ mod tests {
         let mut ids_from_unnormalized: Vec<_> = result_from_unnormalized
             .tasks
             .iter()
-            .map(|t| t.task_id.clone())
+            .map(|t| t.task_id)
             .collect();
         let mut ids_from_normalized: Vec<_> = result_from_normalized
             .tasks
             .iter()
-            .map(|t| t.task_id.clone())
+            .map(|t| t.task_id)
             .collect();
         ids_from_unnormalized.sort();
         ids_from_normalized.sort();
@@ -11625,12 +11595,12 @@ mod tests {
         let mut ids_from_unnormalized: Vec<_> = result_from_unnormalized
             .tasks
             .iter()
-            .map(|t| t.task_id.clone())
+            .map(|t| t.task_id)
             .collect();
         let mut ids_from_normalized: Vec<_> = result_from_normalized
             .tasks
             .iter()
-            .map(|t| t.task_id.clone())
+            .map(|t| t.task_id)
             .collect();
         ids_from_unnormalized.sort();
         ids_from_normalized.sort();
@@ -11765,12 +11735,8 @@ mod tests {
         );
 
         // Verify task IDs match (order-independent)
-        let mut ids_whitespace: Vec<_> = result.tasks.iter().map(|t| t.task_id.clone()).collect();
-        let mut ids_empty: Vec<_> = empty_result
-            .tasks
-            .iter()
-            .map(|t| t.task_id.clone())
-            .collect();
+        let mut ids_whitespace: Vec<_> = result.tasks.iter().map(|t| t.task_id).collect();
+        let mut ids_empty: Vec<_> = empty_result.tasks.iter().map(|t| t.task_id).collect();
         ids_whitespace.sort();
         ids_empty.sort();
         assert_eq!(
@@ -11826,12 +11792,12 @@ mod search_index_differential_update_tests {
         let tasks_after_first: Vec<_> = index_after_first_add
             .all_tasks()
             .iter()
-            .map(|t| t.task_id.clone())
+            .map(|t| t.task_id)
             .collect();
         let tasks_after_second: Vec<_> = index_after_second_add
             .all_tasks()
             .iter()
-            .map(|t| t.task_id.clone())
+            .map(|t| t.task_id)
             .collect();
 
         assert_eq!(
@@ -11916,7 +11882,7 @@ mod search_index_differential_update_tests {
     #[rstest]
     fn test_remove_then_search_misses() {
         let task = create_test_task("Important meeting", Priority::High);
-        let task_id = task.task_id.clone();
+        let task_id = task.task_id;
         let tasks: PersistentVector<Task> = vec![task].into_iter().collect();
         let index = SearchIndex::build(&tasks);
 
@@ -11990,12 +11956,8 @@ mod search_index_differential_update_tests {
         let index = SearchIndex::build(&tasks);
 
         // Create updated task with new title but same ID
-        let new_task = Task::new(
-            old_task.task_id.clone(),
-            "New conference title",
-            Timestamp::now(),
-        )
-        .with_priority(Priority::High);
+        let new_task = Task::new(old_task.task_id, "New conference title", Timestamp::now())
+            .with_priority(Priority::High);
 
         // Verify old title is searchable before update
         let result_old_before = search_with_scope_indexed(&index, "meeting", SearchScope::All);
@@ -12042,13 +12004,9 @@ mod search_index_differential_update_tests {
         let index = SearchIndex::build(&tasks);
 
         // Create updated task with new tags
-        let new_task = Task::new(
-            old_task.task_id.clone(),
-            "Development task",
-            Timestamp::now(),
-        )
-        .with_priority(Priority::Medium)
-        .add_tag(Tag::new("backend"));
+        let new_task = Task::new(old_task.task_id, "Development task", Timestamp::now())
+            .with_priority(Priority::Medium)
+            .add_tag(Tag::new("backend"));
 
         // Verify old tag is searchable before update
         let result_old_tag_before =
@@ -12225,7 +12183,7 @@ mod search_index_differential_update_tests {
     fn test_update_idempotency() {
         // Create initial task
         let task_id = TaskId::generate();
-        let old_task = Task::new(task_id.clone(), "Old title", Timestamp::now())
+        let old_task = Task::new(task_id, "Old title", Timestamp::now())
             .with_priority(Priority::Low)
             .add_tag(Tag::new("work"));
 
@@ -12328,7 +12286,7 @@ mod search_index_differential_update_tests {
     fn test_update_no_internal_duplicates() {
         // Create initial task
         let task_id = TaskId::generate();
-        let old_task = Task::new(task_id.clone(), "Test title", Timestamp::now())
+        let old_task = Task::new(task_id, "Test title", Timestamp::now())
             .with_priority(Priority::Low)
             .add_tag(Tag::new("testtag"));
 
@@ -14768,7 +14726,7 @@ mod add_remove_task_tests {
         let empty_index = SearchIndex::build_with_config(&PersistentVector::new(), config);
 
         let task_id = task_id_from_u128(1);
-        let task = create_task_with_title_and_id("callback function", task_id.clone());
+        let task = create_task_with_title_and_id("callback function", task_id);
 
         let updated_index = empty_index.add_task(&task);
 
@@ -14815,7 +14773,7 @@ mod add_remove_task_tests {
         let empty_index = SearchIndex::build_with_config(&PersistentVector::new(), config);
 
         let task_id = task_id_from_u128(1);
-        let task = create_task_with_title_and_id("callback", task_id.clone());
+        let task = create_task_with_title_and_id("callback", task_id);
 
         let updated_index = empty_index.add_task(&task);
 
@@ -14913,7 +14871,7 @@ mod add_remove_task_tests {
         let task_id1 = task_id_from_u128(1);
         let task_id2 = task_id_from_u128(2);
         let task1 = create_task_with_title_and_id("callback", task_id1);
-        let task2 = create_task_with_title_and_id("callout", task_id2.clone()); // Shares "cal" n-gram
+        let task2 = create_task_with_title_and_id("callout", task_id2); // Shares "cal" n-gram
 
         // Add both tasks
         let index_with_tasks = empty_index.add_task(&task1).add_task(&task2);
@@ -15174,7 +15132,7 @@ mod add_remove_task_tests {
         let task_id = task_id_from_u128(1);
         let task = create_task_with_title_id_and_tags(
             "optimize query performance",
-            task_id.clone(),
+            task_id,
             vec!["database", "performance"],
         );
 
@@ -15461,23 +15419,11 @@ mod compatibility_tests {
 
             let ngram_ids: HashSet<TaskId> = ngram_result
                 .as_ref()
-                .map(|result| {
-                    result
-                        .tasks
-                        .iter()
-                        .map(|task| task.task_id.clone())
-                        .collect()
-                })
+                .map(|result| result.tasks.iter().map(|task| task.task_id).collect())
                 .unwrap_or_default();
             let legacy_ids: HashSet<TaskId> = legacy_result
                 .as_ref()
-                .map(|result| {
-                    result
-                        .tasks
-                        .iter()
-                        .map(|task| task.task_id.clone())
-                        .collect()
-                })
+                .map(|result| result.tasks.iter().map(|task| task.task_id).collect())
                 .unwrap_or_default();
 
             assert_eq!(
@@ -15507,11 +15453,7 @@ mod compatibility_tests {
 
         let result = index.search_by_title("common").unwrap();
 
-        let ids: Vec<TaskId> = result
-            .tasks
-            .iter()
-            .map(|task| task.task_id.clone())
-            .collect();
+        let ids: Vec<TaskId> = result.tasks.iter().map(|task| task.task_id).collect();
 
         // Verify the IDs are in ascending order
         let mut sorted_ids = ids.clone();
@@ -15602,7 +15544,7 @@ mod compatibility_tests {
         let empty_index = SearchIndex::build_with_config(&PersistentVector::new(), config);
 
         let task_id = task_id_from_u128(1);
-        let task = create_task_with_title_and_id("callback function", task_id.clone());
+        let task = create_task_with_title_and_id("callback function", task_id);
 
         // Add task
         let index_with_task = empty_index.add_task(&task);
@@ -15654,7 +15596,7 @@ mod compatibility_tests {
         let empty_index = SearchIndex::build_with_config(&PersistentVector::new(), config);
 
         let task_id = task_id_from_u128(1);
-        let task = create_task_with_title_and_id("callback function", task_id.clone());
+        let task = create_task_with_title_and_id("callback function", task_id);
 
         // Add task
         let index_with_task = empty_index.add_task(&task);
@@ -16080,13 +16022,9 @@ mod search_index_delta_tests {
         let task_id = TaskId::generate();
 
         let title_key = NgramKey::new("test title");
-        delta
-            .title_full_add
-            .insert(title_key, vec![task_id.clone()]);
+        delta.title_full_add.insert(title_key, vec![task_id]);
         let ngram_key = NgramKey::new("tes");
-        delta
-            .tag_ngram_add
-            .insert(ngram_key.clone(), vec![task_id.clone()]);
+        delta.tag_ngram_add.insert(ngram_key.clone(), vec![task_id]);
 
         let cloned = delta.clone();
 
@@ -16094,7 +16032,7 @@ mod search_index_delta_tests {
         assert_eq!(cloned.tag_ngram_add.len(), 1);
         assert_eq!(
             cloned.title_full_add.get("test title"),
-            Some(&vec![task_id.clone()])
+            Some(&vec![task_id])
         );
         assert_eq!(cloned.tag_ngram_add.get(&ngram_key), Some(&vec![task_id]));
     }
@@ -16141,7 +16079,7 @@ mod search_index_delta_tests {
     #[rstest]
     fn delta_from_update_change_collects_both_add_and_remove() {
         let task_id = task_id_from_u128(1);
-        let old_task = create_task_with_title_and_id("Old Title", task_id.clone());
+        let old_task = create_task_with_title_and_id("Old Title", task_id);
         let new_task = create_task_with_title_and_id("New Title", task_id);
         let changes = vec![TaskChange::Update {
             old: old_task,
@@ -16165,8 +16103,8 @@ mod search_index_delta_tests {
     #[rstest]
     fn delta_from_remove_change_uses_tasks_by_id() {
         let task = create_task_with_title_and_id("Test Task", task_id_from_u128(1));
-        let task_id = task.task_id.clone();
-        let tasks_by_id = PersistentTreeMap::new().insert(task_id.clone(), task);
+        let task_id = task.task_id;
+        let tasks_by_id = PersistentTreeMap::new().insert(task_id, task);
 
         let changes = vec![TaskChange::Remove(task_id)];
         let config = SearchIndexConfig::default();
@@ -16200,7 +16138,7 @@ mod search_index_delta_tests {
         let task = create_task_with_title_and_id("Test Task", task_id_from_u128(1));
         let config = SearchIndexConfig::default();
         let tasks_by_id = PersistentTreeMap::new();
-        let task_id = task.task_id.clone();
+        let task_id = task.task_id;
 
         let changes = vec![TaskChange::Add(task), TaskChange::Remove(task_id)];
 
@@ -16215,12 +16153,11 @@ mod search_index_delta_tests {
     #[rstest]
     fn delta_from_update_then_remove_in_same_batch() {
         let task_id = task_id_from_u128(1);
-        let old_task = create_task_with_title_and_id("Old Title", task_id.clone());
+        let old_task = create_task_with_title_and_id("Old Title", task_id);
         let new_task = create_task_with_title_and_id("New Title", task_id);
         let config = SearchIndexConfig::default();
-        let tasks_by_id =
-            PersistentTreeMap::new().insert(old_task.task_id.clone(), old_task.clone());
-        let new_task_id = new_task.task_id.clone();
+        let tasks_by_id = PersistentTreeMap::new().insert(old_task.task_id, old_task.clone());
+        let new_task_id = new_task.task_id;
 
         let changes = vec![
             TaskChange::Update {
@@ -16249,8 +16186,8 @@ mod search_index_delta_tests {
     fn delta_remove_then_add_results_in_add() {
         let task = create_task_with_title_and_id("Test Task", task_id_from_u128(1));
         let config = SearchIndexConfig::default();
-        let task_id = task.task_id.clone();
-        let tasks_by_id = PersistentTreeMap::new().insert(task_id.clone(), task.clone());
+        let task_id = task.task_id;
+        let tasks_by_id = PersistentTreeMap::new().insert(task_id, task.clone());
 
         let changes = vec![TaskChange::Remove(task_id), TaskChange::Add(task)];
 
@@ -16267,11 +16204,11 @@ mod search_index_delta_tests {
     #[rstest]
     fn delta_remove_then_update_treated_as_add() {
         let task_id = task_id_from_u128(1);
-        let task = create_task_with_title_and_id("Test Task", task_id.clone());
+        let task = create_task_with_title_and_id("Test Task", task_id);
         let updated_task = create_task_with_title_and_id("Updated Task", task_id);
         let config = SearchIndexConfig::default();
-        let task_id_for_remove = task.task_id.clone();
-        let tasks_by_id = PersistentTreeMap::new().insert(task.task_id.clone(), task.clone());
+        let task_id_for_remove = task.task_id;
+        let tasks_by_id = PersistentTreeMap::new().insert(task.task_id, task.clone());
 
         let changes = vec![
             TaskChange::Remove(task_id_for_remove),
@@ -16398,10 +16335,9 @@ mod search_index_delta_tests {
         let task_id_3 = task_id_from_u128(75);
 
         // Insert in unsorted order
-        delta.title_full_add.insert(
-            NgramKey::new("test"),
-            vec![task_id_1.clone(), task_id_2.clone(), task_id_3.clone()],
-        );
+        delta
+            .title_full_add
+            .insert(NgramKey::new("test"), vec![task_id_1, task_id_2, task_id_3]);
 
         delta.prepare_posting_lists();
 
@@ -16419,10 +16355,9 @@ mod search_index_delta_tests {
         let mut delta = SearchIndexDelta::default();
         let task_id = task_id_from_u128(42);
 
-        delta.tag_add.insert(
-            NgramKey::new("tag"),
-            vec![task_id.clone(), task_id.clone(), task_id.clone()],
-        );
+        delta
+            .tag_add
+            .insert(NgramKey::new("tag"), vec![task_id, task_id, task_id]);
 
         delta.prepare_posting_lists();
 
@@ -16452,10 +16387,8 @@ mod search_index_delta_tests {
 
         delta
             .title_full_add
-            .insert(NgramKey::new("title"), vec![task_id.clone()]);
-        delta
-            .tag_remove
-            .insert(NgramKey::new("tag"), vec![task_id.clone()]);
+            .insert(NgramKey::new("title"), vec![task_id]);
+        delta.tag_remove.insert(NgramKey::new("tag"), vec![task_id]);
 
         let ngram_key = NgramKey::new("ngr");
         delta
@@ -16488,12 +16421,7 @@ mod search_index_delta_tests {
 
         delta.tag_ngram_add.insert(
             ngram_key.clone(),
-            vec![
-                task_id_1.clone(),
-                task_id_2.clone(),
-                task_id_1.clone(),
-                task_id_3.clone(),
-            ],
+            vec![task_id_1, task_id_2, task_id_1, task_id_3],
         );
 
         delta.prepare_posting_lists();
@@ -16519,10 +16447,9 @@ mod search_index_delta_tests {
         let task_id_1 = task_id_from_u128(30);
         let task_id_2 = task_id_from_u128(10);
 
-        delta.title_full_all_suffix_add.insert(
-            NgramKey::new("suffix"),
-            vec![task_id_1.clone(), task_id_2.clone()],
-        );
+        delta
+            .title_full_all_suffix_add
+            .insert(NgramKey::new("suffix"), vec![task_id_1, task_id_2]);
 
         delta.prepare_posting_lists();
 
@@ -16623,10 +16550,10 @@ mod search_index_delta_tests {
 
         delta
             .title_full_add
-            .insert(NgramKey::new("test"), vec![task_id.clone()]);
+            .insert(NgramKey::new("test"), vec![task_id]);
         delta
             .title_word_add
-            .insert(NgramKey::new("word"), vec![task_id.clone()]);
+            .insert(NgramKey::new("word"), vec![task_id]);
         delta.tag_add.insert(NgramKey::new("tag"), vec![task_id]);
 
         assert!(delta.is_add_only());
@@ -16640,7 +16567,7 @@ mod search_index_delta_tests {
 
         delta
             .title_full_add
-            .insert(NgramKey::new("test"), vec![task_id.clone()]);
+            .insert(NgramKey::new("test"), vec![task_id]);
         delta
             .title_full_remove
             .insert(NgramKey::new("old"), vec![task_id]);
@@ -16868,12 +16795,12 @@ mod apply_changes_tests {
             let batch_posting: HashSet<_> = batch
                 .title_full_index
                 .get(key.as_str())
-                .map(|v| v.iter().cloned().collect())
+                .map(|v| v.iter().copied().collect())
                 .unwrap_or_default();
             let seq_posting: HashSet<_> = sequential
                 .title_full_index
                 .get(key.as_str())
-                .map(|v| v.iter().cloned().collect())
+                .map(|v| v.iter().copied().collect())
                 .unwrap_or_default();
             assert_eq!(
                 batch_posting, seq_posting,
@@ -16892,12 +16819,12 @@ mod apply_changes_tests {
             let batch_posting: HashSet<_> = batch
                 .title_word_index
                 .get(key.as_str())
-                .map(|v| v.iter().cloned().collect())
+                .map(|v| v.iter().copied().collect())
                 .unwrap_or_default();
             let seq_posting: HashSet<_> = sequential
                 .title_word_index
                 .get(key.as_str())
-                .map(|v| v.iter().cloned().collect())
+                .map(|v| v.iter().copied().collect())
                 .unwrap_or_default();
             assert_eq!(
                 batch_posting, seq_posting,
@@ -16918,12 +16845,12 @@ mod apply_changes_tests {
             let batch_posting: HashSet<_> = batch
                 .tag_index
                 .get(key.as_str())
-                .map(|v| v.iter().cloned().collect())
+                .map(|v| v.iter().copied().collect())
                 .unwrap_or_default();
             let seq_posting: HashSet<_> = sequential
                 .tag_index
                 .get(key.as_str())
-                .map(|v| v.iter().cloned().collect())
+                .map(|v| v.iter().copied().collect())
                 .unwrap_or_default();
             assert_eq!(
                 batch_posting, seq_posting,
@@ -16943,11 +16870,11 @@ mod apply_changes_tests {
         for key in batch_title_full_ngram.keys() {
             let batch_posting: HashSet<_> = batch_title_full_ngram
                 .get(key.as_str())
-                .map(|v| v.iter().cloned().collect())
+                .map(|v| v.iter().copied().collect())
                 .unwrap_or_default();
             let seq_posting: HashSet<_> = seq_title_full_ngram
                 .get(key.as_str())
-                .map(|v| v.iter().cloned().collect())
+                .map(|v| v.iter().copied().collect())
                 .unwrap_or_default();
             assert_eq!(
                 batch_posting, seq_posting,
@@ -16967,11 +16894,11 @@ mod apply_changes_tests {
         for key in batch_title_word_ngram.keys() {
             let batch_posting: HashSet<_> = batch_title_word_ngram
                 .get(key.as_str())
-                .map(|v| v.iter().cloned().collect())
+                .map(|v| v.iter().copied().collect())
                 .unwrap_or_default();
             let seq_posting: HashSet<_> = seq_title_word_ngram
                 .get(key.as_str())
-                .map(|v| v.iter().cloned().collect())
+                .map(|v| v.iter().copied().collect())
                 .unwrap_or_default();
             assert_eq!(
                 batch_posting, seq_posting,
@@ -16991,11 +16918,11 @@ mod apply_changes_tests {
         for key in batch_tag_ngram.keys() {
             let batch_posting: HashSet<_> = batch_tag_ngram
                 .get(key.as_str())
-                .map(|v| v.iter().cloned().collect())
+                .map(|v| v.iter().copied().collect())
                 .unwrap_or_default();
             let seq_posting: HashSet<_> = seq_tag_ngram
                 .get(key.as_str())
-                .map(|v| v.iter().cloned().collect())
+                .map(|v| v.iter().copied().collect())
                 .unwrap_or_default();
             assert_eq!(
                 batch_posting, seq_posting,
@@ -17014,12 +16941,12 @@ mod apply_changes_tests {
             let batch_posting: HashSet<_> = batch
                 .title_full_all_suffix_index
                 .get(key.as_str())
-                .map(|v| v.iter().cloned().collect())
+                .map(|v| v.iter().copied().collect())
                 .unwrap_or_default();
             let seq_posting: HashSet<_> = sequential
                 .title_full_all_suffix_index
                 .get(key.as_str())
-                .map(|v| v.iter().cloned().collect())
+                .map(|v| v.iter().copied().collect())
                 .unwrap_or_default();
             assert_eq!(
                 batch_posting, seq_posting,
@@ -17038,12 +16965,12 @@ mod apply_changes_tests {
             let batch_posting: HashSet<_> = batch
                 .title_word_all_suffix_index
                 .get(key.as_str())
-                .map(|v| v.iter().cloned().collect())
+                .map(|v| v.iter().copied().collect())
                 .unwrap_or_default();
             let seq_posting: HashSet<_> = sequential
                 .title_word_all_suffix_index
                 .get(key.as_str())
-                .map(|v| v.iter().cloned().collect())
+                .map(|v| v.iter().copied().collect())
                 .unwrap_or_default();
             assert_eq!(
                 batch_posting, seq_posting,
@@ -17062,12 +16989,12 @@ mod apply_changes_tests {
             let batch_posting: HashSet<_> = batch
                 .tag_all_suffix_index
                 .get(key.as_str())
-                .map(|v| v.iter().cloned().collect())
+                .map(|v| v.iter().copied().collect())
                 .unwrap_or_default();
             let seq_posting: HashSet<_> = sequential
                 .tag_all_suffix_index
                 .get(key.as_str())
-                .map(|v| v.iter().cloned().collect())
+                .map(|v| v.iter().copied().collect())
                 .unwrap_or_default();
             assert_eq!(
                 batch_posting, seq_posting,
@@ -17187,7 +17114,7 @@ mod apply_changes_tests {
         let index = SearchIndex::build_with_config(&tasks, SearchIndexConfig::default());
 
         let task_to_remove = tasks.get(0).unwrap().clone();
-        let changes = vec![TaskChange::Remove(task_to_remove.task_id.clone())];
+        let changes = vec![TaskChange::Remove(task_to_remove.task_id)];
 
         let batch_result = index.apply_changes(&changes);
         let sequential_result = index.apply_change(changes[0].clone());
@@ -17219,7 +17146,7 @@ mod apply_changes_tests {
                 old: task_to_update.clone(),
                 new: updated_task.clone(),
             },
-            TaskChange::Remove(task_to_remove.task_id.clone()),
+            TaskChange::Remove(task_to_remove.task_id),
         ];
 
         let batch_result = index.apply_changes(&changes);
@@ -17265,7 +17192,7 @@ mod apply_changes_tests {
         let tasks: PersistentVector<Task> = vec![task.clone()].into_iter().collect();
         let index = SearchIndex::build_with_config(&tasks, SearchIndexConfig::default());
 
-        let changes = vec![TaskChange::Remove(task.task_id.clone())];
+        let changes = vec![TaskChange::Remove(task.task_id)];
         let result = index.apply_changes(&changes);
 
         // Empty entries should be removed from title_full_index
@@ -17291,7 +17218,7 @@ mod apply_changes_tests {
         // Add then Remove (within the same batch)
         let changes = vec![
             TaskChange::Add(task.clone()),
-            TaskChange::Remove(task.task_id.clone()),
+            TaskChange::Remove(task.task_id),
         ];
 
         let result = index.apply_changes(&changes);
@@ -17313,8 +17240,8 @@ mod apply_changes_tests {
     #[rstest]
     fn apply_changes_update_then_remove_cancels_out() {
         let task_id = task_id_from_u128(1);
-        let old_task = create_test_task_with_id("Old Title", task_id.clone());
-        let new_task = create_test_task_with_id("New Title", task_id.clone());
+        let old_task = create_test_task_with_id("Old Title", task_id);
+        let new_task = create_test_task_with_id("New Title", task_id);
 
         // Initial state: old_task exists
         let tasks: PersistentVector<Task> = vec![old_task.clone()].into_iter().collect();
@@ -17326,7 +17253,7 @@ mod apply_changes_tests {
                 old: old_task.clone(),
                 new: new_task.clone(),
             },
-            TaskChange::Remove(new_task.task_id.clone()),
+            TaskChange::Remove(new_task.task_id),
         ];
 
         let result = index.apply_changes(&changes);
@@ -17363,7 +17290,7 @@ mod apply_changes_tests {
 
         let changes = vec![
             TaskChange::Add(task.clone()),
-            TaskChange::Remove(task.task_id.clone()),
+            TaskChange::Remove(task.task_id),
         ];
 
         // Batch apply
@@ -17388,8 +17315,8 @@ mod apply_changes_tests {
     #[rstest]
     fn apply_changes_equals_sequential_for_update_then_remove() {
         let task_id = task_id_from_u128(1);
-        let old_task = create_test_task_with_id("Old Title", task_id.clone());
-        let new_task = create_test_task_with_id("New Title", task_id.clone());
+        let old_task = create_test_task_with_id("Old Title", task_id);
+        let new_task = create_test_task_with_id("New Title", task_id);
 
         // Initial state: old_task exists
         let tasks: PersistentVector<Task> = vec![old_task.clone()].into_iter().collect();
@@ -17400,7 +17327,7 @@ mod apply_changes_tests {
                 old: old_task.clone(),
                 new: new_task.clone(),
             },
-            TaskChange::Remove(new_task.task_id.clone()),
+            TaskChange::Remove(new_task.task_id),
         ];
 
         // Batch apply
@@ -17431,13 +17358,13 @@ mod apply_changes_tests {
         let task_id = task_id_from_u128(1);
         // old: 6 words + 2 tags = 8 tokens
         let old_task = create_test_task_with_id_and_tags(
-            task_id.clone(),
+            task_id,
             "alpha beta gamma delta epsilon zeta",
             vec!["tag1", "tag2"],
         );
         // new: 7 words + 3 tags = 10 tokens
         let new_task = create_test_task_with_id_and_tags(
-            task_id.clone(),
+            task_id,
             "one two three four five six seven",
             vec!["tagA", "tagB", "tagC"],
         );
@@ -17479,7 +17406,7 @@ mod apply_changes_tests {
     #[rstest]
     fn apply_changes_remove_then_add_results_in_add() {
         let task_id = task_id_from_u128(1);
-        let task = create_test_task_with_id("Test Task", task_id.clone());
+        let task = create_test_task_with_id("Test Task", task_id);
 
         // Initial state: task exists
         let tasks: PersistentVector<Task> = vec![task.clone()].into_iter().collect();
@@ -17487,7 +17414,7 @@ mod apply_changes_tests {
 
         // Remove then Add (same TaskId) - Add wins
         let changes = vec![
-            TaskChange::Remove(task.task_id.clone()),
+            TaskChange::Remove(task.task_id),
             TaskChange::Add(task.clone()),
         ];
 
@@ -17510,7 +17437,7 @@ mod apply_changes_tests {
     #[rstest]
     fn apply_changes_remove_then_update_treated_as_add() {
         let task_id = task_id_from_u128(1);
-        let old_task = create_test_task_with_id("Old Title", task_id.clone());
+        let old_task = create_test_task_with_id("Old Title", task_id);
         let new_task = create_test_task_with_id("New Title", task_id);
 
         // Initial state: old_task exists
@@ -17519,7 +17446,7 @@ mod apply_changes_tests {
 
         // Remove then Update (same TaskId) - treated as Add
         let changes = vec![
-            TaskChange::Remove(old_task.task_id.clone()),
+            TaskChange::Remove(old_task.task_id),
             TaskChange::Update {
                 old: old_task.clone(),
                 new: new_task.clone(),
@@ -17625,7 +17552,7 @@ mod apply_changes_tests {
         let index = SearchIndex::build_with_config(&tasks, config);
 
         let task_to_remove = tasks.get(0).unwrap().clone();
-        let changes = vec![TaskChange::Remove(task_to_remove.task_id.clone())];
+        let changes = vec![TaskChange::Remove(task_to_remove.task_id)];
 
         let batch_result = index.apply_changes(&changes);
         let sequential_result = index.apply_change(changes[0].clone());
@@ -17661,7 +17588,7 @@ mod apply_changes_tests {
                 old: task_to_update.clone(),
                 new: updated_task.clone(),
             },
-            TaskChange::Remove(task_to_remove.task_id.clone()),
+            TaskChange::Remove(task_to_remove.task_id),
         ];
 
         // Batch apply
@@ -17695,7 +17622,7 @@ mod apply_changes_tests {
         let new_task = create_test_task("Temporary Task");
         let changes = vec![
             TaskChange::Add(new_task.clone()),
-            TaskChange::Remove(new_task.task_id.clone()),
+            TaskChange::Remove(new_task.task_id),
         ];
 
         // Batch apply
@@ -17725,7 +17652,7 @@ mod apply_changes_tests {
     #[rstest]
     fn apply_changes_equals_sequential_for_remove_then_add_same_key() {
         let task_id = task_id_from_u128(100);
-        let task = create_test_task_with_id("Test Task Title", task_id.clone());
+        let task = create_test_task_with_id("Test Task Title", task_id);
 
         // Initial state: task exists
         let tasks: PersistentVector<Task> = vec![task.clone()].into_iter().collect();
@@ -17733,7 +17660,7 @@ mod apply_changes_tests {
 
         // Remove then Add (same TaskId)
         let changes = vec![
-            TaskChange::Remove(task.task_id.clone()),
+            TaskChange::Remove(task.task_id),
             TaskChange::Add(task.clone()),
         ];
 
@@ -17760,8 +17687,8 @@ mod apply_changes_tests {
     fn apply_changes_equals_sequential_for_remove_then_add_different_key() {
         let task_id_1 = task_id_from_u128(101);
         let task_id_2 = task_id_from_u128(102);
-        let task_1 = create_test_task_with_id("First Task", task_id_1.clone());
-        let task_2 = create_test_task_with_id("Second Task", task_id_2.clone());
+        let task_1 = create_test_task_with_id("First Task", task_id_1);
+        let task_2 = create_test_task_with_id("Second Task", task_id_2);
 
         // Initial state: task_1 exists
         let tasks: PersistentVector<Task> = vec![task_1.clone()].into_iter().collect();
@@ -17769,7 +17696,7 @@ mod apply_changes_tests {
 
         // Remove task_1 then Add task_2
         let changes = vec![
-            TaskChange::Remove(task_1.task_id.clone()),
+            TaskChange::Remove(task_1.task_id),
             TaskChange::Add(task_2.clone()),
         ];
 
@@ -17796,8 +17723,8 @@ mod apply_changes_tests {
     #[rstest]
     fn apply_changes_equals_sequential_for_remove_then_update_same_key() {
         let task_id = task_id_from_u128(103);
-        let old_task = create_test_task_with_id("Old Title", task_id.clone());
-        let new_task = create_test_task_with_id("New Title", task_id.clone());
+        let old_task = create_test_task_with_id("Old Title", task_id);
+        let new_task = create_test_task_with_id("New Title", task_id);
 
         // Initial state: old_task exists
         let tasks: PersistentVector<Task> = vec![old_task.clone()].into_iter().collect();
@@ -17805,7 +17732,7 @@ mod apply_changes_tests {
 
         // Remove then Update (same TaskId)
         let changes = vec![
-            TaskChange::Remove(old_task.task_id.clone()),
+            TaskChange::Remove(old_task.task_id),
             TaskChange::Update {
                 old: old_task.clone(),
                 new: new_task.clone(),
@@ -17834,16 +17761,10 @@ mod apply_changes_tests {
     #[rstest]
     fn apply_changes_equals_sequential_for_remove_then_update_diff() {
         let task_id = task_id_from_u128(104);
-        let old_task = create_test_task_with_id_and_tags(
-            task_id.clone(),
-            "Original Title",
-            vec!["tag1", "tag2"],
-        );
-        let new_task = create_test_task_with_id_and_tags(
-            task_id.clone(),
-            "Modified Title",
-            vec!["tag3", "tag4"],
-        );
+        let old_task =
+            create_test_task_with_id_and_tags(task_id, "Original Title", vec!["tag1", "tag2"]);
+        let new_task =
+            create_test_task_with_id_and_tags(task_id, "Modified Title", vec!["tag3", "tag4"]);
 
         // Initial state: old_task exists
         let tasks: PersistentVector<Task> = vec![old_task.clone()].into_iter().collect();
@@ -17851,7 +17772,7 @@ mod apply_changes_tests {
 
         // Remove then Update (with content diff)
         let changes = vec![
-            TaskChange::Remove(old_task.task_id.clone()),
+            TaskChange::Remove(old_task.task_id),
             TaskChange::Update {
                 old: old_task.clone(),
                 new: new_task.clone(),
@@ -17882,7 +17803,7 @@ mod apply_changes_tests {
     #[rstest]
     fn apply_changes_equals_sequential_for_remove_then_add_then_remove() {
         let task_id = task_id_from_u128(105);
-        let task = create_test_task_with_id("Task to toggle", task_id.clone());
+        let task = create_test_task_with_id("Task to toggle", task_id);
 
         // Initial state: task exists
         let tasks: PersistentVector<Task> = vec![task.clone()].into_iter().collect();
@@ -17890,9 +17811,9 @@ mod apply_changes_tests {
 
         // Remove→Add→Remove (same TaskId)
         let changes = vec![
-            TaskChange::Remove(task.task_id.clone()),
+            TaskChange::Remove(task.task_id),
             TaskChange::Add(task.clone()),
-            TaskChange::Remove(task.task_id.clone()),
+            TaskChange::Remove(task.task_id),
         ];
 
         // Batch apply
@@ -17917,8 +17838,8 @@ mod apply_changes_tests {
     #[rstest]
     fn apply_changes_equals_sequential_for_add_then_update_same_task() {
         let task_id = task_id_from_u128(106);
-        let initial_task = create_test_task_with_id("Initial Title", task_id.clone());
-        let updated_task = create_test_task_with_id("Updated Title", task_id.clone());
+        let initial_task = create_test_task_with_id("Initial Title", task_id);
+        let updated_task = create_test_task_with_id("Updated Title", task_id);
 
         // Initial state: empty
         let index = create_empty_index();
@@ -17958,8 +17879,8 @@ mod apply_changes_tests {
     #[rstest]
     fn apply_changes_equals_sequential_for_add_to_existing_id() {
         let task_id = task_id_from_u128(107);
-        let existing_task = create_test_task_with_id("Existing Task", task_id.clone());
-        let new_task = create_test_task_with_id("New Task Same ID", task_id.clone());
+        let existing_task = create_test_task_with_id("Existing Task", task_id);
+        let new_task = create_test_task_with_id("New Task Same ID", task_id);
 
         // Initial state: existing_task exists
         let tasks: PersistentVector<Task> = vec![existing_task.clone()].into_iter().collect();
@@ -17988,7 +17909,7 @@ mod apply_changes_tests {
     #[rstest]
     fn apply_changes_equals_sequential_for_remove_then_remove_same_task() {
         let task_id = task_id_from_u128(108);
-        let task = create_test_task_with_id("Task to remove", task_id.clone());
+        let task = create_test_task_with_id("Task to remove", task_id);
 
         // Initial state: task exists
         let tasks: PersistentVector<Task> = vec![task.clone()].into_iter().collect();
@@ -17996,8 +17917,8 @@ mod apply_changes_tests {
 
         // Remove then Remove (same TaskId)
         let changes = vec![
-            TaskChange::Remove(task.task_id.clone()),
-            TaskChange::Remove(task.task_id.clone()),
+            TaskChange::Remove(task.task_id),
+            TaskChange::Remove(task.task_id),
         ];
 
         // Batch apply
@@ -18022,9 +17943,9 @@ mod apply_changes_tests {
     #[rstest]
     fn apply_changes_equals_sequential_for_update_then_update_same_task() {
         let task_id = task_id_from_u128(109);
-        let task_v1 = create_test_task_with_id("Version 1", task_id.clone());
-        let task_v2 = create_test_task_with_id("Version 2", task_id.clone());
-        let task_v3 = create_test_task_with_id("Version 3", task_id.clone());
+        let task_v1 = create_test_task_with_id("Version 1", task_id);
+        let task_v2 = create_test_task_with_id("Version 2", task_id);
+        let task_v3 = create_test_task_with_id("Version 3", task_id);
 
         // Initial state: task_v1 exists
         let tasks: PersistentVector<Task> = vec![task_v1.clone()].into_iter().collect();
@@ -18068,8 +17989,8 @@ mod apply_changes_tests {
     #[rstest]
     fn apply_changes_equals_sequential_for_add_then_remove_then_add() {
         let task_id = task_id_from_u128(110);
-        let task_v1 = create_test_task_with_id("First Version", task_id.clone());
-        let task_v2 = create_test_task_with_id("Second Version", task_id.clone());
+        let task_v1 = create_test_task_with_id("First Version", task_id);
+        let task_v2 = create_test_task_with_id("Second Version", task_id);
 
         // Initial state: empty
         let index = create_empty_index();
@@ -18077,7 +17998,7 @@ mod apply_changes_tests {
         // Add v1→Remove→Add v2
         let changes = vec![
             TaskChange::Add(task_v1.clone()),
-            TaskChange::Remove(task_id.clone()),
+            TaskChange::Remove(task_id),
             TaskChange::Add(task_v2.clone()),
         ];
 
@@ -18116,7 +18037,7 @@ mod apply_changes_tests {
         };
 
         let task_id = task_id_from_u128(111);
-        let task = create_test_task_with_id("Test Task for Ngram", task_id.clone());
+        let task = create_test_task_with_id("Test Task for Ngram", task_id);
 
         // Initial state: task exists
         let tasks: PersistentVector<Task> = vec![task.clone()].into_iter().collect();
@@ -18124,7 +18045,7 @@ mod apply_changes_tests {
 
         // Remove then Add
         let changes = vec![
-            TaskChange::Remove(task.task_id.clone()),
+            TaskChange::Remove(task.task_id),
             TaskChange::Add(task.clone()),
         ];
 
@@ -18157,7 +18078,7 @@ mod apply_changes_tests {
         };
 
         let task_id = task_id_from_u128(112);
-        let task = create_test_task_with_id("Test Task for Legacy", task_id.clone());
+        let task = create_test_task_with_id("Test Task for Legacy", task_id);
 
         // Initial state: task exists
         let tasks: PersistentVector<Task> = vec![task.clone()].into_iter().collect();
@@ -18165,7 +18086,7 @@ mod apply_changes_tests {
 
         // Remove then Add
         let changes = vec![
-            TaskChange::Remove(task.task_id.clone()),
+            TaskChange::Remove(task.task_id),
             TaskChange::Add(task.clone()),
         ];
 
@@ -18193,15 +18114,15 @@ mod apply_changes_tests {
     #[rstest]
     fn apply_changes_equals_sequential_for_remove_then_update_without_existing_task() {
         let task_id = task_id_from_u128(113);
-        let old_task = create_test_task_with_id("Old Task", task_id.clone());
-        let new_task = create_test_task_with_id("New Task", task_id.clone());
+        let old_task = create_test_task_with_id("Old Task", task_id);
+        let new_task = create_test_task_with_id("New Task", task_id);
 
         // Initial state: empty (task does NOT exist)
         let index = create_empty_index();
 
         // Remove (no-op) then Update
         let changes = vec![
-            TaskChange::Remove(old_task.task_id.clone()),
+            TaskChange::Remove(old_task.task_id),
             TaskChange::Update {
                 old: old_task.clone(),
                 new: new_task.clone(),
@@ -18230,8 +18151,8 @@ mod apply_changes_tests {
         let task_id_1 = task_id_from_u128(114);
         let task_id_2 = task_id_from_u128(115);
         // Both tasks have the same title (same index key)
-        let task_1 = create_test_task_with_id("Same Title", task_id_1.clone());
-        let task_2 = create_test_task_with_id("Same Title", task_id_2.clone());
+        let task_1 = create_test_task_with_id("Same Title", task_id_1);
+        let task_2 = create_test_task_with_id("Same Title", task_id_2);
 
         // Initial state: both tasks exist
         let tasks: PersistentVector<Task> =
@@ -18239,7 +18160,7 @@ mod apply_changes_tests {
         let index = SearchIndex::build_with_config(&tasks, SearchIndexConfig::default());
 
         // Remove task_1 only
-        let changes = vec![TaskChange::Remove(task_id_1.clone())];
+        let changes = vec![TaskChange::Remove(task_id_1)];
 
         // Batch apply
         let batch_result = index.apply_changes(&changes);
@@ -18401,7 +18322,7 @@ mod apply_changes_tests {
         let new_task = create_test_task("newitem task");
         let changes = vec![
             TaskChange::Add(new_task.clone()),
-            TaskChange::Remove(existing_task.task_id.clone()),
+            TaskChange::Remove(existing_task.task_id),
             TaskChange::Add(create_test_task("another task")),
         ];
 
@@ -18438,9 +18359,9 @@ mod apply_changes_tests {
         let task_id_2 = task_id_from_u128(2);
         let task_id_3 = task_id_from_u128(3);
 
-        let task_1 = create_test_task_with_id("callback function handler", task_id_1.clone());
-        let task_2 = create_test_task_with_id("important meeting tomorrow", task_id_2.clone());
-        let task_3 = create_test_task_with_id("handler for events", task_id_3.clone());
+        let task_1 = create_test_task_with_id("callback function handler", task_id_1);
+        let task_2 = create_test_task_with_id("important meeting tomorrow", task_id_2);
+        let task_3 = create_test_task_with_id("handler for events", task_id_3);
 
         let changes = vec![
             TaskChange::Add(task_1.clone()),
@@ -18508,9 +18429,9 @@ mod apply_changes_tests {
         let task_id_3 = task_id_from_u128(103);
 
         // Words "callback", "backlog", "feedback" share common substrings for n-gram tests
-        let task_1 = create_test_task_with_id("callback function for api", task_id_1.clone());
-        let task_2 = create_test_task_with_id("backlog management system", task_id_2.clone());
-        let task_3 = create_test_task_with_id("feedback collection tool", task_id_3.clone());
+        let task_1 = create_test_task_with_id("callback function for api", task_id_1);
+        let task_2 = create_test_task_with_id("backlog management system", task_id_2);
+        let task_3 = create_test_task_with_id("feedback collection tool", task_id_3);
 
         let changes = vec![
             TaskChange::Add(task_1.clone()),
@@ -19005,7 +18926,7 @@ mod apply_changes_tests {
         let new_task = create_test_task("New Task");
         let changes = vec![
             TaskChange::Add(new_task.clone()),
-            TaskChange::Remove(existing_task.task_id.clone()),
+            TaskChange::Remove(existing_task.task_id),
         ];
 
         let result = index.apply_changes(&changes);
@@ -19126,8 +19047,8 @@ mod apply_changes_tests {
             SearchIndex::build_with_config(&PersistentVector::new(), SearchIndexConfig::default());
 
         let task_id = task_id_from_u128(42);
-        let task_first = create_test_task_with_id("first title", task_id.clone());
-        let task_second = create_test_task_with_id("second title", task_id.clone());
+        let task_first = create_test_task_with_id("first title", task_id);
+        let task_second = create_test_task_with_id("second title", task_id);
 
         let changes = vec![
             TaskChange::Add(task_first.clone()),
@@ -19571,7 +19492,7 @@ mod ngram_key_tests {
         let task_id = TaskId::generate();
 
         let key1 = pool.intern("index_test_key");
-        index.entry(key1.clone()).or_default().push(task_id.clone());
+        index.entry(key1.clone()).or_default().push(task_id);
 
         let key2 = pool.intern("index_test_key");
 
@@ -20732,7 +20653,7 @@ mod search_index_bulk_builder_tests {
         let index = SearchIndexBulkBuilder::new(config)
             .add_entry("callback".to_string(), task_id_1)
             .add_entry("callback".to_string(), task_id_2)
-            .add_entry("callback".to_string(), task_id_3.clone())
+            .add_entry("callback".to_string(), task_id_3)
             .build()
             .expect("build should succeed");
 
@@ -20918,7 +20839,7 @@ mod search_index_bulk_builder_tests {
 
         let task_id = make_task_id(1);
         let index = SearchIndexBulkBuilder::new(config)
-            .add_entry("callback".to_string(), task_id.clone())
+            .add_entry("callback".to_string(), task_id)
             .build()
             .expect("build should succeed");
 
@@ -21475,8 +21396,8 @@ mod merge_ngram_delta_optimization_tests {
             let individual_collection = individual_materialized
                 .get(key.as_str())
                 .unwrap_or_else(|| panic!("Key '{}' missing in individual result", key.as_str()));
-            let bulk_ids: Vec<_> = bulk_collection.iter_sorted().cloned().collect();
-            let individual_ids: Vec<_> = individual_collection.iter_sorted().cloned().collect();
+            let bulk_ids: Vec<_> = bulk_collection.iter_sorted().copied().collect();
+            let individual_ids: Vec<_> = individual_collection.iter_sorted().copied().collect();
             assert_eq!(
                 bulk_ids,
                 individual_ids,
@@ -21518,7 +21439,7 @@ mod merge_ngram_delta_optimization_tests {
         let mut delta_changes: Vec<TaskChange> = initial_tasks
             .iter()
             .take(3)
-            .map(|t| TaskChange::Remove(t.task_id.clone()))
+            .map(|t| TaskChange::Remove(t.task_id))
             .collect();
         delta_changes.extend(
             (0..5)
@@ -22035,8 +21956,8 @@ mod merge_posting_add_only_tests {
                 .title_word_index
                 .get(key.as_str())
                 .expect("Key should exist in owned result");
-            let borrowed_elements: Vec<_> = borrowed_collection.iter_sorted().cloned().collect();
-            let owned_elements: Vec<_> = owned_collection.iter_sorted().cloned().collect();
+            let borrowed_elements: Vec<_> = borrowed_collection.iter_sorted().copied().collect();
+            let owned_elements: Vec<_> = owned_collection.iter_sorted().copied().collect();
             assert_eq!(
                 borrowed_elements,
                 owned_elements,
@@ -22050,8 +21971,8 @@ mod merge_posting_add_only_tests {
                 .title_full_index
                 .get(key.as_str())
                 .expect("Key should exist in owned result");
-            let borrowed_elements: Vec<_> = borrowed_collection.iter_sorted().cloned().collect();
-            let owned_elements: Vec<_> = owned_collection.iter_sorted().cloned().collect();
+            let borrowed_elements: Vec<_> = borrowed_collection.iter_sorted().copied().collect();
+            let owned_elements: Vec<_> = owned_collection.iter_sorted().copied().collect();
             assert_eq!(
                 borrowed_elements,
                 owned_elements,
@@ -22065,8 +21986,8 @@ mod merge_posting_add_only_tests {
                 .tag_index
                 .get(key.as_str())
                 .expect("Key should exist in owned result");
-            let borrowed_elements: Vec<_> = borrowed_collection.iter_sorted().cloned().collect();
-            let owned_elements: Vec<_> = owned_collection.iter_sorted().cloned().collect();
+            let borrowed_elements: Vec<_> = borrowed_collection.iter_sorted().copied().collect();
+            let owned_elements: Vec<_> = owned_collection.iter_sorted().copied().collect();
             assert_eq!(
                 borrowed_elements,
                 owned_elements,
@@ -22090,9 +22011,9 @@ mod merge_posting_add_only_tests {
             assert_eq!(
                 borrowed_collection
                     .iter_sorted()
-                    .cloned()
+                    .copied()
                     .collect::<Vec<_>>(),
-                owned_collection.iter_sorted().cloned().collect::<Vec<_>>(),
+                owned_collection.iter_sorted().copied().collect::<Vec<_>>(),
                 "title_full_ngram_index posting list mismatch for key '{}'",
                 key.as_str()
             );
@@ -22112,9 +22033,9 @@ mod merge_posting_add_only_tests {
             assert_eq!(
                 borrowed_collection
                     .iter_sorted()
-                    .cloned()
+                    .copied()
                     .collect::<Vec<_>>(),
-                owned_collection.iter_sorted().cloned().collect::<Vec<_>>(),
+                owned_collection.iter_sorted().copied().collect::<Vec<_>>(),
                 "title_word_ngram_index posting list mismatch for key '{}'",
                 key.as_str()
             );
@@ -22134,9 +22055,9 @@ mod merge_posting_add_only_tests {
             assert_eq!(
                 borrowed_collection
                     .iter_sorted()
-                    .cloned()
+                    .copied()
                     .collect::<Vec<_>>(),
-                owned_collection.iter_sorted().cloned().collect::<Vec<_>>(),
+                owned_collection.iter_sorted().copied().collect::<Vec<_>>(),
                 "tag_ngram_index posting list mismatch for key '{}'",
                 key.as_str()
             );
@@ -22156,9 +22077,9 @@ mod merge_posting_add_only_tests {
             assert_eq!(
                 borrowed_collection
                     .iter_sorted()
-                    .cloned()
+                    .copied()
                     .collect::<Vec<_>>(),
-                owned_collection.iter_sorted().cloned().collect::<Vec<_>>(),
+                owned_collection.iter_sorted().copied().collect::<Vec<_>>(),
                 "title_full_all_suffix_index posting list mismatch for key '{}'",
                 key.as_str()
             );
@@ -22177,9 +22098,9 @@ mod merge_posting_add_only_tests {
             assert_eq!(
                 borrowed_collection
                     .iter_sorted()
-                    .cloned()
+                    .copied()
                     .collect::<Vec<_>>(),
-                owned_collection.iter_sorted().cloned().collect::<Vec<_>>(),
+                owned_collection.iter_sorted().copied().collect::<Vec<_>>(),
                 "title_word_all_suffix_index posting list mismatch for key '{}'",
                 key.as_str()
             );
@@ -22198,9 +22119,9 @@ mod merge_posting_add_only_tests {
             assert_eq!(
                 borrowed_collection
                     .iter_sorted()
-                    .cloned()
+                    .copied()
                     .collect::<Vec<_>>(),
-                owned_collection.iter_sorted().cloned().collect::<Vec<_>>(),
+                owned_collection.iter_sorted().copied().collect::<Vec<_>>(),
                 "tag_all_suffix_index posting list mismatch for key '{}'",
                 key.as_str()
             );
@@ -22229,8 +22150,8 @@ mod merge_posting_add_only_tests {
             let owned_collection = result_owned
                 .get(key.as_str())
                 .expect("Key should exist in owned result");
-            let borrowed_elements: Vec<_> = borrowed_collection.iter_sorted().cloned().collect();
-            let owned_elements: Vec<_> = owned_collection.iter_sorted().cloned().collect();
+            let borrowed_elements: Vec<_> = borrowed_collection.iter_sorted().copied().collect();
+            let owned_elements: Vec<_> = owned_collection.iter_sorted().copied().collect();
             assert_eq!(
                 borrowed_elements,
                 owned_elements,
@@ -22248,7 +22169,7 @@ mod merge_posting_add_only_tests {
         let id_3 = TaskId::from_uuid(Uuid::from_u128(3));
 
         let mut initial_add: MutableIndex = std::collections::HashMap::new();
-        initial_add.insert(NgramKey::new("hello"), vec![id_1.clone()]);
+        initial_add.insert(NgramKey::new("hello"), vec![id_1]);
         let index =
             SearchIndex::merge_index_delta_add_only_for_test(&PrefixIndex::new(), &initial_add);
 
@@ -22265,8 +22186,8 @@ mod merge_posting_add_only_tests {
             let owned_collection = result_owned
                 .get(key.as_str())
                 .expect("Key should exist in owned result");
-            let borrowed_elements: Vec<_> = borrowed_collection.iter_sorted().cloned().collect();
-            let owned_elements: Vec<_> = owned_collection.iter_sorted().cloned().collect();
+            let borrowed_elements: Vec<_> = borrowed_collection.iter_sorted().copied().collect();
+            let owned_elements: Vec<_> = owned_collection.iter_sorted().copied().collect();
             assert_eq!(
                 borrowed_elements,
                 owned_elements,
@@ -22301,7 +22222,7 @@ mod merge_posting_add_only_tests {
         let id_1 = TaskId::from_uuid(Uuid::from_u128(1));
         let id_2 = TaskId::from_uuid(Uuid::from_u128(2));
 
-        add.insert(NgramKey::new("hel"), vec![id_1.clone(), id_2]);
+        add.insert(NgramKey::new("hel"), vec![id_1, id_2]);
         add.insert(NgramKey::new("ell"), vec![id_1]);
 
         let result_borrowed =
@@ -22316,8 +22237,8 @@ mod merge_posting_add_only_tests {
             let owned_collection = result_owned
                 .get(key.as_str())
                 .expect("Key should exist in owned result");
-            let borrowed_elements: Vec<_> = borrowed_collection.iter_sorted().cloned().collect();
-            let owned_elements: Vec<_> = owned_collection.iter_sorted().cloned().collect();
+            let borrowed_elements: Vec<_> = borrowed_collection.iter_sorted().copied().collect();
+            let owned_elements: Vec<_> = owned_collection.iter_sorted().copied().collect();
             assert_eq!(
                 borrowed_elements,
                 owned_elements,
@@ -22336,7 +22257,7 @@ mod merge_posting_add_only_tests {
         let id_1 = TaskId::from_uuid(Uuid::from_u128(1));
         let id_2 = TaskId::from_uuid(Uuid::from_u128(2));
 
-        add.insert(NgramKey::new("hel"), vec![id_1.clone(), id_2]);
+        add.insert(NgramKey::new("hel"), vec![id_1, id_2]);
         add.insert(NgramKey::new("ell"), vec![id_1]);
 
         let result_borrowed =
@@ -22350,8 +22271,8 @@ mod merge_posting_add_only_tests {
             let owned_collection = result_owned
                 .get(key.as_str())
                 .expect("Key should exist in owned result");
-            let borrowed_elements: Vec<_> = borrowed_collection.iter_sorted().cloned().collect();
-            let owned_elements: Vec<_> = owned_collection.iter_sorted().cloned().collect();
+            let borrowed_elements: Vec<_> = borrowed_collection.iter_sorted().copied().collect();
+            let owned_elements: Vec<_> = owned_collection.iter_sorted().copied().collect();
             assert_eq!(
                 borrowed_elements,
                 owned_elements,
@@ -22381,7 +22302,7 @@ mod merge_posting_add_only_tests {
         add_delta.prepare_posting_lists();
         let index_with_tasks = index.apply_delta(&add_delta, &add_changes);
 
-        let remove_changes = vec![TaskChange::Remove(tasks[0].task_id.clone())];
+        let remove_changes = vec![TaskChange::Remove(tasks[0].task_id)];
         let mut remove_delta = SearchIndexDelta::from_changes(
             &remove_changes,
             &index_with_tasks.config,
@@ -22420,9 +22341,9 @@ mod merge_posting_add_only_tests {
             assert_eq!(
                 borrowed_collection
                     .iter_sorted()
-                    .cloned()
+                    .copied()
                     .collect::<Vec<_>>(),
-                owned_collection.iter_sorted().cloned().collect::<Vec<_>>(),
+                owned_collection.iter_sorted().copied().collect::<Vec<_>>(),
             );
         }
 
@@ -22438,9 +22359,9 @@ mod merge_posting_add_only_tests {
             assert_eq!(
                 borrowed_collection
                     .iter_sorted()
-                    .cloned()
+                    .copied()
                     .collect::<Vec<_>>(),
-                owned_collection.iter_sorted().cloned().collect::<Vec<_>>(),
+                owned_collection.iter_sorted().copied().collect::<Vec<_>>(),
             );
         }
 
@@ -22456,9 +22377,9 @@ mod merge_posting_add_only_tests {
             assert_eq!(
                 borrowed_collection
                     .iter_sorted()
-                    .cloned()
+                    .copied()
                     .collect::<Vec<_>>(),
-                owned_collection.iter_sorted().cloned().collect::<Vec<_>>(),
+                owned_collection.iter_sorted().copied().collect::<Vec<_>>(),
             );
         }
 
@@ -22476,9 +22397,9 @@ mod merge_posting_add_only_tests {
             assert_eq!(
                 borrowed_collection
                     .iter_sorted()
-                    .cloned()
+                    .copied()
                     .collect::<Vec<_>>(),
-                owned_collection.iter_sorted().cloned().collect::<Vec<_>>(),
+                owned_collection.iter_sorted().copied().collect::<Vec<_>>(),
             );
         }
 
@@ -22495,9 +22416,9 @@ mod merge_posting_add_only_tests {
             assert_eq!(
                 borrowed_collection
                     .iter_sorted()
-                    .cloned()
+                    .copied()
                     .collect::<Vec<_>>(),
-                owned_collection.iter_sorted().cloned().collect::<Vec<_>>(),
+                owned_collection.iter_sorted().copied().collect::<Vec<_>>(),
             );
         }
 
@@ -22511,9 +22432,9 @@ mod merge_posting_add_only_tests {
             assert_eq!(
                 borrowed_collection
                     .iter_sorted()
-                    .cloned()
+                    .copied()
                     .collect::<Vec<_>>(),
-                owned_collection.iter_sorted().cloned().collect::<Vec<_>>(),
+                owned_collection.iter_sorted().copied().collect::<Vec<_>>(),
             );
         }
 
@@ -22530,9 +22451,9 @@ mod merge_posting_add_only_tests {
             assert_eq!(
                 borrowed_collection
                     .iter_sorted()
-                    .cloned()
+                    .copied()
                     .collect::<Vec<_>>(),
-                owned_collection.iter_sorted().cloned().collect::<Vec<_>>(),
+                owned_collection.iter_sorted().copied().collect::<Vec<_>>(),
             );
         }
 
@@ -22548,9 +22469,9 @@ mod merge_posting_add_only_tests {
             assert_eq!(
                 borrowed_collection
                     .iter_sorted()
-                    .cloned()
+                    .copied()
                     .collect::<Vec<_>>(),
-                owned_collection.iter_sorted().cloned().collect::<Vec<_>>(),
+                owned_collection.iter_sorted().copied().collect::<Vec<_>>(),
             );
         }
 
@@ -22566,9 +22487,9 @@ mod merge_posting_add_only_tests {
             assert_eq!(
                 borrowed_collection
                     .iter_sorted()
-                    .cloned()
+                    .copied()
                     .collect::<Vec<_>>(),
-                owned_collection.iter_sorted().cloned().collect::<Vec<_>>(),
+                owned_collection.iter_sorted().copied().collect::<Vec<_>>(),
             );
         }
     }
@@ -22619,7 +22540,7 @@ mod merge_delta_add_only_none_branch_tests {
 
     fn assert_collection_eq(actual: &TaskIdCollection, expected_ids: &[TaskId]) {
         assert_eq!(
-            actual.iter_sorted().cloned().collect::<Vec<_>>(),
+            actual.iter_sorted().copied().collect::<Vec<_>>(),
             expected_ids,
         );
     }
@@ -22723,7 +22644,7 @@ mod concat_fast_path_tests {
 
     fn assert_collection_sorted_eq(actual: &TaskIdCollection, expected_ids: &[TaskId]) {
         assert_eq!(
-            actual.iter_sorted().cloned().collect::<Vec<_>>(),
+            actual.iter_sorted().copied().collect::<Vec<_>>(),
             expected_ids,
         );
     }
@@ -23006,7 +22927,7 @@ mod concat_fast_path_tests {
                 .get(key.as_str())
                 .unwrap()
                 .iter_sorted()
-                .cloned()
+                .copied()
                 .collect();
 
             prop_assert_eq!(&actual, &reference);
@@ -23018,7 +22939,7 @@ mod concat_fast_path_tests {
                 .get(key.as_str())
                 .unwrap()
                 .iter_sorted()
-                .cloned()
+                .copied()
                 .collect();
 
             prop_assert_eq!(&actual_owned, &reference);
@@ -23074,7 +22995,7 @@ mod ngram_segment_overlay_tests {
 
     /// Helper: collects sorted task IDs from a `TaskIdCollection`.
     fn sorted_ids(collection: &TaskIdCollection) -> Vec<TaskId> {
-        collection.iter_sorted().cloned().collect()
+        collection.iter_sorted().copied().collect()
     }
 
     // -------------------------------------------------------------------------
@@ -23558,17 +23479,9 @@ mod ngram_segment_overlay_tests {
             let result_rebuilt = search_with_scope_indexed(&index_rebuilt, query, SearchScope::All);
 
             // Compare task IDs (sorted for deterministic comparison)
-            let mut overlay_ids: Vec<_> = result_overlay
-                .tasks
-                .iter()
-                .map(|t| t.task_id.clone())
-                .collect();
+            let mut overlay_ids: Vec<_> = result_overlay.tasks.iter().map(|t| t.task_id).collect();
             overlay_ids.sort();
-            let mut rebuilt_ids: Vec<_> = result_rebuilt
-                .tasks
-                .iter()
-                .map(|t| t.task_id.clone())
-                .collect();
+            let mut rebuilt_ids: Vec<_> = result_rebuilt.tasks.iter().map(|t| t.task_id).collect();
             rebuilt_ids.sort();
 
             assert_eq!(
@@ -23676,7 +23589,7 @@ mod ngram_segment_overlay_tests {
         let mut pre_compaction_results: Vec<Vec<TaskId>> = Vec::new();
         for query in &queries {
             let result = search_with_scope_indexed(&current_index, query, SearchScope::All);
-            let mut ids: Vec<_> = result.tasks.iter().map(|t| t.task_id.clone()).collect();
+            let mut ids: Vec<_> = result.tasks.iter().map(|t| t.task_id).collect();
             ids.sort();
             pre_compaction_results.push(ids);
         }
@@ -23703,7 +23616,7 @@ mod ngram_segment_overlay_tests {
         // Verify search results are identical after compaction
         for (index, query) in queries.iter().enumerate() {
             let result = search_with_scope_indexed(&compacted_index, query, SearchScope::All);
-            let mut ids: Vec<_> = result.tasks.iter().map(|t| t.task_id.clone()).collect();
+            let mut ids: Vec<_> = result.tasks.iter().map(|t| t.task_id).collect();
             ids.sort();
             assert_eq!(
                 pre_compaction_results[index], ids,
@@ -24619,7 +24532,7 @@ mod adaptive_merge_tests {
         let result = merge_sorted_posting_lists(&existing, &new_entries);
 
         // Verify by checking that all elements from both sets are present
-        let result_vec: Vec<TaskId> = result.iter_sorted().cloned().collect();
+        let result_vec: Vec<TaskId> = result.iter_sorted().copied().collect();
         assert_eq!(result_vec.len(), 105); // 100 + 5 new unique elements
 
         // Verify the new entries are present
@@ -24768,7 +24681,7 @@ mod search_index_writer_tests {
         );
 
         let task = create_task("Writer Test Task");
-        let task_id = task.task_id.clone();
+        let task_id = task.task_id;
 
         writer
             .send_change(TaskChange::Add(task))
@@ -24801,9 +24714,9 @@ mod search_index_writer_tests {
         let task1 = create_task("Alpha Task");
         let task2 = create_task("Beta Task");
         let task3 = create_task("Gamma Task");
-        let task1_id = task1.task_id.clone();
-        let task2_id = task2.task_id.clone();
-        let task3_id = task3.task_id.clone();
+        let task1_id = task1.task_id;
+        let task2_id = task2.task_id;
+        let task3_id = task3.task_id;
 
         writer
             .send_changes(vec![
@@ -24863,8 +24776,8 @@ mod search_index_writer_tests {
         let task_to_keep = create_task("Keep Me");
         let task_to_remove = create_task("Remove Me");
         let task_to_update = create_task("Update Me");
-        let keep_id = task_to_keep.task_id.clone();
-        let remove_id = task_to_remove.task_id.clone();
+        let keep_id = task_to_keep.task_id;
+        let remove_id = task_to_remove.task_id;
 
         // Clone tasks that need to survive the initial Add batch
         let task_to_update_clone_for_add = task_to_update.clone();
@@ -25026,7 +24939,7 @@ mod search_index_writer_tests {
 
         // Send only 1 change (well below batch_size of 100)
         let task = create_task("Timeout Flush Task");
-        let task_id = task.task_id.clone();
+        let task_id = task.task_id;
         writer
             .send_change(TaskChange::Add(task))
             .expect("send should succeed");
@@ -25087,7 +25000,7 @@ mod search_index_writer_tests {
                     for task_index in 0..tasks_per_thread {
                         let title = format!("Concurrent_T{thread_index}_I{task_index}");
                         let task = create_task(&title);
-                        let task_id = task.task_id.clone();
+                        let task_id = task.task_id;
 
                         {
                             let mut guard = all_task_ids.lock().unwrap();
@@ -25111,12 +25024,10 @@ mod search_index_writer_tests {
         // Verify all tasks are present
         let final_index = search_index.load();
         let all_tasks_in_index = final_index.all_tasks();
-        let actual_ids: HashSet<TaskId> = all_tasks_in_index
-            .iter()
-            .map(|task| task.task_id.clone())
-            .collect();
+        let actual_ids: HashSet<TaskId> =
+            all_tasks_in_index.iter().map(|task| task.task_id).collect();
 
-        let expected_ids: HashSet<TaskId> = all_task_ids.lock().unwrap().iter().cloned().collect();
+        let expected_ids: HashSet<TaskId> = all_task_ids.lock().unwrap().iter().copied().collect();
 
         assert_eq!(
             actual_ids.len(),
@@ -25279,8 +25190,8 @@ mod merge_arena_integration_tests {
             let collection_with = result_with_arena
                 .get(key.as_str())
                 .expect("Key should exist in arena result");
-            let without_elements: Vec<_> = collection_without.iter_sorted().cloned().collect();
-            let with_elements: Vec<_> = collection_with.iter_sorted().cloned().collect();
+            let without_elements: Vec<_> = collection_without.iter_sorted().copied().collect();
+            let with_elements: Vec<_> = collection_with.iter_sorted().copied().collect();
             assert_eq!(
                 without_elements,
                 with_elements,
@@ -25390,8 +25301,8 @@ mod merge_arena_integration_tests {
                 .title_word_index
                 .get(key.as_str())
                 .expect("Key should exist in arena result");
-            let without_elements: Vec<_> = without_collection.iter_sorted().cloned().collect();
-            let with_elements: Vec<_> = with_collection.iter_sorted().cloned().collect();
+            let without_elements: Vec<_> = without_collection.iter_sorted().copied().collect();
+            let with_elements: Vec<_> = with_collection.iter_sorted().copied().collect();
             assert_eq!(
                 without_elements,
                 with_elements,
@@ -25462,8 +25373,8 @@ mod merge_arena_integration_tests {
             let with_collection = materialized_with
                 .get(key)
                 .expect("Key should exist in arena result");
-            let without_ids: Vec<_> = without_collection.iter_sorted().cloned().collect();
-            let with_ids: Vec<_> = with_collection.iter_sorted().cloned().collect();
+            let without_ids: Vec<_> = without_collection.iter_sorted().copied().collect();
+            let with_ids: Vec<_> = with_collection.iter_sorted().copied().collect();
             assert_eq!(without_ids, with_ids, "Mismatch for key '{}'", key.as_str());
         }
     }
@@ -25535,8 +25446,8 @@ mod merge_arena_integration_tests {
                         key.as_str()
                     )
                 });
-            let bulk_ids: Vec<_> = bulk_collection.iter_sorted().cloned().collect();
-            let arena_ids: Vec<_> = arena_collection.iter_sorted().cloned().collect();
+            let bulk_ids: Vec<_> = bulk_collection.iter_sorted().copied().collect();
+            let arena_ids: Vec<_> = arena_collection.iter_sorted().copied().collect();
             assert_eq!(
                 bulk_ids,
                 arena_ids,
@@ -25550,8 +25461,8 @@ mod merge_arena_integration_tests {
             let arena_collection = result_arena.tag_index.get(key.as_str()).unwrap_or_else(|| {
                 panic!("tag_index key '{}' missing in arena result", key.as_str())
             });
-            let bulk_ids: Vec<_> = bulk_collection.iter_sorted().cloned().collect();
-            let arena_ids: Vec<_> = arena_collection.iter_sorted().cloned().collect();
+            let bulk_ids: Vec<_> = bulk_collection.iter_sorted().copied().collect();
+            let arena_ids: Vec<_> = arena_collection.iter_sorted().copied().collect();
             assert_eq!(
                 bulk_ids,
                 arena_ids,
@@ -25774,8 +25685,8 @@ mod merge_arena_integration_tests {
                 let collection_b = result_b
                     .get(key.as_str())
                     .unwrap_or_else(|| panic!("{label}: key '{}' missing", key.as_str()));
-                let ids_a: Vec<_> = collection_a.iter_sorted().cloned().collect();
-                let ids_b: Vec<_> = collection_b.iter_sorted().cloned().collect();
+                let ids_a: Vec<_> = collection_a.iter_sorted().copied().collect();
+                let ids_b: Vec<_> = collection_b.iter_sorted().copied().collect();
                 assert_eq!(
                     ids_a,
                     ids_b,

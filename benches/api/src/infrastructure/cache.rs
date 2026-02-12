@@ -367,7 +367,7 @@ impl<P: TaskRepository + 'static> CachedTaskRepository<P> {
         let pool = self.pool.clone();
         let primary = self.primary.clone();
         let config = self.config.clone();
-        let task_id = id.clone();
+        let task_id = *id;
 
         AsyncIO::new(move || async move {
             // If cache is disabled, bypass cache entirely
@@ -615,7 +615,7 @@ impl<P: TaskRepository + 'static> TaskRepository for CachedTaskRepository<P> {
         let pool = self.pool.clone();
         let primary = self.primary.clone();
         let config = self.config.clone();
-        let task_id = id.clone();
+        let task_id = *id;
 
         AsyncIO::new(move || async move {
             // If cache is disabled, bypass cache entirely
@@ -965,7 +965,7 @@ impl<P: TaskRepository + 'static> TaskRepository for CachedTaskRepository<P> {
     fn delete(&self, id: &TaskId) -> AsyncIO<Result<bool, RepositoryError>> {
         let pool = self.pool.clone();
         let primary = self.primary.clone();
-        let task_id = id.clone();
+        let task_id = *id;
 
         AsyncIO::new(move || async move {
             // First, delete from primary storage
