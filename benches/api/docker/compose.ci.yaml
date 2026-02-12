@@ -73,6 +73,8 @@ services:
       USE_BULK_OPTIMIZATION: "${USE_BULK_OPTIMIZATION:-true}"
       BULK_CHUNK_SIZE: "${BULK_CHUNK_SIZE:-50}"
       BULK_CONCURRENCY_LIMIT: "${BULK_CONCURRENCY_LIMIT:-4}"
+      # Writer profile for SearchIndex writer configuration
+      WRITER_PROFILE: "${WRITER_PROFILE:-default}"
     ports:
       - "3002:3000"
     depends_on:
