@@ -716,86 +716,109 @@ jobs:
           fi
 
           # Extract scenarios array from config
-          readarray -t SCENARIOS < <(yq '.nightly_scenarios[]' nightly_config.yaml)
+          readarray -t SCENARIOS < <(yq -r '.nightly_scenarios[]' nightly_config.yaml)
           if [[ ${#SCENARIOS[@]} -eq 0 ]]; then
             echo "Error: No scenarios defined in nightly_config.yaml"
             exit 1
           fi
 
-          # Extract variants from config and convert to env var format
+          # Extract variants from config: store each variant as a JSON string
           # Config format: { hit_rate: 0, fail_injection: 0, payload: small }
-          # Output format: "HIT_RATE=0 FAIL_RATE=0 PAYLOAD=small"
-          readarray -t VARIANTS < <(yq -o=json '.nightly_variants[]' nightly_config.yaml | while read -r variant; do
-            hit_rate=$(echo "${variant}" | jq -r '.hit_rate')
-            fail_rate=$(echo "${variant}" | jq -r '.fail_injection')
-            payload=$(echo "${variant}" | jq -r '.payload')
-            echo "HIT_RATE=${hit_rate} FAIL_RATE=${fail_rate} PAYLOAD=${payload}"
-          done)
+          readarray -t VARIANTS_JSON < <(yq -o=json -I=0 '.nightly_variants[]' nightly_config.yaml)
+          if [[ ${#VARIANTS_JSON[@]} -eq 0 ]]; then
+            echo "Error: No variants defined in nightly_config.yaml"
+            exit 1
+          fi
 
-          echo "Loaded ${#SCENARIOS[@]} scenarios and ${#VARIANTS[@]} variants from nightly_config.yaml"
+          echo "Loaded ${#SCENARIOS[@]} scenarios and ${#VARIANTS_JSON[@]} variants from nightly_config.yaml"
 
           for scenario in "${SCENARIOS[@]}"; do
-            echo "=== Running scenario: ${scenario} ==="
+            (
+              # Ensure cleanup on any exit (success or failure)
+              cleanup() {
+                cd benches/api/docker 2>/dev/null || cd ../docker 2>/dev/null || true
+                docker compose -f compose.ci.yaml down -v || true
+              }
+              trap cleanup EXIT
 
-            SCENARIO_PATH="scenarios/${scenario}"
+              cd benches/api/benchmarks
 
-            # Extract scenario-specific configuration
-            if [[ -f "${SCENARIO_PATH}" ]]; then
-              API_FEATURES=$(yq '.docker_build.api_features // ""' "${SCENARIO_PATH}")
-              WRITER_PROFILE=$(yq '.docker_runtime.writer_profile // ""' "${SCENARIO_PATH}")
-            else
+              echo "=== Running scenario: ${scenario} ==="
+
+              SCENARIO_PATH="scenarios/${scenario}"
+
+              # Extract scenario-specific configuration (only for tasks_bulk)
               API_FEATURES=""
               WRITER_PROFILE=""
-            fi
+              if [[ "${scenario}" == "tasks_bulk.yaml" ]]; then
+                API_FEATURES=$(yq -r '.docker_build.api_features // ""' "${SCENARIO_PATH}")
+                WRITER_PROFILE=$(yq -r '.docker_runtime.writer_profile // ""' "${SCENARIO_PATH}")
+                echo "tasks_bulk scenario: applying API_FEATURES=${API_FEATURES} WRITER_PROFILE=${WRITER_PROFILE}"
+              fi
 
-            # Start services with scenario-specific environment
-            (
-              [[ -n "${API_FEATURES}" ]] && export API_FEATURES="${API_FEATURES}" && echo "API_FEATURES=${API_FEATURES}"
-              [[ -n "${WRITER_PROFILE}" ]] && export WRITER_PROFILE="${WRITER_PROFILE}" && echo "WRITER_PROFILE=${WRITER_PROFILE}"
-              cd ../docker && docker compose -f compose.ci.yaml up -d --build --wait
+              # Start services with scenario-specific environment
+              (
+                [[ -n "${API_FEATURES}" ]] && export API_FEATURES="${API_FEATURES}" || unset API_FEATURES
+                [[ -n "${WRITER_PROFILE}" ]] && export WRITER_PROFILE="${WRITER_PROFILE}" || unset WRITER_PROFILE
+                cd ../docker && docker compose -f compose.ci.yaml up -d --build --wait
+              )
+
+              # Setup data
+              ./setup_test_data.sh --scale medium
+
+              # Run baseline (reset variant environment)
+              unset HIT_RATE FAIL_RATE PAYLOAD
+              ./run_benchmark.sh --scenario "${SCENARIO_PATH}"
+
+              # RPS gate check (fail-closed, tasks_bulk only)
+              if [[ "${scenario}" == "tasks_bulk.yaml" ]]; then
+                SCENARIO_NAME=$(basename "${scenario}" .yaml)
+                BASELINE_META_DIR=$(ls -td results/*/"${SCENARIO_NAME}"/ 2>/dev/null | head -1)
+
+                if [[ -z "${BASELINE_META_DIR}" ]]; then
+                  echo "ERROR: Baseline results not found for scenario ${scenario}"
+                  exit 1
+                fi
+
+                BASELINE_META="${BASELINE_META_DIR}/meta.json"
+                if [[ ! -f "${BASELINE_META}" ]]; then
+                  echo "ERROR: ${SCENARIO_NAME}/meta.json not found"
+                  exit 1
+                fi
+
+                ACTUAL_RPS=$(jq -er '.results.rps' "${BASELINE_META}") || {
+                  echo "ERROR: Invalid or missing results.rps in ${BASELINE_META}"
+                  exit 1
+                }
+
+                MIN_RPS=$(yq -er '.thresholds.min_rps_achieved' "${SCENARIO_PATH}") || {
+                  echo "ERROR: thresholds.min_rps_achieved missing in ${SCENARIO_PATH}"
+                  exit 1
+                }
+
+                echo "RPS Gate: actual=${ACTUAL_RPS}, min=${MIN_RPS}"
+
+                if (( $(echo "${ACTUAL_RPS} < ${MIN_RPS}" | bc -l) )); then
+                  echo "ERROR: RPS ${ACTUAL_RPS} below threshold ${MIN_RPS}"
+                  exit 1
+                fi
+              fi
+
+              # Run variants (isolated environment)
+              for variant_json in "${VARIANTS_JSON[@]}"; do
+                hit_rate=$(jq -er '.hit_rate' <<< "${variant_json}")
+                fail_rate=$(jq -er '.fail_injection' <<< "${variant_json}")
+                payload=$(jq -er '.payload' <<< "${variant_json}")
+
+                echo "--- Variant: hit_rate=${hit_rate}, fail_rate=${fail_rate}, payload=${payload} ---"
+                (
+                  export HIT_RATE="${hit_rate}"
+                  export FAIL_RATE="${fail_rate}"
+                  export PAYLOAD="${payload}"
+                  ./run_benchmark.sh --scenario "${SCENARIO_PATH}"
+                )
+              done
             )
-            cd ../benchmarks
-
-            # Setup data
-            ./setup_test_data.sh --scale medium
-
-            # Run baseline (reset variant environment)
-            unset HIT_RATE FAIL_RATE PAYLOAD
-            ./run_benchmark.sh --scenario "${SCENARIO_PATH}"
-
-            # RPS gate check (fail-closed)
-            BASELINE_META_DIR=$(ls -td results/*/$(basename "${scenario}" .yaml)/ 2>/dev/null | head -1)
-            if [[ -z "${BASELINE_META_DIR}" ]]; then
-              echo "ERROR: Baseline results not found for scenario ${scenario}"
-              cd ../docker && docker compose -f compose.ci.yaml down -v
-              exit 1
-            fi
-
-            BASELINE_META=$(find "${BASELINE_META_DIR}" -name "meta.json" -type f | head -1)
-            if [[ ! -f "${BASELINE_META}" ]]; then
-              echo "ERROR: meta.json not found for scenario ${scenario}"
-              cd ../docker && docker compose -f compose.ci.yaml down -v
-              exit 1
-            fi
-
-            ACTUAL_RPS=$(jq -r '.results.rps // 0' "${BASELINE_META}")
-            MIN_RPS=$(yq '.thresholds.min_rps_achieved // 0' "${SCENARIO_PATH}")
-            echo "RPS Gate: actual=${ACTUAL_RPS}, min=${MIN_RPS}"
-
-            if (( $(echo "${ACTUAL_RPS} < ${MIN_RPS}" | bc -l) )); then
-              echo "ERROR: RPS ${ACTUAL_RPS} below threshold ${MIN_RPS}"
-              cd ../docker && docker compose -f compose.ci.yaml down -v
-              exit 1
-            fi
-
-            # Run variants (isolated environment)
-            for variant in "${VARIANTS[@]}"; do
-              echo "--- Variant: ${variant} ---"
-              ( export ${variant}; ./run_benchmark.sh --scenario "${SCENARIO_PATH}" )
-            done
-
-            # Cleanup
-            cd ../docker && docker compose -f compose.ci.yaml down -v
           done
 
       - name: Validate meta.json schema

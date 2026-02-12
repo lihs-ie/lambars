@@ -134,6 +134,18 @@ docker_runtime:
 ```
 コンテナ実行時の環境変数（API サーバーのバッチサイズ、タイムアウトなど）。
 
+#### `thresholds.min_rps_achieved` (CI RPS ゲート)
+```yaml
+thresholds:
+  min_rps_achieved: 400
+```
+CI nightly の tasks_bulk シナリオで fail-closed RPS ゲートチェックに使用される最小 RPS 閾値。
+この値を下回った場合、CI は失敗します（`.github/workflows/benchmark-api.yml` で評価）。
+
+**注意**: `docker_build` / `docker_runtime` / `thresholds.min_rps_achieved` は CI 専用拡張キーです。
+`cargo xtask bench-api` コマンドでは、厳格な `BenchmarkScenario` 型（`serde(deny_unknown_fields)`）
+によりこれらのキーはエラーになります。CI では `yq` で直接読み取るため動作します。
+
 ### 環境変数
 
 ベンチマークの動作を制御する環境変数を以下に示します。
@@ -202,7 +214,7 @@ RETRY_BACKOFF_MAX=32 ./run_benchmark.sh --scenario scenarios/tasks_update.yaml
 ### しきい値チェック
 
 ```bash
-./check_thresholds.sh results/latest/meta.json
+./check_thresholds.sh results/latest tasks_bulk
 ```
 
 ## Lua スクリプト
