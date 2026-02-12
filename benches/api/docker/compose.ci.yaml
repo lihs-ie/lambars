@@ -45,6 +45,8 @@ services:
     build:
       context: ../../..
       dockerfile: benches/api/docker/Dockerfile
+      args:
+        API_FEATURES: "${API_FEATURES:-}"
     container_name: benchmark-ci-api
     environment:
       HOST: "0.0.0.0"

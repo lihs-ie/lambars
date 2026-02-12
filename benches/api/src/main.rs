@@ -15,6 +15,10 @@
 //! - `WORKER_THREADS`: Number of tokio worker threads (default: logical CPU count)
 //! - `ENABLE_DEBUG_ENDPOINTS`: Enable debug endpoints like `/debug/config` (default: `false`)
 
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use std::env;
 use std::net::SocketAddr;
 
