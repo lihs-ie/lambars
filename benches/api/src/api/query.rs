@@ -1268,23 +1268,72 @@ pub(crate) enum MergePlan {
 }
 
 /// Reusable scratch buffer for merge operations, avoiding repeated heap allocation.
+///
+/// Capacity management uses a hysteresis strategy:
+/// - `reserve_with_hysteresis` grows the buffer by `growth_factor` to amortise
+///   future allocations.
+/// - `compact_when_idle` shrinks the buffer only after `idle_threshold`
+///   consecutive idle cycles, avoiding hot-path shrink/realloc churn.
 pub struct MergeArena {
     scratch: Vec<TaskId>,
     shrink_threshold: usize,
+    growth_factor: f32,
+    idle_counter: usize,
 }
+
+/// Default growth factor for `reserve_with_hysteresis`.
+const DEFAULT_GROWTH_FACTOR: f32 = 1.5;
 
 impl MergeArena {
     pub const fn new() -> Self {
         Self {
             scratch: Vec::new(),
             shrink_threshold: 16_384,
+            // const fn cannot use f32 operations, so we store the bit pattern
+            // and convert in methods. For the default path we use
+            // DEFAULT_GROWTH_FACTOR via `default()`.
+            growth_factor: 1.5,
+            idle_counter: 0,
         }
     }
 
     /// Returns the scratch buffer (cleared but capacity preserved).
     pub fn scratch(&mut self) -> &mut Vec<TaskId> {
         self.scratch.clear();
+        self.idle_counter = 0;
         &mut self.scratch
+    }
+
+    /// Returns the scratch buffer pre-reserved to at least `required` capacity.
+    ///
+    /// The buffer is cleared first, then capacity is ensured via
+    /// [`reserve_with_hysteresis`](Self::reserve_with_hysteresis).
+    pub fn scratch_with_capacity(&mut self, required: usize) -> &mut Vec<TaskId> {
+        self.scratch.clear();
+        self.idle_counter = 0;
+        Self::reserve_with_hysteresis(&mut self.scratch, required, self.growth_factor);
+        &mut self.scratch
+    }
+
+    /// Ensures `buf` has at least `required` capacity, growing by `growth_factor`
+    /// to amortise future allocations.
+    ///
+    /// If the current capacity already meets `required`, this is a no-op.
+    /// Otherwise, the target capacity is `max(required, capacity * growth_factor)`.
+    #[inline]
+    fn reserve_with_hysteresis(
+        buffer: &mut Vec<TaskId>,
+        required: usize,
+        growth_factor: f32,
+    ) {
+        if buffer.capacity() >= required {
+            return;
+        }
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let grown = (buffer.capacity() as f32 * growth_factor) as usize;
+        let target = required.max(grown);
+        // `Vec::reserve` takes *additional* capacity relative to `len()`.
+        buffer.reserve(target.saturating_sub(buffer.len()));
     }
 
     /// Shrinks the scratch buffer when capacity exceeds twice the threshold.
@@ -1298,11 +1347,33 @@ impl MergeArena {
             self.scratch.shrink_to(self.shrink_threshold);
         }
     }
+
+    /// Compacts the scratch buffer only after `idle_threshold` consecutive idle
+    /// cycles.
+    ///
+    /// Call this at the end of each writer-loop iteration. The counter is reset
+    /// to zero whenever [`scratch()`](Self::scratch) or
+    /// [`scratch_with_capacity()`](Self::scratch_with_capacity) is called,
+    /// so an active merge loop never triggers compaction.
+    pub fn compact_when_idle(&mut self, idle_threshold: usize) {
+        self.idle_counter += 1;
+        if self.idle_counter >= idle_threshold
+            && self.scratch.capacity() > self.shrink_threshold
+        {
+            self.scratch.shrink_to(self.shrink_threshold);
+            self.idle_counter = 0;
+        }
+    }
 }
 
 impl Default for MergeArena {
     fn default() -> Self {
-        Self::new()
+        Self {
+            scratch: Vec::new(),
+            shrink_threshold: 16_384,
+            growth_factor: DEFAULT_GROWTH_FACTOR,
+            idle_counter: 0,
+        }
     }
 }
 
@@ -8125,7 +8196,7 @@ impl SearchIndexWriter {
                 Self::apply_coalesced_changes(&search_index, &coalesced_changes, &mut arena);
             }
 
-            arena.maybe_shrink();
+            arena.compact_when_idle(8);
         }
     }
 
@@ -24106,6 +24177,175 @@ mod ngram_segment_overlay_tests {
         // maybe_shrink should NOT shrink (capacity <= threshold)
         arena.maybe_shrink();
         assert_eq!(arena.scratch.capacity(), capacity_before);
+    }
+
+    // =========================================================================
+    // IMPL-TB219-003a: reserve_with_hysteresis tests
+    // =========================================================================
+
+    #[rstest]
+    fn reserve_with_hysteresis_no_realloc_when_sufficient() {
+        let mut arena = MergeArena::new();
+        // Pre-grow buffer to capacity 100
+        let scratch = arena.scratch();
+        scratch.reserve(100);
+        let capacity_before = scratch.capacity();
+        assert!(capacity_before >= 100);
+
+        // reserve_with_hysteresis should not reallocate when capacity is sufficient
+        let scratch = arena.scratch_with_capacity(50);
+        assert!(
+            scratch.capacity() >= capacity_before,
+            "Should not shrink: was {capacity_before}, now {}",
+            scratch.capacity()
+        );
+    }
+
+    #[rstest]
+    fn reserve_with_hysteresis_grows_with_factor() {
+        let mut arena = MergeArena::new();
+        // Start with small capacity
+        let scratch = arena.scratch();
+        scratch.reserve(10);
+        let initial_capacity = scratch.capacity();
+
+        // Request more than current capacity but growth_factor * capacity > required
+        // growth_factor = 1.5, so if capacity=10, grown = 15
+        // required = 12, target = max(12, 15) = 15
+        let scratch = arena.scratch_with_capacity(initial_capacity + 5);
+        assert!(
+            scratch.capacity() >= initial_capacity + 5,
+            "Should grow to at least required: was {initial_capacity}, now {}",
+            scratch.capacity()
+        );
+    }
+
+    #[rstest]
+    fn reserve_with_hysteresis_meets_required_minimum() {
+        let mut arena = MergeArena::new();
+        // Request a large amount from empty
+        let scratch = arena.scratch_with_capacity(1000);
+        assert!(
+            scratch.capacity() >= 1000,
+            "Must meet required minimum: {}",
+            scratch.capacity()
+        );
+    }
+
+    #[rstest]
+    fn scratch_with_capacity_clears_buffer() {
+        let mut arena = MergeArena::new();
+        let scratch = arena.scratch();
+        scratch.push(TaskId::from_uuid(Uuid::from_u128(1)));
+        assert_eq!(scratch.len(), 1);
+
+        let scratch = arena.scratch_with_capacity(10);
+        assert!(scratch.is_empty(), "scratch_with_capacity should clear buffer");
+        assert!(scratch.capacity() >= 10);
+    }
+
+    // =========================================================================
+    // IMPL-TB219-003b: compact_when_idle tests
+    // =========================================================================
+
+    #[rstest]
+    fn compact_when_idle_does_not_shrink_below_threshold() {
+        let mut arena = MergeArena::new();
+        // Grow scratch beyond shrink_threshold
+        let scratch = arena.scratch();
+        scratch.extend((0..40_000).map(|i| TaskId::from_uuid(Uuid::from_u128(i))));
+        arena.scratch.clear();
+        let capacity_before = arena.scratch.capacity();
+
+        // Call compact_when_idle fewer than threshold times
+        for _ in 0..7 {
+            arena.compact_when_idle(8);
+        }
+
+        assert!(
+            arena.scratch.capacity() >= capacity_before,
+            "Should not shrink before idle_threshold: was {capacity_before}, now {}",
+            arena.scratch.capacity()
+        );
+    }
+
+    #[rstest]
+    fn compact_when_idle_shrinks_at_threshold() {
+        let mut arena = MergeArena::new();
+        // Grow scratch beyond shrink_threshold
+        let scratch = arena.scratch();
+        scratch.extend((0..40_000).map(|i| TaskId::from_uuid(Uuid::from_u128(i))));
+        arena.scratch.clear();
+        let capacity_before = arena.scratch.capacity();
+
+        // Call compact_when_idle exactly threshold times
+        for _ in 0..8 {
+            arena.compact_when_idle(8);
+        }
+
+        assert!(
+            arena.scratch.capacity() < capacity_before,
+            "Should shrink at idle_threshold: was {capacity_before}, now {}",
+            arena.scratch.capacity()
+        );
+    }
+
+    #[rstest]
+    fn compact_when_idle_counter_resets_on_scratch() {
+        let mut arena = MergeArena::new();
+        // Grow scratch beyond shrink_threshold
+        let scratch = arena.scratch();
+        scratch.extend((0..40_000).map(|i| TaskId::from_uuid(Uuid::from_u128(i))));
+        arena.scratch.clear();
+        let capacity_before = arena.scratch.capacity();
+
+        // Call compact_when_idle 6 times (below threshold of 8)
+        for _ in 0..6 {
+            arena.compact_when_idle(8);
+        }
+
+        // Access scratch (should reset counter)
+        let _scratch = arena.scratch();
+
+        // Call compact_when_idle 7 more times (total since reset: 7, below 8)
+        for _ in 0..7 {
+            arena.compact_when_idle(8);
+        }
+
+        assert!(
+            arena.scratch.capacity() >= capacity_before,
+            "Should not shrink because counter was reset: was {capacity_before}, now {}",
+            arena.scratch.capacity()
+        );
+    }
+
+    #[rstest]
+    fn compact_when_idle_counter_resets_on_scratch_with_capacity() {
+        let mut arena = MergeArena::new();
+        // Grow scratch beyond shrink_threshold
+        let scratch = arena.scratch();
+        scratch.extend((0..40_000).map(|i| TaskId::from_uuid(Uuid::from_u128(i))));
+        arena.scratch.clear();
+        let capacity_before = arena.scratch.capacity();
+
+        // Call compact_when_idle 6 times
+        for _ in 0..6 {
+            arena.compact_when_idle(8);
+        }
+
+        // Access scratch_with_capacity (should reset counter)
+        let _scratch = arena.scratch_with_capacity(10);
+
+        // Call compact_when_idle 7 more times (total since reset: 7, below 8)
+        for _ in 0..7 {
+            arena.compact_when_idle(8);
+        }
+
+        assert!(
+            arena.scratch.capacity() >= capacity_before,
+            "Should not shrink because counter was reset by scratch_with_capacity: was {capacity_before}, now {}",
+            arena.scratch.capacity()
+        );
     }
 }
 
