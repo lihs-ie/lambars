@@ -1,0 +1,370 @@
+# tasks_bulk PR #284 反映後ボトルネック分析・要件定義
+#
+# 分析対象:
+#   - CI run 21903605063 (PR #284 変更前)
+#   - tasks_bulk benchmark
+#
+# 目的:
+#   - bottleneck-finder ワークフローとチェックリストに基づき、
+#     PR #284 の効果見積もりと残存課題を定量化し、
+#     RPS 500 / P50 200ms / P99 500ms に向けた追加要件を定義する。
+
+version: "1.0.0"
+name: "tasks_bulk_pr284_postprofile_requirements"
+description: |
+  run 21903605063 の tasks_bulk は RPS=368.78, P50=3190ms, P99=7900ms。
+  PR #283 (merge-redesign) は実装済み、PR #284 (TaskId Copy化 / mimalloc / fast-hash / writer profile) も
+  実装済みだが、CI プロファイルでは feature/env の未有効化が残る。
+
+  本要件は、PR #284 各施策の期待削減率をホットスポット比率にマッピングし、
+  残存ボトルネックと追加最適化の優先順位を定義する。
+
+scope:
+  benchmark: "tasks_bulk"
+  ci_run_id: "21903605063"
+  base_metrics:
+    rps: 368.78
+    p50_ms: 3190
+    p99_ms: 7900
+    error_rate: 0.0
+  target_metrics:
+    rps: 500
+    p50_ms: 200
+    p99_ms: 500
+  performance_gap:
+    rps_shortfall: 131.22
+    p50_over_ms: 2990
+    p99_over_ms: 7400
+
+analysis_method:
+  skill: "bottleneck-finder"
+  workflow:
+    phase_1_problem_quantification: "現状性能と目標差分を定量化"
+    phase_2_profile_reading: "stacks.folded の主要ホットスポットを比率化"
+    phase_3_prioritization: "80/20 で allocator + clone + grow + merge を優先"
+    phase_4_validation_strategy: "1変更ずつ CI 計測、回帰時に即切り戻し"
+  checklist_assessment:
+    algorithm_data_structure:
+      status: "要改善"
+      findings:
+        - "merge 系は PR #283 で改善済みだが、merge_segment_into 1.08% が残存。"
+        - "BTreeNode::get 1.16% は更新ループ内 lookup 累積が主因。"
+    memory:
+      status: "重大"
+      findings:
+        - "alloc union (malloc/cfree/realloc/clear_page_erms) が 25.10% と最大。"
+        - "SmallVec::extend 3.96%, SmallVec::try_grow 3.27% が再確保圧を示す。"
+    concurrency:
+      status: "改善余地あり"
+      findings:
+        - "single-writer は導入済みだが default batch_size=8 が tasks_bulk には小さい。"
+    io:
+      status: "主因ではない"
+      findings:
+        - "error_rate=0%、I/O 待機より CPU/メモリ寄与が支配的。"
+    compiler_optimization:
+      status: "要検証"
+      findings:
+        - "CI API profiling build は default feature ビルドで、mimalloc/fast-hash 未有効。"
+
+hotspots_before_pr284:
+  total_samples: 46836508264
+  items:
+    - name: "alloc union (malloc/cfree/realloc/clear_page_erms)"
+      ratio: "25.10%"
+    - name: "Cloned<I>::next"
+      ratio: "9.74%"
+    - name: "SmallVec::extend"
+      ratio: "3.96%"
+    - name: "SmallVec::try_grow"
+      ratio: "3.27%"
+    - name: "Hasher::write"
+      ratio: "0.70%"
+    - name: "BTreeNode::get"
+      ratio: "1.16%"
+    - name: "merge_segment_into"
+      ratio: "1.08%"
+
+implemented_optimizations:
+  pr_283_merge_redesign:
+    status: "実装済み"
+    changes:
+      - "MergePlan adaptive dispatch"
+      - "Arena capacity hysteresis"
+      - "Sorted insert for BTree locality"
+      - "Normalization dedup"
+    constraint: "退行禁止（追加施策でも維持）"
+  pr_284_allocator_clone_phase:
+    status: "実装済み（CI 有効化に不足あり）"
+    changes:
+      - id: "PR284-1"
+        name: "TaskId Copy化 + clone->copy/copy化 (332箇所, 17ファイル)"
+        activation: "default on"
+      - id: "PR284-2"
+        name: "mimalloc feature"
+        activation: "CI で API_FEATURES 付与が必要"
+      - id: "PR284-3"
+        name: "fast-hash (fxhash) feature"
+        activation: "CI で API_FEATURES 付与が必要"
+      - id: "PR284-4"
+        name: "SearchIndexWriterConfig::for_bulk_workload (batch_size=32)"
+        activation: "CI で WRITER_PROFILE=bulk が必要"
+
+pr284_effect_estimation:
+  methodology: "Amdahl の法則 + hotspot 比率の上限拘束でレンジ推定"
+  per_change:
+    - id: "PR284-1"
+      expected_hotspot_reduction:
+        - hotspot: "Cloned<I>::next"
+          before: "9.74%"
+          after_estimate: "2.0% ~ 4.0%"
+          reduction_pp: "5.7 ~ 7.7"
+        - hotspot: "SmallVec::extend"
+          before: "3.96%"
+          after_estimate: "2.6% ~ 3.2%"
+          reduction_pp: "0.8 ~ 1.4"
+        - hotspot: "SmallVec::try_grow"
+          before: "3.27%"
+          after_estimate: "2.6% ~ 2.9%"
+          reduction_pp: "0.3 ~ 0.7"
+      expected_rps_gain: "+25 ~ +55"
+      notes: "clone 由来処理を copy 経路へ寄せることで memcpy 最適化を期待"
+
+    - id: "PR284-2"
+      expected_hotspot_reduction:
+        - hotspot: "alloc union"
+          before: "25.10%"
+          after_estimate: "17.5% ~ 21.3%"
+          reduction_pp: "3.8 ~ 7.6"
+      expected_rps_gain: "+35 ~ +80"
+      notes: "allocator contention / page fault 周辺の実効改善を含む"
+
+    - id: "PR284-3"
+      expected_hotspot_reduction:
+        - hotspot: "Hasher::write"
+          before: "0.70%"
+          after_estimate: "0.14% ~ 0.35%"
+          reduction_pp: "0.35 ~ 0.56"
+      expected_rps_gain: "+5 ~ +15"
+      notes: "trusted-input 前提。公開入力境界では無効のままにする"
+
+    - id: "PR284-4"
+      expected_hotspot_reduction:
+        - hotspot: "alloc union"
+          before: "25.10%"
+          after_estimate: "22.1% ~ 24.1%"
+          reduction_pp: "1.0 ~ 3.0"
+        - hotspot: "SmallVec::extend + try_grow"
+          before: "7.23%"
+          after_estimate: "6.2% ~ 6.8%"
+          reduction_pp: "0.4 ~ 1.0"
+      expected_rps_gain: "+8 ~ +25"
+      notes: "apply_changes 回数減少による間接効果（latency とのトレードオフあり）"
+
+  combined_estimate:
+    post_pr284_default_only:
+      assumed_enabled: ["PR284-1"]
+      expected_rps_range: "394 ~ 424"
+    post_pr284_plus_ci_flags:
+      assumed_enabled: ["PR284-1", "PR284-2", "PR284-3", "PR284-4"]
+      expected_rps_range: "428 ~ 513"
+      likely_band_considering_overlap: "445 ~ 505"
+    interpretation: |
+      RPS 500 は「到達可能性あり」だが、重複寄与と CI 変動を考慮すると境界的。
+      さらに P50/P99 ギャップは依然大きく、追加最適化なしでは目標安定達成は困難。
+
+ci_activation_gap:
+  current_state:
+    api_profiling_build: "default feature build（mimalloc/fast-hash 未指定）"
+    api_server_runtime_env: "WRITER_PROFILE 未設定（default）"
+    tasks_bulk_threshold: "min_rps_achieved=200（目標 500 と乖離）"
+  required_state:
+    docker_build_arg: "API_FEATURES=mimalloc,fast-hash"
+    runtime_env: "WRITER_PROFILE=bulk"
+    scenario_gate: "min_rps_achieved >= 500"
+
+residual_bottlenecks_post_pr284:
+  - component: "SearchIndex merge / arena path telemetry"
+    bottleneck: "merge_path_detail が空オブジェクトで、with_arena 適用率を検証できない"
+    why: "run_benchmark は stacks.folded 非存在時に merge_path_detail={} を出力するため"
+  - component: "allocator hot path"
+    bottleneck: "mimalloc 有効後でも 15% 以上残る見込み"
+    why: "merge と永続構造更新で短命バッファ再確保が残るため"
+  - component: "BTree / segment merge"
+    bottleneck: "BTreeNode::get 1.16%、merge_segment_into 1.08% が tail latency を押し上げる"
+    why: "key lookup 累積と key 単位 merge の反復"
+
+rps500_decision:
+  requires_additional_optimization: true
+  reason: |
+    CI で PR #284 機能を全有効化すれば 500 到達余地はあるが、推定レンジが境界的で再現性リスクが高い。
+    かつ P50/P99 目標に対する乖離が大きく、RPS 単独達成でも受入不能。
+
+requirements:
+  - id: "REQ-TB284-001"
+    priority: "P0"
+    target_component:
+      - ".github/workflows/benchmark-api.yml"
+      - "benches/api/docker/compose.ci.yaml"
+      - "benches/api/benchmarks/scenarios/tasks_bulk.yaml"
+    bottleneck:
+      what: "PR #284 の実装が CI 計測に反映されていない"
+      why: "build/run 時の feature/env 注入不足で効果が無効化される"
+    improvement:
+      required_changes:
+        - "API build に `API_FEATURES=mimalloc,fast-hash` を注入"
+        - "API 起動 env に `WRITER_PROFILE=bulk` を注入"
+        - "tasks_bulk の `min_rps_achieved` を 500 へ引き上げ"
+      algorithm: "Feature/Env Deterministic Activation（計測条件の固定化）"
+    expected_effect:
+      rps_gain: "+30 ~ +90（PR284-2/3/4 の有効化分）"
+      confidence: "中"
+
+  - id: "REQ-TB284-002"
+    priority: "P0"
+    target_component:
+      - "benches/api/benchmarks/run_benchmark.sh"
+      - "benches/api/benchmarks/check_thresholds.sh"
+    bottleneck:
+      what: "merge 経路の実効率を CI で検証できない"
+      why: "merge_path_detail が空でも根因切り分けが遅れる"
+    improvement:
+      required_changes:
+        - "tasks_bulk では stacks.folded 未取得を即 fail（warning 不可）"
+        - "merge_path_detail 欠落時のエラー理由を明示して伝搬"
+      algorithm: "Telemetry-First Gate（観測不能を失敗として扱う）"
+    expected_effect:
+      operability: "回帰検知を 1 run 短縮"
+      performance_indirect: "誤判定による無効最適化継続を防止"
+
+  - id: "REQ-TB284-003"
+    priority: "P1"
+    target_component:
+      - "benches/api/src/api/query.rs"
+    bottleneck:
+      what: "BTree lookup 累積と segment merge 反復"
+      why: "merge_segment_into / BTreeNode::get が tail latency の残差要因"
+    improvement:
+      required_changes:
+        - "segment key を事前 grouping して lookup 回数を削減"
+        - "hit path は scratch 再利用、miss path は ownership move 優先"
+      algorithm: "Segment-Aware Batch Merge + Locality-Preserving Insert"
+    expected_effect:
+      rps_gain: "+5 ~ +20"
+      p99_reduction_ms: "-500 ~ -1500"
+
+  - id: "REQ-TB284-004"
+    priority: "P1"
+    target_component:
+      - "benches/api/src/api/query.rs"
+    bottleneck:
+      what: "allocator 圧が依然高止まり"
+      why: "SmallVec grow と短命 Vec 再確保が残る"
+    improvement:
+      required_changes:
+        - "merge 出力の容量先行見積りを追加"
+        - "scratch reserve 戦略を key 分布に応じて拡張"
+      algorithm: "Two-Pass Capacity Planning + Reusable Scratch Arena"
+    expected_effect:
+      rps_gain: "+10 ~ +30"
+      alloc_union_target: "<= 15%"
+
+  - id: "REQ-TB284-005"
+    priority: "P2"
+    target_component:
+      - "benches/api/src/api/handlers.rs"
+      - "benches/api/src/api/query.rs"
+    bottleneck:
+      what: "writer 設定が固定値で workload 変動に追従しない"
+      why: "batch_size=32 だけでは低/高負荷双方で最適性が崩れる"
+    improvement:
+      required_changes:
+        - "queue depth ベースで batch_size を段階切替"
+        - "timeout を throughput に連動させる"
+      algorithm: "Adaptive Micro-Batching"
+    expected_effect:
+      rps_gain: "+5 ~ +15"
+      p50_reduction_ms: "-100 ~ -300"
+
+non_functional_requirements:
+  consistency_with_existing_code:
+    - "PR #283 の merge-redesign (adaptive dispatch / hysteresis / sorted insert / dedup) を退行させない"
+  security:
+    - "fast-hash は trusted-input ベンチ専用。公開入力境界では無効を維持"
+  functional_architecture:
+    - "計算ロジック（pure）と実行境界（feature/env 注入）を分離する"
+    - "不変データ構造の意味論を維持し、局所 mutable は scratch 再利用のみに限定する"
+
+acceptance_criteria:
+  performance:
+    - "tasks_bulk: rps >= 500"
+    - "tasks_bulk: p50 <= 200ms"
+    - "tasks_bulk: p99 <= 500ms"
+    - "alloc union ratio <= 15%"
+    - "Cloned<I>::next ratio <= 4%"
+  ci_gates:
+    - "API_FEATURES=mimalloc,fast-hash が build ログで確認できる"
+    - "WRITER_PROFILE=bulk が API 実行環境で確認できる"
+    - "merge_path_detail が空オブジェクトなら fail する"
+
+implementation_priority:
+  - rank: 1
+    requirement_id: "REQ-TB284-001"
+    reason: "PR #284 効果を観測可能にする前提条件"
+  - rank: 2
+    requirement_id: "REQ-TB284-002"
+    reason: "観測不能状態の排除と再現性確保"
+  - rank: 3
+    requirement_id: "REQ-TB284-004"
+    reason: "最大寄与（allocator）を直接削減"
+  - rank: 4
+    requirement_id: "REQ-TB284-003"
+    reason: "tail latency 残差の削減"
+  - rank: 5
+    requirement_id: "REQ-TB284-005"
+    reason: "追加の低リスク改善"
+
+evidence:
+  - id: "EV-001"
+    description: "run 21903605063 tasks_bulk メトリクス"
+    source: "profiling-results/github-21903605063/api-profiling-all/tasks_bulk/benchmark/meta/tasks_bulk.json:31"
+  - id: "EV-002"
+    description: "merge_path_detail が空"
+    source: "profiling-results/github-21903605063/api-profiling-all/tasks_bulk/benchmark/meta/tasks_bulk.json:49"
+  - id: "EV-003"
+    description: "hotspot 比率（alloc 25.10%, cloned 9.74% 等）"
+    source: "profiling-results/github-21903605063/api-profiling-all/tasks_bulk/stacks.folded"
+  - id: "EV-004"
+    description: "TaskId Copy 実装"
+    source: "benches/api/src/domain/task.rs:18"
+  - id: "EV-005"
+    description: "mimalloc / fast-hash feature 定義"
+    source: "benches/api/Cargo.toml:12"
+  - id: "EV-006"
+    description: "fast-hash safety gate と global allocator"
+    source: "benches/api/src/main.rs:20"
+  - id: "EV-007"
+    description: "writer bulk profile 実装"
+    source: "benches/api/src/api/handlers.rs:641"
+  - id: "EV-008"
+    description: "for_bulk_workload 設定 (batch_size=32)"
+    source: "benches/api/src/api/query.rs:7946"
+  - id: "EV-009"
+    description: "API profiling build は default feature ビルド"
+    source: ".github/workflows/profiling.yml:329"
+  - id: "EV-010"
+    description: "API profiling 実行時に WRITER_PROFILE 未設定"
+    source: ".github/workflows/profiling.yml:441"
+  - id: "EV-011"
+    description: "compose は API_FEATURES / WRITER_PROFILE 注入に対応済み"
+    source: "benches/api/docker/compose.ci.yaml:49"
+  - id: "EV-012"
+    description: "Dockerfile は API_FEATURES 経由 build に対応済み"
+    source: "benches/api/docker/Dockerfile:55"
+  - id: "EV-013"
+    description: "tasks_bulk シナリオの min_rps_achieved は 200"
+    source: "benches/api/benchmarks/scenarios/tasks_bulk.yaml:73"
+
+file_naming_proposal:
+  path: "docs/internal/requirements/20260212_1619_tasks_bulk_pr284_postprofile_requirements.yaml"
+  rule: "YYYYMMDD_HHMM_<機能名>.yaml"
