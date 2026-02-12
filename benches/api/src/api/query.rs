@@ -1253,6 +1253,20 @@ impl Default for SegmentOverlayConfig {
     }
 }
 
+/// Merge strategy selected by [`SearchIndex::choose_merge_plan`].
+///
+/// Each variant corresponds to a different merge algorithm optimised for
+/// a particular input-size distribution:
+/// - `BinaryInsert`: O(m log n) via binary-search insertion, best when m <= 4.
+/// - `Galloping`: O(m log n) via exponential search, best when m << n (ratio >= 8:1).
+/// - `TwoPointer`: O(n + m) linear merge, best for balanced or large additions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MergePlan {
+    BinaryInsert,
+    Galloping,
+    TwoPointer,
+}
+
 /// Reusable scratch buffer for merge operations, avoiding repeated heap allocation.
 pub struct MergeArena {
     scratch: Vec<TaskId>,
@@ -2437,14 +2451,18 @@ fn merge_sorted_posting_lists(
         SearchIndex::extend_sorted_into(existing, &mut result_vec);
         SearchIndex::extend_sorted_into(new_entries, &mut result_vec);
         TaskIdCollection::from_sorted_vec(result_vec)
-    } else if new_entries.len().saturating_mul(8) < existing.len() {
+    } else {
         let existing_vec = SearchIndex::to_sorted_vec(existing);
         let add_vec = SearchIndex::to_sorted_vec(new_entries);
-        let mut output = Vec::with_capacity(existing.len() + new_entries.len());
-        SearchIndex::merge_posting_add_only_galloping(&existing_vec, &add_vec, &mut output);
+        let plan = SearchIndex::choose_merge_plan(existing_vec.len(), add_vec.len());
+        if matches!(plan, MergePlan::TwoPointer) {
+            // For balanced sizes, fall back to the built-in merge which avoids
+            // the intermediate Vec allocation entirely.
+            return existing.merge(new_entries);
+        }
+        let mut output = Vec::with_capacity(existing_vec.len() + add_vec.len());
+        SearchIndex::merge_postings_adaptive(&existing_vec, &add_vec, &mut output, plan);
         TaskIdCollection::from_sorted_vec(output)
-    } else {
-        existing.merge(new_entries)
     }
 }
 
@@ -6872,6 +6890,55 @@ impl SearchIndex {
                 .unwrap_or_else(|position| position)
     }
 
+    /// Threshold for using binary-search insert: `add.len() <= 4` uses binary insert.
+    const BINARY_INSERT_THRESHOLD: usize = 4;
+
+    /// Ratio threshold for galloping merge: `add.len() * 8 < existing.len()` uses galloping.
+    const GALLOPING_RATIO: usize = 8;
+
+    /// Selects the optimal merge strategy based on input sizes.
+    ///
+    /// - `BinaryInsert`: when `add` is very small (<= 4 elements)
+    /// - `Galloping`: when `add` is much smaller than `existing` (ratio >= 8:1)
+    /// - `TwoPointer`: for all other cases (balanced or large `add`)
+    #[inline]
+    fn choose_merge_plan(existing_length: usize, add_length: usize) -> MergePlan {
+        if add_length == 0 || existing_length == 0 {
+            MergePlan::TwoPointer
+        } else if add_length <= Self::BINARY_INSERT_THRESHOLD {
+            MergePlan::BinaryInsert
+        } else if add_length.saturating_mul(Self::GALLOPING_RATIO) < existing_length {
+            MergePlan::Galloping
+        } else {
+            MergePlan::TwoPointer
+        }
+    }
+
+    /// Dispatches a posting-list merge to the algorithm selected by [`MergePlan`].
+    ///
+    /// All inputs must be sorted and deduplicated. Clears `output` before writing.
+    /// The result is always identical regardless of which plan is chosen; only
+    /// the computational cost differs.
+    #[inline]
+    fn merge_postings_adaptive(
+        existing: &[TaskId],
+        add: &[TaskId],
+        output: &mut Vec<TaskId>,
+        plan: MergePlan,
+    ) {
+        match plan {
+            MergePlan::BinaryInsert => {
+                Self::merge_posting_add_only_binary_search_insert(existing, add, output);
+            }
+            MergePlan::Galloping => {
+                Self::merge_posting_add_only_galloping(existing, add, output);
+            }
+            MergePlan::TwoPointer => {
+                Self::merge_posting_add_only_two_pointer(existing.iter(), add, output);
+            }
+        }
+    }
+
     /// Galloping merge for cases where `add` is much smaller than `existing`.
     ///
     /// Uses exponential search to skip large portions of `existing`, achieving
@@ -6958,14 +7025,15 @@ impl SearchIndex {
         // size_hint().0 is accurate.
         let (existing_size_hint, _) = existing.size_hint();
 
-        if add.len() <= 4 && existing_size_hint > 0 {
-            let existing_vec: Vec<TaskId> = existing.cloned().collect();
-            Self::merge_posting_add_only_binary_search_insert(&existing_vec, add, output);
-        } else if existing_size_hint > 0 && add.len().saturating_mul(8) < existing_size_hint {
-            let existing_vec: Vec<TaskId> = existing.cloned().collect();
-            Self::merge_posting_add_only_galloping(&existing_vec, add, output);
-        } else {
-            Self::merge_posting_add_only_two_pointer(existing, add, output);
+        let plan = Self::choose_merge_plan(existing_size_hint, add.len());
+        match plan {
+            MergePlan::BinaryInsert | MergePlan::Galloping => {
+                let existing_vec: Vec<TaskId> = existing.cloned().collect();
+                Self::merge_postings_adaptive(&existing_vec, add, output, plan);
+            }
+            MergePlan::TwoPointer => {
+                Self::merge_posting_add_only_two_pointer(existing, add, output);
+            }
         }
     }
 
@@ -6997,13 +7065,8 @@ impl SearchIndex {
             return;
         }
 
-        if add.len() <= 4 {
-            Self::merge_posting_add_only_binary_search_insert(existing, add, output);
-        } else if add.len().saturating_mul(8) < existing.len() {
-            Self::merge_posting_add_only_galloping(existing, add, output);
-        } else {
-            Self::merge_posting_add_only_two_pointer(existing.iter(), add, output);
-        }
+        let plan = Self::choose_merge_plan(existing.len(), add.len());
+        Self::merge_postings_adaptive(existing, add, output, plan);
     }
 
     /// Standard two-pointer merge for `existing ∪ add`.
@@ -7744,6 +7807,25 @@ impl SearchIndex {
         add: MutableIndex,
     ) -> MergeNgramDeltaResult {
         Self::merge_ngram_delta_add_only_bulk_owned(index, add)
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn choose_merge_plan_for_test(
+        existing_length: usize,
+        add_length: usize,
+    ) -> MergePlan {
+        Self::choose_merge_plan(existing_length, add_length)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn merge_postings_adaptive_for_test(
+        existing: &[TaskId],
+        add: &[TaskId],
+        output: &mut Vec<TaskId>,
+        plan: MergePlan,
+    ) {
+        Self::merge_postings_adaptive(existing, add, output, plan);
     }
 
 }
@@ -24050,6 +24132,102 @@ mod adaptive_merge_tests {
     }
 
     // =========================================================================
+    // IMPL-TB219-001a: choose_merge_plan tests
+    // =========================================================================
+
+    #[rstest]
+    fn choose_merge_plan_empty_add_returns_two_pointer() {
+        assert_eq!(
+            SearchIndex::choose_merge_plan_for_test(100, 0),
+            MergePlan::TwoPointer
+        );
+    }
+
+    #[rstest]
+    fn choose_merge_plan_empty_existing_returns_two_pointer() {
+        assert_eq!(
+            SearchIndex::choose_merge_plan_for_test(0, 10),
+            MergePlan::TwoPointer
+        );
+    }
+
+    #[rstest]
+    fn choose_merge_plan_both_empty_returns_two_pointer() {
+        assert_eq!(
+            SearchIndex::choose_merge_plan_for_test(0, 0),
+            MergePlan::TwoPointer
+        );
+    }
+
+    #[rstest]
+    fn choose_merge_plan_add_at_binary_insert_threshold() {
+        // add_len == 4 (== BINARY_INSERT_THRESHOLD) -> BinaryInsert
+        assert_eq!(
+            SearchIndex::choose_merge_plan_for_test(100, 4),
+            MergePlan::BinaryInsert
+        );
+    }
+
+    #[rstest]
+    fn choose_merge_plan_add_below_binary_insert_threshold() {
+        // add_len == 1 -> BinaryInsert
+        assert_eq!(
+            SearchIndex::choose_merge_plan_for_test(100, 1),
+            MergePlan::BinaryInsert
+        );
+    }
+
+    #[rstest]
+    fn choose_merge_plan_add_above_binary_insert_threshold_galloping() {
+        // add_len == 5, existing_len == 100
+        // 5 * 8 = 40 < 100 -> Galloping
+        assert_eq!(
+            SearchIndex::choose_merge_plan_for_test(100, 5),
+            MergePlan::Galloping
+        );
+    }
+
+    #[rstest]
+    fn choose_merge_plan_exact_galloping_boundary_returns_two_pointer() {
+        // add_len == 5, existing_len == 40
+        // 5 * 8 = 40, 40 < 40 is false -> TwoPointer
+        assert_eq!(
+            SearchIndex::choose_merge_plan_for_test(40, 5),
+            MergePlan::TwoPointer
+        );
+    }
+
+    #[rstest]
+    fn choose_merge_plan_just_below_galloping_boundary_returns_galloping() {
+        // add_len == 5, existing_len == 41
+        // 5 * 8 = 40 < 41 -> Galloping
+        assert_eq!(
+            SearchIndex::choose_merge_plan_for_test(41, 5),
+            MergePlan::Galloping
+        );
+    }
+
+    #[rstest]
+    fn choose_merge_plan_large_add_returns_two_pointer() {
+        // add_len == 50, existing_len == 100
+        // 50 * 8 = 400, 400 < 100 is false -> TwoPointer
+        assert_eq!(
+            SearchIndex::choose_merge_plan_for_test(100, 50),
+            MergePlan::TwoPointer
+        );
+    }
+
+    #[rstest]
+    fn choose_merge_plan_equal_sizes_returns_two_pointer() {
+        // add_len == 10, existing_len == 10
+        // 10 * 8 = 80 < 10 is false -> TwoPointer
+        assert_eq!(
+            SearchIndex::choose_merge_plan_for_test(10, 10),
+            MergePlan::TwoPointer
+        );
+    }
+
+    // =========================================================================
     // galloping_search tests
     // =========================================================================
 
@@ -24350,6 +24528,66 @@ mod adaptive_merge_tests {
         for &value in &[1u128, 21, 41, 61, 81] {
             let target = task_id(value);
             assert!(result_vec.contains(&target), "Expected {value} in result");
+        }
+    }
+
+    // =========================================================================
+    // IMPL-TB219-001b: merge_postings_adaptive tests
+    // =========================================================================
+
+    #[rstest]
+    fn merge_postings_adaptive_binary_insert_matches_reference() {
+        let existing = task_ids(&[1, 5, 10, 20, 30, 40, 50]);
+        let add = task_ids(&[3, 25]);
+        let mut reference_output = Vec::new();
+        SearchIndex::merge_posting_add_only_two_pointer_for_test(
+            &existing, &add, &mut reference_output,
+        );
+        let mut output = Vec::new();
+        SearchIndex::merge_postings_adaptive_for_test(
+            &existing, &add, &mut output, MergePlan::BinaryInsert,
+        );
+        assert_eq!(output, reference_output);
+    }
+
+    #[rstest]
+    fn merge_postings_adaptive_galloping_matches_reference() {
+        let existing = task_ids(&[1, 5, 10, 20, 30, 40, 50]);
+        let add = task_ids(&[3, 25]);
+        let mut reference_output = Vec::new();
+        SearchIndex::merge_posting_add_only_two_pointer_for_test(
+            &existing, &add, &mut reference_output,
+        );
+        let mut output = Vec::new();
+        SearchIndex::merge_postings_adaptive_for_test(
+            &existing, &add, &mut output, MergePlan::Galloping,
+        );
+        assert_eq!(output, reference_output);
+    }
+
+    #[rstest]
+    fn merge_postings_adaptive_two_pointer_matches_reference() {
+        let existing = task_ids(&[1, 5, 10, 20, 30, 40, 50]);
+        let add = task_ids(&[3, 25]);
+        let mut reference_output = Vec::new();
+        SearchIndex::merge_posting_add_only_two_pointer_for_test(
+            &existing, &add, &mut reference_output,
+        );
+        let mut output = Vec::new();
+        SearchIndex::merge_postings_adaptive_for_test(
+            &existing, &add, &mut output, MergePlan::TwoPointer,
+        );
+        assert_eq!(output, reference_output);
+    }
+
+    #[rstest]
+    fn merge_postings_adaptive_empty_inputs() {
+        for plan in [MergePlan::BinaryInsert, MergePlan::Galloping, MergePlan::TwoPointer] {
+            let mut output = Vec::new();
+            SearchIndex::merge_postings_adaptive_for_test(
+                &[], &[], &mut output, plan,
+            );
+            assert!(output.is_empty(), "Plan {plan:?} should produce empty for empty inputs");
         }
     }
 
