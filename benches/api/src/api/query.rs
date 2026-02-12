@@ -1321,15 +1321,15 @@ impl MergeArena {
     /// If the current capacity already meets `required`, this is a no-op.
     /// Otherwise, the target capacity is `max(required, capacity * growth_factor)`.
     #[inline]
-    fn reserve_with_hysteresis(
-        buffer: &mut Vec<TaskId>,
-        required: usize,
-        growth_factor: f32,
-    ) {
+    fn reserve_with_hysteresis(buffer: &mut Vec<TaskId>, required: usize, growth_factor: f32) {
         if buffer.capacity() >= required {
             return;
         }
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            clippy::cast_precision_loss
+        )]
         let grown = (buffer.capacity() as f32 * growth_factor) as usize;
         let target = required.max(grown);
         // `Vec::reserve` takes *additional* capacity relative to `len()`.
@@ -1357,9 +1357,7 @@ impl MergeArena {
     /// so an active merge loop never triggers compaction.
     pub fn compact_when_idle(&mut self, idle_threshold: usize) {
         self.idle_counter += 1;
-        if self.idle_counter >= idle_threshold
-            && self.scratch.capacity() > self.shrink_threshold
-        {
+        if self.idle_counter >= idle_threshold && self.scratch.capacity() > self.shrink_threshold {
             self.scratch.shrink_to(self.shrink_threshold);
             self.idle_counter = 0;
         }
@@ -6418,18 +6416,14 @@ impl SearchIndex {
                 tag_add,
                 arena,
             ),
-            title_full_ngram_index: self
-                .title_full_ngram_index
-                .append_and_compact_with_arena(
-                    build_ngram_from_mutable(title_full_ngram_add),
-                    arena,
-                ),
-            title_word_ngram_index: self
-                .title_word_ngram_index
-                .append_and_compact_with_arena(
-                    build_ngram_from_mutable(title_word_ngram_add),
-                    arena,
-                ),
+            title_full_ngram_index: self.title_full_ngram_index.append_and_compact_with_arena(
+                build_ngram_from_mutable(title_full_ngram_add),
+                arena,
+            ),
+            title_word_ngram_index: self.title_word_ngram_index.append_and_compact_with_arena(
+                build_ngram_from_mutable(title_word_ngram_add),
+                arena,
+            ),
             tag_ngram_index: self
                 .tag_ngram_index
                 .append_and_compact_with_arena(build_ngram_from_mutable(tag_ngram_add), arena),
@@ -6973,7 +6967,7 @@ impl SearchIndex {
     /// - `Galloping`: when `add` is much smaller than `existing` (ratio >= 8:1)
     /// - `TwoPointer`: for all other cases (balanced or large `add`)
     #[inline]
-    fn choose_merge_plan(existing_length: usize, add_length: usize) -> MergePlan {
+    const fn choose_merge_plan(existing_length: usize, add_length: usize) -> MergePlan {
         if add_length == 0 || existing_length == 0 {
             MergePlan::TwoPointer
         } else if add_length <= Self::BINARY_INSERT_THRESHOLD {
@@ -7189,7 +7183,7 @@ impl SearchIndex {
 
     /// Computes `existing ∪ add` for a `PrefixIndex` (add-only fast path).
     ///
-    /// Entries are sorted by key before insertion for BTree path locality.
+    /// Entries are sorted by key before insertion for `BTree` path locality.
     fn merge_index_delta_add_only(index: &PrefixIndex, add: &MutableIndex) -> PrefixIndex {
         if add.is_empty() {
             return index.clone();
@@ -7227,7 +7221,8 @@ impl SearchIndex {
                         if !scratch.is_empty() {
                             let mut collected = Vec::with_capacity(scratch.len());
                             collected.append(&mut scratch);
-                            transient.insert(key.clone(), TaskIdCollection::from_sorted_vec(collected));
+                            transient
+                                .insert(key.clone(), TaskIdCollection::from_sorted_vec(collected));
                         }
                     } else {
                         Self::merge_posting_add_only_into(
@@ -7238,7 +7233,8 @@ impl SearchIndex {
                         if !scratch.is_empty() {
                             let mut collected = Vec::with_capacity(scratch.len());
                             collected.append(&mut scratch);
-                            transient.insert(key.clone(), TaskIdCollection::from_sorted_vec(collected));
+                            transient
+                                .insert(key.clone(), TaskIdCollection::from_sorted_vec(collected));
                         }
                     }
                 }
@@ -7258,7 +7254,7 @@ impl SearchIndex {
     /// Owned variant of [`merge_index_delta_add_only`] that consumes the `MutableIndex`
     /// via `into_iter()`, eliminating `add_list.clone()` on the miss path.
     ///
-    /// Entries are sorted by key before insertion for BTree path locality.
+    /// Entries are sorted by key before insertion for `BTree` path locality.
     fn merge_index_delta_add_only_owned(index: &PrefixIndex, add: MutableIndex) -> PrefixIndex {
         if add.is_empty() {
             return index.clone();
@@ -7323,7 +7319,7 @@ impl SearchIndex {
     /// Like [`merge_index_delta_add_only_owned`] but reuses scratch from the [`MergeArena`].
     ///
     /// Entries are sorted by key before insertion so that the underlying
-    /// `PersistentTreeMap` (BTree) traverses structurally adjacent paths,
+    /// `PersistentTreeMap` (`BTree`) traverses structurally adjacent paths,
     /// improving cache locality and reducing COW clone overhead.
     fn merge_index_delta_add_only_owned_with_arena(
         index: &PrefixIndex,
@@ -7903,7 +7899,7 @@ impl SearchIndex {
 
     #[cfg(test)]
     #[must_use]
-    pub(crate) fn choose_merge_plan_for_test(
+    pub(crate) const fn choose_merge_plan_for_test(
         existing_length: usize,
         add_length: usize,
     ) -> MergePlan {
@@ -7919,7 +7915,6 @@ impl SearchIndex {
     ) {
         Self::merge_postings_adaptive(existing, add, output, plan);
     }
-
 }
 
 /// Represents a change to a task for differential index updates.
@@ -24261,7 +24256,10 @@ mod ngram_segment_overlay_tests {
         assert_eq!(scratch.len(), 1);
 
         let scratch = arena.scratch_with_capacity(10);
-        assert!(scratch.is_empty(), "scratch_with_capacity should clear buffer");
+        assert!(
+            scratch.is_empty(),
+            "scratch_with_capacity should clear buffer"
+        );
         assert!(scratch.capacity() >= 10);
     }
 
@@ -24802,11 +24800,16 @@ mod adaptive_merge_tests {
         let add = task_ids(&[3, 25]);
         let mut reference_output = Vec::new();
         SearchIndex::merge_posting_add_only_two_pointer_for_test(
-            &existing, &add, &mut reference_output,
+            &existing,
+            &add,
+            &mut reference_output,
         );
         let mut output = Vec::new();
         SearchIndex::merge_postings_adaptive_for_test(
-            &existing, &add, &mut output, MergePlan::BinaryInsert,
+            &existing,
+            &add,
+            &mut output,
+            MergePlan::BinaryInsert,
         );
         assert_eq!(output, reference_output);
     }
@@ -24817,11 +24820,16 @@ mod adaptive_merge_tests {
         let add = task_ids(&[3, 25]);
         let mut reference_output = Vec::new();
         SearchIndex::merge_posting_add_only_two_pointer_for_test(
-            &existing, &add, &mut reference_output,
+            &existing,
+            &add,
+            &mut reference_output,
         );
         let mut output = Vec::new();
         SearchIndex::merge_postings_adaptive_for_test(
-            &existing, &add, &mut output, MergePlan::Galloping,
+            &existing,
+            &add,
+            &mut output,
+            MergePlan::Galloping,
         );
         assert_eq!(output, reference_output);
     }
@@ -24832,23 +24840,33 @@ mod adaptive_merge_tests {
         let add = task_ids(&[3, 25]);
         let mut reference_output = Vec::new();
         SearchIndex::merge_posting_add_only_two_pointer_for_test(
-            &existing, &add, &mut reference_output,
+            &existing,
+            &add,
+            &mut reference_output,
         );
         let mut output = Vec::new();
         SearchIndex::merge_postings_adaptive_for_test(
-            &existing, &add, &mut output, MergePlan::TwoPointer,
+            &existing,
+            &add,
+            &mut output,
+            MergePlan::TwoPointer,
         );
         assert_eq!(output, reference_output);
     }
 
     #[rstest]
     fn merge_postings_adaptive_empty_inputs() {
-        for plan in [MergePlan::BinaryInsert, MergePlan::Galloping, MergePlan::TwoPointer] {
+        for plan in [
+            MergePlan::BinaryInsert,
+            MergePlan::Galloping,
+            MergePlan::TwoPointer,
+        ] {
             let mut output = Vec::new();
-            SearchIndex::merge_postings_adaptive_for_test(
-                &[], &[], &mut output, plan,
+            SearchIndex::merge_postings_adaptive_for_test(&[], &[], &mut output, plan);
+            assert!(
+                output.is_empty(),
+                "Plan {plan:?} should produce empty for empty inputs"
             );
-            assert!(output.is_empty(), "Plan {plan:?} should produce empty for empty inputs");
         }
     }
 
@@ -25630,9 +25648,13 @@ mod merge_arena_integration_tests {
 
         let tasks: Vec<Task> = (0..20)
             .map(|i| {
-                Task::new(TaskId::generate(), format!("Task number {i}"), Timestamp::now())
-                    .add_tag(Tag::new("common"))
-                    .add_tag(Tag::new(format!("tag{i}")))
+                Task::new(
+                    TaskId::generate(),
+                    format!("Task number {i}"),
+                    Timestamp::now(),
+                )
+                .add_tag(Tag::new("common"))
+                .add_tag(Tag::new(format!("tag{i}")))
             })
             .collect();
         let changes: Vec<TaskChange> = tasks.iter().cloned().map(TaskChange::Add).collect();
@@ -25678,7 +25700,8 @@ mod merge_arena_integration_tests {
             let bulk_ids: Vec<_> = bulk_collection.iter_sorted().cloned().collect();
             let arena_ids: Vec<_> = arena_collection.iter_sorted().cloned().collect();
             assert_eq!(
-                bulk_ids, arena_ids,
+                bulk_ids,
+                arena_ids,
                 "title_word_index posting list mismatch for key '{}'",
                 key.as_str()
             );
@@ -25686,16 +25709,14 @@ mod merge_arena_integration_tests {
 
         // Verify tag_index equivalence
         for (key, bulk_collection) in &result_bulk.tag_index {
-            let arena_collection = result_arena
-                .tag_index
-                .get(key.as_str())
-                .unwrap_or_else(|| {
-                    panic!("tag_index key '{}' missing in arena result", key.as_str())
-                });
+            let arena_collection = result_arena.tag_index.get(key.as_str()).unwrap_or_else(|| {
+                panic!("tag_index key '{}' missing in arena result", key.as_str())
+            });
             let bulk_ids: Vec<_> = bulk_collection.iter_sorted().cloned().collect();
             let arena_ids: Vec<_> = arena_collection.iter_sorted().cloned().collect();
             assert_eq!(
-                bulk_ids, arena_ids,
+                bulk_ids,
+                arena_ids,
                 "tag_index posting list mismatch for key '{}'",
                 key.as_str()
             );
@@ -25736,8 +25757,12 @@ mod merge_arena_integration_tests {
 
         let tasks: Vec<Task> = (0..10)
             .map(|i| {
-                Task::new(TaskId::generate(), format!("Arena task {i}"), Timestamp::now())
-                    .add_tag(Tag::new("arenatest"))
+                Task::new(
+                    TaskId::generate(),
+                    format!("Arena task {i}"),
+                    Timestamp::now(),
+                )
+                .add_tag(Tag::new("arenatest"))
             })
             .collect();
         let changes: Vec<TaskChange> = tasks.iter().cloned().map(TaskChange::Add).collect();
@@ -25773,12 +25798,13 @@ mod merge_arena_integration_tests {
             lambars::persistent::PersistentVector::new();
         let index = SearchIndex::build_with_config(&tasks_pv, config);
 
-        let task = Task::new(TaskId::generate(), "Duplicate task".to_string(), Timestamp::now())
-            .add_tag(Tag::new("dup"));
-        let changes = vec![
-            TaskChange::Add(task.clone()),
-            TaskChange::Add(task.clone()),
-        ];
+        let task = Task::new(
+            TaskId::generate(),
+            "Duplicate task".to_string(),
+            Timestamp::now(),
+        )
+        .add_tag(Tag::new("dup"));
+        let changes = vec![TaskChange::Add(task.clone()), TaskChange::Add(task.clone())];
 
         let mut arena = MergeArena::new();
         let result = index
@@ -25786,7 +25812,11 @@ mod merge_arena_integration_tests {
             .expect("should succeed");
 
         // Only one copy of the task should exist
-        assert_eq!(result.tasks_by_id.len(), 1, "Duplicate should be deduplicated");
+        assert_eq!(
+            result.tasks_by_id.len(),
+            1,
+            "Duplicate should be deduplicated"
+        );
         assert!(result.tasks_by_id.contains_key(&task.task_id));
     }
 }
