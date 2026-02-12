@@ -24251,6 +24251,33 @@ mod ngram_segment_overlay_tests {
             let _scratch = arena.scratch_with_capacity(10);
         });
     }
+
+    // =========================================================================
+    // IMPL-TB219-003c: hysteresis realloc count regression test
+    // =========================================================================
+
+    #[rstest]
+    fn reserve_with_hysteresis_limits_realloc_frequency() {
+        let mut arena = MergeArena::new();
+        let mut growth_count = 0usize;
+        let mut last_capacity = 0usize;
+
+        for required in [128, 192, 256, 300, 340, 380, 420, 460] {
+            let scratch = arena.scratch_with_capacity(required);
+            let capacity = scratch.capacity();
+            if capacity > last_capacity {
+                growth_count += 1;
+                last_capacity = capacity;
+            }
+        }
+
+        // With 3/2 growth factor, 8 ascending requests should trigger at most 4
+        // reallocations (initial + ~3 growth steps that overshoot).
+        assert!(
+            growth_count <= 4,
+            "Expected at most 4 reallocations but got {growth_count}"
+        );
+    }
 }
 
 // =============================================================================
@@ -25487,5 +25514,137 @@ mod merge_arena_integration_tests {
             "Duplicate should be deduplicated"
         );
         assert!(result.tasks_by_id.contains_key(&task.task_id));
+    }
+
+    // -------------------------------------------------------------------------
+    // IMPL-TB219-002: sorted insert order invariant (key insertion order must
+    // not affect the result)
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn merge_index_delta_sorted_insert_order_invariant() {
+        let index = PrefixIndex::new();
+
+        // Build two MutableIndex maps with identical entries but different
+        // HashMap iteration orders (achieved by inserting in opposite order).
+        let mut add_forward: MutableIndex = std::collections::HashMap::new();
+        add_forward.insert(
+            NgramKey::new("aaa"),
+            vec![
+                TaskId::from_uuid(Uuid::from_u128(1)),
+                TaskId::from_uuid(Uuid::from_u128(9)),
+            ],
+        );
+        add_forward.insert(
+            NgramKey::new("bbb"),
+            vec![
+                TaskId::from_uuid(Uuid::from_u128(2)),
+                TaskId::from_uuid(Uuid::from_u128(8)),
+            ],
+        );
+        add_forward.insert(
+            NgramKey::new("ccc"),
+            vec![
+                TaskId::from_uuid(Uuid::from_u128(3)),
+                TaskId::from_uuid(Uuid::from_u128(7)),
+            ],
+        );
+
+        let mut add_reverse: MutableIndex = std::collections::HashMap::new();
+        add_reverse.insert(
+            NgramKey::new("ccc"),
+            vec![
+                TaskId::from_uuid(Uuid::from_u128(3)),
+                TaskId::from_uuid(Uuid::from_u128(7)),
+            ],
+        );
+        add_reverse.insert(
+            NgramKey::new("bbb"),
+            vec![
+                TaskId::from_uuid(Uuid::from_u128(2)),
+                TaskId::from_uuid(Uuid::from_u128(8)),
+            ],
+        );
+        add_reverse.insert(
+            NgramKey::new("aaa"),
+            vec![
+                TaskId::from_uuid(Uuid::from_u128(1)),
+                TaskId::from_uuid(Uuid::from_u128(9)),
+            ],
+        );
+
+        // All three variants must produce identical results regardless of
+        // HashMap iteration order.
+        let result_borrowed_forward =
+            SearchIndex::merge_index_delta_add_only_for_test(&index, &add_forward);
+        let result_borrowed_reverse =
+            SearchIndex::merge_index_delta_add_only_for_test(&index, &add_reverse);
+
+        let result_owned_forward =
+            SearchIndex::merge_index_delta_add_only_owned_for_test(&index, add_forward.clone());
+        let result_owned_reverse =
+            SearchIndex::merge_index_delta_add_only_owned_for_test(&index, add_reverse.clone());
+
+        let mut arena = MergeArena::new();
+        let result_arena_forward =
+            SearchIndex::merge_index_delta_add_only_owned_with_arena_for_test(
+                &index,
+                add_forward,
+                &mut arena,
+            );
+        let result_arena_reverse =
+            SearchIndex::merge_index_delta_add_only_owned_with_arena_for_test(
+                &index,
+                add_reverse,
+                &mut arena,
+            );
+
+        // Compare all pairs
+        for (label, result_a, result_b) in [
+            (
+                "borrowed forward vs reverse",
+                &result_borrowed_forward,
+                &result_borrowed_reverse,
+            ),
+            (
+                "owned forward vs reverse",
+                &result_owned_forward,
+                &result_owned_reverse,
+            ),
+            (
+                "arena forward vs reverse",
+                &result_arena_forward,
+                &result_arena_reverse,
+            ),
+            (
+                "borrowed vs owned",
+                &result_borrowed_forward,
+                &result_owned_forward,
+            ),
+            (
+                "borrowed vs arena",
+                &result_borrowed_forward,
+                &result_arena_forward,
+            ),
+        ] {
+            assert_eq!(
+                result_a.len(),
+                result_b.len(),
+                "{label}: length mismatch"
+            );
+            for (key, collection_a) in result_a {
+                let collection_b = result_b
+                    .get(key.as_str())
+                    .unwrap_or_else(|| panic!("{label}: key '{}' missing", key.as_str()));
+                let ids_a: Vec<_> = collection_a.iter_sorted().cloned().collect();
+                let ids_b: Vec<_> = collection_b.iter_sorted().cloned().collect();
+                assert_eq!(
+                    ids_a,
+                    ids_b,
+                    "{label}: posting list mismatch for key '{}'",
+                    key.as_str()
+                );
+            }
+        }
     }
 }
