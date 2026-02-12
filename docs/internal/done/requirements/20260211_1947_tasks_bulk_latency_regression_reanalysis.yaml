@@ -1,0 +1,260 @@
+# tasks_bulk レイテンシ回帰 再分析要件定義
+#
+# 概要:
+#   最新プロファイル（api-profiling-all-1a3f98...）を再分析した結果、
+#   tasks_bulk の p99 が 14.03s まで悪化しており、本番運用判定は不合格。
+#
+# 設計方針:
+#   1. 回帰源である two-pass capacity-planned merge の適用範囲を縮小し、hot path を一発 merge に戻す。
+#   2. merge path テレメトリを「欠落時 fail」に変更し、観測不能な最適化を禁止する。
+#   3. 回帰防止として tasks_bulk の性能ゲートを段階化（回帰防止値 -> 目標値）する。
+#
+# 参照:
+#   - profiling-results-downloaded-latest/api-profiling-all-1a3f98a141ea537092dcfadb35da8af866713e99/tasks_bulk
+#   - benches/api/src/api/query.rs
+#   - benches/api/benchmarks/run_benchmark.sh
+#   - benches/api/benchmarks/check_thresholds.sh
+
+version: "1.0.0"
+name: "tasks_bulk_latency_regression_reanalysis"
+description: |
+  最新成果物 `/Users/lihs/workspace/lambars/profiling-results-downloaded-latest/` の
+  current/baseline/revert を再分析した。
+
+  結果:
+  - current tasks_bulk: rps=264.58, p99=14030ms
+  - baseline tasks_bulk: rps=360.54, p99=8430ms
+  - revert tasks_bulk: rps=341.36, p99=9550ms
+
+  tasks_update 系は error_rate=0 を維持しているが、tasks_bulk の tail latency が
+  しきい値（p99<=500ms）を大幅超過しているため、現時点の本番運用判定は不適格。
+
+background:
+  problem: |
+    tasks_bulk の CPU サンプルで `SearchIndex::merge_into_scratch_capacity_planned` が
+    31.84% を占有し、レイテンシ悪化の主要因になっている。
+    同関数は two-pass（見積り + 実マージ）であり、hot path への全面適用が
+    単一パス merge より高コスト化している。
+
+    さらに、meta.json の `results.merge_path_detail` が空オブジェクト `{}` で、
+    merge 経路の実使用率を CI で検証できない。
+  motivation: |
+    本番運用可否のボトルネックは tasks_bulk のみであり、
+    まず回帰源を除去して current を revert/baseline 以上に戻し、
+    その後 p99<=500ms の本来目標へ再挑戦する。
+  prior_art:
+    - name: "Adaptive Merge Strategy"
+      description: "入力比率で two-pointer / galloping / binary-insert を切り替える単一パス merge。"
+    - name: "Guarded Optimization Rollout"
+      description: "新最適化を feature flag で段階導入し、回帰時に即切り戻す。"
+    - name: "Strict Telemetry Gate"
+      description: "計測値欠落を warning で逃がさず fail とする。"
+
+requirements:
+  - id: REQ-TBLR-001
+    name: "hot path の capacity-planned merge 適用を縮小する"
+    description: |
+      `merge_into_scratch_capacity_planned` の全面適用をやめ、
+      hot path は既存の adaptive 単一パス merge を優先する。
+      two-pass は明示的に有効化した場合のみ使用する。
+    methods:
+      - name: "merge_posting_add_only_into_slice"
+        signature: "fn merge_posting_add_only_into_slice(existing: &[TaskId], add: &[TaskId], output: &mut Vec<TaskId>)"
+        description: |
+          既存実装の adaptive merge（binary-insert/galloping/two-pointer）を hot path 既定に戻す。
+      - name: "merge_into_scratch_capacity_planned"
+        signature: "fn merge_into_scratch_capacity_planned(existing_slice: &[TaskId], add_slice: &[TaskId], scratch: &mut Vec<TaskId>)"
+        description: |
+          デフォルト無効化。使用する場合は feature flag (`use_capacity_planned_merge_hotpath`) を通す。
+    implementations:
+      - type: "SearchIndex merge path"
+        description: |
+          対象箇所:
+          - `merge_posting_slice_or_fallback` の非concat分岐
+          - `merge_index_delta_add_only` / `_owned` / `_owned_with_arena` の slice 分岐
+
+          実装要件:
+          1. 上記分岐で `merge_into_scratch_capacity_planned` を直接呼ばない。
+          2. 既定は `merge_posting_add_only_into_slice` を利用する。
+          3. two-pass を残すなら config flag 経由にし、default=false。
+
+  - id: REQ-TBLR-002
+    name: "merge_path_detail 欠落を fail 条件にする"
+    description: |
+      現在 `merge_path_detail` が `{}` でも CI が warning で通過するため、
+      経路退行を検知できない。tasks_bulk では欠落・不完全を即 fail にする。
+    methods:
+      - name: "check_merge_path_gate"
+        signature: "check_merge_path_gate() -> exit code"
+        description: |
+          `bulk_with_arena`, `bulk_without_arena` の両方が存在しない場合は exit 2 (validation error) を返す。
+          閾値違反（ratio < 0.90）の場合は exit 3 (threshold violation) を返す。
+      - name: "emit_merge_path_detail"
+        signature: "emit_merge_path_detail(meta: json)"
+        description: |
+          `run_benchmark.sh` で空オブジェクト `{}` を出力しない。
+          stacks.folded がない場合は理由を明示して fail へ伝搬する。
+    implementations:
+      - type: "Benchmark pipeline"
+        description: |
+          - `check_thresholds.sh`: WARNING return を削除し FAIL に変更。
+          - `run_benchmark.sh`: stacks.folded の探索パスを強化し、
+            取得失敗時は `merge_path_detail` を空にせず `merge_path_error` を出力。
+
+  - id: REQ-TBLR-003
+    name: "tasks_bulk の回帰防止ゲートを段階化する"
+    description: |
+      目標値（p99<=500ms）に加えて、回帰防止値を設定する。
+      まずは current が revert/baseline を下回らないことを必須化する。
+    methods:
+      - name: "evaluate_bulk_regression_guard"
+        signature: "fn evaluate_bulk_regression_guard(current: Metrics, reference: Metrics) -> bool"
+        description: |
+          最低条件: `current.p99 <= reference.p99` かつ `current.rps >= reference.rps`。
+    implementations:
+      - type: "requirements/CI gate"
+        description: |
+          比較対象として `profiling-results-downloaded-latest/revert/.../tasks_bulk` を採用し、
+          退行時は要件未達として fail 扱いにする。
+
+non_functional_requirements:
+  performance:
+    - "短期: tasks_bulk の p99 を 14030ms から 9550ms 以下へ戻す（revert 水準以上）"
+    - "短期: tasks_bulk の rps を 264.58 から 341.36 以上へ戻す（revert 水準以上）"
+    - "最終: tasks_bulk の p99 <= 500ms（scenarios/tasks_bulk.yaml の閾値）"
+  compatibility:
+    - "tasks_update / tasks_update_status / tasks_update_conflict の error_rate=0 を維持する"
+    - "POST /tasks/bulk の 207 応答契約を維持する"
+  testing:
+    - "merge strategy 切替時の同値性テスト（既存テスト + 回帰ケース追加）"
+    - "check_thresholds.sh の merge_path_detail 欠落 fail テスト"
+    - "run_benchmark.sh の merge_path_detail 生成テスト"
+
+# 根拠（確固たる裏付け）
+evidence:
+  metrics:
+    - id: EV-TBLR-M1
+      description: "current tasks_bulk: rps=264.58, p99=14030ms"
+      source: "profiling-results-downloaded-latest/api-profiling-all-1a3f98a141ea537092dcfadb35da8af866713e99/tasks_bulk/benchmark/meta/tasks_bulk.json:31"
+    - id: EV-TBLR-M2
+      description: "baseline tasks_bulk: rps=360.54, p99=8430ms"
+      source: "profiling-results-downloaded-latest/baseline/api-profiling-all-cec19b06ec4fe36d95bc84ed889709739152937e/tasks_bulk/benchmark/meta/tasks_bulk.json:31"
+    - id: EV-TBLR-M3
+      description: "revert tasks_bulk: rps=341.36, p99=9550ms"
+      source: "profiling-results-downloaded-latest/revert/api-profiling-all-0955a410ad6bbd842fd5ff74a054f23339eb3ba0/tasks_bulk/benchmark/meta/tasks_bulk.json:31"
+    - id: EV-TBLR-M4
+      description: "tasks_update は error_rate=0"
+      source: "profiling-results-downloaded-latest/api-profiling-all-1a3f98a141ea537092dcfadb35da8af866713e99/tasks_update/benchmark/meta/tasks_update.json:30"
+    - id: EV-TBLR-M5
+      description: "tasks_update_status は error_rate=0"
+      source: "profiling-results-downloaded-latest/api-profiling-all-1a3f98a141ea537092dcfadb35da8af866713e99/tasks_update_status/benchmark/meta/tasks_update_status.json:30"
+    - id: EV-TBLR-M6
+      description: "tasks_update_conflict は error_rate=0"
+      source: "profiling-results-downloaded-latest/api-profiling-all-1a3f98a141ea537092dcfadb35da8af866713e99/tasks_update_conflict/benchmark/meta/tasks_update.json:30"
+  profile:
+    - id: EV-TBLR-P1
+      description: "merge_into_scratch_capacity_planned が 31.84% を占有"
+      source: "profiling-results-downloaded-latest/api-profiling-all-1a3f98a141ea537092dcfadb35da8af866713e99/tasks_bulk/stacks.folded:505"
+    - id: EV-TBLR-P2
+      description: "meta の merge_path_detail が空オブジェクト"
+      source: "profiling-results-downloaded-latest/api-profiling-all-1a3f98a141ea537092dcfadb35da8af866713e99/tasks_bulk/benchmark/meta/tasks_bulk.json:49"
+  thresholds:
+    - id: EV-TBLR-T1
+      description: "tasks_bulk p99 閾値 = 500ms"
+      source: "benches/api/benchmarks/scenarios/tasks_bulk.yaml:72"
+  code:
+    - id: EV-TBLR-C1
+      description: "hot path merge 関数定義"
+      source: "benches/api/src/api/query.rs:4477"
+    - id: EV-TBLR-C2
+      description: "merge_posting_slice_or_fallback で capacity-planned merge を呼んでいる"
+      source: "benches/api/src/api/query.rs:1605"
+    - id: EV-TBLR-C3
+      description: "merge_index_delta_add_only 系で capacity-planned merge を呼んでいる"
+      source: "benches/api/src/api/query.rs:7196"
+    - id: EV-TBLR-C4
+      description: "check_thresholds は merge_path_detail 欠落時 warning で通過"
+      source: "benches/api/benchmarks/check_thresholds.sh:250"
+    - id: EV-TBLR-C5
+      description: "run_benchmark で merge_path_detail を stacks.folded から算出"
+      source: "benches/api/benchmarks/run_benchmark.sh:1595"
+
+implementation_tasks:
+  - id: IMPL-TBLR-001
+    priority: 1
+    requirement_ids:
+      - REQ-TBLR-001
+    evidence_ids:
+      - EV-TBLR-M1
+      - EV-TBLR-P1
+      - EV-TBLR-C1
+      - EV-TBLR-C2
+      - EV-TBLR-C3
+    objective: "tasks_bulk レイテンシ回帰源を除去する"
+    scope_files:
+      - "benches/api/src/api/query.rs"
+    actions:
+      - "`merge_posting_slice_or_fallback` の非concat分岐を adaptive merge 既定に戻す"
+      - "`merge_index_delta_add_only` / `_owned` / `_owned_with_arena` の slice 分岐を adaptive merge 既定に戻す"
+      - "two-pass は feature flag でのみ有効化し default=false にする"
+    completion_criteria:
+      - "`tasks_bulk` の p99 が 9550ms 以下（revert水準以上）"
+      - "`tasks_bulk` の rps が 341.36 以上（revert水準以上）"
+    verification_artifacts:
+      - "profiling-results-downloaded-latest/*/tasks_bulk/benchmark/meta/tasks_bulk.json"
+      - "profiling-results-downloaded-latest/*/tasks_bulk/stacks.folded"
+
+  - id: IMPL-TBLR-002
+    priority: 2
+    requirement_ids:
+      - REQ-TBLR-002
+    evidence_ids:
+      - EV-TBLR-P2
+      - EV-TBLR-C4
+      - EV-TBLR-C5
+    objective: "merge path 観測不能状態を CI で遮断する"
+    scope_files:
+      - "benches/api/benchmarks/check_thresholds.sh"
+      - "benches/api/benchmarks/run_benchmark.sh"
+    actions:
+      - "`check_thresholds.sh` の warning return を fail (exit 3) へ変更"
+      - "`run_benchmark.sh` で `merge_path_detail` が空の場合に明示エラーを埋める"
+      - "profile実行時に `merge_path_detail` 欠落を許容しない"
+    completion_criteria:
+      - "`tasks_bulk` の meta に `bulk_with_arena`/`bulk_without_arena` が必ず存在"
+      - "欠落時に CI が fail する"
+    verification_artifacts:
+      - "tasks_bulk/benchmark/meta/tasks_bulk.json"
+      - "check_thresholds 実行ログ"
+
+  - id: IMPL-TBLR-003
+    priority: 3
+    requirement_ids:
+      - REQ-TBLR-003
+    evidence_ids:
+      - EV-TBLR-M1
+      - EV-TBLR-M2
+      - EV-TBLR-M3
+      - EV-TBLR-T1
+    objective: "回帰防止と最終目標の二段ゲート化"
+    scope_files:
+      - "docs/internal/requirements"
+      - "benches/api/benchmarks/check_thresholds.sh"
+    actions:
+      - "回帰防止値（revert比較）を自動評価するチェックを追加"
+      - "最終目標（p99<=500ms）の fail 条件を維持"
+    completion_criteria:
+      - "revert比で悪化したコミットが自動で fail"
+      - "p99<=500ms 達成まで本番判定を fail 維持"
+    verification_artifacts:
+      - "CI 比較レポート"
+      - "tasks_bulk threshold logs"
+
+future_extensions:
+  - id: "TBLR-FUTURE-001"
+    name: "capacity-planned merge の再導入最適化"
+    description: |
+      capacity-planned merge を無効化するだけでなく、
+      ヒストグラム駆動で「有効な入力サイズ帯」に限定して再導入する。
+    rationale: |
+      現時点では回帰解消が優先であり、全面適用は再び劣化リスクが高いため。
