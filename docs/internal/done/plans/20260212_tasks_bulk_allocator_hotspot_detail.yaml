@@ -1,0 +1,706 @@
+# tasks_bulk allocator/clone hotspot detailed implementation plan
+#
+# Requirement: 20260212_1249_tasks_bulk_allocator_clone_hotspot_run21903605063.yaml
+# Branch: perf/tasks-bulk-allocator-hotspot (PR #284)
+# Base: perf/tasks-bulk-merge-redesign
+#
+# Codex Review: 2026-02-12 - 7 findings addressed (2 Critical, 2 High, 3 Medium)
+
+version: "1.1.0"
+name: "tasks_bulk_allocator_hotspot_detail"
+description: |
+  CI run 21903605063 の tasks_bulk プロファイルに基づく 5 つのアプローチ (AP-1 ~ AP-5) の
+  詳細実装計画。現在 RPS=368.78 を目標 RPS>=500 に引き上げるための段階的最適化。
+
+codex_review:
+  date: "2026-02-12"
+  findings_count: 7
+  resolved:
+    - id: "CR-001"
+      severity: "Critical"
+      title: "mimalloc 有効化経路が CI Docker build に未接続"
+      resolution: |
+        AP-2 に Dockerfile ARG API_FEATURES と compose.ci.yaml の build args 追加タスクを追加。
+        scenarios/tasks_bulk.yaml の api_features ではなく Docker build 引数で feature を渡す設計に変更。
+    - id: "CR-002"
+      severity: "Critical"
+      title: "fxhash のリスク評価が文書内で矛盾"
+      resolution: |
+        lambars 依存に直接 fxhash を追加する設計から、benches/api 側に fast-hash feature を
+        新設して lambars/fxhash を間接的に有効化する設計に変更。
+        外部入力由来キー経路の存在を認めつつ、feature gate で明示的に分離。
+    - id: "CR-003"
+      severity: "High"
+      title: "AP-5 のデフォルト値変更は影響範囲が広い"
+      resolution: |
+        SearchIndexWriterConfig::default() は変更せず、for_bulk_workload() ファクトリメソッドを
+        追加してシナリオ別に切り替える設計に変更。handlers.rs ではワークロード判定で注入。
+    - id: "CR-004"
+      severity: "High"
+      title: "AP-3/AP-4 の期待 RPS が Amdahl 上強気"
+      resolution: |
+        AP-3 の単独効果を +5~+15 RPS に下方修正。AP-4 を +5~+15 RPS に下方修正。
+        combined_impact も保守的に 440~520 RPS に修正。
+    - id: "CR-005"
+      severity: "Medium"
+      title: "Phase 1 並列実装と個別効果測定が衝突"
+      resolution: |
+        実装は並列で進めるが、計測は「1変更1コミット」で分離。
+        コミット単位で CI ベンチマークを実行し、寄与を分離可能にする方針を明記。
+    - id: "CR-006"
+      severity: "Medium"
+      title: "AP-1 の対象件数見積が過大"
+      resolution: |
+        query.rs 非テスト領域での実数: task_id.clone() 約32箇所、.cloned() 約6箇所。
+        handlers.rs 非テスト領域: task_id.clone() 約2箇所。合計 約40箇所に修正。
+    - id: "CR-007"
+      severity: "Medium"
+      title: "compact_when_idle 連動変更のテスト更新不足"
+      resolution: |
+        AP-5 に compact_when_idle 系テスト更新タスクを追加。
+
+# =============================================================================
+# 調査結果サマリ
+# =============================================================================
+
+investigation_summary:
+  task_id_definition:
+    file: "benches/api/src/domain/task.rs:18-19"
+    current_derive: "Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize"
+    inner_type: "Uuid"
+    uuid_crate_version: "1.11"
+    uuid_is_copy: true
+    note: |
+      Uuid (uuid 1.x) は [u8; 16] ベースで Copy を derive 済み。
+      TaskId に Copy を追加するだけで、.clone() が memcpy に最適化される。
+
+  task_id_clone_usage:
+    total_clone_calls: 187
+    push_clone_calls: 23
+    non_test_breakdown:
+      query_rs_task_id_clone: 32
+      query_rs_cloned: 6
+      handlers_rs_task_id_clone: 2
+      total_non_test: 40
+    hot_paths:
+      - "benches/api/src/api/query.rs: task_id.clone() - 約32箇所 (non-test)"
+      - "benches/api/src/api/query.rs: .cloned() - 約6箇所 (non-test)"
+      - "benches/api/src/api/handlers.rs: task_id.clone() - 約2箇所 (non-test)"
+      - "benches/api/src/api/query.rs: extend_from_slice - 6箇所 (Copy化で memcpy 最適化)"
+
+  fxhash_feature:
+    lambars_cargo_toml: "Cargo.toml:63 - fxhash = [\"dep:rustc-hash\"]"
+    implementation: "src/persistent/hashmap.rs:303-310 - 3-way dispatch 実装済み"
+    benchmark_dependency: "benches/api/Cargo.toml:14 - features = [\"full\", \"arc\"]"
+    action: |
+      [CR-002 修正] benches/api/Cargo.toml に fast-hash feature を新設し、
+      lambars/fxhash を間接的に有効化する。lambars 依存に直接 fxhash を追加しない。
+
+  merge_segment_into:
+    file: "benches/api/src/api/query.rs:1590-1625"
+    profile_ratio: "1.08% (search-index-wr 内 2.11%)"
+    current_implementation: |
+      NgramIndex (PersistentHashMap) の transient() を取得し、segment の各エントリに対して
+      get + merge_posting_slice_or_fallback + insert を実行。key.clone() と
+      segment_collection.clone() (miss path) が発生。
+
+  writer_config:
+    file: "benches/api/src/api/query.rs:7947-7954"
+    current_defaults:
+      batch_size: 8
+      batch_timeout_milliseconds: 5
+      channel_capacity: 32
+    production_usage: "benches/api/src/api/handlers.rs:452 - SearchIndexWriterConfig::default()"
+
+  merge_arena:
+    file: "benches/api/src/api/query.rs:1277-1342"
+    description: "scratch Vec<TaskId> を再利用するアリーナ。既に writer_loop で使用中。"
+
+# =============================================================================
+# 実装順序と依存関係
+# =============================================================================
+
+implementation_order:
+  rationale: |
+    AP-1 (Copy化) は最も基本的な変更であり、AP-2/AP-3 と独立して実装可能。
+    AP-1 が完了すると extend_from_slice が memcpy に最適化され、AP-4/AP-5 の効果測定が正確になる。
+    AP-2 (mimalloc) はビルド設定のみの変更。AP-3 (fxhash) も feature gate の設計変更。
+    AP-4/AP-5 はコードロジックの変更を伴い、AP-1の効果を確認してから実施すべき。
+
+    [CR-005 修正] 実装は並列で進めるが、計測は「1変更1コミット」で分離する。
+    コミット単位で CI ベンチマークを実行し、各施策の寄与を分離可能にする。
+
+  measurement_policy: |
+    Phase 1 の 3 施策は並列実装するが、以下の順序でコミットし個別に効果を測定:
+    1. AP-1 コミット -> CI ベンチマーク (Copy化の単独効果)
+    2. AP-2 コミット -> CI ベンチマーク (mimalloc の追加効果)
+    3. AP-3 コミット -> CI ベンチマーク (fxhash の追加効果)
+
+  phases:
+    - phase: 1
+      name: "基盤最適化 (AP-1 + AP-2 + AP-3)"
+      approaches: ["AP-1", "AP-2", "AP-3"]
+      parallel_implementation: true
+      sequential_measurement: true
+      reason: |
+        3つは完全に独立して実装可能。ただし効果測定はコミット単位で逐次実行し寄与を分離する。
+        AP-1 は型定義変更、AP-2 は allocator 変更、AP-3 は hash 変更。
+
+    - phase: 2
+      name: "Ngram merge 最適化 (AP-4)"
+      approaches: ["AP-4"]
+      depends_on: ["AP-1"]
+      reason: |
+        AP-1 の Copy 化により merge 経路の clone コストが変わるため、AP-1 後に実施して
+        正確な効果測定を行う。
+
+    - phase: 3
+      name: "Writer 設定最適化 (AP-5)"
+      approaches: ["AP-5"]
+      depends_on: ["AP-1", "AP-4"]
+      reason: |
+        AP-1/AP-4 の効果で batch あたりの処理時間が変化するため、最後に設定チューニングを行う。
+
+# =============================================================================
+# AP-1: TaskId Copy 化 (+25~55 RPS)
+# =============================================================================
+
+ap_1:
+  name: "TaskId Copy 化"
+  priority: "P0"
+  estimated_rps_impact: "+25 ~ +55"
+  category: "Rust"
+  risk: "中"
+
+  detailed_changes:
+    - id: "AP-1-001"
+      file: "benches/api/src/domain/task.rs:18"
+      description: "TaskId に Copy derive を追加"
+      before: "#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]"
+      after: "#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]"
+      impact: |
+        Uuid は Copy 実装済み (uuid 1.x: [u8; 16])。
+        TaskId(Uuid) も Copy 化可能。
+
+    - id: "AP-1-002"
+      file: "benches/api/src/api/query.rs"
+      description: "task_id.clone() を task_id (Copy) に置換"
+      locations: "約32箇所 (non-test コード) [CR-006 修正]"
+      examples:
+        - "line 888: .map(|task| task.task_id.clone()) -> .map(|task| task.task_id)"
+        - "line 930: seen_ids.insert(task.task_id.clone()) -> seen_ids.insert(task.task_id)"
+        - "line 1969: .push(task_id.clone()) -> .push(*task_id) or .push(task_id)"
+        - "line 2791: pending_tasks.insert(task.task_id.clone(), ...) -> pending_tasks.insert(task.task_id, ...)"
+      note: |
+        task_id が &TaskId の場合は *task_id で Copy。
+        task_id が TaskId の場合はそのまま使用。
+        自動置換は安全だが、借用関係を確認する必要がある。
+
+    - id: "AP-1-002b"
+      file: "benches/api/src/api/handlers.rs"
+      description: "handlers.rs 内の task_id.clone() を Copy に置換"
+      locations: "約2箇所 (non-test コード) [CR-006 修正]"
+      examples:
+        - "line 2147: .map(|(task_id, _)| task_id.clone()) -> .map(|(task_id, _)| *task_id)"
+        - "line 2155: .map(|task| task.task_id.clone()) -> .map(|task| task.task_id)"
+
+    - id: "AP-1-003"
+      file: "benches/api/src/api/query.rs"
+      description: "iter().cloned() / .cloned() を iter().copied() / .copied() に置換"
+      locations: "約6箇所 (non-test コード) [CR-006 修正]"
+      examples:
+        - "line 4552: output.extend(collection.iter_sorted().cloned()) -> .copied()"
+        - "line 4899: matching_ids.iter().cloned().collect() -> .copied().collect()"
+      impact: |
+        cloned() は Clone::clone() を呼ぶが、copied() は memcpy。
+        Copy 型では copied() のほうが最適化されやすい。
+
+    - id: "AP-1-004"
+      file: "benches/api/src/api/query.rs"
+      description: "extend_from_slice が memcpy に最適化される (コード変更なし)"
+      locations:
+        - "line 1653-1657: scratch.extend_from_slice(existing_slice/segment_slice)"
+        - "line 4550: output.extend_from_slice(slice)"
+        - "line 7044, 7057, 7073, 7141, 7147: merge 経路の extend_from_slice"
+      impact: |
+        Phase8 の教訓: Clone 型では extend_from_slice は要素ごとの clone を呼ぶ。
+        Copy 化により、extend_from_slice が memcpy (ptr::copy_nonoverlapping) に最適化される。
+        これが AP-1 の最大の効果源。コード変更は不要 (型変更のみで自動適用)。
+
+    - id: "AP-1-005"
+      file: "benches/api/src/api/query.rs:4258"
+      description: "intersect_sorted_vecs 内の clone を Copy に"
+      before: "result.push(left[left_index].clone())"
+      after: "result.push(left[left_index])"
+
+    - id: "AP-1-006"
+      file: "benches/api/src/domain/task.rs, benches/api/src/api/query.rs, benches/api/src/api/handlers.rs"
+      description: "テストコード内の task_id.clone() を Copy に置換"
+      locations: "テストコード全体で約100箇所以上 (コンパイルは通るが一貫性のために修正)"
+      note: "テストコードも一貫性のために修正。ただしコンパイルエラーにはならない。"
+
+  test_strategy:
+    - "cargo check で Copy derive の型チェック"
+    - "cargo test -p task-management-benchmark-api で全テスト通過確認"
+    - "Clone が Copy になった影響で所有権の移動が変わるケースの確認"
+    - "serde の Serialize/Deserialize が Copy 型でも正しく動作することの確認"
+
+  risks:
+    - risk: "Copy 化により意図しない暗黙コピーが発生する可能性"
+      mitigation: "TaskId は 16バイトと小さく、暗黙コピーのコストは無視できる"
+    - risk: "既存テストが clone の意味論に依存している可能性"
+      mitigation: "Copy は Clone のスーパーセット。clone() は引き続き使用可能"
+
+# =============================================================================
+# AP-2: mimalloc グローバルアロケータ (+35~80 RPS)
+# =============================================================================
+
+ap_2:
+  name: "mimalloc グローバルアロケータ"
+  priority: "P0"
+  estimated_rps_impact: "+35 ~ +80"
+  category: "Rust (Cargo.toml + main.rs + Docker)"
+  risk: "中"
+
+  detailed_changes:
+    - id: "AP-2-001"
+      file: "benches/api/Cargo.toml"
+      description: "mimalloc クレートを feature gate 付きで追加"
+      change: |
+        [features] セクションに追加:
+          mimalloc = ["dep:mimalloc"]
+
+        [dependencies] セクションに追加:
+          mimalloc = { version = "0.1", optional = true }
+      note: |
+        feature gate により、通常ビルドでは system allocator を使用し、
+        ベンチマーク時のみ mimalloc を有効化する。
+
+    - id: "AP-2-002"
+      file: "benches/api/src/main.rs"
+      description: "#[global_allocator] を条件付きで追加"
+      change: |
+        ファイル先頭に追加:
+          #[cfg(feature = "mimalloc")]
+          #[global_allocator]
+          static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+      note: |
+        unsafe_code = "deny" が設定されているが、#[global_allocator] は
+        unsafe ブロックを必要としないため問題ない。
+        [CR-001 関数型アーキテクチャ観点] #[global_allocator] は実行境界 (main) での
+        設定であり、純粋関数層に環境読取やグローバル分岐を導入するものではない。
+        計算ロジック自体はアロケータに依存せず参照透過性を維持する。
+
+    - id: "AP-2-003"
+      file: "benches/api/docker/Dockerfile"
+      description: "[CR-001 修正] Dockerfile に ARG API_FEATURES を追加"
+      change: |
+        build 引数として API_FEATURES を受け取り、cargo build に渡す:
+          ARG API_FEATURES=""
+          RUN ... cargo build --release \
+            --manifest-path benches/api/Cargo.toml \
+            --bin task-management-benchmark-api \
+            ${API_FEATURES:+--features ${API_FEATURES}}
+
+    - id: "AP-2-004"
+      file: "benches/api/docker/compose.ci.yaml"
+      description: "[CR-001 修正] compose.ci.yaml に API_FEATURES build arg を追加"
+      change: |
+        services:
+          api:
+            build:
+              args:
+                API_FEATURES: "${API_FEATURES:-}"
+
+    - id: "AP-2-005"
+      file: "benches/api/benchmarks/scenarios/tasks_bulk.yaml"
+      description: "tasks_bulk シナリオの api_features に mimalloc を追加"
+      change: |
+        api_features セクションで mimalloc feature を指定:
+          api_features:
+            - mimalloc
+
+  test_strategy:
+    - "cargo build -p task-management-benchmark-api --features mimalloc でビルド確認"
+    - "cargo test -p task-management-benchmark-api --features mimalloc でテスト通過確認"
+    - "mimalloc なし (デフォルト) でも正常動作することを確認"
+    - "メモリ使用量のピーク RSS を測定 (既存の peak_rss 計測で確認可能)"
+    - "Docker build に API_FEATURES=mimalloc を渡してビルド確認"
+
+  risks:
+    - risk: "allocator 変更でメモリ使用量が増加する可能性"
+      mitigation: "ベンチマーク結果の peak_rss を before/after で比較"
+    - risk: "CI 環境 (Linux) と開発環境 (macOS) での差異"
+      mitigation: "CI 実行で実効果を測定。macOS では mimalloc の効果が異なる可能性あり"
+    - risk: "unsafe_code lint との衝突"
+      mitigation: "#[global_allocator] は unsafe 不要。ただし mimalloc 内部の unsafe は crate 側"
+    - risk: "Docker build で feature が渡らない"
+      mitigation: "CI ログで --features mimalloc が含まれることを確認"
+
+# =============================================================================
+# AP-3: fxhash 有効化 (+5~15 RPS) [CR-004 下方修正]
+# =============================================================================
+
+ap_3:
+  name: "fxhash 有効化 (bench 専用 feature gate 経由)"
+  priority: "P1"
+  estimated_rps_impact: "+5 ~ +15 [CR-004 下方修正: 旧 +15~40]"
+  category: "Rust (Cargo.toml feature gate 設計)"
+  risk: "高 (HashDoS) - feature gate で軽減"
+
+  detailed_changes:
+    - id: "AP-3-001"
+      file: "benches/api/Cargo.toml"
+      description: "[CR-002 修正] bench 専用 fast-hash feature を新設"
+      change: |
+        [features] セクションに追加:
+          fast-hash = ["lambars/fxhash"]
+
+        lambars 依存は変更しない (features = ["full", "arc"] のまま)。
+        fast-hash feature を明示的に有効化した場合のみ fxhash が使われる。
+      before: 'lambars = { path = "../../", features = ["full", "arc"] }'
+      after: |
+        lambars = { path = "../../", features = ["full", "arc"] }
+        # [features] に fast-hash = ["lambars/fxhash"] を追加
+      impact: |
+        PersistentHashMap の compute_hash が SipHash から FxHash に切り替わる。
+        src/persistent/hashmap.rs:303-310 の既存 3-way dispatch により自動適用。
+        FxHash は短キー (NgramKey = Arc<str>) で SipHash の 3-5x 高速。
+
+  implementation_note: |
+    [CR-002 修正] lambars 依存に直接 fxhash を追加するのではなく、
+    benches/api 側の fast-hash feature で lambars/fxhash を間接的に有効化する。
+    これにより feature gate が明示的になり、意図しない有効化を防止できる。
+
+    外部入力由来キー経路 (検索クエリ -> NgramKey -> PersistentHashMap) が存在するため、
+    fxhash の HashDoS リスクは認識した上で、以下の安全策を適用:
+    1. bench 専用 feature (fast-hash) で明示的に有効化が必要
+    2. ベンチマーク限定 (benches/api/) であり、本番 API ではない
+    3. CI の feature 指定漏れで意図せず有効化されない設計
+
+  test_strategy:
+    - "cargo test -p task-management-benchmark-api --features fast-hash で全テスト通過確認"
+    - "fast-hash なしでも正常動作することを確認"
+    - "fxhash 有効化前後で SearchIndex の検索結果が同一であることを確認"
+    - "既存の differential test が全て通過することを確認"
+
+  risks:
+    - risk: "HashDoS 耐性の喪失"
+      mitigation: "bench 専用 feature gate で分離。ドキュメントに明記。CI で誤有効化を防止。"
+    - risk: "Hash 値の変化によるテスト不安定化"
+      mitigation: "テストは Hash 値ではなく結果の同値性で検証"
+
+# =============================================================================
+# AP-4: Ngram merge 最適化 (+5~15 RPS) [CR-004 下方修正]
+# =============================================================================
+
+ap_4:
+  name: "Ngram merge 経路最適化"
+  priority: "P1"
+  estimated_rps_impact: "+5 ~ +15 [CR-004 下方修正: 旧 +10~30]"
+  category: "Rust"
+  risk: "低"
+
+  detailed_changes:
+    - id: "AP-4-001"
+      file: "benches/api/src/api/query.rs:1590-1625"
+      description: "merge_segment_into の miss path で clone を移譲に最適化"
+      current_code: |
+        // miss path: segment_collection を clone して insert
+        transient.insert(key.clone(), segment_collection.clone());
+      proposed_code: |
+        // miss path: NgramKey は Arc<str> なので clone は O(1)
+        // TaskIdCollection は OrderedUniqueSet で内部に Arc を持つため clone は O(1)
+        // ただし、segment が &NgramIndex なので所有権移譲は不可
+        // 最適化: segment を consuming iterator に変更する案を検討
+      note: |
+        現在 segment は &NgramIndex (借用) なので所有権移譲不可。
+        consuming merge API を追加するか、もしくは key のソート済み走査で
+        BTree の locality を活用する方向が有効。
+
+    - id: "AP-4-002"
+      file: "benches/api/src/api/query.rs:1590-1625"
+      description: "segment keys をソートして BTree 走査の局所性を向上"
+      proposed_change: |
+        segment のキーを事前にソートし、transient (PersistentHashMap) への
+        insert 順序を最適化。ただし PersistentHashMap は hash ベースなので
+        キーソートの効果は限定的。代わりに batch insert API の活用を検討。
+
+    - id: "AP-4-003"
+      file: "benches/api/src/api/query.rs:1627-1678"
+      description: "merge_posting_slice_or_fallback の (None, None) fallback パスの最適化"
+      current_code: "(None, None) => existing.merge(segment_collection)"
+      proposed_change: |
+        Small state (len <= 8) の場合は OrderedUniqueSet::merge が O(n+m) で動作。
+        AP-1 の Copy 化により内部の clone コストが消えるため、AP-1 適用後は
+        このパスの改善余地が小さくなる可能性がある。効果測定後に判断。
+
+  test_strategy:
+    - "既存の merge_segment_into 関連テスト (23748-23893行) が全て通過"
+    - "differential test で検索結果の同値性を確認"
+    - "プロファイルで merge_segment_into の CPU 比率が低下したことを確認"
+
+  risks:
+    - risk: "検索結果の同値性が崩れる可能性"
+      mitigation: "既存の differential test + 追加の回帰テスト"
+
+# =============================================================================
+# AP-5: Writer micro-batch 設定最適化 (+8~25 RPS) [CR-003 修正: ファクトリメソッド方式]
+# =============================================================================
+
+ap_5:
+  name: "Writer micro-batch 設定最適化 (ファクトリメソッド方式)"
+  priority: "P2"
+  estimated_rps_impact: "+8 ~ +25"
+  category: "Rust (ファクトリメソッド追加 + 設定注入)"
+  risk: "低"
+
+  detailed_changes:
+    - id: "AP-5-001"
+      file: "benches/api/src/api/query.rs"
+      description: "[CR-003 修正] SearchIndexWriterConfig::for_bulk_workload() ファクトリメソッド追加"
+      change: |
+        impl SearchIndexWriterConfig {
+            /// Bulk workload 向けの最適化設定を返す。
+            ///
+            /// batch_size を大きくして apply_changes の呼び出し回数を削減し、
+            /// COW 更新コストを抑制する。
+            #[must_use]
+            pub const fn for_bulk_workload() -> Self {
+                Self {
+                    batch_size: 32,
+                    batch_timeout_milliseconds: 10,
+                    channel_capacity: 64,
+                }
+            }
+        }
+      note: |
+        default() は変更しない (batch_size: 8, timeout: 5, capacity: 32 のまま)。
+        純粋関数として const fn で実装し、参照透過性を維持。
+
+    - id: "AP-5-002"
+      file: "benches/api/src/api/handlers.rs:452"
+      description: "[CR-003 修正] ワークロードに応じた設定注入"
+      current_code: "SearchIndexWriterConfig::default()"
+      proposed_change: |
+        初期化層 (I/O 境界) でワークロード判定を行い、適切な設定を注入:
+
+        let writer_config = if std::env::var("WRITER_PROFILE").as_deref() == Ok("bulk") {
+            SearchIndexWriterConfig::for_bulk_workload()
+        } else {
+            SearchIndexWriterConfig::default()
+        };
+
+        let search_index_writer = Arc::new(SearchIndexWriter::new(
+            Arc::clone(&search_index_arc),
+            writer_config,
+        ));
+      note: |
+        環境変数 WRITER_PROFILE による切り替え。I/O 境界での設定注入であり、
+        純粋関数層には影響しない。AP-5 は pure 層ではなく初期化層での設定変更。
+
+    - id: "AP-5-003"
+      file: "benches/api/src/api/query.rs:8144"
+      description: "[CR-007 修正] idle compaction threshold の調整と関連テスト更新"
+      current_code: "arena.compact_when_idle(8)"
+      proposed_change: |
+        for_bulk_workload の場合、idle_threshold も引き上げ:
+        arena.compact_when_idle(config.batch_size)
+        で batch_size と連動させる。
+
+        関連テストの更新:
+        - compact_when_idle のパラメータが batch_size に連動することを検証するテスト追加
+        - writer_loop 内の idle compaction 動作確認テスト
+
+  test_strategy:
+    - "既存の SearchIndexWriter テスト (24762-25211行) が全て通過"
+    - "test_writer_config_default_values のアサーション値は変更しない (default は維持)"
+    - "for_bulk_workload() の新規テスト追加"
+    - "[CR-007 修正] compact_when_idle 系テストの追加"
+    - "tasks_bulk ベンチマークで RPS と latency (P50/P99) を測定"
+    - "WRITER_PROFILE=bulk 有無での動作確認"
+
+  risks:
+    - risk: "batch_size 増加による低スループット時の反映遅延"
+      mitigation: "batch_timeout_milliseconds で上限を制御 (10ms で十分短い)"
+    - risk: "環境変数の設定漏れ"
+      mitigation: "デフォルトは既存値を維持。bulk profile は明示的に有効化が必要"
+
+# =============================================================================
+# タスク一覧 (実装対象別)
+# =============================================================================
+
+task_list:
+  rust_implementation:
+    - task_id: "IMPL-AH-001"
+      approach: "AP-1"
+      subject: "TaskId に Copy derive を追加"
+      file: "benches/api/src/domain/task.rs:18"
+      complexity: "S"
+      estimated_time: "10min"
+
+    - task_id: "IMPL-AH-002"
+      approach: "AP-1"
+      subject: "non-test コードの task_id.clone() を Copy に置換"
+      file: "benches/api/src/api/query.rs, benches/api/src/api/handlers.rs"
+      complexity: "M"
+      estimated_time: "20min"
+      note: "query.rs 約32箇所 + handlers.rs 約2箇所 = 約34箇所 [CR-006 修正]"
+
+    - task_id: "IMPL-AH-003"
+      approach: "AP-1"
+      subject: ".cloned() を .copied() に置換"
+      file: "benches/api/src/api/query.rs"
+      complexity: "S"
+      estimated_time: "10min"
+      note: "約6箇所 (non-test) [CR-006 修正]"
+
+    - task_id: "IMPL-AH-004"
+      approach: "AP-1"
+      subject: "テストコードの task_id.clone() を Copy に置換"
+      file: "benches/api/src/domain/task.rs, benches/api/src/api/query.rs, benches/api/src/api/handlers.rs"
+      complexity: "S"
+      estimated_time: "15min"
+
+    - task_id: "IMPL-AH-005"
+      approach: "AP-2"
+      subject: "mimalloc を feature gate 付きで Cargo.toml に追加"
+      file: "benches/api/Cargo.toml"
+      complexity: "S"
+      estimated_time: "5min"
+
+    - task_id: "IMPL-AH-006"
+      approach: "AP-2"
+      subject: "#[global_allocator] を main.rs に追加"
+      file: "benches/api/src/main.rs"
+      complexity: "S"
+      estimated_time: "5min"
+
+    - task_id: "IMPL-AH-006b"
+      approach: "AP-2"
+      subject: "[CR-001] Dockerfile に ARG API_FEATURES を追加"
+      file: "benches/api/docker/Dockerfile"
+      complexity: "S"
+      estimated_time: "10min"
+
+    - task_id: "IMPL-AH-006c"
+      approach: "AP-2"
+      subject: "[CR-001] compose.ci.yaml に API_FEATURES build arg を追加"
+      file: "benches/api/docker/compose.ci.yaml"
+      complexity: "S"
+      estimated_time: "5min"
+
+    - task_id: "IMPL-AH-007"
+      approach: "AP-3"
+      subject: "[CR-002] bench 専用 fast-hash feature を新設"
+      file: "benches/api/Cargo.toml"
+      complexity: "S"
+      estimated_time: "5min"
+
+    - task_id: "IMPL-AH-008"
+      approach: "AP-4"
+      subject: "merge_segment_into の最適化"
+      file: "benches/api/src/api/query.rs:1590-1625"
+      complexity: "M"
+      estimated_time: "45min"
+      depends_on: ["IMPL-AH-001"]
+
+    - task_id: "IMPL-AH-009"
+      approach: "AP-5"
+      subject: "[CR-003] SearchIndexWriterConfig::for_bulk_workload() ファクトリメソッド追加"
+      file: "benches/api/src/api/query.rs"
+      complexity: "S"
+      estimated_time: "15min"
+      depends_on: ["IMPL-AH-001", "IMPL-AH-008"]
+
+    - task_id: "IMPL-AH-010"
+      approach: "AP-5"
+      subject: "[CR-003] handlers.rs でワークロード判定によるconfig注入"
+      file: "benches/api/src/api/handlers.rs"
+      complexity: "S"
+      estimated_time: "10min"
+      depends_on: ["IMPL-AH-009"]
+
+    - task_id: "IMPL-AH-011"
+      approach: "AP-5"
+      subject: "[CR-007] for_bulk_workload / compact_when_idle のテスト追加"
+      file: "benches/api/src/api/query.rs"
+      complexity: "S"
+      estimated_time: "15min"
+      depends_on: ["IMPL-AH-009"]
+
+  shell_and_ci:
+    - task_id: "IMPL-AH-CI-001"
+      approach: "AP-2"
+      subject: "[CR-001] scenarios/tasks_bulk.yaml に api_features mimalloc を追加"
+      file: "benches/api/benchmarks/scenarios/tasks_bulk.yaml"
+      complexity: "S"
+      estimated_time: "5min"
+
+  documentation:
+    - task_id: "IMPL-AH-DOC-001"
+      approach: "AP-3"
+      subject: "fxhash (fast-hash feature) 使用に関するセキュリティ注意事項をドキュメント化"
+      file: "benches/api/src/api/query.rs (doc comment)"
+      complexity: "S"
+      estimated_time: "10min"
+
+# =============================================================================
+# 並列探索対象
+# =============================================================================
+
+parallel_exploration:
+  description: |
+    AP-1 (Copy化) と AP-2 (mimalloc) は独立しており、効果の測定を並列で行える。
+    特に以下の組み合わせを /parallel-exploration で検証:
+    1. AP-1 のみ適用した場合の RPS
+    2. AP-2 のみ適用した場合の RPS
+    3. AP-1 + AP-2 の組み合わせの RPS
+    4. AP-1 + AP-2 + AP-3 の組み合わせの RPS
+  note: |
+    [CR-005] ローカルでの測定は macOS (Darwin) であり CI (Linux) とは異なるため、
+    定性的な比較のみ有効。最終的な効果は CI ベンチマークで確認する。
+    CI では 1 コミット 1 計測で寄与を分離する。
+
+# =============================================================================
+# 複合効果推定 [CR-004 修正]
+# =============================================================================
+
+combined_impact_estimate:
+  methodology: "Amdahl の法則に基づくレンジ推定 (重複寄与を考慮して保守的に算出)"
+  individual_estimates:
+    ap_1: "+25 ~ +55 RPS (profile: clone 9.74% + allocator 圧の部分解消)"
+    ap_2: "+35 ~ +80 RPS (profile: allocator 25.10% の大幅削減)"
+    ap_3: "+5 ~ +15 RPS (profile: hash 1.43% - 下方修正)"
+    ap_4: "+5 ~ +15 RPS (profile: merge 1.08% - 下方修正)"
+    ap_5: "+8 ~ +25 RPS (batch 回数削減による間接効果)"
+  expected_rps_range: "440 ~ 520 [CR-004 修正: 旧 470~560]"
+  note: |
+    AP-1 + AP-2 の P0 施策で 420~500 RPS 到達を見込む。
+    AP-3/AP-4/AP-5 の追加で 500 RPS 超過を目指す。
+    ただし各施策の重複寄与を考慮し保守的に推定。
+    500 RPS 未達の場合はさらなるプロファイリングで次の施策を検討。
+
+# =============================================================================
+# 受入基準
+# =============================================================================
+
+acceptance_criteria:
+  must_pass:
+    - "cargo check -p task-management-benchmark-api"
+    - "cargo clippy -p task-management-benchmark-api --all-features --all-targets -- -D warnings"
+    - "cargo test -p task-management-benchmark-api"
+    - "cargo fmt -- --check"
+  performance_gates:
+    - metric: "RPS"
+      target: ">= 500"
+      current: "368.78"
+    - metric: "malloc+cfree+realloc ratio"
+      target: "<= 15%"
+      current: "25.10%"
+    - metric: "Cloned<I>::next ratio"
+      target: "<= 5%"
+      current: "9.74%"
+  regression_guards:
+    - "error_rate == 0.0"
+    - "既存の merge_path_detail gate を通過"

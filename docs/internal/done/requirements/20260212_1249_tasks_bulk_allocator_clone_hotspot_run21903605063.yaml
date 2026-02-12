@@ -1,0 +1,348 @@
+# tasks_bulk allocator/clone ホットスポット再分析 要件定義 (run 21903605063)
+#
+# 参照データ:
+# - profiling-results-downloaded-latest/api-profiling-all-5664005e128d052ddb40a32dc6810ed2c0d2bdfc/tasks_bulk/stacks.folded
+# - profiling-results-downloaded-latest/api-profiling-all-5664005e128d052ddb40a32dc6810ed2c0d2bdfc/tasks_bulk/benchmark/meta/tasks_bulk.json
+# - benches/api/src/api/query.rs
+# - src/persistent/ordered_unique_set.rs
+# - src/persistent/hashmap.rs
+# - src/persistent/treemap.rs
+
+version: "1.0.0"
+name: "tasks_bulk_allocator_clone_hotspot_run21903605063"
+description: |
+  CI run 21903605063 の tasks_bulk プロファイルを bottleneck-finder ワークフロー
+  (Phase 1-4) とチェックリストで再分析した。
+
+  現状は RPS=368.78, P50=3190ms, P99=7900ms で、目標 (RPS>=500, P50<=200ms, P99<=500ms)
+  を大幅未達。CPU サンプルは search-index writer 経路に集中し、
+  allocator + clone + hash + persistent map lookup の複合ボトルネックが支配的。
+
+context:
+  profiling:
+    ci_run: "21903605063"
+    scenario: "tasks_bulk"
+    folded_file: "profiling-results-downloaded-latest/api-profiling-all-5664005e128d052ddb40a32dc6810ed2c0d2bdfc/tasks_bulk/stacks.folded"
+    benchmark_meta: "profiling-results-downloaded-latest/api-profiling-all-5664005e128d052ddb40a32dc6810ed2c0d2bdfc/tasks_bulk/benchmark/meta/tasks_bulk.json"
+  current_performance:
+    rps: 368.78
+    p50_ms: 3190
+    p99_ms: 7900
+    error_rate: 0.0
+  target_performance:
+    rps: 500
+    p50_ms: 200
+    p99_ms: 500
+
+workflow_analysis:
+  phase1_quantification:
+    total_samples: 46836508264
+    primary_threads:
+      - name: "search-index-wr"
+        inclusive_samples: 23921764650
+        ratio: "51.08%"
+      - name: "tokio-runtime-w"
+        inclusive_samples: 22904713524
+        ratio: "48.90%"
+  phase2_profile_reading:
+    key_hotspots:
+      - symbol: "[unknown]"
+        inclusive_samples: 25108324297
+        ratio: "53.61%"
+      - symbol: "malloc"
+        inclusive_samples: 7415245537
+        ratio: "15.83%"
+      - symbol: "cfree"
+        inclusive_samples: 3202607737
+        ratio: "6.84%"
+      - symbol: "realloc"
+        inclusive_samples: 949849523
+        ratio: "2.03%"
+      - symbol: "alloc union (malloc|cfree|realloc|clear_page_erms)"
+        inclusive_samples: 11758274507
+        ratio: "25.10%"
+      - symbol: "<core::iter::adapters::cloned::Cloned<I> as core::iter::traits::iterator::Iterator>::next"
+        inclusive_samples: 4559678914
+        ratio: "9.74%"
+      - symbol: "<smallvec::SmallVec<A> as core::clone::Clone>::clone"
+        inclusive_samples: 302908718
+        ratio: "0.65%"
+      - symbol: "<core::hash::sip::Hasher<S> as core::hash::Hasher>::write"
+        inclusive_samples: 325977925
+        ratio: "0.70%"
+      - symbol: "lambars::persistent::treemap::BTreeNode<K,V>::get"
+        inclusive_samples: 541624860
+        ratio: "1.16%"
+      - symbol: "task_management_benchmark_api::api::query::NgramSegmentOverlay::merge_segment_into"
+        inclusive_samples: 505516536
+        ratio: "1.08%"
+      - symbol: "<task_management_benchmark_api::api::query::NgramWindow as core::iter::traits::iterator::Iterator>::next"
+        inclusive_samples: 15045135
+        ratio: "0.03%"
+      - symbol: "<task_management_benchmark_api::api::query::NgramSegmentOverlay as core::clone::Clone>::clone"
+        inclusive_samples: 5015045
+        ratio: "0.01%"
+  phase3_prioritization:
+    observation: |
+      [unknown] は単独原因ではなく「シンボル未解決の器」であり、unknown 配下 leaf の 41.42% が
+      [libc.so.6]、16.60% が Cloned<I>::next。実質的には allocator/clone 主体。
+      したがって優先順位は「アロケーション削減 + clone 抑制 + hash/lookup 経路の軽量化」。
+
+checklist_assessment:
+  algorithm_data_structure:
+    status: "要改善"
+    findings:
+      - "TaskIdCollection/OrderedUniqueSet の永続更新で小サイズ SmallVec clone が多発 (src/persistent/ordered_unique_set.rs:339, src/persistent/ordered_unique_set.rs:361)。"
+      - "PersistentHashMap child array 更新が SmallVec の cloned+extend を繰り返す (src/persistent/hashmap.rs:903, src/persistent/hashmap.rs:927, src/persistent/hashmap.rs:949)。"
+      - "Ngram マージは add-only 最適化済みだが、merge_segment_into のキー単位 merge が依然重い (benches/api/src/api/query.rs:1590)。"
+  memory:
+    status: "重大"
+    findings:
+      - "allocator 経路が 25.10% (union) を占有。page fault 系シンボルも 1.84%。"
+      - "to_lowercase/normalize 経路の短命文字列確保が残存 (benches/api/src/api/query.rs:356)。"
+      - "SearchIndex writer で apply_changes ごとの新インデックス生成が大きい。"
+  concurrency:
+    status: "概ね良好だが余地あり"
+    findings:
+      - "single-writer 化は導入済み (benches/api/src/api/query.rs:8126) だが、batch_size=8 が小さく copy-on-write 回数を増やす可能性。"
+      - "futex/schedule 系が合計約2.66%で、alloc contention 由来の待ちが示唆される。"
+  io:
+    status: "支配的ではない"
+    findings:
+      - "writev 0.65% で I/O は主因ではない。"
+      - "Error=0% で機能面より CPU/memory 最適化が優先。"
+  compiler_optimization:
+    status: "追加余地あり"
+    findings:
+      - "release + lto=fat + debug=1 は有効。"
+      - "[unknown] 高比率のため、次回計測は frame pointer/symbol 解決率向上が必要。"
+
+root_cause_analysis:
+  allocator_53_percent_question:
+    answer: |
+      "53.78% allocator" は厳密には [unknown] 53.61% と allocator シンボルが重なって見えている状態。
+      直接観測できる malloc/cfree/realloc/clear_page_erms は 25.10% だが、unknown 配下 leaf の
+      41.42% が [libc.so.6] であり、実質的にメモリアロケータ/解放・その周辺コストが支配的。
+      さらに Cloned<I>::next (9.74%) と SmallVec 系処理が allocator 圧を増幅している。
+  smallvec_btree_hasher_patterns:
+    smallvec:
+      issue: "永続データ構造更新時の clone/extend が高頻度。"
+      evidence:
+        - "<smallvec::SmallVec<A> as core::iter::traits::collect::Extend<...>>::extend 3.96%"
+        - "<smallvec::SmallVec<A> as core::clone::Clone>::clone 0.65%"
+        - "smallvec::SmallVec<A>::try_grow 3.27%"
+    btreenode:
+      issue: "BTreeNode::get 自体は O(log n) だが、更新ループ内 lookup 回数が多く累積。"
+      evidence:
+        - "lambars::persistent::treemap::BTreeNode<K,V>::get 1.16%"
+        - "実装は各ノード binary_search + 再帰 (src/persistent/treemap.rs:176)。"
+    hasher:
+      issue: "PersistentHashMap がデフォルト SipHash を使用し、短キー大量処理で CPU コスト化。"
+      evidence:
+        - "<core::hash::sip::Hasher<S> as core::hash::Hasher>::write 0.70%"
+        - "core::hash::BuildHasher::hash_one 0.73%"
+        - "compute_hash が DefaultHasher(SipHash) (src/persistent/hashmap.rs:349)。"
+  ngram_clone_allocation:
+    conclusion: |
+      NgramWindow::next と NgramSegmentOverlay::clone はサンプル数自体は大きいが割合は低い
+      (0.03%, 0.01%)。一方で merge_segment_into は 1.08% (search-index-wr 内 2.11%) あり、
+      Ngram 経路の優先対象は clone/next ではなく merge + key intern + posting merge である。
+
+approach_catalog:
+  - id: AP-1
+    name: "TaskId clone/iterator clone 削減"
+    summary: "hot path の `iter().cloned()` と `task_id.clone()` を Copy/borrow 優先へ置換。"
+    concrete_changes:
+      - "TaskId を `Copy` 化し clone 呼び出しを除去 (benches/api/src/domain/task.rs:18)。"
+      - "merge 系で `extend_from_slice` / slice ベース merge を優先。"
+      - "`Vec<TaskId>` 生成時の中間 collect を削減。"
+    expected_rps_impact: "+25 ~ +55 RPS"
+    risk:
+      level: "中"
+      details:
+        - "TaskId を Copy 化する影響範囲が広い。"
+        - "意味論は同一だが API の trait 境界再確認が必要。"
+
+  - id: AP-2
+    name: "allocator 圧縮 (arena 追加最適化 + グローバルアロケータ評価)"
+    summary: "merge scratch 再利用の適用範囲拡大と allocator 実装比較で malloc/cfree を削減。"
+    concrete_changes:
+      - "merge/posting 経路の一時 Vec を arena 由来バッファへ集約。"
+      - "`TaskIdCollection::from_sorted_vec(std::mem::take(scratch))` の再利用性を改善。"
+      - "`mimalloc`/`jemalloc` A/B を bench feature で比較。"
+    expected_rps_impact: "+35 ~ +80 RPS"
+    risk:
+      level: "中"
+      details:
+        - "allocator 変更はデプロイ環境差分の影響を受ける。"
+        - "メモリ使用量ピークと断片化の再検証が必要。"
+
+  - id: AP-3
+    name: "hash コスト削減 (trusted path のみ高速 hasher)"
+    summary: "NgramIndex 内部経路限定で SipHash 依存を減らす。"
+    concrete_changes:
+      - "`PersistentHashMap` の feature 切替 (ahash/fxhash) を benchmark 限定で評価。"
+      - "または NgramKey 専用 map に pre-hash/cached-hash を導入。"
+    expected_rps_impact: "+15 ~ +40 RPS"
+    risk:
+      level: "高"
+      details:
+        - "fxhash/ahash は HashDoS 耐性が低下。"
+        - "外部入力キーを扱う公開 API では安全策 (path 限定/feature 限定) が必須。"
+
+  - id: AP-4
+    name: "Ngram merge 経路の差分適用最適化"
+    summary: "`merge_segment_into` 中心に key lookup 回数・一時確保を削減。"
+    concrete_changes:
+      - "segment 側の key grouping + 連続 key の batch insert。"
+      - "hit/miss 分岐で miss path clone を最小化。"
+      - "NgramWindow は現状維持、merge 側を優先最適化。"
+    expected_rps_impact: "+10 ~ +30 RPS"
+    risk:
+      level: "低"
+      details:
+        - "検索結果同値性の回帰テスト追加が必要。"
+
+  - id: AP-5
+    name: "writer micro-batch 設定最適化"
+    summary: "single-writer のバッチ粒度を workload に合わせて引き上げ、COW 回数を減らす。"
+    concrete_changes:
+      - "`SearchIndexWriterConfig` の batch_size/time をシナリオ別に最適化。"
+      - "queue drain 時の merge 回数を削減。"
+    expected_rps_impact: "+8 ~ +25 RPS"
+    risk:
+      level: "低"
+      details:
+        - "低スループット時の反映遅延増加に注意。"
+
+requirements:
+  - id: REQ-TB219-ALC-001
+    priority: "P0"
+    component: "SearchIndex merge/apply path"
+    bottleneck: "allocator + clone 複合コスト"
+    why_bottleneck: |
+      `search-index-wr` が全体 51.08% を占め、同経路で malloc/cfree と clone 系が集中。
+      add-only 更新でも短命 Vec/SmallVec 生成が多く、ページ確保/解放を誘発する。
+    required_improvements:
+      - "TaskId clone削減 (Copy化または borrow化)"
+      - "scratch バッファの再利用率向上"
+      - "中間 Vec collect の除去"
+    algorithm:
+      name: "Arena-backed Streaming Merge"
+      details:
+        - "two-pointer/galloping は維持し、出力先を再利用バッファへ固定"
+        - "`iter().cloned().collect()` を slice 経路へ寄せる"
+    estimated_impact:
+      rps_gain: "+45 ~ +100"
+      target_after: "414 ~ 469 RPS"
+
+  - id: REQ-TB219-ALC-002
+    priority: "P1"
+    component: "PersistentHashMap / Ngram key path"
+    bottleneck: "SipHash ベース hashing コスト"
+    why_bottleneck: |
+      `Hasher::write` + `BuildHasher::hash_one` が継続的に出現し、短キー高頻度処理の CPU を消費。
+      KeyPool + PersistentHashMap lookup/insert が更新ループで繰り返される。
+    required_improvements:
+      - "trusted internal path に限定した高速 hasher の導入可否判定"
+      - "セキュリティ要件を満たす feature gate 設計"
+    algorithm:
+      name: "Dual Hash Policy"
+      details:
+        - "公開入力境界は SipHash 維持"
+        - "内部 index build path のみ fast hasher を選択可能にする"
+    estimated_impact:
+      rps_gain: "+15 ~ +40"
+      target_after: "383 ~ 409 RPS (単独)"
+
+  - id: REQ-TB219-ALC-003
+    priority: "P1"
+    component: "Ngram overlay compaction"
+    bottleneck: "merge_segment_into の累積コスト"
+    why_bottleneck: |
+      NgramWindow::next/Overlay::clone 自体は軽微だが、segment merge が search-index-wr の
+      2.11% を占有し、長時間実行では tail latency へ寄与する。
+    required_improvements:
+      - "segment merge の key lookup/insert 回数削減"
+      - "miss path clone 最小化"
+    algorithm:
+      name: "Segment-Aware Batch Merge"
+      details:
+        - "key を順序化して transient insert の局所性を上げる"
+        - "hit path は scratch 経由 merge、miss path は ownership 移譲優先"
+    estimated_impact:
+      rps_gain: "+10 ~ +30"
+      target_after: "379 ~ 399 RPS (単独)"
+
+  - id: REQ-TB219-ALC-004
+    priority: "P2"
+    component: "SearchIndexWriter configuration"
+    bottleneck: "micro-batch 粒度が小さく apply 回数が多い"
+    why_bottleneck: |
+      default `batch_size=8` は low latency 寄りだが、tasks_bulk では COW 更新回数を増やし
+      allocator 負荷を押し上げる可能性がある。
+    required_improvements:
+      - "workload 別 writer config 導入"
+      - "batch timeout とスループットのトレードオフ最適化"
+    algorithm:
+      name: "Adaptive Micro-Batching"
+      details:
+        - "queue depth と change count に応じて batch_size を段階調整"
+    estimated_impact:
+      rps_gain: "+8 ~ +25"
+      target_after: "377 ~ 394 RPS (単独)"
+
+combined_impact_estimate:
+  methodology: "Amdahl の法則に基づくレンジ推定 (重複寄与を考慮して保守的に算出)"
+  expected_rps_range: "470 ~ 560"
+  note: |
+    P0 + P1 (REQ-001 + REQ-002) の組み合わせで 500 RPS 到達可能性が高い。
+    ただし P50/P99 は allocator 改善だけでは不足するため、writer 設定と Ngram merge 最適化を併用する。
+
+non_functional_requirements:
+  consistency_with_existing_code:
+    - "SearchIndex の結果同値性を維持する (既存 differential tests を必須通過)。"
+    - "PR #283 の MergePlan adaptive dispatch / arena hysteresis を退行させない。"
+  performance:
+    - "tasks_bulk: RPS >= 500"
+    - "tasks_bulk: p50 <= 2000ms (中間ゲート), 最終 <= 200ms"
+    - "tasks_bulk: p99 <= 4000ms (中間ゲート), 最終 <= 500ms"
+    - "stacks.folded: alloc union 比率 25.10% -> 15% 以下"
+  security:
+    - "fast hasher は trusted path 限定。公開入力境界では SipHash を維持。"
+    - "feature flag 経路での誤有効化を CI チェックで防止。"
+  functional_architecture:
+    - "計算と実行の分離を維持 (pure 関数層に I/O を混在させない)。"
+    - "参照透過性を崩すグローバル可変状態を追加しない。"
+    - "不変性を維持しつつ、局所的 transient/mutable バッファで性能最適化する。"
+
+validation_plan:
+  benchmarks:
+    - "benches/api/benchmarks/scenarios/tasks_bulk.yaml"
+    - "現行 run と同条件 (threads=4, connections=30, duration=30s)"
+  profiling:
+    - "stacks.folded の比較 (before/after)"
+    - "unknown 比率と symbol 解決率を併記"
+  acceptance_criteria:
+    - "RPS >= 500"
+    - "p99 <= 500ms"
+    - "malloc+cfree+realloc+clear_page_erms 比率 <= 15%"
+    - "Cloned<I>::next 比率 <= 5%"
+
+implementation_priority:
+  - rank: 1
+    requirement_id: "REQ-TB219-ALC-001"
+    reason: "最大寄与で、セキュリティリスクを増やさず改善幅が最も大きい。"
+  - rank: 2
+    requirement_id: "REQ-TB219-ALC-002"
+    reason: "hash コストを直接削減できるが、安全境界設計が必要。"
+  - rank: 3
+    requirement_id: "REQ-TB219-ALC-003"
+    reason: "Ngram merge の局所最適化で tail latency を補正。"
+  - rank: 4
+    requirement_id: "REQ-TB219-ALC-004"
+    reason: "設定調整で低リスクの追加改善が見込める。"
+
+file_naming_proposal:
+  path: "docs/internal/requirements/20260212_1249_tasks_bulk_allocator_clone_hotspot_run21903605063.yaml"
+  rule: "YYYYMMDD_HHMM_<機能名>.yaml"
