@@ -1270,14 +1270,13 @@ pub(crate) enum MergePlan {
 /// Reusable scratch buffer for merge operations, avoiding repeated heap allocation.
 ///
 /// Capacity management uses a hysteresis strategy:
-/// - `reserve_with_hysteresis` grows the buffer by `growth_factor` to amortise
-///   future allocations.
+/// - `reserve_with_hysteresis` grows the buffer by 3/2 (integer arithmetic) to
+///   amortise future allocations.
 /// - `compact_when_idle` shrinks the buffer only after `idle_threshold`
 ///   consecutive idle cycles, avoiding hot-path shrink/realloc churn.
 pub struct MergeArena {
     scratch: Vec<TaskId>,
     shrink_threshold: usize,
-    growth_factor: f32,
     idle_counter: usize,
 }
 
@@ -1286,7 +1285,6 @@ impl MergeArena {
         Self {
             scratch: Vec::new(),
             shrink_threshold: 16_384,
-            growth_factor: 1.5,
             idle_counter: 0,
         }
     }
@@ -1304,24 +1302,21 @@ impl MergeArena {
     pub fn scratch_with_capacity(&mut self, required: usize) -> &mut Vec<TaskId> {
         self.scratch.clear();
         self.idle_counter = 0;
-        Self::reserve_with_hysteresis(&mut self.scratch, required, self.growth_factor);
+        Self::reserve_with_hysteresis(&mut self.scratch, required);
         &mut self.scratch
     }
 
-    /// Grows `buffer` to at least `required` capacity, overshooting by
-    /// `growth_factor` to amortise future allocations. No-op when capacity
-    /// already suffices.
+    /// Grows `buffer` to at least `required` capacity, overshooting by 3/2 to
+    /// amortise future allocations. No-op when capacity already suffices.
+    ///
+    /// Uses integer arithmetic (`saturating_mul(3) / 2`) to avoid `f32` cast
+    /// precision loss on large capacities.
     #[inline]
-    fn reserve_with_hysteresis(buffer: &mut Vec<TaskId>, required: usize, growth_factor: f32) {
+    fn reserve_with_hysteresis(buffer: &mut Vec<TaskId>, required: usize) {
         if buffer.capacity() >= required {
             return;
         }
-        #[allow(
-            clippy::cast_possible_truncation,
-            clippy::cast_sign_loss,
-            clippy::cast_precision_loss
-        )]
-        let grown = (buffer.capacity() as f32 * growth_factor) as usize;
+        let grown = buffer.capacity().saturating_mul(3) / 2;
         let target = required.max(grown);
         buffer.reserve(target.saturating_sub(buffer.len()));
     }
@@ -2498,14 +2493,14 @@ fn merge_sorted_posting_lists(
         SearchIndex::extend_sorted_into(new_entries, &mut result_vec);
         TaskIdCollection::from_sorted_vec(result_vec)
     } else {
-        let existing_vec = SearchIndex::to_sorted_vec(existing);
-        let add_vec = SearchIndex::to_sorted_vec(new_entries);
-        let plan = SearchIndex::choose_merge_plan(existing_vec.len(), add_vec.len());
+        let plan = SearchIndex::choose_merge_plan(existing.len(), new_entries.len());
         if matches!(plan, MergePlan::TwoPointer) {
             // For balanced sizes, fall back to the built-in merge which avoids
             // the intermediate Vec allocation entirely.
             return existing.merge(new_entries);
         }
+        let existing_vec = SearchIndex::to_sorted_vec(existing);
+        let add_vec = SearchIndex::to_sorted_vec(new_entries);
         let mut output = Vec::with_capacity(existing_vec.len() + add_vec.len());
         SearchIndex::merge_postings_adaptive(&existing_vec, &add_vec, &mut output, plan);
         TaskIdCollection::from_sorted_vec(output)
@@ -7294,8 +7289,14 @@ impl SearchIndex {
         let mut sorted_entries: Vec<(NgramKey, Vec<TaskId>)> = add.into_iter().collect();
         sorted_entries.sort_unstable_by(|(key_a, _), (key_b, _)| key_a.cmp(key_b));
 
+        let estimated_capacity = sorted_entries
+            .iter()
+            .map(|(_, add_list)| add_list.len())
+            .max()
+            .unwrap_or(0);
+
         let mut transient = index.clone().transient();
-        let scratch = arena.scratch();
+        let scratch = arena.scratch_with_capacity(estimated_capacity);
 
         for (key, add_list) in sorted_entries {
             if add_list.is_empty() {
@@ -8071,12 +8072,21 @@ impl SearchIndexWriter {
         search_index: Arc<arc_swap::ArcSwap<SearchIndex>>,
         config: &SearchIndexWriterConfig,
     ) {
-        let batch_timeout = std::time::Duration::from_millis(config.batch_timeout_milliseconds);
+        // Ensure at least 1ms to prevent spin-loop when batch_timeout_milliseconds=0.
+        let batch_timeout =
+            std::time::Duration::from_millis(config.batch_timeout_milliseconds.max(1));
+        let idle_poll_interval = batch_timeout.saturating_mul(2);
         let mut arena = MergeArena::new();
 
         loop {
-            let Ok(first_changes) = receiver.recv() else {
-                break;
+            // Use recv_timeout so that idle cycles trigger scratch compaction.
+            let first_changes = match receiver.recv_timeout(idle_poll_interval) {
+                Ok(changes) => changes,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    arena.compact_when_idle(8);
+                    continue;
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
             };
 
             // Fixed deadline prevents a continuous stream from extending the batch window.
@@ -8110,8 +8120,6 @@ impl SearchIndexWriter {
             if !coalesced_changes.is_empty() {
                 Self::apply_coalesced_changes(&search_index, &coalesced_changes, &mut arena);
             }
-
-            arena.compact_when_idle(8);
         }
     }
 
@@ -24124,9 +24132,8 @@ mod ngram_segment_overlay_tests {
         scratch.reserve(10);
         let initial_capacity = scratch.capacity();
 
-        // Request more than current capacity but growth_factor * capacity > required
-        // growth_factor = 1.5, so if capacity=10, grown = 15
-        // required = 12, target = max(12, 15) = 15
+        // Request more than current capacity; integer 3/2 growth applies.
+        // If capacity=10, grown = 10*3/2 = 15, required = 15, target = max(15, 15) = 15
         let scratch = arena.scratch_with_capacity(initial_capacity + 5);
         assert!(
             scratch.capacity() >= initial_capacity + 5,
@@ -25013,6 +25020,39 @@ mod search_index_writer_tests {
 
         let debug_output = format!("{writer:?}");
         assert!(debug_output.contains("SearchIndexWriter"));
+
+        writer.shutdown();
+    }
+
+    // -------------------------------------------------------------------------
+    // Regression: batch_timeout_milliseconds=0 must not cause busy-loop
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn test_writer_with_zero_batch_timeout_is_safe() {
+        let search_index = create_empty_search_index();
+        let writer = SearchIndexWriter::new(
+            Arc::clone(&search_index),
+            SearchIndexWriterConfig {
+                batch_size: 8,
+                batch_timeout_milliseconds: 0,
+                channel_capacity: 32,
+            },
+        );
+
+        let task = create_task("zero-timeout-safe");
+        writer
+            .send_change(TaskChange::Add(task))
+            .expect("send should succeed");
+
+        // Allow the writer thread enough time to process.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        let index = search_index.load();
+        assert!(
+            index.search_by_title("zero-timeout-safe").is_some(),
+            "Task should be indexed even with batch_timeout_milliseconds=0"
+        );
 
         writer.shutdown();
     }
