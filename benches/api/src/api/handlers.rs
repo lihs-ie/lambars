@@ -447,11 +447,6 @@ impl AppState {
 
         let search_index_arc = Arc::new(ArcSwap::from_pointee(search_index));
 
-        // Select writer configuration based on workload profile.
-        // WRITER_PROFILE=bulk uses larger batches optimized for high-throughput
-        // bulk operations, reducing COW update frequency at the cost of slightly
-        // higher latency. This decision is made at the I/O boundary (initialization)
-        // and does not affect the pure function layer.
         let writer_config = if std::env::var("WRITER_PROFILE").as_deref() == Ok("bulk") {
             SearchIndexWriterConfig::for_bulk_workload()
         } else {

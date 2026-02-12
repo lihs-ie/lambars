@@ -650,18 +650,9 @@ mod tests {
 
     #[rstest]
     fn test_task_id_is_copy() {
-        let original = TaskId::generate();
-        // Copy semantics: original remains valid after assignment
-        let copied = original;
-        assert_eq!(original, copied);
-    }
-
-    #[rstest]
-    fn test_task_id_copy_preserves_value() {
         let uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
         let task_id = TaskId::from_uuid(uuid);
         let copied = task_id;
-        // Both original and copy should have identical UUID
         assert_eq!(task_id.as_uuid(), copied.as_uuid());
         assert_eq!(task_id, copied);
     }

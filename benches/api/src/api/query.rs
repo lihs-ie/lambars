@@ -25094,22 +25094,16 @@ mod search_index_writer_tests {
     fn test_writer_config_for_bulk_workload_differs_from_default() {
         let default_config = SearchIndexWriterConfig::default();
         let bulk_config = SearchIndexWriterConfig::for_bulk_workload();
-        // Bulk workload should use larger batches for reduced COW update frequency
         assert!(bulk_config.batch_size > default_config.batch_size);
         assert!(bulk_config.channel_capacity > default_config.channel_capacity);
     }
 
     #[rstest]
     fn test_writer_config_for_bulk_workload_is_const() {
-        // Verify const fn behavior: two calls return identical values
-        const CONFIG_A: SearchIndexWriterConfig = SearchIndexWriterConfig::for_bulk_workload();
-        const CONFIG_B: SearchIndexWriterConfig = SearchIndexWriterConfig::for_bulk_workload();
-        assert_eq!(CONFIG_A.batch_size, CONFIG_B.batch_size);
-        assert_eq!(
-            CONFIG_A.batch_timeout_milliseconds,
-            CONFIG_B.batch_timeout_milliseconds
-        );
-        assert_eq!(CONFIG_A.channel_capacity, CONFIG_B.channel_capacity);
+        const CONFIG: SearchIndexWriterConfig = SearchIndexWriterConfig::for_bulk_workload();
+        assert_eq!(CONFIG.batch_size, 32);
+        assert_eq!(CONFIG.batch_timeout_milliseconds, 10);
+        assert_eq!(CONFIG.channel_capacity, 64);
     }
 
     #[rstest]
@@ -25124,7 +25118,6 @@ mod search_index_writer_tests {
             },
         );
 
-        // Send a few tasks to verify it works with custom config
         for index in 0..10 {
             let task = create_task(&format!("Custom Config Task {index}"));
             writer

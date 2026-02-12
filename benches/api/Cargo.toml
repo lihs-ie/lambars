@@ -9,7 +9,7 @@ license = "MIT OR Apache-2.0"
 [features]
 default = []
 demo = []  # Demo endpoints for development/debugging
-mimalloc = ["dep:mimalloc"]  # Use mimalloc as global allocator for reduced fragmentation
+mimalloc = ["dep:mimalloc"]
 # Use FxHash instead of SipHash for PersistentHashMap/PersistentHashSet.
 # WARNING: FxHash is NOT HashDoS-resistant. Only enable for trusted-input
 # benchmark workloads, never for public-facing API builds.
@@ -65,7 +65,6 @@ lru = "0.12"
 # HTTP client for external data sources
 reqwest = { version = "0.12", features = ["json"] }
 
-# Alternative global allocator (optional, enabled via --features mimalloc)
 mimalloc = { version = "0.1", optional = true }
 
 [dev-dependencies]
