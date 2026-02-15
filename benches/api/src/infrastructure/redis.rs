@@ -1029,7 +1029,7 @@ mod tests {
     async fn test_task_repository_save_and_find() {
         let repository = RedisTaskRepository::from_url("redis://localhost:6379").unwrap();
         let task = test_task("Test Task");
-        let task_id = task.task_id.clone();
+        let task_id = task.task_id;
 
         // Save the task
         let save_result = repository.save(&task).await;
@@ -1049,13 +1049,13 @@ mod tests {
     async fn test_task_repository_save_update() {
         let repository = RedisTaskRepository::from_url("redis://localhost:6379").unwrap();
         let task = test_task("Original Title");
-        let task_id = task.task_id.clone();
+        let task_id = task.task_id;
 
         // Save the original task
         repository.save(&task).await.unwrap();
 
         // Update the task with incremented version
-        let updated_task = test_task_with_id(task_id.clone(), "Updated Title").increment_version();
+        let updated_task = test_task_with_id(task_id, "Updated Title").increment_version();
         let update_result = repository.save(&updated_task).await;
         assert!(update_result.is_ok());
 
@@ -1071,7 +1071,7 @@ mod tests {
     async fn test_task_repository_save_version_conflict() {
         let repository = RedisTaskRepository::from_url("redis://localhost:6379").unwrap();
         let task = test_task("Test Task");
-        let task_id = task.task_id.clone();
+        let task_id = task.task_id;
 
         // Save the original task
         repository.save(&task).await.unwrap();
@@ -1096,7 +1096,7 @@ mod tests {
     async fn test_task_repository_delete() {
         let repository = RedisTaskRepository::from_url("redis://localhost:6379").unwrap();
         let task = test_task("Test Task");
-        let task_id = task.task_id.clone();
+        let task_id = task.task_id;
 
         // Save the task
         repository.save(&task).await.unwrap();

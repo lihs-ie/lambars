@@ -1,0 +1,462 @@
+# REQ-TB284-001 実装計画: CI feature 有効化
+#
+# PR #284 の feature (mimalloc, fast-hash, WRITER_PROFILE=bulk) を
+# CI ベンチマーク実行で tasks_bulk シナリオに限定して有効化する。
+#
+# 変更対象: CI/YAML/シェルスクリプトのみ (Rust コード変更なし)
+
+version: "1.2.0"
+name: "tasks_bulk_ci_feature_activation"
+requirement_id: "REQ-TB284-001"
+
+description: |
+  PR #284 で実装済みの mimalloc, fast-hash, WRITER_PROFILE=bulk は
+  コードとしては存在するが、CI ベンチマーク実行時に有効化されていない。
+  本計画では、tasks_bulk シナリオに限定してこれらを CI で有効化し、
+  性能ゲートの閾値を引き上げる。
+
+# ==========================================================================
+# Codex レビュー反映事項
+# ==========================================================================
+#
+# v1.0.0 -> v1.1.0 (第1回レビュー)
+# 1. [High] 要件 target_component との整合性
+#    -> CHANGE-003 で要件定義の target_component を修正
+# 2. [High] min_rps_achieved がゲートとして実効化されない問題
+#    -> CHANGE-002 で nightly ループに RPS ゲートチェックを追加
+# 3. [Medium] 検証手順の自己矛盾
+#    -> 検証手順を「tasks_bulk.yaml を除外して検索」に修正
+# 4. [Medium] min_rps_achieved 閾値の段階的引き上げ運用
+#    -> threshold_escalation セクションを追加
+# 5. [Medium] docker_build / docker_runtime 命名の設計負債リスク
+#    -> TASK-005 (README.md 追記) を追加
+# 6. [Medium] 環境汚染対策の堅牢化
+#    -> subshell + trap cleanup 方式に変更
+#
+# v1.1.0 -> v1.2.0 (第2回レビュー)
+# 7. [High] RPS ゲートが fail-closed になっていない
+#    -> meta.json 未検出時を ERROR + exit 1 に変更 (fail-closed)
+# 8. [High] RPS ゲートがベースライン結果ではなく variant 結果を拾う可能性
+#    -> ベースライン実行直後にゲートチェックを移動
+#    -> meta.json パスをシナリオ名/スクリプト名で絞り込み
+# 9. [Medium] README 追記タスクが tasks セクションに欠落
+#    -> TASK-005 を追加
+# 10. [Medium] export ${variant} の脆弱性
+#     -> VARIANTS を JSON で保持し、jq で個別変数に分解する方式に変更
+
+# ==========================================================================
+# 調査結果
+# ==========================================================================
+
+investigation:
+  api_features_injection_path:
+    description: |
+      API_FEATURES は Docker build ARG として compose.ci.yaml -> Dockerfile に伝搬する。
+      compose.ci.yaml line 49: API_FEATURES: "${API_FEATURES:-}"
+      Dockerfile line 55: ARG API_FEATURES=""
+      Dockerfile line 64: --features "${API_FEATURES}"
+      つまり、docker compose up --build の前に export API_FEATURES="mimalloc,fast-hash" すれば
+      Docker ビルド時に feature が有効化される。
+    status: "ready"
+
+  writer_profile_injection_path:
+    description: |
+      WRITER_PROFILE は Docker runtime 環境変数として compose.ci.yaml で注入される。
+      compose.ci.yaml line 77: WRITER_PROFILE: "${WRITER_PROFILE:-default}"
+      つまり、docker compose up の前に export WRITER_PROFILE="bulk" すれば
+      API サーバー起動時に bulk writer profile が有効化される。
+    status: "ready"
+
+  nightly_job_structure:
+    description: |
+      benchmark-api.yml の benchmark-nightly ジョブでは、
+      nightly_config.yaml からシナリオ一覧を読み取り、
+      各シナリオについて docker compose up --build -> run_benchmark.sh -> docker compose down を実行する。
+      つまり、シナリオごとに Docker ビルド/起動がやり直される。
+      ループ内で docker compose up の前にシナリオ固有の環境変数を設定すれば、
+      他のシナリオに影響なく tasks_bulk だけで feature を有効化できる。
+    status: "ready"
+
+  other_scenario_impact:
+    description: |
+      他のシナリオ (postgres_redis_read_heavy_warm, postgres_write_heavy, mixed_workload_burst) は
+      docker_build.api_features も docker_runtime.writer_profile も定義しないため、
+      デフォルト値 (空文字列, "default") が適用される。影響なし。
+    status: "confirmed"
+
+  min_rps_achieved_gap:
+    description: |
+      [Codex 指摘 #2] シナリオ YAML の thresholds.min_rps_achieved は
+      run_benchmark.sh でも check_thresholds.sh でも参照されていない。
+      宣言的な目標値としてのみ存在し、CI ゲートとして機能していない。
+      本計画では nightly ジョブ内で実測 RPS と min_rps_achieved を比較する
+      ゲートチェック処理を追加して実効化する。
+    status: "addressed_in_change_002"
+
+  profiling_workflow_scope:
+    description: |
+      [Codex 指摘 #1] profiling.yml は Docker Compose を使用せず、
+      cargo build --release で直接 API バイナリをビルドし、
+      環境変数で直接 API サーバーを起動する。
+      API_FEATURES の注入は --features フラグを cargo build コマンドに追加する必要がある。
+      これは本計画のスコープ外とし、別タスクとして分離する。
+    status: "out_of_scope"
+
+# ==========================================================================
+# 変更内容
+# ==========================================================================
+
+changes:
+  - id: "CHANGE-001"
+    file: "benches/api/benchmarks/scenarios/tasks_bulk.yaml"
+    type: "yaml"
+    description: |
+      シナリオ YAML に以下のフィールドを追加する:
+      1. docker_build セクション: api_features: "mimalloc,fast-hash"
+         - Docker ビルド時の Cargo feature 指定 (metadata.api_features とは別概念)
+         - metadata.api_features は「テスト対象の lambars API 機能」(for_!, Alternative 等)
+         - docker_build.api_features は「Docker ビルドの Cargo feature」(mimalloc, fast-hash)
+      2. docker_runtime セクション: writer_profile: "bulk"
+         - Docker 起動時の環境変数 WRITER_PROFILE に対応
+      3. thresholds.min_rps_achieved を 200 -> 400 に引き上げ
+         (初回値。段階的引き上げ手順は threshold_escalation 参照)
+    rationale: |
+      シナリオ YAML に宣言的に記述することで、
+      ビルド/ランタイム設定がシナリオごとに管理可能になる。
+      Docker の設定はシナリオ YAML を single source of truth とする。
+    detail:
+      additions:
+        - path: "docker_build.api_features"
+          value: "mimalloc,fast-hash"
+          comment: "Docker ビルド時の Cargo feature (metadata.api_features とは別)"
+        - path: "docker_runtime.writer_profile"
+          value: "bulk"
+          comment: "Docker 起動時の WRITER_PROFILE 環境変数"
+      modifications:
+        - path: "thresholds.min_rps_achieved"
+          old_value: 200
+          new_value: 400
+          rationale: |
+            要件定義の最終目標は RPS >= 500 だが、CI 環境の変動 (10-15%) を考慮し
+            段階的に引き上げる:
+              Phase 1 (本計画): 400 — feature 有効化の効果確認
+              Phase 2 (安定確認後): 500 — 目標値に到達
+            直近の実測値は RPS=368.78 (feature 未有効化)。
+            PR #284 全有効化で +60 ~ +120 が推定されるため、
+            400 は安全マージンを確保した初期閾値。
+
+  - id: "CHANGE-002"
+    file: ".github/workflows/benchmark-api.yml"
+    type: "github-actions"
+    description: |
+      benchmark-nightly ジョブのシナリオループを以下の方式に改修:
+      1. subshell で環境隔離
+      2. docker compose up --build の前に API_FEATURES/WRITER_PROFILE を設定
+      3. ベースライン実行直後に fail-closed の RPS ゲートチェック
+      4. VARIANTS を JSON 保持 + jq 分解で安全に注入
+    rationale: |
+      Docker build ARG (API_FEATURES) は docker compose up --build 時に必要。
+      Docker runtime env (WRITER_PROFILE) も docker compose up 時に必要。
+      subshell 方式により環境変数の漏洩を防止し、trap cleanup で
+      Docker コンテナの確実な後片付けを保証する。
+      RPS ゲートはベースライン実行直後に配置し、fail-closed (meta.json 未検出 = ERROR) とする。
+    detail:
+      location: "benchmark-nightly job > 'Run nightly benchmarks' step"
+      implementation: |
+        # VARIANTS を JSON のまま保持し、空白分割の脆弱性を排除
+        readarray -t VARIANTS < <(yq -o=json -I=0 '.nightly_variants[]' nightly_config.yaml)
+
+        for scenario in "${SCENARIOS[@]}"; do
+          (
+            set -euo pipefail
+            scenario_path="scenarios/${scenario}"
+
+            # Read scenario-specific Docker build/runtime settings
+            export API_FEATURES="$(yq -r '.docker_build.api_features // ""' "${scenario_path}")"
+            export WRITER_PROFILE="$(yq -r '.docker_runtime.writer_profile // "default"' "${scenario_path}")"
+            echo "=== Running scenario: ${scenario} ==="
+            echo "  API_FEATURES='${API_FEATURES}' WRITER_PROFILE='${WRITER_PROFILE}'"
+
+            # Ensure cleanup on exit
+            cleanup() { (cd ../docker && docker compose -f compose.ci.yaml down -v) || true; }
+            trap cleanup EXIT
+
+            # Start services with scenario-specific build args and runtime env
+            cd ../docker && docker compose -f compose.ci.yaml up -d --build --wait
+            cd ../benchmarks
+
+            # Setup data
+            ./setup_test_data.sh --scale medium
+
+            # Run baseline (reset variant overrides)
+            unset HIT_RATE FAIL_RATE PAYLOAD
+            ./run_benchmark.sh --scenario "${scenario_path}"
+
+            # RPS gate check (fail-closed): ベースライン直後に実行
+            min_rps="$(yq -r '.thresholds.min_rps_achieved // 0' "${scenario_path}")"
+            if [[ "${min_rps}" =~ ^[0-9]+$ ]] && [[ "${min_rps}" -gt 0 ]]; then
+              scenario_name="$(yq -r '.name // ""' "${scenario_path}")"
+              # ベースライン meta.json を探索 (シナリオ名/スクリプト名で絞り込み)
+              baseline_meta="$(find results -path "*/${scenario_name}/${scenario_name}/meta.json" -type f 2>/dev/null | sort | tail -1)"
+
+              # fail-closed: meta.json 未検出は ERROR
+              if [[ -z "${baseline_meta}" ]]; then
+                echo "ERROR: baseline meta.json not found for scenario '${scenario_name}'"
+                exit 1
+              fi
+
+              actual_rps="$(jq -r '.results.rps // empty' "${baseline_meta}")"
+              if [[ -z "${actual_rps}" ]]; then
+                echo "ERROR: results.rps missing in ${baseline_meta}"
+                exit 1
+              fi
+
+              echo "  RPS gate: actual=${actual_rps} threshold=${min_rps}"
+              if awk -v a="${actual_rps}" -v t="${min_rps}" 'BEGIN{exit !(a>=t)}'; then
+                echo "  RPS gate PASSED: ${actual_rps} >= ${min_rps}"
+              else
+                echo "ERROR: RPS gate FAILED for ${scenario_name}: ${actual_rps} < ${min_rps}"
+                exit 1
+              fi
+            fi
+
+            # Run variants with JSON-safe injection
+            for variant_json in "${VARIANTS[@]}"; do
+              echo "--- Variant: ${variant_json} ---"
+              (
+                HIT_RATE="$(jq -r '.hit_rate' <<< "${variant_json}")"
+                FAIL_RATE="$(jq -r '.fail_injection' <<< "${variant_json}")"
+                PAYLOAD="$(jq -r '.payload' <<< "${variant_json}")"
+                export HIT_RATE FAIL_RATE PAYLOAD
+                ./run_benchmark.sh --scenario "${scenario_path}"
+              )
+            done
+          )
+        done
+
+  - id: "CHANGE-003"
+    file: "docs/internal/requirements/20260212_1619_tasks_bulk_pr284_postprofile_requirements.yaml"
+    type: "yaml"
+    description: |
+      [Codex 指摘 #1 対応] 要件定義の target_component[0] を
+      ".github/workflows/profiling.yml" から ".github/workflows/benchmark-api.yml" に修正。
+      profiling.yml への feature 注入は scope 外として分離。
+    rationale: |
+      profiling.yml は Docker Compose を使用せず独自のビルドパイプラインを持つため、
+      API_FEATURES の注入経路が異なる。benchmark-api.yml が正しい対象。
+    detail:
+      modifications:
+        - path: "requirements[0].target_component[0]"
+          old_value: ".github/workflows/profiling.yml"
+          new_value: ".github/workflows/benchmark-api.yml"
+
+# ==========================================================================
+# 影響範囲分析
+# ==========================================================================
+
+impact_analysis:
+  tasks_bulk_scenario:
+    affected: true
+    changes:
+      - "docker_build.api_features が追加され、mimalloc + fast-hash でビルドされる"
+      - "docker_runtime.writer_profile が追加され、bulk writer profile で起動される"
+      - "min_rps_achieved が 200 -> 400 に引き上がる"
+      - "nightly ジョブで fail-closed の RPS ゲートが実効化される"
+  other_scenarios:
+    affected: false
+    reason: |
+      docker_build / docker_runtime セクションが未定義のシナリオでは、
+      yq の // "" デフォルトにより空文字列/"default" が設定される。
+      compose.ci.yaml の ${API_FEATURES:-} と ${WRITER_PROFILE:-default} により、
+      既存の挙動 (default feature ビルド + default writer profile) が維持される。
+      thresholds.min_rps_achieved が未定義 (= 0) のシナリオでは RPS ゲートがスキップされる。
+  profiling_workflow:
+    affected: false
+    reason: |
+      profiling.yml は独自のビルド (cargo build --release) を行い、
+      compose.ci.yaml を使用しない。本変更の対象外。
+      profiling.yml への API_FEATURES 対応は別 issue で対応する。
+  pr_benchmark:
+    affected: false
+    reason: |
+      PR ベンチマーク (benchmark-pr, benchmark-baseline) は
+      in_memory_read_heavy_warm.yaml シナリオのみを実行し、
+      tasks_bulk.yaml は使用しない。
+  nightly_loop_structure:
+    affected: true
+    reason: |
+      nightly ループが subshell 方式に変更される。
+      これにより各シナリオの環境変数が隔離され、
+      trap cleanup で Docker コンテナの確実な後片付けが保証される。
+      既存の振る舞い (シナリオごとの up/down) は維持される。
+      VARIANTS の解析方法が空白分割から JSON + jq に変更されるが、
+      出力される環境変数 (HIT_RATE, FAIL_RATE, PAYLOAD) は同一。
+
+# ==========================================================================
+# 実装順序
+# ==========================================================================
+
+implementation_order:
+  - step: 1
+    change_id: "CHANGE-003"
+    description: "要件定義の target_component を修正"
+    validation: "yq で修正後の値を確認"
+
+  - step: 2
+    change_id: "CHANGE-001"
+    description: "tasks_bulk.yaml に docker_build, docker_runtime セクションを追加し、min_rps_achieved を引き上げ"
+    validation: "yq で追加フィールドと閾値を確認"
+
+  - step: 3
+    change_id: "CHANGE-002"
+    description: "benchmark-api.yml の nightly ループを subshell + 環境変数注入 + fail-closed RPS ゲートに改修"
+    validation: "YAML 構文確認。可能であれば act -j benchmark-nightly でローカルテスト"
+
+  - step: 4
+    description: "他のシナリオ YAML に docker_build / docker_runtime が存在しないことを確認"
+    validation: |
+      grep -r 'docker_build\|docker_runtime' benches/api/benchmarks/scenarios/ | grep -v tasks_bulk.yaml
+      上記コマンドの出力が空であることを確認
+
+# ==========================================================================
+# 受入条件
+# ==========================================================================
+
+acceptance_criteria:
+  - id: "AC-001"
+    description: "tasks_bulk.yaml に docker_build.api_features='mimalloc,fast-hash' が定義されている"
+    verification: "yq '.docker_build.api_features' benches/api/benchmarks/scenarios/tasks_bulk.yaml"
+
+  - id: "AC-002"
+    description: "tasks_bulk.yaml に docker_runtime.writer_profile='bulk' が定義されている"
+    verification: "yq '.docker_runtime.writer_profile' benches/api/benchmarks/scenarios/tasks_bulk.yaml"
+
+  - id: "AC-003"
+    description: "tasks_bulk.yaml の min_rps_achieved >= 400"
+    verification: "yq '.thresholds.min_rps_achieved' benches/api/benchmarks/scenarios/tasks_bulk.yaml"
+
+  - id: "AC-004"
+    description: "benchmark-nightly ジョブで docker compose up 前に API_FEATURES/WRITER_PROFILE が設定される"
+    verification: "benchmark-api.yml のコードレビュー"
+
+  - id: "AC-005"
+    description: "他のシナリオ実行時に API_FEATURES が空 (デフォルト) であること"
+    verification: "subshell 方式による環境隔離の確認"
+
+  - id: "AC-006"
+    description: "CI ログから API_FEATURES と WRITER_PROFILE の値が確認できる"
+    verification: "ログ出力の確認"
+
+  - id: "AC-007"
+    description: "nightly ジョブで tasks_bulk の RPS ゲートが fail-closed で実行される"
+    verification: "CI ログに 'RPS gate: actual=... threshold=...' が出力され、meta.json 未検出時は ERROR"
+
+  - id: "AC-008"
+    description: "要件定義の target_component[0] が benchmark-api.yml に修正されている"
+    verification: "yq '.requirements[0].target_component[0]' docs/internal/requirements/20260212_1619_tasks_bulk_pr284_postprofile_requirements.yaml"
+
+  - id: "AC-009"
+    description: "README.md に docker_build / docker_runtime と metadata.api_features の責務差分が明記されている"
+    verification: "benches/api/benchmarks/README.md のコードレビュー"
+
+# ==========================================================================
+# リスクと軽減策
+# ==========================================================================
+
+risks:
+  - id: "RISK-001"
+    description: "mimalloc ビルドが CI 環境で失敗する可能性"
+    likelihood: "低"
+    mitigation: |
+      Dockerfile は既に mimalloc feature 対応済み (Cargo.toml に定義あり)。
+      ローカルで cargo build --features mimalloc を事前に確認する。
+
+  - id: "RISK-002"
+    description: "min_rps_achieved=400 が CI 環境で安定達成できない可能性"
+    likelihood: "中"
+    mitigation: |
+      段階的引き上げ:
+        Phase 1: 400 (本計画) — feature 有効化の効果確認
+        Phase 2: 500 (安定確認後) — 目標値に到達
+      達成できない場合は 350 に一時的に下げて次の最適化フェーズに進む。
+      直近実測 RPS=368.78 (feature 未有効化) + 推定 +60~+120 = 428~488。
+
+  - id: "RISK-003"
+    description: "subshell 方式への変更で nightly ジョブの振る舞いが変わる可能性"
+    likelihood: "低"
+    mitigation: |
+      subshell 内で set -euo pipefail + trap cleanup EXIT を設定し、
+      既存の振る舞い (シナリオごとの up/down/run) を完全に維持する。
+      subshell の終了コードは親シェルに伝搬されるため、
+      ゲートチェック失敗時にジョブ全体が fail する。
+
+  - id: "RISK-004"
+    description: "RPS ゲートの meta.json 探索が不正確になる可能性"
+    likelihood: "低"
+    mitigation: |
+      fail-closed 方式: meta.json 未検出時は ERROR + exit 1 で即失敗する。
+      ベースライン実行直後にゲートチェックを行うため、variant 結果の混入を防止する。
+      meta.json パスは results/*/${scenario_name}/${scenario_name}/meta.json で
+      シナリオ名とスクリプト名の両方で絞り込む。
+
+# ==========================================================================
+# 段階的引き上げ計画
+# ==========================================================================
+
+threshold_escalation:
+  phase_1:
+    min_rps_achieved: 400
+    trigger: "本計画の実装完了"
+    validation: "nightly CI で 3 回連続パスを確認"
+  phase_2:
+    min_rps_achieved: 500
+    trigger: "Phase 1 で 3 回連続パスを確認"
+    validation: "nightly CI で 5 回連続パスを確認"
+  rollback:
+    min_rps_achieved: 350
+    trigger: "Phase 1 で 2 回連続 fail"
+    action: "閾値を下げて次の最適化フェーズ (REQ-TB284-003/004) に進む"
+
+# ==========================================================================
+# タスク一覧
+# ==========================================================================
+
+tasks:
+  - id: "TASK-001"
+    type: "yaml"
+    file: "docs/internal/requirements/20260212_1619_tasks_bulk_pr284_postprofile_requirements.yaml"
+    description: "要件定義の target_component[0] を profiling.yml から benchmark-api.yml に修正"
+    estimated_lines: 1
+    complexity: "低"
+
+  - id: "TASK-002"
+    type: "yaml"
+    file: "benches/api/benchmarks/scenarios/tasks_bulk.yaml"
+    description: "docker_build / docker_runtime セクションを追加し、min_rps_achieved を引き上げ"
+    estimated_lines: 10
+    complexity: "低"
+
+  - id: "TASK-003"
+    type: "github-actions"
+    file: ".github/workflows/benchmark-api.yml"
+    description: |
+      nightly ループを subshell + 環境変数注入 + fail-closed RPS ゲートに改修。
+      VARIANTS の解析を JSON + jq 方式に変更。
+    estimated_lines: 50
+    complexity: "中"
+
+  - id: "TASK-004"
+    type: "validation"
+    description: "他のシナリオに docker_build / docker_runtime が存在しないことを検証"
+    complexity: "低"
+
+  - id: "TASK-005"
+    type: "docs"
+    file: "benches/api/benchmarks/README.md"
+    description: |
+      metadata.api_features と docker_build.api_features の責務差分を明記。
+      metadata.api_features: テスト対象の lambars API 機能 (for_!, Alternative 等)
+      docker_build.api_features: Docker ビルド時の Cargo feature (mimalloc, fast-hash)
+      docker_runtime.writer_profile: Docker 起動時の環境変数 (WRITER_PROFILE)
+    estimated_lines: 15
+    complexity: "低"

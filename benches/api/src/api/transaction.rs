@@ -525,12 +525,12 @@ pub fn rebase_update_request(
         });
     }
 
-    if let Some(priority_dto) = request.priority {
-        if original_base.priority != latest.priority {
-            let request_priority: Priority = priority_dto.into();
-            if request_priority != latest.priority {
-                return Err(RebaseError::NonCommutativeConflict { field: "priority" });
-            }
+    if let Some(priority_dto) = request.priority
+        && original_base.priority != latest.priority
+    {
+        let request_priority: Priority = priority_dto.into();
+        if request_priority != latest.priority {
+            return Err(RebaseError::NonCommutativeConflict { field: "priority" });
         }
     }
 
@@ -715,7 +715,7 @@ impl KeyedUpdateQueue {
                 .and_then(std::sync::Weak::upgrade)
                 .unwrap_or_else(|| {
                     let new_mutex = Arc::new(Mutex::new(()));
-                    map.insert(task_id.clone(), Arc::downgrade(&new_mutex));
+                    map.insert(*task_id, Arc::downgrade(&new_mutex));
                     new_mutex
                 });
 
@@ -831,7 +831,7 @@ pub(crate) async fn update_task_with_read_repair(
         };
 
         let repair_result = retry_on_conflict(
-            || update_task_inner(state.clone(), task_id.clone(), rebased_request.clone()),
+            || update_task_inner(state.clone(), *task_id, rebased_request.clone()),
             DEFAULT_MAX_RETRIES,
             DEFAULT_BASE_DELAY_MS,
             |_| {},
@@ -910,10 +910,10 @@ pub async fn update_task(
     let exhausted_counter = Arc::clone(&state.retry_exhausted);
     let retries_used = Arc::new(AtomicUsize::new(0));
     let retries_used_inner = Arc::clone(&retries_used);
-    let task_id_for_log = task_id.clone();
+    let task_id_for_log = task_id;
 
     let result = retry_on_conflict(
-        || update_task_inner(state.clone(), task_id.clone(), request.clone()),
+        || update_task_inner(state.clone(), task_id, request.clone()),
         DEFAULT_MAX_RETRIES,
         DEFAULT_BASE_DELAY_MS,
         move |attempt| {
@@ -3007,7 +3007,7 @@ mod tests {
             version: task.version,
         };
 
-        let result = update_task_inner(state, task.task_id.clone(), request).await;
+        let result = update_task_inner(state, task.task_id, request).await;
 
         assert!(result.is_err(), "Expected Err for status field in PUT");
         let error = result.unwrap_err();
@@ -3035,7 +3035,7 @@ mod tests {
             version: 999, // Stale version, but irrelevant for no-op
         };
 
-        let result = update_task_inner(state, task.task_id.clone(), request).await;
+        let result = update_task_inner(state, task.task_id, request).await;
 
         assert!(result.is_ok(), "Expected Ok for no-op request");
         let (status_code, json_response) = result.unwrap();
@@ -3125,7 +3125,7 @@ mod tests {
             version: task.version,
         };
 
-        let result = update_task_inner(state, task.task_id.clone(), request).await;
+        let result = update_task_inner(state, task.task_id, request).await;
 
         assert!(result.is_ok(), "Expected Ok for valid title update");
         let (status_code, json_response) = result.unwrap();
@@ -3149,7 +3149,7 @@ mod tests {
             version: task.version + 999, // Stale version
         };
 
-        let result = update_task_inner(state, task.task_id.clone(), request).await;
+        let result = update_task_inner(state, task.task_id, request).await;
 
         assert!(result.is_err(), "Expected Err for stale version");
         let error = result.unwrap_err();
@@ -3306,7 +3306,7 @@ mod tests {
     fn test_rebase_update_request_success_different_fields() {
         let task_id = TaskId::generate();
         let original_base = make_task_for_rebase(
-            task_id.clone(),
+            task_id,
             "Original Title",
             Some("Original Desc"),
             Priority::Low,
@@ -3340,7 +3340,7 @@ mod tests {
     #[rstest]
     fn test_rebase_update_request_success_same_value_update() {
         let task_id = TaskId::generate();
-        let original_base = make_task_for_rebase(task_id.clone(), "Title", None, Priority::Low, 1);
+        let original_base = make_task_for_rebase(task_id, "Title", None, Priority::Low, 1);
         // Another user also set title to "Title" (same value)
         let latest = make_task_for_rebase(task_id, "Title", None, Priority::Low, 2);
         // Our request changes title
@@ -3363,8 +3363,7 @@ mod tests {
     #[rstest]
     fn test_rebase_update_request_fails_title_conflict() {
         let task_id = TaskId::generate();
-        let original_base =
-            make_task_for_rebase(task_id.clone(), "Original Title", None, Priority::Low, 1);
+        let original_base = make_task_for_rebase(task_id, "Original Title", None, Priority::Low, 1);
         // Another user changed title
         let latest =
             make_task_for_rebase(task_id, "Changed by another user", None, Priority::Low, 2);
@@ -3389,13 +3388,8 @@ mod tests {
     #[rstest]
     fn test_rebase_update_request_fails_description_conflict() {
         let task_id = TaskId::generate();
-        let original_base = make_task_for_rebase(
-            task_id.clone(),
-            "Title",
-            Some("Original Desc"),
-            Priority::Low,
-            1,
-        );
+        let original_base =
+            make_task_for_rebase(task_id, "Title", Some("Original Desc"), Priority::Low, 1);
         // Another user changed description
         let latest = make_task_for_rebase(
             task_id,
@@ -3427,7 +3421,7 @@ mod tests {
     #[rstest]
     fn test_rebase_update_request_fails_priority_conflict() {
         let task_id = TaskId::generate();
-        let original_base = make_task_for_rebase(task_id.clone(), "Title", None, Priority::Low, 1);
+        let original_base = make_task_for_rebase(task_id, "Title", None, Priority::Low, 1);
         // Another user changed priority
         let latest = make_task_for_rebase(task_id, "Title", None, Priority::High, 2);
         // Our request also changes priority
@@ -3484,8 +3478,7 @@ mod tests {
         };
 
         // Call update_task_inner first - it should return stale-version 409
-        let first_result =
-            update_task_inner(state.clone(), task.task_id.clone(), request.clone()).await;
+        let first_result = update_task_inner(state.clone(), task.task_id, request.clone()).await;
         assert!(first_result.is_err());
         assert!(is_stale_version_conflict(&first_result.unwrap_err()));
 

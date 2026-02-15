@@ -15,7 +15,7 @@ use uuid::Uuid;
 /// Unique identifier for a task.
 ///
 /// This is a newtype wrapper around UUID to provide type safety.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct TaskId(Uuid);
 
 impl TaskId {
@@ -648,6 +648,15 @@ mod tests {
         assert_eq!(format!("{task_id}"), "550e8400-e29b-41d4-a716-446655440000");
     }
 
+    #[rstest]
+    fn test_task_id_is_copy() {
+        let uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        let task_id = TaskId::from_uuid(uuid);
+        let copied = task_id;
+        assert_eq!(task_id.as_uuid(), copied.as_uuid());
+        assert_eq!(task_id, copied);
+    }
+
     // -------------------------------------------------------------------------
     // Tag Tests
     // -------------------------------------------------------------------------
@@ -823,7 +832,7 @@ mod tests {
     fn test_task_equality_by_id() {
         let id = TaskId::generate();
         let timestamp = Timestamp::now();
-        let task1 = Task::new(id.clone(), "Task 1", timestamp.clone());
+        let task1 = Task::new(id, "Task 1", timestamp.clone());
         let task2 = Task::new(id, "Task 2", timestamp);
         assert_eq!(task1, task2);
     }

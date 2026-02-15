@@ -51,13 +51,26 @@ COPY src/ src/
 COPY lambars-derive/src/ lambars-derive/src/
 COPY benches/api/src/ benches/api/src/
 
+# Optional features for the benchmark API binary (e.g., "mimalloc", "mimalloc,fast-hash")
+ARG API_FEATURES=""
+
 # Build the binary with cargo registry cache
 # Use CARGO_TARGET_DIR to ensure consistent output location
+# Explicit branch avoids shell word-splitting issues with feature strings.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
-    CARGO_TARGET_DIR=/build/target cargo build --release \
-    --manifest-path benches/api/Cargo.toml \
-    --bin task-management-benchmark-api
+    sh -eu -c ' \
+      if [ -n "${API_FEATURES}" ]; then \
+        CARGO_TARGET_DIR=/build/target cargo build --release \
+          --manifest-path benches/api/Cargo.toml \
+          --bin task-management-benchmark-api \
+          --features "${API_FEATURES}"; \
+      else \
+        CARGO_TARGET_DIR=/build/target cargo build --release \
+          --manifest-path benches/api/Cargo.toml \
+          --bin task-management-benchmark-api; \
+      fi \
+    '
 
 # =============================================================================
 # Runtime Stage

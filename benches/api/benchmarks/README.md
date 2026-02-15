@@ -109,6 +109,44 @@ benchmarks/
 ./run_benchmark.sh --scenario scenarios/tasks_eff.yaml
 ```
 
+### シナリオ設定
+
+シナリオ YAML ファイルには複数のレイヤーで設定を記述します。
+
+#### `metadata.api_features` (ドキュメント用)
+```yaml
+metadata:
+  api_features: [for_!, Alternative]
+```
+ベンチマークが測定対象とする lambars API の機能を記述（レポート生成、結果分類用）。
+
+#### `docker_build.api_features` (ビルド時)
+```yaml
+docker_build:
+  api_features: "mimalloc,fast-hash"
+```
+Docker ビルド時の Cargo features（allocator, hasher など）。CI nightly でシナリオごとに適用。
+
+#### `docker_runtime.writer_profile` (実行時)
+```yaml
+docker_runtime:
+  writer_profile: "bulk"
+```
+コンテナ実行時の環境変数（API サーバーのバッチサイズ、タイムアウトなど）。
+
+#### `thresholds.min_rps_achieved` (CI RPS ゲート)
+```yaml
+thresholds:
+  min_rps_achieved: 400
+```
+CI nightly の tasks_bulk シナリオで fail-closed RPS ゲートチェックに使用される最小 RPS 閾値。
+この値を下回った場合、CI は失敗します（`.github/workflows/benchmark-api.yml` で評価）。
+
+**注意**: `docker_build` / `docker_runtime` / `thresholds.min_rps_achieved` は CI 専用拡張キーです。
+`cargo xtask bench-api` の `ScenarioConfig` では未知キーは許容されますが、
+API サーバー内部の `BenchmarkScenario` 型（`serde(deny_unknown_fields)`）を使う経路では
+未知キーはエラーになります。CI では `yq` で直接読み取るため動作します。
+
 ### 環境変数
 
 ベンチマークの動作を制御する環境変数を以下に示します。
@@ -177,7 +215,7 @@ RETRY_BACKOFF_MAX=32 ./run_benchmark.sh --scenario scenarios/tasks_update.yaml
 ### しきい値チェック
 
 ```bash
-./check_thresholds.sh results/latest/meta.json
+./check_thresholds.sh results/latest tasks_bulk
 ```
 
 ## Lua スクリプト

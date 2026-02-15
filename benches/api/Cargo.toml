@@ -9,6 +9,14 @@ license = "MIT OR Apache-2.0"
 [features]
 default = []
 demo = []  # Demo endpoints for development/debugging
+mimalloc = ["dep:mimalloc"]
+# Marker feature: signals that the build target only receives trusted input.
+# Required by `fast-hash` to prevent accidental use in public-facing builds.
+trusted-input = []
+# Use FxHash instead of SipHash for PersistentHashMap/PersistentHashSet.
+# WARNING: FxHash is NOT HashDoS-resistant. Only enable for trusted-input
+# benchmark workloads, never for public-facing API builds.
+fast-hash = ["trusted-input", "lambars/fxhash"]
 
 [dependencies]
 lambars = { path = "../../", features = ["full", "arc"] }
@@ -59,6 +67,8 @@ lru = "0.12"
 
 # HTTP client for external data sources
 reqwest = { version = "0.12", features = ["json"] }
+
+mimalloc = { version = "0.1", optional = true }
 
 [dev-dependencies]
 rstest = "0.24"

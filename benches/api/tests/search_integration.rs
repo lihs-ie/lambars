@@ -116,7 +116,7 @@ fn test_index_multiple_tasks() {
 #[rstest]
 fn test_index_update_task() {
     let task_id = TaskId::generate();
-    let original_task = Task::new(task_id.clone(), "Original title", Timestamp::now());
+    let original_task = Task::new(task_id, "Original title", Timestamp::now());
     let tasks: PersistentVector<Task> = vec![original_task.clone()].into_iter().collect();
 
     let index = SearchIndex::build(&tasks);
@@ -255,13 +255,13 @@ fn test_search_order_stability() {
         .unwrap()
         .tasks()
         .iter()
-        .map(|task| task.task_id.clone())
+        .map(|task| task.task_id)
         .collect();
     let ids2: Vec<_> = result2
         .unwrap()
         .tasks()
         .iter()
-        .map(|task| task.task_id.clone())
+        .map(|task| task.task_id)
         .collect();
     assert_eq!(ids1, ids2, "Search results should have stable order");
 }

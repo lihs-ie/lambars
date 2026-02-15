@@ -40,7 +40,7 @@ async fn test_get_task_history_demo_generates_mock() {
     // Create a task WITHOUT writing events to EventStore
     let task_id = TaskId::generate_v7();
     let timestamp = Timestamp::now();
-    let task = Task::new(task_id.clone(), "Demo Task", timestamp);
+    let task = Task::new(task_id, "Demo Task", timestamp);
     save_task_without_events(&state, &task).await;
 
     // Call the demo endpoint
@@ -83,8 +83,7 @@ async fn test_get_task_history_demo_with_status_changes() {
     // Create a completed task (should generate multiple status events)
     let task_id = TaskId::generate_v7();
     let timestamp = Timestamp::now();
-    let task =
-        Task::new(task_id.clone(), "Completed Task", timestamp).with_status(TaskStatus::Completed);
+    let task = Task::new(task_id, "Completed Task", timestamp).with_status(TaskStatus::Completed);
     save_task_without_events(&state, &task).await;
 
     // Call the demo endpoint
@@ -140,7 +139,7 @@ async fn test_get_task_history_demo_with_tags() {
     // Create a task with tags
     let task_id = TaskId::generate_v7();
     let timestamp = Timestamp::now();
-    let task = Task::new(task_id.clone(), "Tagged Task", timestamp)
+    let task = Task::new(task_id, "Tagged Task", timestamp)
         .add_tag(Tag::new("rust"))
         .add_tag(Tag::new("functional"));
     save_task_without_events(&state, &task).await;
@@ -187,8 +186,7 @@ async fn test_get_task_history_demo_with_priority_change() {
     // Create a task with high priority (non-default)
     let task_id = TaskId::generate_v7();
     let timestamp = Timestamp::now();
-    let task =
-        Task::new(task_id.clone(), "High Priority Task", timestamp).with_priority(Priority::High);
+    let task = Task::new(task_id, "High Priority Task", timestamp).with_priority(Priority::High);
     save_task_without_events(&state, &task).await;
 
     // Call the demo endpoint
@@ -233,7 +231,7 @@ async fn test_demo_endpoints_use_mock_not_event_store() {
     // Create a task WITHOUT writing any events
     let task_id = TaskId::generate_v7();
     let timestamp = Timestamp::now();
-    let task = Task::new(task_id.clone(), "Test Task", timestamp);
+    let task = Task::new(task_id, "Test Task", timestamp);
     save_task_without_events(&state, &task).await;
 
     // Verify EventStore is actually empty
@@ -321,7 +319,7 @@ async fn test_get_task_history_demo_pagination() {
     // Create a task with many tags to generate multiple events
     let task_id = TaskId::generate_v7();
     let timestamp = Timestamp::now();
-    let mut task = Task::new(task_id.clone(), "Multi-event Task", timestamp)
+    let mut task = Task::new(task_id, "Multi-event Task", timestamp)
         .with_priority(Priority::High)
         .with_status(TaskStatus::Completed);
     for i in 0..5 {

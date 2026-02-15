@@ -383,7 +383,7 @@ fn build_deadline_index(tasks: &[Task]) -> (DeadlineIndex, usize) {
             task_id: task.task_id.to_string(),
         };
         operations += 1;
-        map.insert(key, task.task_id.clone())
+        map.insert(key, task.task_id)
     });
     (index, operations)
 }
@@ -432,7 +432,7 @@ fn query_deadline_range(
         .range((start, end))
         .skip(offset)
         .take(limit)
-        .map(|(_, task_id)| task_id.clone())
+        .map(|(_, task_id)| *task_id)
         .collect();
 
     (paginated, total)
@@ -533,7 +533,7 @@ pub async fn tasks_timeline(
         .iter()
         .skip(query.offset)
         .take(query.limit)
-        .map(|(_, task_id)| task_id.clone())
+        .map(|(_, task_id)| *task_id)
         .collect();
 
     let has_more = query.offset + task_ids.len() < total;
@@ -569,7 +569,7 @@ fn build_timeline_index(tasks: &[&Task], order: &str) -> (TimelineIndex, usize) 
             TimelineKey::from_task_created_first(task)
         };
         operations += 1;
-        map.insert(key, task.task_id.clone())
+        map.insert(key, task.task_id)
     });
     (index, operations)
 }

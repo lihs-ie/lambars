@@ -328,7 +328,7 @@ where
     R: 'static,
     F: FnOnce(&TaskId) -> TaskHistory + 'static,
 {
-    let task_id = task_id.clone();
+    let task_id = *task_id;
     Continuation::new(move |k: Box<dyn FnOnce(TaskHistory) -> R>| {
         let history = loader(&task_id);
         k(history)
@@ -361,8 +361,8 @@ where
     F1: FnOnce(&TaskId) -> TaskHistory + 'static,
     F2: FnOnce(&TaskId) -> TaskHistory + 'static,
 {
-    let id1 = task_id1.clone();
-    let id2 = task_id2.clone();
+    let id1 = *task_id1;
+    let id2 = *task_id2;
 
     load_history_continuation(&id1, loader1)
         .flat_map(move |h1| load_history_continuation(&id2, loader2).map(move |h2| (h1, h2)))
@@ -413,7 +413,7 @@ pub fn create_task_created_event(
 ) -> TaskEvent {
     TaskEvent::new(
         event_id,
-        task.task_id.clone(),
+        task.task_id,
         timestamp,
         version,
         TaskEventKind::Created(TaskCreated {
@@ -460,7 +460,7 @@ pub fn create_task_created_event(
 /// event_store.append(&event, current_version).await?;  // expected_version = current_version
 /// ```
 #[must_use]
-pub fn create_status_changed_event(
+pub const fn create_status_changed_event(
     task_id: &TaskId,
     old_status: TaskStatus,
     new_status: TaskStatus,
@@ -470,7 +470,7 @@ pub fn create_status_changed_event(
 ) -> TaskEvent {
     TaskEvent::new(
         event_id,
-        task_id.clone(),
+        *task_id,
         timestamp,
         version,
         TaskEventKind::StatusChanged(StatusChanged {
@@ -494,7 +494,7 @@ pub fn create_status_changed_event(
 /// * `timestamp` - When the event occurred (generated in I/O boundary)
 /// * `version` - This event's version (`current_version` + 1)
 #[must_use]
-pub fn create_priority_changed_event(
+pub const fn create_priority_changed_event(
     task_id: &TaskId,
     old_priority: Priority,
     new_priority: Priority,
@@ -504,7 +504,7 @@ pub fn create_priority_changed_event(
 ) -> TaskEvent {
     TaskEvent::new(
         event_id,
-        task_id.clone(),
+        *task_id,
         timestamp,
         version,
         TaskEventKind::PriorityChanged(PriorityChanged {
@@ -538,7 +538,7 @@ pub fn create_title_updated_event(
 ) -> TaskEvent {
     TaskEvent::new(
         event_id,
-        task_id.clone(),
+        *task_id,
         timestamp,
         version,
         TaskEventKind::TitleUpdated(TaskTitleUpdated {
@@ -572,7 +572,7 @@ pub fn create_description_updated_event(
 ) -> TaskEvent {
     TaskEvent::new(
         event_id,
-        task_id.clone(),
+        *task_id,
         timestamp,
         version,
         TaskEventKind::DescriptionUpdated(TaskDescriptionUpdated {
@@ -604,7 +604,7 @@ pub fn create_tag_added_event(
 ) -> TaskEvent {
     TaskEvent::new(
         event_id,
-        task_id.clone(),
+        *task_id,
         timestamp,
         version,
         TaskEventKind::TagAdded(TagAdded { tag: tag.clone() }),
@@ -906,7 +906,7 @@ mod tests {
     fn test_create_task_created_event_generates_correct_payload() {
         let task_id = TaskId::generate();
         let timestamp = Timestamp::now();
-        let task = Task::new(task_id.clone(), "Test Task", timestamp.clone())
+        let task = Task::new(task_id, "Test Task", timestamp.clone())
             .with_description("Test description")
             .with_priority(Priority::High);
 

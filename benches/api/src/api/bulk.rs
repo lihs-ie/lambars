@@ -842,9 +842,7 @@ fn build_tasks(
         .map(
             |(result, id): (&Either<ItemError, ValidatedCreate>, &TaskId)| match result {
                 Either::Left(error) => Either::Left(error.clone()),
-                Either::Right(v) => {
-                    Either::Right(build_single_task(v, id.clone(), timestamp.clone()))
-                }
+                Either::Right(v) => Either::Right(build_single_task(v, *id, timestamp.clone())),
             },
         )
         .collect()
@@ -1771,7 +1769,7 @@ mod tests {
         let id = TaskId::generate();
         let now = Timestamp::now();
 
-        let task = build_single_task(&validated, id.clone(), now);
+        let task = build_single_task(&validated, id, now);
 
         assert_eq!(task.task_id, id);
         assert_eq!(task.title, "Test Task");
@@ -3394,7 +3392,7 @@ mod tests {
         async fn test_save_chunk_returns_save_results() {
             let repository = Arc::new(InMemoryTaskRepository::new());
             let task = create_test_task("Test Task");
-            let task_id = task.task_id.clone();
+            let task_id = task.task_id;
             let chunk = vec![(42, task)];
 
             let results = save_chunk(repository.clone(), chunk).await;

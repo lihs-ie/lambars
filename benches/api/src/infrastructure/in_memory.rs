@@ -71,7 +71,7 @@ fn detect_duplicate_task_ids(tasks: &[Task]) -> std::collections::HashSet<usize>
     let mut duplicate_indices = std::collections::HashSet::new();
 
     for (index, task) in tasks.iter().enumerate() {
-        if !seen_ids.insert(task.task_id.clone()) {
+        if !seen_ids.insert(task.task_id) {
             // ID was already seen, this is a duplicate
             duplicate_indices.insert(index);
         }
@@ -127,7 +127,7 @@ impl TaskRepository for InMemoryTaskRepository {
     #[allow(clippy::future_not_send)]
     fn find_by_id(&self, id: &TaskId) -> AsyncIO<Result<Option<Task>, RepositoryError>> {
         let tasks = Arc::clone(&self.tasks);
-        let id = id.clone();
+        let id = *id;
         AsyncIO::new(move || async move {
             let guard = tasks.read().await;
             Ok(guard.get(&id).cloned())
@@ -162,7 +162,7 @@ impl TaskRepository for InMemoryTaskRepository {
             }
 
             // Insert the task (this creates a new map with structural sharing)
-            *guard = guard.insert(task.task_id.clone(), task);
+            *guard = guard.insert(task.task_id, task);
             Ok(())
         })
     }
@@ -217,7 +217,7 @@ impl TaskRepository for InMemoryTaskRepository {
                     }
 
                     // Insert the task (this creates a new map with structural sharing)
-                    *guard = guard.insert(task.task_id.clone(), task.clone());
+                    *guard = guard.insert(task.task_id, task.clone());
                     Ok(())
                 })
                 .collect();
@@ -229,7 +229,7 @@ impl TaskRepository for InMemoryTaskRepository {
     #[allow(clippy::future_not_send)]
     fn delete(&self, id: &TaskId) -> AsyncIO<Result<bool, RepositoryError>> {
         let tasks = Arc::clone(&self.tasks);
-        let id = id.clone();
+        let id = *id;
         AsyncIO::new(move || async move {
             let mut guard = tasks.write().await;
             let exists = guard.contains_key(&id);
@@ -571,7 +571,7 @@ impl EventStore for InMemoryEventStore {
             };
 
             // Update the map
-            *guard = guard.insert(event.task_id.clone(), new_data);
+            *guard = guard.insert(event.task_id, new_data);
             Ok(())
         })
     }
@@ -579,7 +579,7 @@ impl EventStore for InMemoryEventStore {
     #[allow(clippy::future_not_send)]
     fn load_events(&self, task_id: &TaskId) -> AsyncIO<Result<TaskHistory, RepositoryError>> {
         let events = Arc::clone(&self.events);
-        let task_id = task_id.clone();
+        let task_id = *task_id;
         AsyncIO::new(move || async move {
             let guard = events.read().await;
             let history = guard.get(&task_id).map_or_else(TaskHistory::new, |data| {
@@ -603,7 +603,7 @@ impl EventStore for InMemoryEventStore {
         from_version: u64,
     ) -> AsyncIO<Result<TaskHistory, RepositoryError>> {
         let events = Arc::clone(&self.events);
-        let task_id = task_id.clone();
+        let task_id = *task_id;
         AsyncIO::new(move || async move {
             let guard = events.read().await;
             let history = guard.get(&task_id).map_or_else(TaskHistory::new, |data| {
@@ -623,7 +623,7 @@ impl EventStore for InMemoryEventStore {
     #[allow(clippy::future_not_send)]
     fn get_current_version(&self, task_id: &TaskId) -> AsyncIO<Result<u64, RepositoryError>> {
         let events = Arc::clone(&self.events);
-        let task_id = task_id.clone();
+        let task_id = *task_id;
         AsyncIO::new(move || async move {
             let guard = events.read().await;
             let version = guard.get(&task_id).map_or(0, |data| data.current_version);
@@ -700,7 +700,7 @@ mod tests {
     async fn test_task_repository_save_and_find() {
         let repository = InMemoryTaskRepository::new();
         let task = test_task("Test Task");
-        let task_id = task.task_id.clone();
+        let task_id = task.task_id;
 
         // Save the task
         let save_result = repository.save(&task).await;
@@ -719,13 +719,13 @@ mod tests {
     async fn test_task_repository_save_update() {
         let repository = InMemoryTaskRepository::new();
         let task = test_task("Original Title");
-        let task_id = task.task_id.clone();
+        let task_id = task.task_id;
 
         // Save the original task
         repository.save(&task).await.unwrap();
 
         // Update the task with incremented version
-        let updated_task = test_task_with_id(task_id.clone(), "Updated Title").increment_version();
+        let updated_task = test_task_with_id(task_id, "Updated Title").increment_version();
         let update_result = repository.save(&updated_task).await;
         assert!(update_result.is_ok());
 
@@ -740,7 +740,7 @@ mod tests {
     async fn test_task_repository_save_version_conflict() {
         let repository = InMemoryTaskRepository::new();
         let task = test_task("Test Task");
-        let task_id = task.task_id.clone();
+        let task_id = task.task_id;
 
         // Save the original task
         repository.save(&task).await.unwrap();
@@ -764,7 +764,7 @@ mod tests {
     async fn test_task_repository_delete_existing() {
         let repository = InMemoryTaskRepository::new();
         let task = test_task("Test Task");
-        let task_id = task.task_id.clone();
+        let task_id = task.task_id;
 
         // Save the task
         repository.save(&task).await.unwrap();
@@ -1029,7 +1029,7 @@ mod tests {
     async fn test_event_store_append_first_event() {
         let store = InMemoryEventStore::new();
         let task_id = TaskId::generate();
-        let event = test_task_event(task_id.clone(), 1);
+        let event = test_task_event(task_id, 1);
 
         // Append first event with expected version 0
         let result = store.append(&event, 0).await;
@@ -1048,7 +1048,7 @@ mod tests {
 
         // Append three events
         for i in 1..=3 {
-            let event = test_task_event(task_id.clone(), i);
+            let event = test_task_event(task_id, i);
             store.append(&event, i - 1).await.unwrap();
         }
 
@@ -1066,7 +1066,7 @@ mod tests {
     async fn test_event_store_append_version_conflict() {
         let store = InMemoryEventStore::new();
         let task_id = TaskId::generate();
-        let event1 = test_task_event(task_id.clone(), 1);
+        let event1 = test_task_event(task_id, 1);
 
         // Append first event
         store.append(&event1, 0).await.unwrap();
@@ -1103,7 +1103,7 @@ mod tests {
 
         // Append events
         for i in 1..=3 {
-            let event = test_task_event(task_id.clone(), i);
+            let event = test_task_event(task_id, i);
             store.append(&event, i - 1).await.unwrap();
         }
 
@@ -1124,7 +1124,7 @@ mod tests {
 
         // Append 5 events
         for i in 1..=5 {
-            let event = test_task_event(task_id.clone(), i);
+            let event = test_task_event(task_id, i);
             store.append(&event, i - 1).await.unwrap();
         }
 
@@ -1147,7 +1147,7 @@ mod tests {
 
         // Append 3 events
         for i in 1..=3 {
-            let event = test_task_event(task_id.clone(), i);
+            let event = test_task_event(task_id, i);
             store.append(&event, i - 1).await.unwrap();
         }
 
@@ -1164,7 +1164,7 @@ mod tests {
 
         // Append 3 events
         for i in 1..=3 {
-            let event = test_task_event(task_id.clone(), i);
+            let event = test_task_event(task_id, i);
             store.append(&event, i - 1).await.unwrap();
         }
 
@@ -1191,7 +1191,7 @@ mod tests {
 
         // Append 3 events
         for i in 1..=3 {
-            let event = test_task_event(task_id.clone(), i);
+            let event = test_task_event(task_id, i);
             store.append(&event, i - 1).await.unwrap();
         }
 
@@ -1284,7 +1284,7 @@ mod tests {
 
         // Append events 1, 2, 3 in order
         for i in 1..=3 {
-            let event = test_task_event(task_id.clone(), i);
+            let event = test_task_event(task_id, i);
             store.append(&event, i - 1).await.unwrap();
         }
 
@@ -1304,7 +1304,7 @@ mod tests {
 
         // Append 5 events
         for i in 1..=5 {
-            let event = test_task_event(task_id.clone(), i);
+            let event = test_task_event(task_id, i);
             store.append(&event, i - 1).await.unwrap();
         }
 
@@ -1328,7 +1328,7 @@ mod tests {
         let timestamp = Timestamp::now();
 
         // Save initial task (version 1)
-        let task = Task::new(task_id.clone(), "Test Task", timestamp);
+        let task = Task::new(task_id, "Test Task", timestamp);
         repository.save(&task).await.unwrap();
 
         // Try to save with version 3 (jumping from 1 to 3) - should fail
@@ -1393,7 +1393,7 @@ mod tests {
     async fn test_task_repository_save_bulk_single() {
         let repository = InMemoryTaskRepository::new();
         let task = test_task("Single Task");
-        let task_id = task.task_id.clone();
+        let task_id = task.task_id;
 
         let results = repository.save_bulk(&[task]).await;
 
@@ -1411,7 +1411,7 @@ mod tests {
     async fn test_task_repository_save_bulk_multiple() {
         let repository = InMemoryTaskRepository::new();
         let tasks: Vec<Task> = (0..5).map(|i| test_task(&format!("Task {i}"))).collect();
-        let task_ids: Vec<TaskId> = tasks.iter().map(|t| t.task_id.clone()).collect();
+        let task_ids: Vec<TaskId> = tasks.iter().map(|t| t.task_id).collect();
 
         let results = repository.save_bulk(&tasks).await;
 
@@ -1438,13 +1438,13 @@ mod tests {
         let task_id = TaskId::generate();
 
         // Pre-save a task to cause version conflict
-        let existing_task = test_task_with_id(task_id.clone(), "Existing Task");
+        let existing_task = test_task_with_id(task_id, "Existing Task");
         repository.save(&existing_task).await.unwrap();
 
         // Create bulk tasks: 2 new tasks, 1 conflicting, 2 more new tasks
         let new_task_1 = test_task("New Task 1");
         let new_task_2 = test_task("New Task 2");
-        let conflicting_task = test_task_with_id(task_id.clone(), "Conflicting Task");
+        let conflicting_task = test_task_with_id(task_id, "Conflicting Task");
         let new_task_3 = test_task("New Task 3");
         let new_task_4 = test_task("New Task 4");
 
@@ -1548,9 +1548,9 @@ mod tests {
         let task_id = TaskId::generate();
 
         // Create tasks with duplicate ID in the same batch
-        let task_1 = test_task_with_id(task_id.clone(), "First Task");
+        let task_1 = test_task_with_id(task_id, "First Task");
         let task_2 = test_task("Different Task");
-        let task_3 = test_task_with_id(task_id.clone(), "Duplicate Task"); // Same ID as task_1
+        let task_3 = test_task_with_id(task_id, "Duplicate Task"); // Same ID as task_1
 
         let tasks = vec![task_1.clone(), task_2.clone(), task_3.clone()];
 
@@ -1592,13 +1592,13 @@ mod tests {
 
         // Pre-save a task for update
         let existing_task = test_task("Existing Task");
-        let existing_task_id = existing_task.task_id.clone();
+        let existing_task_id = existing_task.task_id;
         repository.save(&existing_task).await.unwrap();
 
         // Create tasks: one valid new, one valid update, one invalid new (version != 1)
         let valid_new_task = test_task("Valid New Task");
         let valid_update_task =
-            test_task_with_id(existing_task_id.clone(), "Updated Task").increment_version(); // version 2
+            test_task_with_id(existing_task_id, "Updated Task").increment_version(); // version 2
 
         let mut invalid_new_task = test_task("Invalid New Task");
         invalid_new_task.version = 3; // Invalid: new task should have version 1

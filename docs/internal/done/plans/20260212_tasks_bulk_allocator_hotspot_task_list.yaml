@@ -1,0 +1,332 @@
+# tasks_bulk allocator/clone hotspot task list
+#
+# Detail plan: 20260212_tasks_bulk_allocator_hotspot_detail.yaml
+# Requirement: 20260212_1249_tasks_bulk_allocator_clone_hotspot_run21903605063.yaml
+# Branch: perf/tasks-bulk-allocator-hotspot (PR #284)
+#
+# Codex Review: 2026-02-12 - 7 findings addressed (v1.1.0)
+
+version: "1.1.0"
+name: "tasks_bulk_allocator_hotspot_task_list"
+
+# =============================================================================
+# Phase 1: AP-1 + AP-2 + AP-3 (並列実装, 逐次計測)
+# =============================================================================
+
+phase_1:
+  name: "基盤最適化"
+  parallel_implementation: true
+  sequential_measurement: true
+  measurement_order: "AP-1 -> AP-2 -> AP-3 (各コミット後に CI ベンチマークで寄与分離)"
+
+  ap_1_tasks:
+    - id: "IMPL-AH-001"
+      subject: "TaskId に Copy derive を追加"
+      status: "pending"
+      priority: "P0"
+      category: "Rust"
+      file: "benches/api/src/domain/task.rs:18"
+      description: |
+        TaskId の derive マクロに Copy を追加する。
+        Uuid (uuid 1.x) は Copy を実装済みのため、TaskId(Uuid) も Copy 化可能。
+
+        変更前: #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+        変更後: #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+      acceptance: "cargo check -p task-management-benchmark-api が通過"
+
+    - id: "IMPL-AH-002"
+      subject: "non-test コードの task_id.clone() を Copy 代入に置換"
+      status: "pending"
+      priority: "P0"
+      category: "Rust"
+      file: "benches/api/src/api/query.rs (約32箇所), benches/api/src/api/handlers.rs (約2箇所)"
+      depends_on: ["IMPL-AH-001"]
+      description: |
+        [CR-006 修正] 実数ベースで約34箇所を置換:
+        - task_id が TaskId 型 (所有): そのまま task_id を使用
+        - task_id が &TaskId 型 (借用): *task_id で Copy
+        - .map(|task| task.task_id.clone()) -> .map(|task| task.task_id)
+        - .push(task_id.clone()) -> .push(*task_id) (task_id が &TaskId の場合)
+
+        handlers.rs:
+        - line 2147: .map(|(task_id, _)| task_id.clone()) -> .map(|(task_id, _)| *task_id)
+        - line 2155: .map(|task| task.task_id.clone()) -> .map(|task| task.task_id)
+      acceptance: "cargo check && cargo test が通過"
+
+    - id: "IMPL-AH-003"
+      subject: ".cloned() を .copied() に置換"
+      status: "pending"
+      priority: "P0"
+      category: "Rust"
+      file: "benches/api/src/api/query.rs (約6箇所)"
+      depends_on: ["IMPL-AH-001"]
+      description: |
+        [CR-006 修正] 実数ベースで約6箇所を置換。
+        TaskId に関連する .cloned() を .copied() に置換。
+        copied() は Copy 型に特化した最適化 (memcpy) を利用できる。
+
+        対象: TaskIdCollection (OrderedUniqueSet<TaskId>) の iter_sorted().cloned() など。
+      acceptance: "cargo check && cargo test が通過"
+
+    - id: "IMPL-AH-004"
+      subject: "テストコードの task_id.clone() を Copy に置換"
+      status: "pending"
+      priority: "P0"
+      category: "Rust"
+      file: "benches/api/src/domain/task.rs, benches/api/src/api/query.rs, benches/api/src/api/handlers.rs"
+      depends_on: ["IMPL-AH-001"]
+      description: |
+        テストコード内の task_id.clone() も一貫性のために Copy 代入に置換。
+        コンパイルエラーにはならないが、コードの一貫性を保つため。
+
+        例: let task1 = Task::new(id.clone(), ...) -> Task::new(id, ...)
+      acceptance: "cargo test が通過"
+
+  ap_2_tasks:
+    - id: "IMPL-AH-005"
+      subject: "mimalloc を feature gate 付きで Cargo.toml に追加"
+      status: "pending"
+      priority: "P0"
+      category: "Rust (Cargo.toml)"
+      file: "benches/api/Cargo.toml"
+      description: |
+        [features] セクションに追加:
+          mimalloc = ["dep:mimalloc"]
+
+        [dependencies] セクションに追加:
+          mimalloc = { version = "0.1", optional = true }
+
+        feature gate により通常ビルドでは system allocator を使用。
+      acceptance: "cargo build -p task-management-benchmark-api --features mimalloc が通過"
+
+    - id: "IMPL-AH-006"
+      subject: "#[global_allocator] を main.rs に追加"
+      status: "pending"
+      priority: "P0"
+      category: "Rust"
+      file: "benches/api/src/main.rs"
+      depends_on: ["IMPL-AH-005"]
+      description: |
+        ファイル先頭 (use 文の前) に追加:
+
+        #[cfg(feature = "mimalloc")]
+        #[global_allocator]
+        static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+        unsafe_code = "deny" 設定下でも #[global_allocator] は unsafe 不要。
+        [関数型アーキテクチャ観点] 実行境界 (main) での設定であり、
+        純粋関数層に環境読取やグローバル分岐を導入するものではない。
+      acceptance: "cargo build --features mimalloc && cargo test --features mimalloc が通過"
+
+    - id: "IMPL-AH-006b"
+      subject: "[CR-001] Dockerfile に ARG API_FEATURES を追加"
+      status: "pending"
+      priority: "P0"
+      category: "Docker"
+      file: "benches/api/docker/Dockerfile"
+      depends_on: ["IMPL-AH-005"]
+      description: |
+        [CR-001 修正] Dockerfile に ARG API_FEATURES を追加し、
+        cargo build コマンドに --features を条件付きで渡す:
+
+        ARG API_FEATURES=""
+        RUN ... cargo build --release \
+          --manifest-path benches/api/Cargo.toml \
+          --bin task-management-benchmark-api \
+          ${API_FEATURES:+--features ${API_FEATURES}}
+      acceptance: "docker build --build-arg API_FEATURES=mimalloc が成功"
+
+    - id: "IMPL-AH-006c"
+      subject: "[CR-001] compose.ci.yaml に API_FEATURES build arg を追加"
+      status: "pending"
+      priority: "P0"
+      category: "Docker"
+      file: "benches/api/docker/compose.ci.yaml"
+      depends_on: ["IMPL-AH-006b"]
+      description: |
+        [CR-001 修正] compose.ci.yaml の api サービスに build args を追加:
+
+        services:
+          api:
+            build:
+              args:
+                API_FEATURES: "${API_FEATURES:-}"
+      acceptance: "API_FEATURES=mimalloc docker compose -f compose.ci.yaml build api が成功"
+
+  ap_3_tasks:
+    - id: "IMPL-AH-007"
+      subject: "[CR-002] bench 専用 fast-hash feature を新設"
+      status: "pending"
+      priority: "P1"
+      category: "Rust (Cargo.toml)"
+      file: "benches/api/Cargo.toml"
+      description: |
+        [CR-002 修正] lambars 依存に直接 fxhash を追加するのではなく、
+        benches/api 側に fast-hash feature を新設:
+
+        [features] セクションに追加:
+          fast-hash = ["lambars/fxhash"]
+
+        lambars 依存は変更しない (features = ["full", "arc"] のまま)。
+        fast-hash feature を明示的に有効化した場合のみ fxhash が使われる。
+      acceptance: "cargo test -p task-management-benchmark-api --features fast-hash が通過"
+
+# =============================================================================
+# Phase 2: AP-4 (AP-1 完了後)
+# =============================================================================
+
+phase_2:
+  name: "Ngram merge 最適化"
+  depends_on_phase: "phase_1 (AP-1)"
+
+  tasks:
+    - id: "IMPL-AH-008"
+      subject: "merge_segment_into の最適化"
+      status: "pending"
+      priority: "P1"
+      category: "Rust"
+      file: "benches/api/src/api/query.rs:1590-1625"
+      depends_on: ["IMPL-AH-001"]
+      description: |
+        AP-1 の Copy 化後、merge_segment_into の残存ボトルネックを分析:
+
+        [CR-004 下方修正] プロファイル比率 1.08% に基づき、期待効果を +5~+15 RPS に修正。
+
+        1. miss path の segment_collection.clone():
+           - TaskIdCollection (OrderedUniqueSet) は内部で Arc を使用
+           - clone は O(1) だが参照カウントの atomic 操作がある
+           - consuming iterator 化を検討
+
+        2. key.clone() (NgramKey = Arc<str>):
+           - Arc::clone は O(1) だが atomic increment あり
+           - transient.insert で必要なため回避困難
+
+        3. AP-1 後の効果測定結果に基づいて対応範囲を決定
+      acceptance: |
+        - 既存テスト (merge_segment_*) が全て通過
+        - differential test が通過
+        - merge_segment_into の CPU 比率が低下
+
+# =============================================================================
+# Phase 3: AP-5 (AP-1 + AP-4 完了後)
+# =============================================================================
+
+phase_3:
+  name: "Writer 設定最適化 (ファクトリメソッド方式)"
+  depends_on_phase: "phase_2"
+
+  tasks:
+    - id: "IMPL-AH-009"
+      subject: "[CR-003] SearchIndexWriterConfig::for_bulk_workload() ファクトリメソッド追加"
+      status: "pending"
+      priority: "P2"
+      category: "Rust"
+      file: "benches/api/src/api/query.rs"
+      depends_on: ["IMPL-AH-001", "IMPL-AH-008"]
+      description: |
+        [CR-003 修正] SearchIndexWriterConfig::default() は変更しない。
+        for_bulk_workload() ファクトリメソッドを新設:
+
+        impl SearchIndexWriterConfig {
+            #[must_use]
+            pub const fn for_bulk_workload() -> Self {
+                Self {
+                    batch_size: 32,
+                    batch_timeout_milliseconds: 10,
+                    channel_capacity: 64,
+                }
+            }
+        }
+
+        純粋関数として const fn で実装し、参照透過性を維持。
+      acceptance: "cargo test が通過 && ベンチマークで RPS 改善を確認"
+
+    - id: "IMPL-AH-010"
+      subject: "[CR-003] handlers.rs でワークロード判定によるconfig注入"
+      status: "pending"
+      priority: "P2"
+      category: "Rust"
+      file: "benches/api/src/api/handlers.rs"
+      depends_on: ["IMPL-AH-009"]
+      description: |
+        [CR-003 修正] 初期化層 (I/O 境界) でワークロード判定:
+
+        let writer_config = if std::env::var("WRITER_PROFILE").as_deref() == Ok("bulk") {
+            SearchIndexWriterConfig::for_bulk_workload()
+        } else {
+            SearchIndexWriterConfig::default()
+        };
+
+        I/O 境界での設定注入であり、純粋関数層には影響しない。
+      acceptance: "cargo test が通過 && WRITER_PROFILE=bulk での動作確認"
+
+    - id: "IMPL-AH-011"
+      subject: "[CR-007] for_bulk_workload / compact_when_idle のテスト追加"
+      status: "pending"
+      priority: "P2"
+      category: "Rust"
+      file: "benches/api/src/api/query.rs"
+      depends_on: ["IMPL-AH-009"]
+      description: |
+        [CR-007 修正] 以下のテストを追加:
+        1. for_bulk_workload() が正しい値を返すことの検証
+        2. compact_when_idle のパラメータが batch_size に連動することの検証
+        3. writer_loop 内の idle compaction 動作確認
+
+        既存の test_writer_config_default_values は変更不要 (default は維持)。
+      acceptance: "cargo test が通過"
+
+# =============================================================================
+# CI / シェルスクリプト / Docker
+# =============================================================================
+
+ci_tasks:
+  - id: "IMPL-AH-CI-001"
+    subject: "[CR-001] scenarios/tasks_bulk.yaml に api_features mimalloc を追加"
+    status: "pending"
+    priority: "P0"
+    category: "Shell / CI"
+    file: "benches/api/benchmarks/scenarios/tasks_bulk.yaml"
+    description: |
+      [CR-001 修正] tasks_bulk シナリオの api_features で mimalloc feature を指定。
+      Docker build 経由で feature が渡される設計。
+
+# =============================================================================
+# ドキュメント
+# =============================================================================
+
+documentation_tasks:
+  - id: "IMPL-AH-DOC-001"
+    subject: "fxhash (fast-hash feature) 使用に関するセキュリティ注意事項"
+    status: "pending"
+    priority: "P1"
+    category: "Documentation"
+    description: |
+      fast-hash feature はベンチマーク限定で使用し、外部公開 API では SipHash を推奨する旨を
+      doc comment に明記する。外部入力由来キー経路のリスクも記載。
+
+# =============================================================================
+# 実装サマリ
+# =============================================================================
+
+summary:
+  total_tasks: 15
+  by_category:
+    rust: 11
+    docker: 2
+    shell_ci: 1
+    documentation: 1
+  by_priority:
+    p0: 9
+    p1: 3
+    p2: 3
+  estimated_total_time: "3 ~ 3.5 hours"
+  critical_path: "IMPL-AH-001 -> IMPL-AH-002/003/004 -> IMPL-AH-008 -> IMPL-AH-009/010/011"
+  codex_review_changes:
+    - "CR-001: Dockerfile/compose.ci.yaml タスク追加 (IMPL-AH-006b, 006c)"
+    - "CR-002: fast-hash feature 設計変更 (IMPL-AH-007)"
+    - "CR-003: ファクトリメソッド方式に変更 (IMPL-AH-009, 010)"
+    - "CR-004: AP-3/AP-4 の期待効果を下方修正"
+    - "CR-005: 逐次計測方針を明記"
+    - "CR-006: 対象箇所数を実数ベースに修正"
+    - "CR-007: compact_when_idle テスト追加 (IMPL-AH-011)"

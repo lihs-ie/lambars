@@ -447,9 +447,11 @@ impl AppState {
 
         let search_index_arc = Arc::new(ArcSwap::from_pointee(search_index));
 
+        let writer_config = writer_config_from_env();
+
         let search_index_writer = Arc::new(SearchIndexWriter::new(
             Arc::clone(&search_index_arc),
-            SearchIndexWriterConfig::default(),
+            writer_config,
         ));
 
         Ok(Self {
@@ -622,6 +624,35 @@ pub fn create_stub_external_sources() -> ExternalSources {
     ExternalSources {
         secondary_source: Arc::new(StubExternalDataSource::not_found("secondary")),
         external_source: Arc::new(StubExternalDataSource::not_found("external")),
+    }
+}
+
+// =============================================================================
+// Writer Config Parsing
+// =============================================================================
+
+/// Parses the `WRITER_PROFILE` environment variable and returns the
+/// corresponding [`SearchIndexWriterConfig`].
+///
+/// Recognized values (case-insensitive, trimmed):
+/// - `"bulk"` -- [`SearchIndexWriterConfig::for_bulk_workload()`]
+/// - `"default"` or unset -- [`SearchIndexWriterConfig::default()`]
+/// - anything else -- logs a warning and falls back to default.
+fn writer_config_from_env() -> SearchIndexWriterConfig {
+    match std::env::var("WRITER_PROFILE")
+        .ok()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("bulk") => SearchIndexWriterConfig::for_bulk_workload(),
+        Some("default") | None => SearchIndexWriterConfig::default(),
+        Some(other) => {
+            tracing::warn!(
+                profile = %other,
+                "Unknown WRITER_PROFILE value, falling back to default"
+            );
+            SearchIndexWriterConfig::default()
+        }
     }
 }
 
@@ -1328,7 +1359,7 @@ mod tests {
     async fn test_get_task_returns_200_when_task_found() {
         // Arrange
         let task_id = TaskId::generate();
-        let task = Task::new(task_id.clone(), "Test Task", Timestamp::now())
+        let task = Task::new(task_id, "Test Task", Timestamp::now())
             .with_description("Test description")
             .with_priority(Priority::High);
         let state = create_app_state_with_mock_task_repository(MockTaskRepository::with_task(task));
@@ -1396,7 +1427,7 @@ mod tests {
         // Arrange
         let task_id = TaskId::generate();
         let timestamp = Timestamp::now();
-        let task = Task::new(task_id.clone(), "Complete Task", timestamp)
+        let task = Task::new(task_id, "Complete Task", timestamp)
             .with_description("Detailed description")
             .with_priority(Priority::Critical)
             .add_tag(Tag::new("urgent"))
@@ -1428,7 +1459,7 @@ mod tests {
         // Arrange
         let state = create_default_app_state();
         let task_id = TaskId::generate();
-        let task = Task::new(task_id.clone(), "Integration Test Task", Timestamp::now());
+        let task = Task::new(task_id, "Integration Test Task", Timestamp::now());
 
         // Save the task first
         state
@@ -1823,7 +1854,7 @@ mod tests {
         // Arrange
         let state = create_default_app_state();
         let task_id = TaskId::generate();
-        let task = Task::new(task_id.clone(), "Task to Delete", Timestamp::now());
+        let task = Task::new(task_id, "Task to Delete", Timestamp::now());
 
         // Save the task first
         state
@@ -1864,7 +1895,7 @@ mod tests {
         // Arrange
         let state = create_default_app_state();
         let task_id = TaskId::generate();
-        let task = Task::new(task_id.clone(), "Task to Delete", Timestamp::now());
+        let task = Task::new(task_id, "Task to Delete", Timestamp::now());
 
         // Save the task first
         state
@@ -2112,8 +2143,7 @@ mod tests {
                                 let title =
                                     format!("Task_T{thread_index}_B{batch_index}_I{task_index}");
                                 let task_id = TaskId::generate();
-                                let task =
-                                    Task::new(task_id.clone(), title.clone(), Timestamp::now());
+                                let task = Task::new(task_id, title.clone(), Timestamp::now());
 
                                 // Record task info for later verification
                                 batch_task_info.push((task_id, title));
@@ -2144,16 +2174,14 @@ mod tests {
         let all_generated_tasks = generated_tasks.lock().unwrap().clone();
         let expected_task_ids: HashSet<TaskId> = all_generated_tasks
             .iter()
-            .map(|(task_id, _)| task_id.clone())
+            .map(|(task_id, _)| *task_id)
             .collect();
 
         // Verify: All tasks must be present in the search index using all_tasks()
         let index = state.search_index.load();
         let all_tasks_in_index = index.all_tasks();
-        let actual_task_ids: HashSet<TaskId> = all_tasks_in_index
-            .iter()
-            .map(|task| task.task_id.clone())
-            .collect();
+        let actual_task_ids: HashSet<TaskId> =
+            all_tasks_in_index.iter().map(|task| task.task_id).collect();
 
         // Primary assertion: count matches
         assert_eq!(
