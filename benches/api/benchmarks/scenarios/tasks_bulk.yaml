@@ -10,6 +10,14 @@
 name: "tasks_bulk"
 description: "Benchmark POST /tasks/bulk endpoint with for_! macro and Alternative"
 
+# Docker build configuration (applies build-time features)
+docker_build:
+  api_features: "mimalloc,fast-hash"
+
+# Docker runtime configuration (applies runtime environment variables)
+docker_runtime:
+  writer_profile: "bulk"
+
 # Backend configuration (maps to STORAGE_MODE, CACHE_MODE)
 storage_mode: postgres
 cache_mode: redis
@@ -70,7 +78,7 @@ error_config:
 thresholds:
   max_error_rate: 0.10
   p99_latency_ms: 500
-  min_rps_achieved: 200
+  min_rps_achieved: 400
 
 # Extended metadata for workflow integration
 # Keys here map to environment variables:
