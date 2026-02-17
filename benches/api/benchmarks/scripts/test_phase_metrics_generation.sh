@@ -4,6 +4,23 @@
 
 set -uo pipefail
 
+# Global temp dir for cleanup on EXIT
+TEMP_DIR_ROOT=""
+cleanup_temp_dirs() {
+    if [[ -n "${TEMP_DIR_ROOT:-}" ]]; then
+        rm -rf "${TEMP_DIR_ROOT}" 2>/dev/null || true
+    fi
+}
+trap cleanup_temp_dirs EXIT
+
+# Create a unique subdirectory under TEMP_DIR_ROOT for each test case
+make_test_tmp_dir() {
+    if [[ -z "${TEMP_DIR_ROOT}" ]]; then
+        TEMP_DIR_ROOT=$(mktemp -d)
+    fi
+    mktemp -d "${TEMP_DIR_ROOT}/XXXXXX"
+}
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUN_BENCHMARK_SCRIPT="${SCRIPT_DIR}/../run_benchmark.sh"
 
@@ -194,8 +211,7 @@ test_steady_single_phase_fallback() {
 ==============================================
 EOF
     local tmp_dir
-    tmp_dir=$(mktemp -d)
-    trap 'rm -rf "${tmp_dir}"' RETURN
+    tmp_dir=$(make_test_tmp_dir)
 
     # No phase_result.json files - steady single-phase scenario
     local result
@@ -219,8 +235,7 @@ test_burst_multiple_phases() {
 ==============================================
 EOF
     local tmp_dir
-    tmp_dir=$(mktemp -d)
-    trap 'rm -rf "${tmp_dir}"' RETURN
+    tmp_dir=$(make_test_tmp_dir)
 
     # Create burst scenario with 3 phases:
     # - warmup: 100 RPS for 30s
@@ -265,8 +280,7 @@ test_ramp_up_down_sustain_phase() {
 ==============================================
 EOF
     local tmp_dir
-    tmp_dir=$(mktemp -d)
-    trap 'rm -rf "${tmp_dir}"' RETURN
+    tmp_dir=$(make_test_tmp_dir)
 
     # ramp_up_down: ramp_up, sustain, ramp_down
     create_phase_result "${tmp_dir}/phase_ramp_up" "ramp_up" 500 480 30
@@ -293,8 +307,7 @@ test_step_up_last_step() {
 ==============================================
 EOF
     local tmp_dir
-    tmp_dir=$(mktemp -d)
-    trap 'rm -rf "${tmp_dir}"' RETURN
+    tmp_dir=$(make_test_tmp_dir)
 
     # step_up: step1, step2, step3 (sorted alphabetically = step1, step2, step3)
     create_phase_result "${tmp_dir}/phase_step1" "step1" 100 98 30
@@ -321,8 +334,7 @@ test_empty_directory_returns_null() {
 ==============================================
 EOF
     local tmp_dir
-    tmp_dir=$(mktemp -d)
-    trap 'rm -rf "${tmp_dir}"' RETURN
+    tmp_dir=$(make_test_tmp_dir)
 
     local result
     result=$(call_build_phase_metrics_json "${tmp_dir}" "steady")
@@ -341,8 +353,7 @@ test_weighted_rps_calculation_accuracy() {
 ==============================================
 EOF
     local tmp_dir
-    tmp_dir=$(mktemp -d)
-    trap 'rm -rf "${tmp_dir}"' RETURN
+    tmp_dir=$(make_test_tmp_dir)
 
     # Simple case: 2 phases with equal duration
     # phase_a: 200 RPS for 60s
@@ -380,8 +391,7 @@ test_steady_main_phase_sustain_selection() {
 ==============================================
 EOF
     local tmp_dir
-    tmp_dir=$(mktemp -d)
-    trap 'rm -rf "${tmp_dir}"' RETURN
+    tmp_dir=$(make_test_tmp_dir)
 
     create_phase_result "${tmp_dir}/phase_warmup" "warmup" 500 490 10
     create_phase_result "${tmp_dir}/phase_main" "main" 500 502 60
