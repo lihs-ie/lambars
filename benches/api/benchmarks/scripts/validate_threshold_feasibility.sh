@@ -64,7 +64,13 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 
 SCENARIO_NAME=$(yq '.name // ""' "${SCENARIO_FILE}" | tr -d '"')
 PROFILE_TYPE=$(yq '.rps_profile // "steady"' "${SCENARIO_FILE}" | tr -d '"')
-TARGET_RPS=$(yq '.target_rps // 0' "${SCENARIO_FILE}" | tr -d '"')
+TARGET_RPS_RAW=$(yq '.target_rps // "null"' "${SCENARIO_FILE}" | tr -d '"')
+# When target_rps is unspecified or 0, use the same runtime default as run_benchmark.sh (100 RPS)
+if [[ "${TARGET_RPS_RAW}" == "null" || "${TARGET_RPS_RAW}" == "0" ]]; then
+    TARGET_RPS=100
+else
+    TARGET_RPS="${TARGET_RPS_RAW}"
+fi
 MIN_RPS=$(yq '.min_rps // 0' "${SCENARIO_FILE}" | tr -d '"')
 STEP_COUNT=$(yq '.step_count // 0' "${SCENARIO_FILE}" | tr -d '"')
 DURATION_SECONDS=$(yq '.duration_seconds // 0' "${SCENARIO_FILE}" | tr -d '"')
@@ -103,6 +109,31 @@ fi
 
 UPPER_BOUND="0"
 
+# Allowed metrics per profile type (REQ-PATE-002)
+# Enforce profile-specific metric constraints to prevent misconfiguration.
+declare -A ALLOWED_METRICS
+ALLOWED_METRICS["steady"]="weighted_rps sustain_phase_rps"
+ALLOWED_METRICS["constant"]="weighted_rps sustain_phase_rps"
+ALLOWED_METRICS["burst"]="peak_phase_rps weighted_rps"
+ALLOWED_METRICS["step_up"]="weighted_rps sustain_phase_rps"
+ALLOWED_METRICS["ramp_up_down"]="sustain_phase_rps weighted_rps"
+
+allowed="${ALLOWED_METRICS[${PROFILE_TYPE}]:-}"
+if [[ -n "${allowed}" ]]; then
+    metric_allowed=false
+    for m in ${allowed}; do
+        if [[ "${RPS_METRIC}" == "${m}" ]]; then
+            metric_allowed=true
+            break
+        fi
+    done
+    if [[ "${metric_allowed}" == "false" ]]; then
+        echo "FAIL: ${SCENARIO_NAME} (metric '${RPS_METRIC}' is not allowed for profile '${PROFILE_TYPE}'; allowed: ${allowed}) [INVALID_METRIC]"
+        [[ "${MODE}" == "strict" ]] && exit 1
+        exit 0
+    fi
+fi
+
 case "${PROFILE_TYPE}" in
     steady|constant)
         UPPER_BOUND="${TARGET_RPS}"
@@ -116,6 +147,7 @@ case "${PROFILE_TYPE}" in
             weighted_rps)
                 # weighted_rps = burst_ratio * target_rps + (1 - burst_ratio) * base_rps
                 # where base_rps = target_rps / burst_multiplier
+                # base_rps is floored to MIN_RPS when MIN_RPS > 0.
                 if [[ "${BURST_INTERVAL}" == "0" || "${BURST_MULTIPLIER}" == "0" ]]; then
                     UPPER_BOUND="${TARGET_RPS}"
                 else
@@ -124,15 +156,14 @@ case "${PROFILE_TYPE}" in
                         -v multiplier="${BURST_MULTIPLIER}" \
                         -v burst_duration="${BURST_DURATION}" \
                         -v burst_interval="${BURST_INTERVAL}" \
+                        -v min_rps="${MIN_RPS}" \
                         'BEGIN {
                             burst_ratio = burst_duration / burst_interval
                             base_rps = target / multiplier
+                            if (min_rps > 0 && base_rps < min_rps) base_rps = min_rps
                             print burst_ratio * target + (1 - burst_ratio) * base_rps
                         }')
                 fi
-                ;;
-            *)
-                UPPER_BOUND="${TARGET_RPS}"
                 ;;
         esac
         ;;
@@ -160,23 +191,41 @@ case "${PROFILE_TYPE}" in
                         }')
                 fi
                 ;;
-            *)
+            sustain_phase_rps)
+                # Longest phase (last step) achieves target_rps
                 UPPER_BOUND="${TARGET_RPS}"
                 ;;
         esac
         ;;
 
     ramp_up_down)
+        # Read ramp_up_seconds and ramp_down_seconds from scenario file for accurate calculation
+        ramp_up_seconds=$(yq '.ramp_up_seconds // 0' "${SCENARIO_FILE}" | tr -d '"')
+        ramp_down_seconds=$(yq '.ramp_down_seconds // 0' "${SCENARIO_FILE}" | tr -d '"')
         case "${RPS_METRIC}" in
             sustain_phase_rps)
                 UPPER_BOUND="${TARGET_RPS}"
                 ;;
             weighted_rps)
-                # Ramp up/down phases reduce average to approximately 75% of target
-                UPPER_BOUND=$(awk -v target="${TARGET_RPS}" 'BEGIN { print target * 0.75 }')
-                ;;
-            *)
-                UPPER_BOUND="${TARGET_RPS}"
+                # weighted_rps = (ramp_up/2 * target + sustain * target + ramp_down/2 * target) / total
+                # = target * (ramp_up/2 + sustain + ramp_down/2) / total
+                # = target * (total - ramp_up/2 - ramp_down/2) / total
+                if [[ "${DURATION_SECONDS}" == "0" ]]; then
+                    UPPER_BOUND="${TARGET_RPS}"
+                else
+                    UPPER_BOUND=$(awk \
+                        -v target="${TARGET_RPS}" \
+                        -v ramp_up="${ramp_up_seconds}" \
+                        -v ramp_down="${ramp_down_seconds}" \
+                        -v duration="${DURATION_SECONDS}" \
+                        'BEGIN {
+                            sustain = duration - ramp_up - ramp_down
+                            if (sustain < 0) sustain = 0
+                            # Trapezoidal integration: ramp_up avg = target/2, sustain avg = target, ramp_down avg = target/2
+                            effective = ramp_up * (target / 2) + sustain * target + ramp_down * (target / 2)
+                            print effective / duration
+                        }')
+                fi
                 ;;
         esac
         ;;

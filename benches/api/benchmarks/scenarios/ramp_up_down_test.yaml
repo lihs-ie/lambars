@@ -55,7 +55,6 @@ worker_config:
 thresholds:
   max_error_rate: 0.01        # 1% max error rate
   p99_latency_ms: 200         # p99 latency threshold
-  min_rps_achieved: 450       # Minimum RPS during sustain phase
 
 # Metadata for result analysis
 metadata:

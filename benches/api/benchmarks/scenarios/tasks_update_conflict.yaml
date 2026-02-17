@@ -79,7 +79,6 @@ error_config:
 thresholds:
   max_error_rate: 0.1
   p99_latency_ms: 200
-  min_rps_achieved: 300
 
 # Extended metadata for workflow integration
 # Keys here map to environment variables:

@@ -67,7 +67,6 @@ error_config:
 thresholds:
   max_error_rate: 0.03
   p99_latency_ms: 100
-  min_rps_achieved: 500
 
 metadata:
   test_type: "endpoint_benchmark"

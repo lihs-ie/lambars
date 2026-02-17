@@ -1111,7 +1111,7 @@ echo ""
 
 # Threshold feasibility lint (after scenario validation)
 if [[ "${SKIP_THRESHOLD_LINT:-false}" != "true" ]]; then
-    LINT_MODE="${THRESHOLD_LINT_MODE:-warn}"
+    LINT_MODE="${THRESHOLD_LINT_MODE:-strict}"
     if [[ -f "${SCRIPT_DIR}/scripts/validate_threshold_feasibility.sh" && \
           -f "${SCRIPT_DIR}/thresholds.yaml" ]]; then
         echo "Running threshold feasibility lint (mode: ${LINT_MODE})..."
@@ -1477,6 +1477,8 @@ build_phase_metrics_json() {
     fi
 
     # Aggregate metrics using jq with profile-aware sustain selection
+    # ALG-PATE-001: sustain_phase_rps = average of sustain-labelled phases
+    # (or longest phase when no sustain label present).
     jq -s --arg profile "${profile}" '
         def weighted_rps:
             if (map(.duration_seconds) | add // 0) == 0 then 0
@@ -1485,16 +1487,27 @@ build_phase_metrics_json() {
                  (map(.duration_seconds) | add))
             end;
 
+        def longest_phase_avg:
+            (map(.duration_seconds) | max) as $max_dur
+            | [.[] | select(.duration_seconds == $max_dur) | .actual_rps] as $vals
+            | if ($vals | length) > 0 then ($vals | add / length) else weighted_rps end;
+
         def select_sustain:
             if $profile == "steady" then
-                (map(select(.phase == "main"))[0].actual_rps // weighted_rps)
+                ([.[] | select(.phase == "main") | .actual_rps] as $s
+                 | if ($s | length) > 0 then ($s | add / length) else longest_phase_avg end)
             elif $profile == "ramp_up_down" then
-                (map(select(.phase == "sustain"))[0].actual_rps // weighted_rps)
+                ([.[] | select(.phase == "sustain") | .actual_rps] as $s
+                 | if ($s | length) > 0 then ($s | add / length) else longest_phase_avg end)
             elif $profile == "burst" then
-                ([map(select(.phase | test("burst"))) | .[].actual_rps] | if length > 0 then max else weighted_rps end)
+                ([.[] | select(.phase | test("burst")) | .actual_rps] as $s
+                 | if ($s | length) > 0 then ($s | max) else weighted_rps end)
             elif $profile == "step_up" then
-                ((sort_by(.phase) | last | .actual_rps) // weighted_rps)
-            else weighted_rps end;
+                longest_phase_avg
+            else
+                ([.[] | select(.phase == "sustain") | .actual_rps] as $s
+                 | if ($s | length) > 0 then ($s | add / length) else longest_phase_avg end)
+            end;
 
         {
             phase_count: length,

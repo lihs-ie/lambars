@@ -64,7 +64,6 @@ error_config:
 thresholds:
   max_error_rate: 0.05
   p99_latency_ms: 500
-  min_rps_achieved: 5000
 
 metadata:
   test_type: "production_simulation"

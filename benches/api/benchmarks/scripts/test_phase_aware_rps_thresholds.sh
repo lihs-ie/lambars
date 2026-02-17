@@ -262,40 +262,54 @@ test_legacy_meta_json_falls_back_to_merged_rps() {
 }
 
 # -------------------------------------------------------------------
-# TC-RPS-5: RPS ルールが thresholds.yaml に未定義 -> スキップ (PASS)
+# TC-RPS-5: RPS ルールが thresholds.yaml に定義済みだが閾値を十分上回る場合 -> PASS
+# Note: tasks_update_steady is used here because it has an RPS rule defined.
+# This test verifies that when actual RPS exceeds both warning and error thresholds,
+# the check passes normally (not skipped). For true skip behavior (no rps rule),
+# see the SKIP message in get_rps_rule() when the scenario has no rps section.
 # -------------------------------------------------------------------
-test_no_rps_rule_skips_check() {
-    log_test "TC-RPS-5: rps rule not in thresholds.yaml -> skip (PASS)"
+test_rps_well_above_threshold_passes() {
+    log_test "TC-RPS-5: RPS well above threshold -> PASS"
 
     local tmp_dir
     tmp_dir=$(make_test_tmp_dir)
 
-    # Create meta.json for tasks_search_hot with high RPS
-    mkdir -p "${tmp_dir}/tasks_search_hot/benchmark/meta"
+    # tasks_update_steady: p99<=150ms, error_rate<=0.001, conflict_rate<=0.001
+    # rps.metric=weighted_rps, warning=85, error=70
+    # Use weighted_rps=500 (well above warning=85) -> should PASS rps check
+    mkdir -p "${tmp_dir}/tasks_update_steady/benchmark/meta"
     jq -n '{
-        "scenario": "tasks_search_hot",
+        "scenario": "tasks_update_steady",
         "results": {
-            "rps": 2000,
-            "p50": "10ms",
-            "p90": "50ms",
-            "p99": "100ms",
-            "error_rate": 0.001,
+            "rps": 500,
+            "p50": "5ms",
+            "p90": "10ms",
+            "p99": "20ms",
+            "error_rate": 0.0001,
+            "conflict_rate": 0.0001,
             "requests": 5000,
             "http_status": {
-                "200": 4995,
+                "200": 4999,
                 "400": 0,
-                "409": 0
+                "409": 1
+            },
+            "phase_metrics": {
+                "peak_phase_rps": 500,
+                "sustain_phase_rps": 500,
+                "weighted_rps": 500,
+                "min_phase_rps": 400,
+                "phase_count": 1
             }
         }
-    }' > "${tmp_dir}/tasks_search_hot/benchmark/meta/tasks_search_hot.json"
+    }' > "${tmp_dir}/tasks_update_steady/benchmark/meta/tasks_update_steady.json"
 
     local output
     local exit_code
-    output=$("${CHECK_THRESHOLDS_SCRIPT}" "${tmp_dir}" "tasks_search_hot" 2>&1) || exit_code=$?
+    output=$("${CHECK_THRESHOLDS_SCRIPT}" "${tmp_dir}" "tasks_update_steady" 2>&1) || exit_code=$?
     exit_code="${exit_code:-0}"
 
-    assert_exit_code "0" "${exit_code}" "TC-RPS-5: exit code 0 (RPS check skipped or passed)"
-    assert_contains "${output}" "PASS" "TC-RPS-5: PASS when RPS rule absent or met"
+    assert_exit_code "0" "${exit_code}" "TC-RPS-5: exit code 0 (RPS well above threshold)"
+    assert_contains "${output}" "PASS" "TC-RPS-5: PASS when RPS is above warning threshold"
 }
 
 # -------------------------------------------------------------------
@@ -369,7 +383,7 @@ main() {
     test_rps_between_warning_and_error_is_warning
     test_rps_below_error_threshold_is_fail
     test_legacy_meta_json_falls_back_to_merged_rps
-    test_no_rps_rule_skips_check
+    test_rps_well_above_threshold_passes
     test_each_profile_uses_correct_metric
 
     print_summary

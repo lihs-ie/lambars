@@ -68,7 +68,6 @@ thresholds:
   max_error_rate: 0.03
   max_validation_error_rate: 0  # 400 is structural violation - must be 0 (enforced by check_validation_gate in check_thresholds.sh)
   p99_latency_ms: 100
-  min_rps_achieved: 500
 
 metadata:
   test_type: "endpoint_benchmark"

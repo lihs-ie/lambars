@@ -282,17 +282,20 @@ test_ramp_up_down_sustain_phase() {
     assert_json_field "${result}" ".min_phase_rps" "102" "TC-3: min_phase_rps is ramp_down value"
 }
 
-# TC-4: step_up - 最終ステップの正しい選択
+# TC-4: step_up - longest duration step selection (ALG-PATE-001)
+# sustain_phase_rps = average of phases with maximum duration_seconds.
+# When phases have equal duration, all phases contribute to the average.
 test_step_up_last_step() {
     echo ""
-    echo "TC-4: step_up - last step selection"
+    echo "TC-4: step_up - longest duration phase selection (ALG-PATE-001)"
     local tmp_dir
     tmp_dir=$(make_test_tmp_dir)
 
-    # step_up: step1, step2, step3 (sorted alphabetically = step1, step2, step3)
+    # step_up: step1(30s, 98rps), step2(30s, 195rps), step3(60s, 298rps)
+    # Longest phase = step3 (60s) -> sustain_phase_rps = 298
     create_phase_result "${tmp_dir}/phase_step1" "step1" 100 98 30
     create_phase_result "${tmp_dir}/phase_step2" "step2" 200 195 30
-    create_phase_result "${tmp_dir}/phase_step3" "step3" 300 298 30
+    create_phase_result "${tmp_dir}/phase_step3" "step3" 300 298 60
 
     local result
     result=$(call_build_phase_metrics_json "${tmp_dir}" "step_up")
@@ -300,7 +303,7 @@ test_step_up_last_step() {
 
     assert_exit_code "0" "${exit_code}" "TC-4: exit code 0"
     assert_json_field "${result}" ".phase_count" "3" "TC-4: phase_count is 3"
-    assert_json_field "${result}" ".sustain_phase_rps" "298" "TC-4: sustain_phase_rps is last step actual_rps"
+    assert_json_field "${result}" ".sustain_phase_rps" "298" "TC-4: sustain_phase_rps is longest step actual_rps"
     assert_json_field "${result}" ".peak_phase_rps" "298" "TC-4: peak_phase_rps is max actual_rps"
     assert_json_field "${result}" ".min_phase_rps" "98" "TC-4: min_phase_rps is first step value"
 }

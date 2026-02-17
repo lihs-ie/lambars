@@ -161,7 +161,8 @@ P99_MAX=$(get_threshold "${SCENARIO}" "p99")
 ERROR_RATE_MAX=$(get_threshold "${SCENARIO}" "error_rate")
 CONFLICT_RATE_MAX=$(get_threshold "${SCENARIO}" "conflict_rate")
 
-if [[ -z "${P50_MAX}" ]]; then
+# Require at least p99 threshold to be defined; p50/p90 are optional.
+if [[ -z "${P99_MAX}" ]]; then
     echo "ERROR: Unknown scenario: ${SCENARIO}"
     echo "Scenarios are defined in thresholds.yaml"
     echo "Use: yq '.scenarios | keys' ${SCRIPT_DIR}/thresholds.yaml"
@@ -208,9 +209,11 @@ ERROR_RATE="${RAW_ERROR_RATE}"
 CONFLICT_RATE="${RAW_CONFLICT_RATE}"
 
 MISSING_METRICS=""
-[[ -z "${P50}" ]] && MISSING_METRICS="${MISSING_METRICS} p50"
-[[ -z "${P90}" ]] && MISSING_METRICS="${MISSING_METRICS} p90"
-[[ -z "${P99}" ]] && MISSING_METRICS="${MISSING_METRICS} p99"
+# Only check for p50/p90 if thresholds are defined (optional latency metrics)
+[[ -n "${P50_MAX}" ]] && [[ -z "${P50}" ]] && MISSING_METRICS="${MISSING_METRICS} p50"
+[[ -n "${P90_MAX}" ]] && [[ -z "${P90}" ]] && MISSING_METRICS="${MISSING_METRICS} p90"
+# p99 is required when threshold is defined
+[[ -n "${P99_MAX}" ]] && [[ -z "${P99}" ]] && MISSING_METRICS="${MISSING_METRICS} p99"
 [[ -n "${ERROR_RATE_MAX}" ]] && [[ -z "${ERROR_RATE}" ]] && MISSING_METRICS="${MISSING_METRICS} error_rate"
 [[ -n "${CONFLICT_RATE_MAX}" ]] && [[ -z "${CONFLICT_RATE}" ]] && MISSING_METRICS="${MISSING_METRICS} conflict_rate"
 
@@ -228,8 +231,8 @@ fi
 
 echo ""
 echo "Thresholds:"
-echo "  p50 <= ${P50_MAX}ms"
-echo "  p90 <= ${P90_MAX}ms"
+[[ -n "${P50_MAX}" ]] && echo "  p50 <= ${P50_MAX}ms"
+[[ -n "${P90_MAX}" ]] && echo "  p90 <= ${P90_MAX}ms"
 echo "  p99 <= ${P99_MAX}ms"
 if [[ -n "${ERROR_RATE_MAX}" ]]; then
     echo "  error_rate <= ${ERROR_RATE_MAX}"
@@ -239,8 +242,8 @@ if [[ -n "${CONFLICT_RATE_MAX}" ]]; then
 fi
 echo ""
 echo "Results:"
-echo "  p50 = ${P50}ms"
-echo "  p90 = ${P90}ms"
+[[ -n "${P50}" ]] && echo "  p50 = ${P50}ms"
+[[ -n "${P90}" ]] && echo "  p90 = ${P90}ms"
 echo "  p99 = ${P99}ms"
 if [[ -n "${ERROR_RATE}" ]]; then
     echo "  error_rate = ${ERROR_RATE}"
@@ -413,22 +416,28 @@ fi
 FAILED=0
 FAILURES=""
 
-if (( $(echo "${P50} > ${P50_MAX}" | bc -l) )); then
-    FAILURES="${FAILURES}
+if [[ -n "${P50_MAX}" ]] && [[ -n "${P50}" ]]; then
+    if (( $(echo "${P50} > ${P50_MAX}" | bc -l) )); then
+        FAILURES="${FAILURES}
   - p50=${P50}ms exceeds threshold of ${P50_MAX}ms"
-    FAILED=1
+        FAILED=1
+    fi
 fi
 
-if (( $(echo "${P90} > ${P90_MAX}" | bc -l) )); then
-    FAILURES="${FAILURES}
+if [[ -n "${P90_MAX}" ]] && [[ -n "${P90}" ]]; then
+    if (( $(echo "${P90} > ${P90_MAX}" | bc -l) )); then
+        FAILURES="${FAILURES}
   - p90=${P90}ms exceeds threshold of ${P90_MAX}ms"
-    FAILED=1
+        FAILED=1
+    fi
 fi
 
-if (( $(echo "${P99} > ${P99_MAX}" | bc -l) )); then
-    FAILURES="${FAILURES}
+if [[ -n "${P99}" ]]; then
+    if (( $(echo "${P99} > ${P99_MAX}" | bc -l) )); then
+        FAILURES="${FAILURES}
   - p99=${P99}ms exceeds threshold of ${P99_MAX}ms"
-    FAILED=1
+        FAILED=1
+    fi
 fi
 
 if [[ -n "${ERROR_RATE_MAX}" ]] && [[ -n "${ERROR_RATE}" ]]; then
@@ -450,8 +459,12 @@ if [[ -n "${CONFLICT_RATE_MAX}" ]]; then
         fi
     fi
 fi
-RESULTS_SUMMARY="p50=${P50}ms, p90=${P90}ms, p99=${P99}ms"
-THRESHOLDS_SUMMARY="p50<=${P50_MAX}ms, p90<=${P90_MAX}ms, p99<=${P99_MAX}ms"
+RESULTS_SUMMARY="p99=${P99}ms"
+[[ -n "${P50}" ]] && RESULTS_SUMMARY="p50=${P50}ms, ${RESULTS_SUMMARY}"
+[[ -n "${P90}" ]] && RESULTS_SUMMARY="p90=${P90}ms, ${RESULTS_SUMMARY}"
+THRESHOLDS_SUMMARY="p99<=${P99_MAX}ms"
+[[ -n "${P50_MAX}" ]] && THRESHOLDS_SUMMARY="p50<=${P50_MAX}ms, ${THRESHOLDS_SUMMARY}"
+[[ -n "${P90_MAX}" ]] && THRESHOLDS_SUMMARY="p90<=${P90_MAX}ms, ${THRESHOLDS_SUMMARY}"
 [[ -n "${ERROR_RATE}" ]] && RESULTS_SUMMARY="${RESULTS_SUMMARY}, error_rate=${ERROR_RATE}"
 [[ -n "${ERROR_RATE_MAX}" ]] && THRESHOLDS_SUMMARY="${THRESHOLDS_SUMMARY}, error_rate<=${ERROR_RATE_MAX}"
 # Use calculated conflict_error_rate if available
