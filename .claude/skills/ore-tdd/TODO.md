@@ -2,9 +2,9 @@
 
 ## In Progress
 
-- [🔴 RED] pin profiling runners to ubuntu-22.04 - 失敗テスト作成中
+- [🟢 GREEN] pin profiling runners to ubuntu-22.04 - 最小実装中
   - Started: 2026-02-17
-  - Goal: profiling.yml の全ジョブの runs-on が ubuntu-22.04 になっていることを検証するテストを作成
+  - Goal: profiling.yml の全ジョブの runs-on を ubuntu-22.04 に変更する
 
 ## Next
 

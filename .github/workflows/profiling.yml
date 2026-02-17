@@ -35,7 +35,7 @@ jobs:
   # ==========================================================================
   criterion-profiling-build:
     name: Criterion Build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     if: ${{ github.event.inputs.profile_type == 'all' || github.event.inputs.profile_type == 'criterion' || github.event_name == 'pull_request' }}
 
     steps:
@@ -94,7 +94,7 @@ jobs:
   # ==========================================================================
   criterion-profiling:
     name: Criterion (${{ matrix.bench }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     if: ${{ github.event.inputs.profile_type == 'all' || github.event.inputs.profile_type == 'criterion' || github.event_name == 'pull_request' }}
     needs: [criterion-profiling-build]
     strategy:
@@ -231,7 +231,7 @@ jobs:
   # ==========================================================================
   iai-profiling:
     name: iai-callgrind Analysis
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     if: ${{ github.event.inputs.profile_type == 'all' || github.event.inputs.profile_type == 'iai' || github.event_name == 'pull_request' }}
 
     steps:
@@ -318,7 +318,7 @@ jobs:
   # ==========================================================================
   api-profiling-matrix:
     name: API Profiling Matrix
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     if: ${{ github.event.inputs.profile_type == 'all' || github.event.inputs.profile_type == 'api' || github.event_name == 'pull_request' }}
     outputs:
       scenarios: ${{ steps.matrix.outputs.scenarios }}
@@ -348,7 +348,7 @@ jobs:
   # ==========================================================================
   api-profiling-build:
     name: API Profiling Build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     if: ${{ github.event.inputs.profile_type == 'all' || github.event.inputs.profile_type == 'api' || github.event_name == 'pull_request' }}
 
     steps:
@@ -382,7 +382,7 @@ jobs:
   # ==========================================================================
   api-profiling:
     name: API Server Profiling (${{ matrix.scenario }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     if: ${{ github.event.inputs.profile_type == 'all' || github.event.inputs.profile_type == 'api' || github.event_name == 'pull_request' }}
     needs: [api-profiling-matrix, api-profiling-build]
     strategy:
@@ -608,7 +608,7 @@ jobs:
   # ==========================================================================
   summarize-profiling:
     name: Summarize Profiling Results
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     needs: [criterion-profiling, iai-profiling, api-profiling]
     if: ${{ always() && !cancelled() && github.event_name == 'pull_request' }}
     permissions:
