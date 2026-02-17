@@ -12,6 +12,12 @@
 #   p99_latency_ms:       99th percentile latency in milliseconds.
 #   error_rate:           Percentage of failed requests (0.01 = 1%).
 #   rps_degradation_percent: Percentage decrease in RPS compared to baseline.
+#
+# Scenario-specific RPS thresholds use phase-aware metrics:
+#   rps.metric:   phase_metrics field to evaluate (weighted_rps, peak_phase_rps, sustain_phase_rps).
+#                 Falls back to results.rps (merged) when phase_metrics is absent.
+#   rps.warning:  RPS below this level triggers a WARNING (non-blocking).
+#   rps.error:    RPS below this level causes CI to fail (exit 3).
 
 thresholds:
   p95_latency_ms:
