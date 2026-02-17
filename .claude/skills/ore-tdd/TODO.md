@@ -2,9 +2,7 @@
 
 ## In Progress
 
-- [🔄 REFACTOR] pin profiling runners to ubuntu-22.04 - リファクタリング中
-  - Started: 2026-02-17
-  - Goal: テストスクリプトのリファクタリング（期待値定数化）
+(なし)
 
 ## Next
 
@@ -12,6 +10,9 @@
 
 ## Done
 
+- [x] pin profiling runners to ubuntu-22.04 (2026-02-17)
+  - profiling.yml の全7ジョブを ubuntu-latest -> ubuntu-22.04 に変更
+  - テストスクリプト test_profiling_runner_pin.sh を追加
 - [x] AP-1: TaskId Copy 化 (IMPL-AH-001~004) (2026-02-12)
   - 332 clone_on_copy fixes across 17 files
 - [x] AP-2: mimalloc 導入 (IMPL-AH-005~006c) (2026-02-12)
