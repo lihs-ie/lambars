@@ -1109,6 +1109,26 @@ fi
 validate_scenario_parameters
 echo ""
 
+# Threshold feasibility lint (after scenario validation)
+if [[ "${SKIP_THRESHOLD_LINT:-false}" != "true" ]]; then
+    LINT_MODE="${THRESHOLD_LINT_MODE:-warn}"
+    THRESHOLD_LINT_FILE="${SCRIPT_DIR}/thresholds.yaml"
+    LINT_SCRIPT="${SCRIPT_DIR}/scripts/validate_threshold_feasibility.sh"
+    if [[ -f "${LINT_SCRIPT}" && -f "${THRESHOLD_LINT_FILE}" ]]; then
+        echo "Running threshold feasibility lint (mode: ${LINT_MODE})..."
+        if ! bash "${LINT_SCRIPT}" \
+            --scenario-file "${SCENARIO_FILE}" \
+            --threshold-file "${THRESHOLD_LINT_FILE}" \
+            --mode "${LINT_MODE}"; then
+            echo "ERROR: Threshold feasibility check failed"
+            if [[ "${LINT_MODE}" == "strict" ]]; then
+                exit 1
+            fi
+        fi
+    fi
+fi
+echo ""
+
 echo "=============================================="
 echo "  API Workload Benchmark"
 echo "=============================================="
