@@ -71,12 +71,13 @@ if [[ "${TARGET_RPS_RAW}" == "null" || "${TARGET_RPS_RAW}" == "0" ]]; then
 else
     TARGET_RPS="${TARGET_RPS_RAW}"
 fi
-MIN_RPS=$(yq '.min_rps // 0' "${SCENARIO_FILE}" | tr -d '"')
-STEP_COUNT=$(yq '.step_count // 0' "${SCENARIO_FILE}" | tr -d '"')
-DURATION_SECONDS=$(yq '.duration_seconds // 0' "${SCENARIO_FILE}" | tr -d '"')
-BURST_MULTIPLIER=$(yq '.burst_multiplier // 1.0' "${SCENARIO_FILE}" | tr -d '"')
-BURST_DURATION=$(yq '.burst_duration_seconds // 0' "${SCENARIO_FILE}" | tr -d '"')
-BURST_INTERVAL=$(yq '.burst_interval_seconds // 0' "${SCENARIO_FILE}" | tr -d '"')
+# Defaults must match run_benchmark.sh runtime defaults to avoid false PASS verdicts.
+MIN_RPS=$(yq '.min_rps // 10' "${SCENARIO_FILE}" | tr -d '"')
+STEP_COUNT=$(yq '.step_count // 4' "${SCENARIO_FILE}" | tr -d '"')
+DURATION_SECONDS=$(yq '.duration_seconds // 30' "${SCENARIO_FILE}" | tr -d '"')
+BURST_MULTIPLIER=$(yq '.burst_multiplier // 3' "${SCENARIO_FILE}" | tr -d '"')
+BURST_DURATION=$(yq '.burst_duration_seconds // 5' "${SCENARIO_FILE}" | tr -d '"')
+BURST_INTERVAL=$(yq '.burst_interval_seconds // 20' "${SCENARIO_FILE}" | tr -d '"')
 
 if [[ -z "${SCENARIO_NAME}" ]]; then
     echo "ERROR: Scenario file missing 'name' field: ${SCENARIO_FILE}" >&2

@@ -55,7 +55,7 @@ worker_config:
 thresholds:
   max_error_rate: 0.01
   p99_latency_ms: 50        # Low latency expected for minimal payload
-  min_rps_achieved: 450
+
 
 # Metadata for result analysis
 metadata:

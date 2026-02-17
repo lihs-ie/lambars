@@ -55,7 +55,7 @@ worker_config:
 thresholds:
   max_error_rate: 0.02      # Slightly higher tolerance for complex payloads
   p99_latency_ms: 300       # Higher latency expected for complex payload
-  min_rps_achieved: 150
+
 
 # Metadata for result analysis
 metadata:

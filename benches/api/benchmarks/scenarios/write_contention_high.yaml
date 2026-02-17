@@ -58,7 +58,7 @@ worker_config:
 thresholds:
   max_error_rate: 0.05
   p99_latency_ms: 300
-  min_rps_achieved: 100
+
 
 # Metadata
 metadata:

@@ -53,7 +53,7 @@ pool_sizes:
 thresholds:
   max_error_rate: 0.05
   p99_latency_ms: 500
-  min_rps_achieved: 50
+
 
 # Metadata
 metadata:

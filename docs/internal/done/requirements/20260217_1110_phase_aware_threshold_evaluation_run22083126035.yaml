@@ -1,0 +1,211 @@
+# Phase-aware Threshold Evaluation (run 22083126035) 要件定義
+#
+# 概要:
+#   複数シナリオで閾値未達が出たが、実測フェーズ値は target を満たしており、
+#   判定指標（merged RPS）の意味と閾値定義が整合していない。
+#
+# 設計方針:
+#   1. phase 型負荷の評価を merged 値から phase-aware 指標へ分離する。
+#   2. シナリオ閾値に評価対象メトリクスを明示し、曖昧比較を禁止する。
+#   3. 実行前 lint で「達成不可能な閾値」を排除する。
+#
+# 参照:
+#   - benches/api/benchmarks/scenarios/*.yaml
+#   - profiling-results/github-22083126035/*/benchmark/wrk/*.txt
+
+version: "1.0.0"
+name: "phase_aware_threshold_evaluation_run22083126035"
+description: |
+  run 22083126035 では burst_spike_test, production_load, large_scale_seeded,
+  pool_stress_large, pool_stress_medium, mixed_contention, ramp_up_down_test が
+  min_rps 閾値で FAIL と判定された。
+  ただし wrk の phase 詳細では target RPS にほぼ追従しており、
+  merged RPS を min_rps と比較する設計が誤判定を誘発している。
+
+background:
+  problem: |
+    閾値判定が profile_type（steady/burst/step_up/ramp_up_down）を考慮せず、
+    評価不能または過剰に厳しい FAIL が混在している。
+  motivation: |
+    性能改善対象の優先度を正しく決めるため、
+    指標定義と閾値の意味を一意にし、誤検知を除去する必要がある。
+  prior_art:
+    - name: "Profile-aware SLO"
+      description: "phase ごとの期待値（peak/sustain/weighted）を分離して評価する方式。"
+
+requirements:
+  - id: REQ-PATE-001
+    name: "phase-aware メトリクスを標準出力する"
+    description: |
+      meta に merged_rps のみではなく、
+      peak_phase_rps / sustain_phase_rps / weighted_rps / min_phase_rps を出力する。
+      これにより burst/step/ramp での評価対象を明確化する。
+    methods:
+      - name: "compute_phase_metrics"
+        signature: "fn compute_phase_metrics(phases: Vec<PhaseResult>) -> PhaseMetrics"
+        description: "フェーズ結果から評価指標を純粋関数で算出する。"
+    implementations:
+      - type: "result_collector / summary generator"
+        description: "phase 詳細を集約し meta.results.phase_metrics に保存する。"
+
+  - id: REQ-PATE-002
+    name: "閾値に評価対象メトリクスを明示する"
+    description: |
+      シナリオ閾値の min_rps_achieved を廃止し、
+      min_peak_rps / min_sustain_rps / min_weighted_rps のいずれかを明示指定させる。
+      profile_type ごとに許可メトリクスを制限する。
+    implementations:
+      - type: "scenario schema"
+        description: "scenario YAML の thresholds スキーマを更新する。"
+
+  - id: REQ-PATE-003
+    name: "実行前閾値 lint を導入する"
+    description: |
+      シナリオ設定（target_rps, burst_multiplier, phase duration）から理論上限を計算し、
+      閾値が理論達成不可能なら workflow を開始前に失敗させる。
+    methods:
+      - name: "validate_threshold_feasibility"
+        signature: "fn validate_threshold_feasibility(config: ScenarioConfig) -> Result<(), ThresholdError>"
+        description: "profile 形状に対する閾値の実現可能性を判定する。"
+    implementations:
+      - type: "benchmark preflight"
+        description: "run_benchmark.sh 前段で lint を実行する。"
+
+evidence:
+  metrics:
+    - id: EV-PATE-M1
+      description: "burst_spike_test は merged RPS 500.88 < 閾値 900 だが burst phase は約1002 RPSで target を達成。"
+      source: "profiling-results/github-22083126035/...-burst_spike_test/benchmark/wrk/recursive.txt"
+    - id: EV-PATE-M2
+      description: "production_load は merged RPS 4005.88 < 閾値 5000 だが burst phase は約8018 RPSで target を達成。"
+      source: "profiling-results/github-22083126035/...-production_load/benchmark/wrk/recursive.txt"
+    - id: EV-PATE-M3
+      description: "large_scale_seeded は step_up で最大約100 RPSなのに閾値 min_rps=500 が設定されている。"
+      source: "benches/api/benchmarks/scenarios/large_scale_seeded.yaml"
+    - id: EV-PATE-M4
+      description: "pool_stress_large は target=100 RPS なのに閾値 min_rps=500 が設定されている。"
+      source: "benches/api/benchmarks/scenarios/pool_stress_large.yaml"
+    - id: EV-PATE-M5
+      description: "ramp_up_down_test は error_rate 0.001672 (閾値0.01以内) でも min_rps 判定で失敗する。"
+      source: "profiling-results/github-22083126035/...-ramp_up_down_test/benchmark/meta/recursive.json"
+
+quality_findings:
+  - id: QF-PATE-001
+    severity: "high"
+    issue: "評価指標と閾値意味の不一致"
+    impact: |
+      実際には target 達成しているシナリオが FAIL となり、改善優先度が歪む。
+  - id: QF-PATE-002
+    severity: "high"
+    issue: "理論的に達成不可能な閾値の混入"
+    impact: |
+      CI の恒常的 FAIL を招き、性能退行検知の信頼性を低下させる。
+
+barriers:
+  - id: BAR-PATE-001
+    name: "phase 形状差の未吸収"
+    details: |
+      steady/burst/step/ramp を同一ルールで比較しているため、比較対象が意味的に一致しない。
+  - id: BAR-PATE-002
+    name: "シナリオスキーマの曖昧性"
+    details: |
+      `min_rps_achieved` の定義が merged なのか phase-specific なのか不明確で、設定ミスを誘発する。
+  - id: BAR-PATE-003
+    name: "事前lint不足"
+    details: |
+      実行前に設定妥当性を検査しないため、無効閾値が運用に流入する。
+
+algorithms:
+  - id: ALG-PATE-001
+    name: "Phase Metric Extraction"
+    problem: "phase 型負荷を評価可能な指標へ正規化する。"
+    input: "phase list (target, actual_rps, duration)"
+    output: "peak_phase_rps, sustain_phase_rps, weighted_rps, min_phase_rps"
+    steps:
+      - "peak_phase_rps = max(actual_rps)"
+      - "weighted_rps = sum(actual_rps * duration) / sum(duration)"
+      - "sustain_phase_rps = 長尺 phase（または `sustain` ラベル）の平均"
+      - "min_phase_rps = min(actual_rps)"
+    complexity:
+      time: "O(p) (p = phase count)"
+      space: "O(1)"
+    guarantees:
+      - "profile_type を跨いでも比較可能な指標集合を生成する"
+
+  - id: ALG-PATE-002
+    name: "Threshold Feasibility Lint"
+    problem: "達成不可能な閾値設定を実行前に排除する。"
+    input: "scenario config (target_rps, burst_multiplier, profile, durations, thresholds)"
+    output: "Pass/Fail と不整合理由"
+    steps:
+      - "profile_type ごとに理論上限RPSを計算"
+      - "例: burst の weighted 上限 = (burst_dur/interval)*target + (1-burst_dur/interval)*(target/burst_multiplier)"
+      - "step_up は phase target の最大値・重み付き平均を計算"
+      - "threshold が理論上限を超える場合は fail"
+    complexity:
+      time: "O(1)〜O(p)"
+      space: "O(1)"
+    guarantees:
+      - "理論的に不可能な SLO を CI へ流さない"
+
+implementation_tasks:
+  - id: IMPL-PATE-001
+    priority: 1
+    requirement_ids:
+      - REQ-PATE-001
+    blockers:
+      - BAR-PATE-001
+    actions:
+      - "result_collector に phase_metrics 生成処理を実装する。"
+      - "meta.results.phase_metrics を全 profile_type で出力する。"
+    completion_criteria:
+      - "37シナリオ全てで phase_metrics が欠落しない"
+    verification_artifacts:
+      - "benchmark/meta/*.json"
+
+  - id: IMPL-PATE-002
+    priority: 2
+    requirement_ids:
+      - REQ-PATE-002
+    blockers:
+      - BAR-PATE-002
+    actions:
+      - "threshold スキーマを `min_*_rps` へ分解する。"
+      - "profile_type ごとに許可フィールドを制約する。"
+    completion_criteria:
+      - "曖昧な min_rps_achieved が新規シナリオで使用不可"
+    verification_artifacts:
+      - "scenario schema validation report"
+
+  - id: IMPL-PATE-003
+    priority: 3
+    requirement_ids:
+      - REQ-PATE-003
+    blockers:
+      - BAR-PATE-003
+    actions:
+      - "preflight lint を run_benchmark.sh の前段へ組み込む。"
+      - "無効閾値検出時は benchmark 実行を中止する。"
+    completion_criteria:
+      - "large_scale_seeded/pool_stress_large などの不整合設定を事前検出できる"
+    verification_artifacts:
+      - "preflight lint logs"
+      - "CI fail case records"
+
+non_functional_requirements:
+  performance:
+    - "閾値誤判定（達成不可能閾値の混入）を 0 件にする"
+    - "phase-aware 指標生成の追加オーバーヘッドを 1% 未満に抑える"
+  compatibility:
+    - "既存シナリオは移行期間中に自動変換または互換読み込みを提供する"
+  testing:
+    - "burst/step/ramp/steady それぞれの閾値判定ユニットテスト"
+    - "達成不可能閾値に対する preflight fail テスト"
+
+future_extensions:
+  - id: "EXT-PATE-001"
+    name: "SLO 自動提案"
+    description: |
+      過去実績からシナリオ別に妥当な閾値を自動提案する。
+    rationale: |
+      まずは誤判定防止を優先し、提案機能は安定化後に導入する。

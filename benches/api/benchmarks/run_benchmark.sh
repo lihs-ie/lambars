@@ -1438,7 +1438,7 @@ compute_error_rate() {
 #   - steady:       actual_rps of the "main" phase (fallback: weighted_rps)
 #   - ramp_up_down: actual_rps of the "sustain" phase (fallback: weighted_rps)
 #   - burst:        max actual_rps among phases whose name contains "burst"
-#   - step_up:      actual_rps of the alphabetically last phase (fallback: weighted_rps)
+#   - step_up:      average actual_rps of the longest-duration phase(s) (fallback: weighted_rps)
 #
 # When no phase_result.json files are found and MERGED_RPS is set, a
 # single-phase fallback is returned using MERGED_RPS for all metrics.

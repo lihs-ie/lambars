@@ -232,7 +232,7 @@
             "sustain_phase_rps": {
               "type": ["number", "null"],
               "minimum": 0,
-              "description": "Profile-aware sustained RPS: main phase for steady, sustain phase for ramp_up_down, max burst phase for burst, last step for step_up"
+              "description": "Profile-aware sustained RPS: main phase for steady, sustain phase for ramp_up_down, max burst phase for burst, longest-duration phase(s) average for step_up"
             }
           }
         }
