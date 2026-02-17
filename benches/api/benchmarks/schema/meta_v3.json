@@ -204,6 +204,37 @@
           "type": "integer",
           "minimum": 0,
           "description": "Total number of retries"
+        },
+        "phase_metrics": {
+          "type": ["object", "null"],
+          "description": "Phase-aware RPS metrics aggregated from phase_result.json files (REQ-PATE-001). null for single-phase scenarios without phase files.",
+          "properties": {
+            "phase_count": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Number of phases executed"
+            },
+            "peak_phase_rps": {
+              "type": "number",
+              "minimum": 0,
+              "description": "Maximum actual_rps across all phases"
+            },
+            "min_phase_rps": {
+              "type": "number",
+              "minimum": 0,
+              "description": "Minimum actual_rps across all phases"
+            },
+            "weighted_rps": {
+              "type": "number",
+              "minimum": 0,
+              "description": "Duration-weighted average RPS across all phases"
+            },
+            "sustain_phase_rps": {
+              "type": ["number", "null"],
+              "minimum": 0,
+              "description": "Profile-aware sustained RPS: main phase for steady, sustain phase for ramp_up_down, max burst phase for burst, last step for step_up"
+            }
+          }
         }
       }
     },

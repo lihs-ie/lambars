@@ -1412,6 +1412,83 @@ compute_error_rate() {
     }'
 }
 
+# =============================================================================
+# Build Phase Metrics JSON (REQ-PATE-001)
+# =============================================================================
+#
+# Aggregates phase_result.json files from a results directory into a single
+# phase-aware metrics object. The sustain_phase_rps selection is profile-aware:
+#   - steady:       actual_rps of the "main" phase (fallback: weighted_rps)
+#   - ramp_up_down: actual_rps of the "sustain" phase (fallback: weighted_rps)
+#   - burst:        max actual_rps among phases whose name contains "burst"
+#   - step_up:      actual_rps of the alphabetically last phase (fallback: weighted_rps)
+#
+# When no phase_result.json files are found and MERGED_RPS is set, a
+# single-phase fallback is returned using MERGED_RPS for all metrics.
+# When no files exist and MERGED_RPS is unset, "null" is returned.
+#
+# Parameters:
+#   $1: results_dir - directory to search for phase_result.json files (maxdepth 2)
+#   $2: profile     - profile type (steady|ramp_up_down|burst|step_up), default: steady
+#
+# Output: JSON object printed to stdout
+# =============================================================================
+build_phase_metrics_json() {
+    local results_dir="$1"
+    local profile="${2:-steady}"
+
+    # Collect phase_result.json files sorted by path
+    local files=()
+    while IFS= read -r -d '' file_path; do
+        files+=("${file_path}")
+    done < <(find "${results_dir}" -maxdepth 2 -type f -name "phase_result.json" -print0 2>/dev/null | sort -z)
+
+    if [[ ${#files[@]} -eq 0 ]]; then
+        # Single-phase fallback: use MERGED_RPS from environment
+        if [[ -n "${MERGED_RPS:-}" ]] && [[ "${MERGED_RPS}" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+            jq -n --argjson rps "${MERGED_RPS}" '{
+                phase_count: 1,
+                peak_phase_rps: $rps,
+                min_phase_rps: $rps,
+                weighted_rps: $rps,
+                sustain_phase_rps: $rps
+            }'
+        else
+            echo "null"
+        fi
+        return
+    fi
+
+    # Aggregate metrics using jq with profile-aware sustain selection
+    jq -s --arg profile "${profile}" '
+        def weighted_rps:
+            if (map(.duration_seconds) | add // 0) == 0 then 0
+            else
+                ((map(.actual_rps * .duration_seconds) | add) /
+                 (map(.duration_seconds) | add))
+            end;
+
+        def select_sustain:
+            if $profile == "steady" then
+                (map(select(.phase == "main"))[0].actual_rps // weighted_rps)
+            elif $profile == "ramp_up_down" then
+                (map(select(.phase == "sustain"))[0].actual_rps // weighted_rps)
+            elif $profile == "burst" then
+                ([map(select(.phase | test("burst"))) | .[].actual_rps] | if length > 0 then max else weighted_rps end)
+            elif $profile == "step_up" then
+                ((sort_by(.phase) | last | .actual_rps) // weighted_rps)
+            else weighted_rps end;
+
+        {
+            phase_count: length,
+            peak_phase_rps: (map(.actual_rps) | max),
+            min_phase_rps: (map(.actual_rps) | min),
+            weighted_rps: weighted_rps,
+            sustain_phase_rps: select_sustain
+        }
+    ' "${files[@]}"
+}
+
 generate_meta_json() {
     local result_file="$1"
     local script_name="$2"
@@ -1740,6 +1817,11 @@ generate_meta_json() {
             }')
     fi
 
+    # Build phase-aware metrics (REQ-PATE-001)
+    # Aggregates phase_result.json files from the results directory with profile-aware sustain selection
+    local phase_metrics_json
+    phase_metrics_json=$(build_phase_metrics_json "${RESULTS_DIR}" "${RPS_PROFILE:-steady}")
+
     # ==========================================================================
     # Fetch applied_env from /debug/config endpoint (ENV-REQ-030)
     # ==========================================================================
@@ -1964,6 +2046,7 @@ generate_meta_json() {
         --argjson scenario_requested "${scenario_requested_json}" \
         --argjson applied_env "${applied_env_json}" \
         --argjson env_mismatch "${env_mismatch}" \
+        --argjson phase_metrics "${phase_metrics_json}" \
         '{
   "version": $version,
   "scenario": {
@@ -2005,7 +2088,8 @@ generate_meta_json() {
     "http_status": $http_status,
     "retries": $retries,
     "conflict_detail": $conflict_detail,
-    "merge_path_detail": $merge_path_detail
+    "merge_path_detail": $merge_path_detail,
+    "phase_metrics": $phase_metrics
   },
   "errors": {
     "socket_errors": {
