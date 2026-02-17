@@ -35,7 +35,7 @@ jobs:
   # ==========================================================================
   criterion-profiling-build:
     name: Criterion Build
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     if: ${{ github.event.inputs.profile_type == 'all' || github.event.inputs.profile_type == 'criterion' || github.event_name == 'pull_request' }}
 
     steps:
@@ -94,7 +94,7 @@ jobs:
   # ==========================================================================
   criterion-profiling:
     name: Criterion (${{ matrix.bench }})
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     if: ${{ github.event.inputs.profile_type == 'all' || github.event.inputs.profile_type == 'criterion' || github.event_name == 'pull_request' }}
     needs: [criterion-profiling-build]
     strategy:
@@ -107,11 +107,10 @@ jobs:
 
       - name: Install perf tools
         run: |
-          set -euo pipefail
           # Remove problematic Azure CLI repository that may return 403
           sudo rm -f /etc/apt/sources.list.d/azure-cli.list || true
-          sudo apt-get update
-          sudo apt-get install -y linux-tools-common linux-tools-generic "linux-tools-$(uname -r)" gawk
+          sudo apt-get update || true
+          sudo apt-get install -y linux-tools-common linux-tools-generic linux-tools-$(uname -r) gawk || true
           echo '1' | sudo tee /proc/sys/kernel/perf_event_paranoid
           echo '0' | sudo tee /proc/sys/kernel/kptr_restrict
 
@@ -231,7 +230,7 @@ jobs:
   # ==========================================================================
   iai-profiling:
     name: iai-callgrind Analysis
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     if: ${{ github.event.inputs.profile_type == 'all' || github.event.inputs.profile_type == 'iai' || github.event_name == 'pull_request' }}
 
     steps:
@@ -242,10 +241,9 @@ jobs:
 
       - name: Install Valgrind
         run: |
-          set -euo pipefail
           # Remove problematic Azure CLI repository that may return 403
           sudo rm -f /etc/apt/sources.list.d/azure-cli.list || true
-          sudo apt-get update
+          sudo apt-get update || true
           sudo apt-get install -y valgrind
 
       - name: Install iai-callgrind-runner
@@ -318,7 +316,7 @@ jobs:
   # ==========================================================================
   api-profiling-matrix:
     name: API Profiling Matrix
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     if: ${{ github.event.inputs.profile_type == 'all' || github.event.inputs.profile_type == 'api' || github.event_name == 'pull_request' }}
     outputs:
       scenarios: ${{ steps.matrix.outputs.scenarios }}
@@ -348,7 +346,7 @@ jobs:
   # ==========================================================================
   api-profiling-build:
     name: API Profiling Build
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     if: ${{ github.event.inputs.profile_type == 'all' || github.event.inputs.profile_type == 'api' || github.event_name == 'pull_request' }}
 
     steps:
@@ -382,7 +380,7 @@ jobs:
   # ==========================================================================
   api-profiling:
     name: API Server Profiling (${{ matrix.scenario }})
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     if: ${{ github.event.inputs.profile_type == 'all' || github.event.inputs.profile_type == 'api' || github.event_name == 'pull_request' }}
     needs: [api-profiling-matrix, api-profiling-build]
     strategy:
@@ -398,8 +396,8 @@ jobs:
           set -euo pipefail
           # Remove problematic Azure CLI repository that may return 403
           sudo rm -f /etc/apt/sources.list.d/azure-cli.list || true
-          sudo apt-get update
-          sudo apt-get install -y build-essential libssl-dev git yq linux-tools-common linux-tools-generic "linux-tools-$(uname -r)" gawk
+          sudo apt-get update || true
+          sudo apt-get install -y build-essential libssl-dev git yq linux-tools-common linux-tools-generic linux-tools-$(uname -r) gawk || true
           # Build wrk2 from source (REQUIRED for rate control)
           git clone --depth 1 https://github.com/giltene/wrk2.git /tmp/wrk2
           cd /tmp/wrk2 && make -j$(nproc) && sudo cp wrk /usr/local/bin/wrk2
@@ -608,7 +606,7 @@ jobs:
   # ==========================================================================
   summarize-profiling:
     name: Summarize Profiling Results
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     needs: [criterion-profiling, iai-profiling, api-profiling]
     if: ${{ always() && !cancelled() && github.event_name == 'pull_request' }}
     permissions:
