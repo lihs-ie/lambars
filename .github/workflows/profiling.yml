@@ -107,10 +107,11 @@ jobs:
 
       - name: Install perf tools
         run: |
+          set -euo pipefail
           # Remove problematic Azure CLI repository that may return 403
           sudo rm -f /etc/apt/sources.list.d/azure-cli.list || true
-          sudo apt-get update || true
-          sudo apt-get install -y linux-tools-common linux-tools-generic linux-tools-$(uname -r) gawk || true
+          sudo apt-get update
+          sudo apt-get install -y linux-tools-common linux-tools-generic "linux-tools-$(uname -r)" gawk
           echo '1' | sudo tee /proc/sys/kernel/perf_event_paranoid
           echo '0' | sudo tee /proc/sys/kernel/kptr_restrict
 
@@ -126,15 +127,19 @@ jobs:
           fi
           perf --version
 
-          # 2. Dry-run: actually record a trivial workload
-          sudo perf record -e cpu-clock -o /tmp/perf-probe.data -- sleep 0.1
-          sudo perf script -i /tmp/perf-probe.data > /tmp/perf-probe.script
-          if [[ ! -s /tmp/perf-probe.script ]]; then
+          # 2. Dry-run: record a trivial workload to confirm perf is functional.
+          # Use mktemp to avoid collisions when jobs run concurrently on the same runner.
+          probe_data="$(mktemp "${RUNNER_TEMP:-/tmp}/perf-probe.XXXXXX.data")"
+          probe_script="$(mktemp "${RUNNER_TEMP:-/tmp}/perf-probe.XXXXXX.script")"
+          cleanup_probe() { rm -f "${probe_data}" "${probe_script}"; }
+          trap cleanup_probe EXIT
+          sudo perf record -e cpu-clock -o "${probe_data}" -- sleep 0.1
+          sudo perf script -i "${probe_data}" > "${probe_script}"
+          if [[ ! -s "${probe_script}" ]]; then
             echo "::error::perf record dry-run produced no output"
             exit 1
           fi
-          echo "perf capability verified: $(wc -l < /tmp/perf-probe.script) lines captured"
-          rm -f /tmp/perf-probe.data /tmp/perf-probe.script
+          echo "perf capability verified: $(wc -l < "${probe_script}") lines captured"
 
       - name: Download profiling tools
         uses: actions/download-artifact@v4
@@ -236,9 +241,10 @@ jobs:
 
       - name: Install Valgrind
         run: |
+          set -euo pipefail
           # Remove problematic Azure CLI repository that may return 403
           sudo rm -f /etc/apt/sources.list.d/azure-cli.list || true
-          sudo apt-get update || true
+          sudo apt-get update
           sudo apt-get install -y valgrind
 
       - name: Install iai-callgrind-runner
@@ -388,10 +394,11 @@ jobs:
 
       - name: Install dependencies
         run: |
+          set -euo pipefail
           # Remove problematic Azure CLI repository that may return 403
           sudo rm -f /etc/apt/sources.list.d/azure-cli.list || true
-          sudo apt-get update || true
-          sudo apt-get install -y build-essential libssl-dev git yq linux-tools-common linux-tools-generic linux-tools-$(uname -r) gawk || true
+          sudo apt-get update
+          sudo apt-get install -y build-essential libssl-dev git yq linux-tools-common linux-tools-generic "linux-tools-$(uname -r)" gawk
           # Build wrk2 from source (REQUIRED for rate control)
           git clone --depth 1 https://github.com/giltene/wrk2.git /tmp/wrk2
           cd /tmp/wrk2 && make -j$(nproc) && sudo cp wrk /usr/local/bin/wrk2
@@ -415,15 +422,19 @@ jobs:
           fi
           perf --version
 
-          # 2. Dry-run: actually record a trivial workload
-          sudo perf record -e cpu-clock -o /tmp/perf-probe.data -- sleep 0.1
-          sudo perf script -i /tmp/perf-probe.data > /tmp/perf-probe.script
-          if [[ ! -s /tmp/perf-probe.script ]]; then
+          # 2. Dry-run: record a trivial workload to confirm perf is functional.
+          # Use mktemp to avoid collisions when jobs run concurrently on the same runner.
+          probe_data="$(mktemp "${RUNNER_TEMP:-/tmp}/perf-probe.XXXXXX.data")"
+          probe_script="$(mktemp "${RUNNER_TEMP:-/tmp}/perf-probe.XXXXXX.script")"
+          cleanup_probe() { rm -f "${probe_data}" "${probe_script}"; }
+          trap cleanup_probe EXIT
+          sudo perf record -e cpu-clock -o "${probe_data}" -- sleep 0.1
+          sudo perf script -i "${probe_data}" > "${probe_script}"
+          if [[ ! -s "${probe_script}" ]]; then
             echo "::error::perf record dry-run produced no output"
             exit 1
           fi
-          echo "perf capability verified: $(wc -l < /tmp/perf-probe.script) lines captured"
-          rm -f /tmp/perf-probe.data /tmp/perf-probe.script
+          echo "perf capability verified: $(wc -l < "${probe_script}") lines captured"
 
       - name: Download profiling tools
         uses: actions/download-artifact@v4
@@ -597,7 +608,7 @@ jobs:
     name: Summarize Profiling Results
     runs-on: ubuntu-latest
     needs: [criterion-profiling, iai-profiling, api-profiling]
-    if: "!cancelled() && github.event_name == 'pull_request'"
+    if: ${{ always() && !cancelled() && github.event_name == 'pull_request' }}
     permissions:
       actions: write
       pull-requests: write
@@ -749,18 +760,27 @@ jobs:
           rm -rf "${out}"
           mkdir -p "${out}"
 
-          if [[ -f "${root}/api-profiling-summary.json" ]]; then
-            cp "${root}/api-profiling-summary.json" "${out}/"
+          # Require the summary JSON to exist and be non-empty (REQ-PPDI-003).
+          if [[ ! -s "${root}/api-profiling-summary.json" ]]; then
+            echo "::error::api-profiling-summary.json is missing or empty"
+            exit 1
           fi
+          cp "${root}/api-profiling-summary.json" "${out}/"
 
+          found=0
           for dir in "${root}"/${prefix}*; do
             if [[ -d "${dir}" ]]; then
+              found=1
               scenario="${dir##*/}"
               scenario="${scenario#${prefix}}"
               mkdir -p "${out}/${scenario}"
               cp -R "${dir}/." "${out}/${scenario}/"
             fi
           done
+          if [[ "${found}" -eq 0 ]]; then
+            echo "::error::No API profiling scenario artifacts found under ${root}"
+            exit 1
+          fi
           shopt -u nullglob
 
       - name: Post profiling summary to PR
@@ -888,7 +908,7 @@ jobs:
           name: criterion-profiling-all-${{ github.sha }}
           path: criterion-profiling-all/
           retention-days: 30
-          if-no-files-found: warn
+          if-no-files-found: error
 
       - name: Upload API profiling aggregate
         uses: actions/upload-artifact@v4
@@ -897,7 +917,7 @@ jobs:
           name: api-profiling-all-${{ github.sha }}
           path: api-profiling-all/
           retention-days: 30
-          if-no-files-found: warn
+          if-no-files-found: error
 
       - name: Delete per-scenario profiling artifacts
         if: always()

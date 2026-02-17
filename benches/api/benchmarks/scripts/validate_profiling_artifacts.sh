@@ -17,14 +17,28 @@ ALL_DIR=""
 REPORT_FILE=""
 SINGLE_DIR=""
 
+# Validate that an option requiring a value has one provided.
+# Pass the remaining positional parameters so the function can inspect $2.
+require_value() {
+    local option="$1"
+    # $# includes $1 (the option name), so we need at least 2 args ($option + value).
+    # Also reject a missing value (empty string) or a value that looks like another flag.
+    if [[ $# -lt 2 || -z "${2:-}" || "${2:-}" == --* ]]; then
+        echo -e "${RED}ERROR: ${option} requires a value${NC}" >&2
+        exit 1
+    fi
+}
+
 while [[ $# -gt 0 ]]; do
     case $1 in
         --all)
+            require_value "$1" "${2:-}"
             ALL_MODE=true
             ALL_DIR="$2"
             shift 2
             ;;
         --report)
+            require_value "$1" "${2:-}"
             REPORT_FILE="$2"
             shift 2
             ;;
@@ -42,11 +56,15 @@ if [[ "${ALL_MODE}" == "true" ]]; then
         echo -e "${RED}ERROR: --all requires a valid directory${NC}" >&2
         exit 1
     fi
-    while IFS= read -r dir; do
-        ARTIFACT_DIRS+=("${dir}")
-    done < <(find "${ALL_DIR}" -type f \( -name 'stacks.folded' -o -name 'flamegraph.svg' \) -print0 2>/dev/null \
-        | xargs -0 -I{} dirname {} \
-        | sort -u)
+    # Use -print0 / read -d '' throughout to handle paths with spaces or newlines.
+    declare -a dirs_tmp=()
+    while IFS= read -r -d '' file; do
+        dirs_tmp+=("$(dirname "${file}")")
+    done < <(find "${ALL_DIR}" -type f \( -name 'stacks.folded' -o -name 'flamegraph.svg' \) -print0 2>/dev/null)
+
+    if [[ ${#dirs_tmp[@]} -gt 0 ]]; then
+        mapfile -t ARTIFACT_DIRS < <(printf '%s\n' "${dirs_tmp[@]}" | sort -u)
+    fi
 
     if [[ ${#ARTIFACT_DIRS[@]} -eq 0 ]]; then
         echo -e "${RED}ERROR: No profiling artifacts found in ${ALL_DIR}${NC}" >&2
@@ -80,6 +98,11 @@ check_stacks_folded() {
 
     [[ -f "${stacks_file}" ]] || return 0
 
+    if ! [[ -s "${stacks_file}" ]]; then
+        check_violations+=("stacks.folded: file is empty")
+        return 0
+    fi
+
     if grep -qF "perf not found" "${stacks_file}" 2>/dev/null; then
         check_violations+=("stacks.folded: contains 'perf not found' error")
     fi
@@ -98,6 +121,11 @@ check_flamegraph_svg() {
 
     [[ -f "${svg_file}" ]] || return 0
 
+    if ! [[ -s "${svg_file}" ]]; then
+        check_violations+=("flamegraph.svg: file is empty")
+        return 0
+    fi
+
     if grep -qF "No valid input provided to flamegraph" "${svg_file}" 2>/dev/null; then
         check_violations+=("flamegraph.svg: contains 'No valid input provided to flamegraph'")
     fi
@@ -114,6 +142,14 @@ validate_artifact_directory() {
     local dir_name
     dir_name="$(basename "${directory}")"
     local violations_for_dir=()
+
+    local stacks_file="${directory}/stacks.folded"
+    local svg_file="${directory}/flamegraph.svg"
+
+    # Fail immediately if neither artifact is present — the directory is incomplete.
+    if [[ ! -f "${stacks_file}" && ! -f "${svg_file}" ]]; then
+        violations_for_dir+=("missing both stacks.folded and flamegraph.svg")
+    fi
 
     check_stacks_folded "${directory}" violations_for_dir
     check_flamegraph_svg "${directory}" violations_for_dir
@@ -152,7 +188,7 @@ add_report "Fail: ${FAIL_COUNT}"
 
 if [[ -n "${REPORT_FILE}" ]]; then
     mkdir -p "$(dirname "${REPORT_FILE}")"
-    echo -e "${REPORT}" > "${REPORT_FILE}"
+    printf '%s\n' "${REPORT}" > "${REPORT_FILE}"
     echo "Report written to ${REPORT_FILE}" >&2
 fi
 
