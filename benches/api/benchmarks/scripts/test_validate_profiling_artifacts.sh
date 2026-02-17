@@ -164,9 +164,8 @@ EOF
     create_valid_stacks_folded "${tmpdir}"
     create_valid_flamegraph_svg "${tmpdir}"
 
-    local output
-    output=$("${TARGET_SCRIPT}" "${tmpdir}" 2>&1 || true)
-    local exit_code=$?
+    local output exit_code
+    output=$("${TARGET_SCRIPT}" "${tmpdir}" 2>&1) && exit_code=0 || exit_code=$?
 
     assert_exit_code 0 "${exit_code}" "valid artifacts: exit code 0"
     assert_contains "PASS" "${output}" "valid artifacts: output contains PASS"
@@ -191,8 +190,8 @@ EOF
     create_valid_flamegraph_svg "${tmpdir}"
 
     local output
-    output=$("${TARGET_SCRIPT}" "${tmpdir}" 2>&1 || true)
-    local exit_code=$?
+    local exit_code
+    output=$("${TARGET_SCRIPT}" "${tmpdir}" 2>&1) && exit_code=0 || exit_code=$?
 
     assert_exit_code 1 "${exit_code}" "perf not found: exit code 1"
     assert_contains "FAIL" "${output}" "perf not found: output contains FAIL"
@@ -217,8 +216,8 @@ EOF
     create_valid_flamegraph_svg "${tmpdir}"
 
     local output
-    output=$("${TARGET_SCRIPT}" "${tmpdir}" 2>&1 || true)
-    local exit_code=$?
+    local exit_code
+    output=$("${TARGET_SCRIPT}" "${tmpdir}" 2>&1) && exit_code=0 || exit_code=$?
 
     assert_exit_code 1 "${exit_code}" "assertion failed: exit code 1"
     assert_contains "FAIL" "${output}" "assertion failed: output contains FAIL"
@@ -243,8 +242,8 @@ EOF
     create_valid_flamegraph_svg "${tmpdir}"
 
     local output
-    output=$("${TARGET_SCRIPT}" "${tmpdir}" 2>&1 || true)
-    local exit_code=$?
+    local exit_code
+    output=$("${TARGET_SCRIPT}" "${tmpdir}" 2>&1) && exit_code=0 || exit_code=$?
 
     assert_exit_code 1 "${exit_code}" "no valid counts: exit code 1"
     assert_contains "FAIL" "${output}" "no valid counts: output contains FAIL"
@@ -269,8 +268,8 @@ EOF
     create_flamegraph_svg_with_no_valid_input "${tmpdir}"
 
     local output
-    output=$("${TARGET_SCRIPT}" "${tmpdir}" 2>&1 || true)
-    local exit_code=$?
+    local exit_code
+    output=$("${TARGET_SCRIPT}" "${tmpdir}" 2>&1) && exit_code=0 || exit_code=$?
 
     assert_exit_code 1 "${exit_code}" "no valid input: exit code 1"
     assert_contains "FAIL" "${output}" "no valid input: output contains FAIL"
@@ -295,8 +294,8 @@ EOF
     create_flamegraph_svg_with_no_stack_counts "${tmpdir}"
 
     local output
-    output=$("${TARGET_SCRIPT}" "${tmpdir}" 2>&1 || true)
-    local exit_code=$?
+    local exit_code
+    output=$("${TARGET_SCRIPT}" "${tmpdir}" 2>&1) && exit_code=0 || exit_code=$?
 
     assert_exit_code 1 "${exit_code}" "no stack counts found: exit code 1"
     assert_contains "FAIL" "${output}" "no stack counts found: output contains FAIL"
@@ -321,8 +320,8 @@ EOF
     create_flamegraph_svg_with_error_prefix "${tmpdir}"
 
     local output
-    output=$("${TARGET_SCRIPT}" "${tmpdir}" 2>&1 || true)
-    local exit_code=$?
+    local exit_code
+    output=$("${TARGET_SCRIPT}" "${tmpdir}" 2>&1) && exit_code=0 || exit_code=$?
 
     assert_exit_code 1 "${exit_code}" "ERROR: prefix: exit code 1"
     assert_contains "FAIL" "${output}" "ERROR: prefix: output contains FAIL"
@@ -354,9 +353,8 @@ EOF
     create_stacks_folded_with_perf_not_found "${invalid_dir}"
     create_valid_flamegraph_svg "${invalid_dir}"
 
-    local output
-    output=$("${TARGET_SCRIPT}" --all "${rootdir}" 2>&1 || true)
-    local exit_code=$?
+    local output exit_code
+    output=$("${TARGET_SCRIPT}" --all "${rootdir}" 2>&1) && exit_code=0 || exit_code=$?
 
     assert_exit_code 1 "${exit_code}" "--all mode with invalid: exit code 1"
     assert_contains "FAIL" "${output}" "--all mode: output contains FAIL"
@@ -389,9 +387,8 @@ EOF
     create_valid_stacks_folded "${dir2}"
     create_valid_flamegraph_svg "${dir2}"
 
-    local output
-    output=$("${TARGET_SCRIPT}" --all "${rootdir}" 2>&1)
-    local exit_code=$?
+    local output exit_code
+    output=$("${TARGET_SCRIPT}" --all "${rootdir}" 2>&1) && exit_code=0 || exit_code=$?
 
     assert_exit_code 0 "${exit_code}" "--all mode all pass: exit code 0"
     assert_contains "PASS" "${output}" "--all mode all pass: output contains PASS"
