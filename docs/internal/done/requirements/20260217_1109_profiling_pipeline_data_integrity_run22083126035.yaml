@@ -1,0 +1,227 @@
+# Profiling Pipeline Data Integrity (run 22083126035) 要件定義
+#
+# 概要:
+#   2026-02-17 の main 実行 (run_id: 22083126035) では API/Criterion の Flamegraph 生成が全件失敗し、
+#   CPU ボトルネック分析に必要なプロファイルが欠落した。
+#
+# 設計方針:
+#   1. perf ツールチェーンをジョブ開始時に厳密検証し、欠落時は即失敗させる。
+#   2. stacks/flamegraph の妥当性を機械検証し、エラーSVGを成果物として扱わない。
+#   3. 集約ジョブのスキップを禁止し、品質ゲートを通過した成果物のみ公開する。
+#
+# 参照:
+#   - profiling-results/github-22083126035
+#   - .github/workflows/profiling.yml
+
+version: "1.0.0"
+name: "profiling_pipeline_data_integrity_run22083126035"
+description: |
+  実行 run 22083126035 の取得成果物を分析したところ、
+  stacks.folded 37/37 で "perf not found"、
+  flamegraph.svg 37/37 で "No valid input provided to flamegraph"、
+  criterion benchmark.log 3/3 で perf 未検出が確認された。
+  本状態では CPU ホットパス分析が成立せず、性能改善の根拠が欠落する。
+
+background:
+  problem: |
+    API/criterion プロファイルが全件エラー生成となり、
+    「どの関数が律速か」を示す証拠が存在しない。
+  motivation: |
+    本番運用判定に必要な再現可能な性能根拠を確保するため、
+    プロファイル生成の完全性を CI で担保する必要がある。
+  prior_art:
+    - name: "Fail-fast Profiling Gate"
+      description: "プロファイラ未導入を検知した時点でジョブを失敗させる。"
+
+requirements:
+  - id: REQ-PPDI-001
+    name: "perf 実行可能性を事前検証する"
+    description: |
+      profiling ジョブ開始時に perf バイナリと kernel 対応パッケージを検証し、
+      未導入または実行不可の場合はプロファイリングステップを開始しない。
+    methods:
+      - name: "verify_perf_runtime"
+        signature: "fn verify_perf_runtime() -> Result<(), PerfRuntimeError>"
+        description: "perf --version と perf record のドライラン結果を検証する。"
+    implementations:
+      - type: "GitHub Actions workflow"
+        description: ".github/workflows/profiling.yml の API/Criterion ジョブに検証ステップを追加する。"
+
+  - id: REQ-PPDI-002
+    name: "無効 Flamegraph を成果物から排除する"
+    description: |
+      stacks.folded と flamegraph.svg に既知エラーパターンが含まれる場合は失敗とし、
+      エラー成果物を公開しない。
+    methods:
+      - name: "validate_flamegraph_artifact"
+        signature: "fn validate_flamegraph_artifact(stacks: &str, flamegraph_svg: &str) -> ValidationResult"
+        description: "No stack counts found / perf not found などの失敗文字列を検出する。"
+    implementations:
+      - type: "artifact validation script"
+        description: "summarize-profiling 前に妥当性チェックを実行し、失敗時は job を fail させる。"
+
+  - id: REQ-PPDI-003
+    name: "集約成果物を必須化する"
+    description: |
+      summarize-profiling ジョブを必須化し、
+      api/criterion の aggregate artifact と summary JSON が生成されない場合は workflow を失敗扱いにする。
+    implementations:
+      - type: "workflow dependency / branch protection"
+        description: "required checks に summarize-profiling を追加し、skip を許容しない。"
+
+evidence:
+  metrics:
+    - id: EV-PPDI-M1
+      description: "stacks.folded の perf エラー率は 37/37 (100%)。"
+      source: "profiling-results/github-22083126035"
+    - id: EV-PPDI-M2
+      description: "flamegraph.svg の無効生成率は 37/37 (100%)。"
+      source: "profiling-results/github-22083126035"
+    - id: EV-PPDI-M3
+      description: "criterion benchmark.log の perf エラー率は 3/3 (100%)。"
+      source: "profiling-results/github-22083126035"
+  logs:
+    - id: EV-PPDI-L1
+      description: "stacks.folded に `perf not found for kernel 6.14.0-1017` が出力される。"
+      source: "profiling-results/github-22083126035/*/stacks.folded"
+    - id: EV-PPDI-L2
+      description: "flamegraph.svg に `ERROR: No valid input provided to flamegraph` が含まれる。"
+      source: "profiling-results/github-22083126035/*/flamegraph.svg"
+    - id: EV-PPDI-L3
+      description: "criterion の benchmark.log でも `perf not found` が出力される。"
+      source: "profiling-results/github-22083126035/criterion-profiling-*/benchmark.log"
+  workflow:
+    - id: EV-PPDI-W1
+      description: "run 22083126035 は workflow 全体として success だが summarize-profiling は skipped。"
+      source: "https://github.com/lihs-ie/lambars/actions/runs/22083126035"
+
+quality_findings:
+  - id: QF-PPDI-001
+    severity: "critical"
+    issue: "CPU ホットパス分析不能"
+    impact: |
+      ボトルネック特定が不能なため、性能改善の優先順位付けが推測ベースになる。
+      本番運用可否の根拠として不十分。
+  - id: QF-PPDI-002
+    severity: "high"
+    issue: "workflow 成功と成果物品質が乖離"
+    impact: |
+      CI が green でもプロファイル自体は無効という状態が継続し、品質ゲートが機能しない。
+
+barriers:
+  - id: BAR-PPDI-001
+    name: "runner kernel 依存"
+    details: |
+      `linux-tools-$(uname -r)` の導入が runner 環境で解決できず、perf が実行不能になる。
+  - id: BAR-PPDI-002
+    name: "エラー成果物の見分け不足"
+    details: |
+      現行ワークフローは artifacts の存在のみを確認し、内容妥当性を判定していない。
+  - id: BAR-PPDI-003
+    name: "集約ジョブのスキップ許容"
+    details: |
+      summarize-profiling が必須チェック化されておらず、品質未検証のまま成功扱いとなる。
+
+algorithms:
+  - id: ALG-PPDI-001
+    name: "Perf Capability Probe"
+    problem: "perf が存在しても実行不能なケースを事前に検出する。"
+    input: "runner 情報, perf 実行結果"
+    output: "Pass/Fail と失敗理由"
+    steps:
+      - "`perf --version` でバイナリ存在確認"
+      - "`perf record -e cpu-clock -F 99 -- bash -c 'i=0; while [ \"$i\" -lt 2000000 ]; do i=$((i+1)); done'` のドライラン（CPU-bound busy loop でサンプル取得を保証）"
+      - "exit code と stderr パターンで失敗分類（not found / permission / kernel mismatch）"
+      - "Fail 時は以降ジョブを即終了"
+    complexity:
+      time: "O(1)"
+      space: "O(1)"
+    guarantees:
+      - "プロファイル無効化状態で本計測ステップへ進まない"
+
+  - id: ALG-PPDI-002
+    name: "Artifact Integrity Validation"
+    problem: "エラー文字列入りの擬似成果物を除外する。"
+    input: "stacks.folded, flamegraph.svg, benchmark.log"
+    output: "有効/無効判定"
+    steps:
+      - "stacks に `perf not found` / `assertion failed` がないことを確認"
+      - "flamegraph に `No valid input` / `No stack counts found` がないことを確認"
+      - "最低1件以上の有効 stack count 行を必須化"
+      - "無効なら artifact publish を中断して fail"
+    complexity:
+      time: "O(n) (n = artifact text size)"
+      space: "O(1)"
+    guarantees:
+      - "エラー成果物を品質証拠として採用しない"
+
+implementation_tasks:
+  - id: IMPL-PPDI-001
+    priority: 1
+    requirement_ids:
+      - REQ-PPDI-001
+    blockers:
+      - BAR-PPDI-001
+    actions:
+      - ".github/workflows/profiling.yml に perf capability probe ステップを追加する。"
+      - "probe fail 時は後続 `perf record` を実行せずジョブ失敗とする。"
+    completion_criteria:
+      - "perf 非対応 runner で workflow が fail-fast する"
+      - "perf 対応 runner で従来どおり計測を継続できる"
+    verification_artifacts:
+      - "workflow logs (probe step)"
+
+  - id: IMPL-PPDI-002
+    priority: 2
+    requirement_ids:
+      - REQ-PPDI-002
+    blockers:
+      - BAR-PPDI-002
+    actions:
+      - "artifact validation スクリプトを追加する。"
+      - "API/Criterion ジョブの upload 前に妥当性チェックを必須化する。"
+    completion_criteria:
+      - "No valid input 系エラー成果物が upload されない"
+      - "有効成果物のみ upload される"
+    verification_artifacts:
+      - "validation log"
+      - "uploaded artifact list"
+
+  - id: IMPL-PPDI-003
+    priority: 3
+    requirement_ids:
+      - REQ-PPDI-003
+    blockers:
+      - BAR-PPDI-003
+    actions:
+      - "summarize-profiling を required check に設定する。"
+      - "aggregate artifact 未生成時は fail とするガードを追加する。"
+    completion_criteria:
+      - "summarize-profiling が skipped の run は merge 不可となる"
+      - "summary JSON と aggregate artifact の両方が存在する run のみ pass"
+    verification_artifacts:
+      - "branch protection settings"
+      - "run summary output"
+    notes:
+      - "Branch Protection の required checks 設定は GitHub UI/API で別途実施する。"
+      - "Workflow 内では summarize-profiling の if 条件修正、aggregate artifact の必須化、upload-artifact の if-no-files-found: error で担保済み。"
+
+non_functional_requirements:
+  performance:
+    - "API プロファイルで有効 stacks.folded 生成率 100%"
+    - "API プロファイルで有効 flamegraph.svg 生成率 100%"
+    - "Criterion プロファイルで perf 未検出率 0%"
+  compatibility:
+    - "既存のアーティファクト命名規約（api-profiling-*, criterion-profiling-*）を維持する"
+  testing:
+    - "故意に perf を欠落させた失敗系テスト"
+    - "正常系で summarize-profiling が aggregate artifact を出力する E2E テスト"
+
+future_extensions:
+  - id: "EXT-PPDI-001"
+    name: "self-hosted runner への切替"
+    description: |
+      perf 依存性を安定化するため、プロファイリング専用 self-hosted runner を導入する。
+    rationale: |
+      現時点では workflow 側の fail-fast と検証強化を優先し、
+      インフラ変更は次段階で実施する。

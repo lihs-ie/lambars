@@ -114,6 +114,80 @@ jobs:
           echo '1' | sudo tee /proc/sys/kernel/perf_event_paranoid
           echo '0' | sudo tee /proc/sys/kernel/kptr_restrict
 
+      - name: Verify perf capability
+        run: |
+          set -euo pipefail
+          echo "=== Verifying perf capability ==="
+
+          # 1. Binary existence check
+          if ! command -v perf &>/dev/null; then
+            echo "::error::perf binary not found. linux-tools-$(uname -r) may not be available."
+            exit 1
+          fi
+
+          # Check whether perf wrapper resolves to a working binary.
+          # Ubuntu Bug #2117159: linux-hwe-6.14 package may ship the directory
+          # /usr/lib/linux-tools/<kernel>/ without the actual perf binary inside,
+          # causing the /usr/bin/perf wrapper script to fail at runtime.
+          set +e
+          perf --version 2>/dev/null
+          perf_exit_code=$?
+          set -e
+
+          if [[ "${perf_exit_code}" -ne 0 ]]; then
+            echo "::warning::perf --version failed (exit ${perf_exit_code}). Attempting workaround for Ubuntu Bug #2117159."
+
+            # Locate the newest available perf binary under /usr/lib/linux-tools-*/
+            # sort -V performs version-aware (natural) sort; tail -1 picks the highest.
+            workaround_binary="$(
+              ls /usr/lib/linux-tools-*/perf 2>/dev/null \
+                | sort -V \
+                | tail -1
+            )"
+
+            if [[ -z "${workaround_binary}" ]]; then
+              echo "::error::No fallback perf binary found under /usr/lib/linux-tools-*/"
+              exit 1
+            fi
+
+            echo "::warning::Using fallback perf binary: ${workaround_binary}"
+
+            # Create a symlink so that the /usr/bin/perf wrapper can resolve the
+            # binary for the currently running kernel version.
+            kernel_tools_dir="/usr/lib/linux-tools/$(uname -r)"
+            sudo mkdir -p "${kernel_tools_dir}"
+            sudo ln -sf "${workaround_binary}" "${kernel_tools_dir}/perf"
+            echo "Symlink created: ${kernel_tools_dir}/perf -> ${workaround_binary}"
+
+            # Verify that perf is now functional after the workaround.
+            if ! perf --version; then
+              echo "::error::perf --version still failed after workaround. Cannot proceed."
+              exit 1
+            fi
+
+            echo "::warning::Workaround applied successfully. perf is now functional."
+          else
+            echo "perf is functional (no workaround required)."
+          fi
+
+          # 2. Dry-run: record a CPU-bound workload to confirm perf is functional.
+          # Use a busy loop instead of sleep to guarantee CPU samples are captured.
+          probe_data="$(mktemp "${RUNNER_TEMP:-/tmp}/perf-probe.XXXXXX.data")"
+          probe_script="$(mktemp "${RUNNER_TEMP:-/tmp}/perf-probe.XXXXXX.script")"
+          cleanup_probe() { rm -f "${probe_data}" "${probe_script}"; }
+          trap cleanup_probe EXIT
+          # Remove mktemp placeholder so perf record creates the file as root,
+          # avoiding "not owned by current user or root" error in perf script.
+          rm -f "${probe_data}"
+          sudo perf record -e cpu-clock -F 99 -o "${probe_data}" -- \
+            bash -c 'i=0; while [ "$i" -lt 2000000 ]; do i=$((i+1)); done'
+          sudo perf script -i "${probe_data}" > "${probe_script}"
+          if [[ ! -s "${probe_script}" ]]; then
+            echo "::error::perf record dry-run produced no output"
+            exit 1
+          fi
+          echo "perf capability verified: $(wc -l < "${probe_script}") lines captured"
+
       - name: Download profiling tools
         uses: actions/download-artifact@v4
         with:
@@ -146,7 +220,7 @@ jobs:
           # Run with perf to collect profile data
           # Use cpu-clock software event for VM compatibility
           sudo perf record -e cpu-clock -F 997 -g -o "${RESULTS_DIR}/perf.data" \
-            "${BENCH_BIN}" --bench --profile-time 5 2>&1 | tee "${RESULTS_DIR}/benchmark.log" || true
+            "${BENCH_BIN}" --bench --profile-time 5 2>&1 | tee "${RESULTS_DIR}/benchmark.log"
 
           if [[ -f "${RESULTS_DIR}/perf.data" ]]; then
             echo "=== Processing perf data ==="
@@ -154,14 +228,14 @@ jobs:
 
             # Generate folded stacks
             sudo perf script -i "${RESULTS_DIR}/perf.data" 2>&1 | \
-              inferno-collapse-perf > "${RESULTS_DIR}/stacks.folded" 2>&1 || true
+              inferno-collapse-perf > "${RESULTS_DIR}/stacks.folded" 2>&1
 
             if [[ -s "${RESULTS_DIR}/stacks.folded" ]]; then
               echo "folded lines: $(wc -l < "${RESULTS_DIR}/stacks.folded")"
 
               # Generate flamegraph
-              inferno-flamegraph < "${RESULTS_DIR}/stacks.folded" > "${RESULTS_DIR}/flamegraph.svg" 2>&1 || true
-              inferno-flamegraph --reverse < "${RESULTS_DIR}/stacks.folded" > "${RESULTS_DIR}/flamegraph-reverse.svg" 2>&1 || true
+              inferno-flamegraph < "${RESULTS_DIR}/stacks.folded" > "${RESULTS_DIR}/flamegraph.svg" 2>&1
+              inferno-flamegraph --reverse < "${RESULTS_DIR}/stacks.folded" > "${RESULTS_DIR}/flamegraph-reverse.svg" 2>&1
 
               # Generate top functions
               gawk -F';' '{
@@ -182,6 +256,13 @@ jobs:
             # Cleanup large files
             sudo rm -f "${RESULTS_DIR}/perf.data" 2>/dev/null || true
           fi
+
+      - name: Validate profiling artifacts
+        run: |
+          set -euo pipefail
+          chmod +x benches/api/benchmarks/scripts/validate_profiling_artifacts.sh
+          benches/api/benchmarks/scripts/validate_profiling_artifacts.sh \
+            "profiling-results/criterion/${{ matrix.bench }}"
 
       - name: Upload profiling artifacts
         uses: actions/upload-artifact@v4
@@ -359,6 +440,7 @@ jobs:
 
       - name: Install dependencies
         run: |
+          set -euo pipefail
           # Remove problematic Azure CLI repository that may return 403
           sudo rm -f /etc/apt/sources.list.d/azure-cli.list || true
           sudo apt-get update || true
@@ -368,11 +450,89 @@ jobs:
           cd /tmp/wrk2 && make -j$(nproc) && sudo cp wrk /usr/local/bin/wrk2
           # Create wrk symlink for backward compatibility
           sudo ln -sf /usr/local/bin/wrk2 /usr/local/bin/wrk
-          # Verify wrk2 installation
-          command -v wrk2 && wrk2 -v 2>&1 | head -1 || (echo "ERROR: wrk2 installation failed" && exit 1)
+          # Verify wrk2 installation (wrk2 -v exits non-zero even on success, so
+          # only check that the binary exists and is executable).
+          if ! command -v wrk2 &>/dev/null; then
+            echo "ERROR: wrk2 installation failed" && exit 1
+          fi
+          wrk2 -v 2>&1 | head -1 || true
           # Allow perf for non-root users
           echo '1' | sudo tee /proc/sys/kernel/perf_event_paranoid
           echo '0' | sudo tee /proc/sys/kernel/kptr_restrict
+
+      - name: Verify perf capability
+        run: |
+          set -euo pipefail
+          echo "=== Verifying perf capability ==="
+
+          # 1. Binary existence check
+          if ! command -v perf &>/dev/null; then
+            echo "::error::perf binary not found. linux-tools-$(uname -r) may not be available."
+            exit 1
+          fi
+
+          # Check whether perf wrapper resolves to a working binary.
+          # Ubuntu Bug #2117159: linux-hwe-6.14 package may ship the directory
+          # /usr/lib/linux-tools/<kernel>/ without the actual perf binary inside,
+          # causing the /usr/bin/perf wrapper script to fail at runtime.
+          set +e
+          perf --version 2>/dev/null
+          perf_exit_code=$?
+          set -e
+
+          if [[ "${perf_exit_code}" -ne 0 ]]; then
+            echo "::warning::perf --version failed (exit ${perf_exit_code}). Attempting workaround for Ubuntu Bug #2117159."
+
+            # Locate the newest available perf binary under /usr/lib/linux-tools-*/
+            # sort -V performs version-aware (natural) sort; tail -1 picks the highest.
+            workaround_binary="$(
+              ls /usr/lib/linux-tools-*/perf 2>/dev/null \
+                | sort -V \
+                | tail -1
+            )"
+
+            if [[ -z "${workaround_binary}" ]]; then
+              echo "::error::No fallback perf binary found under /usr/lib/linux-tools-*/"
+              exit 1
+            fi
+
+            echo "::warning::Using fallback perf binary: ${workaround_binary}"
+
+            # Create a symlink so that the /usr/bin/perf wrapper can resolve the
+            # binary for the currently running kernel version.
+            kernel_tools_dir="/usr/lib/linux-tools/$(uname -r)"
+            sudo mkdir -p "${kernel_tools_dir}"
+            sudo ln -sf "${workaround_binary}" "${kernel_tools_dir}/perf"
+            echo "Symlink created: ${kernel_tools_dir}/perf -> ${workaround_binary}"
+
+            # Verify that perf is now functional after the workaround.
+            if ! perf --version; then
+              echo "::error::perf --version still failed after workaround. Cannot proceed."
+              exit 1
+            fi
+
+            echo "::warning::Workaround applied successfully. perf is now functional."
+          else
+            echo "perf is functional (no workaround required)."
+          fi
+
+          # 2. Dry-run: record a CPU-bound workload to confirm perf is functional.
+          # Use a busy loop instead of sleep to guarantee CPU samples are captured.
+          probe_data="$(mktemp "${RUNNER_TEMP:-/tmp}/perf-probe.XXXXXX.data")"
+          probe_script="$(mktemp "${RUNNER_TEMP:-/tmp}/perf-probe.XXXXXX.script")"
+          cleanup_probe() { rm -f "${probe_data}" "${probe_script}"; }
+          trap cleanup_probe EXIT
+          # Remove mktemp placeholder so perf record creates the file as root,
+          # avoiding "not owned by current user or root" error in perf script.
+          rm -f "${probe_data}"
+          sudo perf record -e cpu-clock -F 99 -o "${probe_data}" -- \
+            bash -c 'i=0; while [ "$i" -lt 2000000 ]; do i=$((i+1)); done'
+          sudo perf script -i "${probe_data}" > "${probe_script}"
+          if [[ ! -s "${probe_script}" ]]; then
+            echo "::error::perf record dry-run produced no output"
+            exit 1
+          fi
+          echo "perf capability verified: $(wc -l < "${probe_script}") lines captured"
 
       - name: Download profiling tools
         uses: actions/download-artifact@v4
@@ -505,15 +665,15 @@ jobs:
 
           # Generate flamegraph
           echo "=== Running perf script ==="
-          sudo perf script -i "${RESULTS_DIR}/perf.data" > "${RESULTS_DIR}/perf.script" 2>&1 || echo "perf script returned non-zero"
+          sudo perf script -i "${RESULTS_DIR}/perf.data" > "${RESULTS_DIR}/perf.script" 2>&1
 
           if [ -s "${RESULTS_DIR}/perf.script" ]; then
             echo "=== Generating folded stacks ==="
-            inferno-collapse-perf < "${RESULTS_DIR}/perf.script" > "${RESULTS_DIR}/stacks.folded" 2>&1 || echo "inferno-collapse-perf returned non-zero"
+            inferno-collapse-perf < "${RESULTS_DIR}/perf.script" > "${RESULTS_DIR}/stacks.folded" 2>&1
 
             if [ -s "${RESULTS_DIR}/stacks.folded" ]; then
               echo "=== Generating flamegraph ==="
-              inferno-flamegraph < "${RESULTS_DIR}/stacks.folded" > "${RESULTS_DIR}/flamegraph.svg" 2>&1 || echo "inferno-flamegraph returned non-zero"
+              inferno-flamegraph < "${RESULTS_DIR}/stacks.folded" > "${RESULTS_DIR}/flamegraph.svg" 2>&1
             else
               echo "WARNING: stacks.folded is empty"
             fi
@@ -523,6 +683,13 @@ jobs:
 
           # Clean up perf artifacts to avoid permission issues during upload
           sudo rm -f "${RESULTS_DIR}/perf.data" "${RESULTS_DIR}/perf.script" 2>/dev/null || true
+
+      - name: Validate profiling artifacts
+        run: |
+          set -euo pipefail
+          chmod +x benches/api/benchmarks/scripts/validate_profiling_artifacts.sh
+          benches/api/benchmarks/scripts/validate_profiling_artifacts.sh \
+            "profiling-results/api/${{ steps.scenario.outputs.name }}"
 
       - name: Upload API profiling artifacts
         uses: actions/upload-artifact@v4
@@ -539,7 +706,7 @@ jobs:
     name: Summarize Profiling Results
     runs-on: ubuntu-latest
     needs: [criterion-profiling, iai-profiling, api-profiling]
-    if: always() && github.event_name == 'pull_request'
+    if: ${{ always() && !cancelled() && github.event_name == 'pull_request' }}
     permissions:
       actions: write
       pull-requests: write
@@ -653,6 +820,15 @@ jobs:
           path: profiling-artifacts/invariant-report.txt
           if-no-files-found: ignore
 
+      - name: Validate profiling artifact integrity
+        if: always()
+        run: |
+          set -euo pipefail
+          chmod +x benches/api/benchmarks/scripts/validate_profiling_artifacts.sh
+          benches/api/benchmarks/scripts/validate_profiling_artifacts.sh \
+            --all profiling-artifacts \
+            --report profiling-artifacts/artifact-integrity-report.txt
+
       - name: Assemble Criterion profiling artifact
         run: |
           set -euo pipefail
@@ -682,18 +858,27 @@ jobs:
           rm -rf "${out}"
           mkdir -p "${out}"
 
-          if [[ -f "${root}/api-profiling-summary.json" ]]; then
-            cp "${root}/api-profiling-summary.json" "${out}/"
+          # Require the summary JSON to exist and be non-empty (REQ-PPDI-003).
+          if [[ ! -s "${root}/api-profiling-summary.json" ]]; then
+            echo "::error::api-profiling-summary.json is missing or empty"
+            exit 1
           fi
+          cp "${root}/api-profiling-summary.json" "${out}/"
 
+          found=0
           for dir in "${root}"/${prefix}*; do
             if [[ -d "${dir}" ]]; then
+              found=1
               scenario="${dir##*/}"
               scenario="${scenario#${prefix}}"
               mkdir -p "${out}/${scenario}"
               cp -R "${dir}/." "${out}/${scenario}/"
             fi
           done
+          if [[ "${found}" -eq 0 ]]; then
+            echo "::error::No API profiling scenario artifacts found under ${root}"
+            exit 1
+          fi
           shopt -u nullglob
 
       - name: Post profiling summary to PR
@@ -821,7 +1006,7 @@ jobs:
           name: criterion-profiling-all-${{ github.sha }}
           path: criterion-profiling-all/
           retention-days: 30
-          if-no-files-found: warn
+          if-no-files-found: error
 
       - name: Upload API profiling aggregate
         uses: actions/upload-artifact@v4
@@ -830,7 +1015,7 @@ jobs:
           name: api-profiling-all-${{ github.sha }}
           path: api-profiling-all/
           retention-days: 30
-          if-no-files-found: warn
+          if-no-files-found: error
 
       - name: Delete per-scenario profiling artifacts
         if: always()
