@@ -17,7 +17,6 @@ ALL_DIR=""
 REPORT_FILE=""
 SINGLE_DIR=""
 
-# Parse arguments
 while [[ $# -gt 0 ]]; do
     case $1 in
         --all)
@@ -43,10 +42,9 @@ if [[ "${ALL_MODE}" == "true" ]]; then
         echo -e "${RED}ERROR: --all requires a valid directory${NC}" >&2
         exit 1
     fi
-    # Collect all subdirectories that contain either stacks.folded or flamegraph.svg
+    # Collect directories containing stacks.folded or flamegraph.svg (deduplicated)
     while IFS= read -r -d '' artifact_file; do
         dir="$(dirname "${artifact_file}")"
-        # Deduplicate: only add if not already in list
         already_added=false
         for existing_dir in "${ARTIFACT_DIRS[@]+"${ARTIFACT_DIRS[@]}"}"; do
             if [[ "${existing_dir}" == "${dir}" ]]; then
@@ -82,106 +80,65 @@ FAIL_COUNT=0
 REPORT=""
 declare -a VIOLATIONS=()
 
-add_report() {
-    REPORT+="$1"$'\n'
-}
+add_report() { REPORT+="$1"$'\n'; }
 
-# Validate stacks.folded in the given directory
-# Returns 0 if valid, 1 if violations found.
-validate_stacks_folded() {
+# Checks stacks.folded in the given directory.
+# Appends any violations to the provided array variable name (nameref).
+check_stacks_folded() {
     local directory="$1"
+    local -n check_violations=$2
     local stacks_file="${directory}/stacks.folded"
-    local violations=()
 
-    if [[ ! -f "${stacks_file}" ]]; then
-        return 0
-    fi
+    [[ -f "${stacks_file}" ]] || return 0
 
-    # Check: "perf not found" pattern must be absent
     if grep -qF "perf not found" "${stacks_file}" 2>/dev/null; then
-        violations+=("stacks.folded: contains 'perf not found' error")
+        check_violations+=("stacks.folded: contains 'perf not found' error")
     fi
-
-    # Check: "assertion failed" pattern must be absent
     if grep -qF "assertion failed" "${stacks_file}" 2>/dev/null; then
-        violations+=("stacks.folded: contains 'assertion failed' error")
+        check_violations+=("stacks.folded: contains 'assertion failed' error")
     fi
-
-    # Check: at least one valid stack count line must exist
-    # Valid format: "<semicolon-separated-frames> <count>"
     if ! grep -qE '^[^[:space:]].+[[:space:]]+[0-9]+$' "${stacks_file}" 2>/dev/null; then
-        violations+=("stacks.folded: no valid stack count lines found (expected '<stack> <count>' format)")
+        check_violations+=("stacks.folded: no valid stack count lines found (expected '<stack> <count>' format)")
     fi
-
-    if [[ ${#violations[@]} -gt 0 ]]; then
-        for violation in "${violations[@]}"; do
-            echo "${violation}"
-        done
-        return 1
-    fi
-    return 0
 }
 
-# Validate flamegraph.svg in the given directory
-# Returns 0 if valid, 1 if violations found.
-validate_flamegraph_svg() {
+# Checks flamegraph.svg in the given directory.
+# Appends any violations to the provided array variable name (nameref).
+check_flamegraph_svg() {
     local directory="$1"
+    local -n check_violations=$2
     local svg_file="${directory}/flamegraph.svg"
-    local violations=()
 
-    if [[ ! -f "${svg_file}" ]]; then
-        return 0
-    fi
+    [[ -f "${svg_file}" ]] || return 0
 
-    # Check: "No valid input provided to flamegraph" must be absent
     if grep -qF "No valid input provided to flamegraph" "${svg_file}" 2>/dev/null; then
-        violations+=("flamegraph.svg: contains 'No valid input provided to flamegraph'")
+        check_violations+=("flamegraph.svg: contains 'No valid input provided to flamegraph'")
     fi
-
-    # Check: "No stack counts found" must be absent
     if grep -qF "No stack counts found" "${svg_file}" 2>/dev/null; then
-        violations+=("flamegraph.svg: contains 'No stack counts found'")
+        check_violations+=("flamegraph.svg: contains 'No stack counts found'")
     fi
-
-    # Check: "ERROR:" prefix must be absent in text node content
     if grep -qE 'ERROR:' "${svg_file}" 2>/dev/null; then
-        violations+=("flamegraph.svg: contains 'ERROR:' prefix")
+        check_violations+=("flamegraph.svg: contains 'ERROR:' prefix")
     fi
-
-    if [[ ${#violations[@]} -gt 0 ]]; then
-        for violation in "${violations[@]}"; do
-            echo "${violation}"
-        done
-        return 1
-    fi
-    return 0
 }
 
-# Validate a single artifact directory
 validate_artifact_directory() {
     local directory="$1"
     local dir_name
     dir_name="$(basename "${directory}")"
-    local violations=()
+    local violations_for_dir=()
 
-    # Validate stacks.folded
-    while IFS= read -r violation; do
-        violations+=("${violation}")
-    done < <(validate_stacks_folded "${directory}" || true)
+    check_stacks_folded "${directory}" violations_for_dir
+    check_flamegraph_svg "${directory}" violations_for_dir
 
-    # Validate flamegraph.svg
-    while IFS= read -r violation; do
-        violations+=("${violation}")
-    done < <(validate_flamegraph_svg "${directory}" || true)
-
-    if [[ ${#violations[@]} -eq 0 ]]; then
+    if [[ ${#violations_for_dir[@]} -eq 0 ]]; then
         echo -e "${GREEN}PASS: ${dir_name}${NC}" >&2
         add_report "PASS: ${dir_name}"
         PASS_COUNT=$((PASS_COUNT + 1))
     else
         echo -e "${RED}FAIL: ${dir_name}${NC}" >&2
         add_report "FAIL: ${dir_name}"
-        for violation in "${violations[@]}"; do
+        for violation in "${violations_for_dir[@]}"; do
             echo -e "  ${YELLOW}> ${violation}${NC}" >&2
             add_report "  > ${violation}"
             VIOLATIONS+=("${dir_name}: ${violation}")
