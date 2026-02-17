@@ -118,14 +118,6 @@ fi
 # Calculate theoretical upper bound per profile type
 # =============================================================================
 
-# awk helper: floating point comparison (a >= b)
-awk_gte() {
-    local a="$1"
-    local b="$2"
-    awk -v a="${a}" -v b="${b}" 'BEGIN { exit (a >= b) ? 0 : 1 }'
-}
-
-# Calculate upper bound
 UPPER_BOUND="0"
 
 case "${PROFILE_TYPE}" in
