@@ -114,6 +114,28 @@ jobs:
           echo '1' | sudo tee /proc/sys/kernel/perf_event_paranoid
           echo '0' | sudo tee /proc/sys/kernel/kptr_restrict
 
+      - name: Verify perf capability
+        run: |
+          set -euo pipefail
+          echo "=== Verifying perf capability ==="
+
+          # 1. Binary existence check
+          if ! command -v perf &>/dev/null; then
+            echo "::error::perf binary not found. linux-tools-$(uname -r) may not be available."
+            exit 1
+          fi
+          perf --version
+
+          # 2. Dry-run: actually record a trivial workload
+          sudo perf record -e cpu-clock -o /tmp/perf-probe.data -- sleep 0.1
+          sudo perf script -i /tmp/perf-probe.data > /tmp/perf-probe.script
+          if [[ ! -s /tmp/perf-probe.script ]]; then
+            echo "::error::perf record dry-run produced no output"
+            exit 1
+          fi
+          echo "perf capability verified: $(wc -l < /tmp/perf-probe.script) lines captured"
+          rm -f /tmp/perf-probe.data /tmp/perf-probe.script
+
       - name: Download profiling tools
         uses: actions/download-artifact@v4
         with:
@@ -146,7 +168,7 @@ jobs:
           # Run with perf to collect profile data
           # Use cpu-clock software event for VM compatibility
           sudo perf record -e cpu-clock -F 997 -g -o "${RESULTS_DIR}/perf.data" \
-            "${BENCH_BIN}" --bench --profile-time 5 2>&1 | tee "${RESULTS_DIR}/benchmark.log" || true
+            "${BENCH_BIN}" --bench --profile-time 5 2>&1 | tee "${RESULTS_DIR}/benchmark.log"
 
           if [[ -f "${RESULTS_DIR}/perf.data" ]]; then
             echo "=== Processing perf data ==="
@@ -154,14 +176,14 @@ jobs:
 
             # Generate folded stacks
             sudo perf script -i "${RESULTS_DIR}/perf.data" 2>&1 | \
-              inferno-collapse-perf > "${RESULTS_DIR}/stacks.folded" 2>&1 || true
+              inferno-collapse-perf > "${RESULTS_DIR}/stacks.folded" 2>&1
 
             if [[ -s "${RESULTS_DIR}/stacks.folded" ]]; then
               echo "folded lines: $(wc -l < "${RESULTS_DIR}/stacks.folded")"
 
               # Generate flamegraph
-              inferno-flamegraph < "${RESULTS_DIR}/stacks.folded" > "${RESULTS_DIR}/flamegraph.svg" 2>&1 || true
-              inferno-flamegraph --reverse < "${RESULTS_DIR}/stacks.folded" > "${RESULTS_DIR}/flamegraph-reverse.svg" 2>&1 || true
+              inferno-flamegraph < "${RESULTS_DIR}/stacks.folded" > "${RESULTS_DIR}/flamegraph.svg" 2>&1
+              inferno-flamegraph --reverse < "${RESULTS_DIR}/stacks.folded" > "${RESULTS_DIR}/flamegraph-reverse.svg" 2>&1
 
               # Generate top functions
               gawk -F';' '{
@@ -182,6 +204,13 @@ jobs:
             # Cleanup large files
             sudo rm -f "${RESULTS_DIR}/perf.data" 2>/dev/null || true
           fi
+
+      - name: Validate profiling artifacts
+        run: |
+          set -euo pipefail
+          chmod +x benches/api/benchmarks/scripts/validate_profiling_artifacts.sh
+          benches/api/benchmarks/scripts/validate_profiling_artifacts.sh \
+            "profiling-results/criterion/${{ matrix.bench }}"
 
       - name: Upload profiling artifacts
         uses: actions/upload-artifact@v4
@@ -374,6 +403,28 @@ jobs:
           echo '1' | sudo tee /proc/sys/kernel/perf_event_paranoid
           echo '0' | sudo tee /proc/sys/kernel/kptr_restrict
 
+      - name: Verify perf capability
+        run: |
+          set -euo pipefail
+          echo "=== Verifying perf capability ==="
+
+          # 1. Binary existence check
+          if ! command -v perf &>/dev/null; then
+            echo "::error::perf binary not found. linux-tools-$(uname -r) may not be available."
+            exit 1
+          fi
+          perf --version
+
+          # 2. Dry-run: actually record a trivial workload
+          sudo perf record -e cpu-clock -o /tmp/perf-probe.data -- sleep 0.1
+          sudo perf script -i /tmp/perf-probe.data > /tmp/perf-probe.script
+          if [[ ! -s /tmp/perf-probe.script ]]; then
+            echo "::error::perf record dry-run produced no output"
+            exit 1
+          fi
+          echo "perf capability verified: $(wc -l < /tmp/perf-probe.script) lines captured"
+          rm -f /tmp/perf-probe.data /tmp/perf-probe.script
+
       - name: Download profiling tools
         uses: actions/download-artifact@v4
         with:
@@ -505,15 +556,15 @@ jobs:
 
           # Generate flamegraph
           echo "=== Running perf script ==="
-          sudo perf script -i "${RESULTS_DIR}/perf.data" > "${RESULTS_DIR}/perf.script" 2>&1 || echo "perf script returned non-zero"
+          sudo perf script -i "${RESULTS_DIR}/perf.data" > "${RESULTS_DIR}/perf.script" 2>&1
 
           if [ -s "${RESULTS_DIR}/perf.script" ]; then
             echo "=== Generating folded stacks ==="
-            inferno-collapse-perf < "${RESULTS_DIR}/perf.script" > "${RESULTS_DIR}/stacks.folded" 2>&1 || echo "inferno-collapse-perf returned non-zero"
+            inferno-collapse-perf < "${RESULTS_DIR}/perf.script" > "${RESULTS_DIR}/stacks.folded" 2>&1
 
             if [ -s "${RESULTS_DIR}/stacks.folded" ]; then
               echo "=== Generating flamegraph ==="
-              inferno-flamegraph < "${RESULTS_DIR}/stacks.folded" > "${RESULTS_DIR}/flamegraph.svg" 2>&1 || echo "inferno-flamegraph returned non-zero"
+              inferno-flamegraph < "${RESULTS_DIR}/stacks.folded" > "${RESULTS_DIR}/flamegraph.svg" 2>&1
             else
               echo "WARNING: stacks.folded is empty"
             fi
@@ -523,6 +574,13 @@ jobs:
 
           # Clean up perf artifacts to avoid permission issues during upload
           sudo rm -f "${RESULTS_DIR}/perf.data" "${RESULTS_DIR}/perf.script" 2>/dev/null || true
+
+      - name: Validate profiling artifacts
+        run: |
+          set -euo pipefail
+          chmod +x benches/api/benchmarks/scripts/validate_profiling_artifacts.sh
+          benches/api/benchmarks/scripts/validate_profiling_artifacts.sh \
+            "profiling-results/api/${{ steps.scenario.outputs.name }}"
 
       - name: Upload API profiling artifacts
         uses: actions/upload-artifact@v4
@@ -539,7 +597,7 @@ jobs:
     name: Summarize Profiling Results
     runs-on: ubuntu-latest
     needs: [criterion-profiling, iai-profiling, api-profiling]
-    if: always() && github.event_name == 'pull_request'
+    if: "!cancelled() && github.event_name == 'pull_request'"
     permissions:
       actions: write
       pull-requests: write
@@ -652,6 +710,15 @@ jobs:
           name: metrics-invariant-report
           path: profiling-artifacts/invariant-report.txt
           if-no-files-found: ignore
+
+      - name: Validate profiling artifact integrity
+        if: always()
+        run: |
+          set -euo pipefail
+          chmod +x benches/api/benchmarks/scripts/validate_profiling_artifacts.sh
+          benches/api/benchmarks/scripts/validate_profiling_artifacts.sh \
+            --all profiling-artifacts \
+            --report profiling-artifacts/artifact-integrity-report.txt
 
       - name: Assemble Criterion profiling artifact
         run: |
