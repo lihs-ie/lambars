@@ -124,7 +124,51 @@ jobs:
             echo "::error::perf binary not found. linux-tools-$(uname -r) may not be available."
             exit 1
           fi
-          perf --version
+
+          # Check whether perf wrapper resolves to a working binary.
+          # Ubuntu Bug #2117159: linux-hwe-6.14 package may ship the directory
+          # /usr/lib/linux-tools/<kernel>/ without the actual perf binary inside,
+          # causing the /usr/bin/perf wrapper script to fail at runtime.
+          set +e
+          perf --version 2>/dev/null
+          perf_exit_code=$?
+          set -e
+
+          if [[ "${perf_exit_code}" -ne 0 ]]; then
+            echo "::warning::perf --version failed (exit ${perf_exit_code}). Attempting workaround for Ubuntu Bug #2117159."
+
+            # Locate the newest available perf binary under /usr/lib/linux-tools-*/
+            # sort -V performs version-aware (natural) sort; tail -1 picks the highest.
+            workaround_binary="$(
+              ls /usr/lib/linux-tools-*/perf 2>/dev/null \
+                | sort -V \
+                | tail -1
+            )"
+
+            if [[ -z "${workaround_binary}" ]]; then
+              echo "::error::No fallback perf binary found under /usr/lib/linux-tools-*/"
+              exit 1
+            fi
+
+            echo "::warning::Using fallback perf binary: ${workaround_binary}"
+
+            # Create a symlink so that the /usr/bin/perf wrapper can resolve the
+            # binary for the currently running kernel version.
+            kernel_tools_dir="/usr/lib/linux-tools/$(uname -r)"
+            sudo mkdir -p "${kernel_tools_dir}"
+            sudo ln -sf "${workaround_binary}" "${kernel_tools_dir}/perf"
+            echo "Symlink created: ${kernel_tools_dir}/perf -> ${workaround_binary}"
+
+            # Verify that perf is now functional after the workaround.
+            if ! perf --version; then
+              echo "::error::perf --version still failed after workaround. Cannot proceed."
+              exit 1
+            fi
+
+            echo "::warning::Workaround applied successfully. perf is now functional."
+          else
+            echo "perf is functional (no workaround required)."
+          fi
 
           # 2. Dry-run: record a CPU-bound workload to confirm perf is functional.
           # Use a busy loop instead of sleep to guarantee CPU samples are captured.
@@ -419,7 +463,51 @@ jobs:
             echo "::error::perf binary not found. linux-tools-$(uname -r) may not be available."
             exit 1
           fi
-          perf --version
+
+          # Check whether perf wrapper resolves to a working binary.
+          # Ubuntu Bug #2117159: linux-hwe-6.14 package may ship the directory
+          # /usr/lib/linux-tools/<kernel>/ without the actual perf binary inside,
+          # causing the /usr/bin/perf wrapper script to fail at runtime.
+          set +e
+          perf --version 2>/dev/null
+          perf_exit_code=$?
+          set -e
+
+          if [[ "${perf_exit_code}" -ne 0 ]]; then
+            echo "::warning::perf --version failed (exit ${perf_exit_code}). Attempting workaround for Ubuntu Bug #2117159."
+
+            # Locate the newest available perf binary under /usr/lib/linux-tools-*/
+            # sort -V performs version-aware (natural) sort; tail -1 picks the highest.
+            workaround_binary="$(
+              ls /usr/lib/linux-tools-*/perf 2>/dev/null \
+                | sort -V \
+                | tail -1
+            )"
+
+            if [[ -z "${workaround_binary}" ]]; then
+              echo "::error::No fallback perf binary found under /usr/lib/linux-tools-*/"
+              exit 1
+            fi
+
+            echo "::warning::Using fallback perf binary: ${workaround_binary}"
+
+            # Create a symlink so that the /usr/bin/perf wrapper can resolve the
+            # binary for the currently running kernel version.
+            kernel_tools_dir="/usr/lib/linux-tools/$(uname -r)"
+            sudo mkdir -p "${kernel_tools_dir}"
+            sudo ln -sf "${workaround_binary}" "${kernel_tools_dir}/perf"
+            echo "Symlink created: ${kernel_tools_dir}/perf -> ${workaround_binary}"
+
+            # Verify that perf is now functional after the workaround.
+            if ! perf --version; then
+              echo "::error::perf --version still failed after workaround. Cannot proceed."
+              exit 1
+            fi
+
+            echo "::warning::Workaround applied successfully. perf is now functional."
+          else
+            echo "perf is functional (no workaround required)."
+          fi
 
           # 2. Dry-run: record a CPU-bound workload to confirm perf is functional.
           # Use a busy loop instead of sleep to guarantee CPU samples are captured.
