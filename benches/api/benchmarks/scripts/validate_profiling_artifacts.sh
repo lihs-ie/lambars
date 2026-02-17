@@ -42,20 +42,11 @@ if [[ "${ALL_MODE}" == "true" ]]; then
         echo -e "${RED}ERROR: --all requires a valid directory${NC}" >&2
         exit 1
     fi
-    # Collect directories containing stacks.folded or flamegraph.svg (deduplicated)
-    while IFS= read -r -d '' artifact_file; do
-        dir="$(dirname "${artifact_file}")"
-        already_added=false
-        for existing_dir in "${ARTIFACT_DIRS[@]+"${ARTIFACT_DIRS[@]}"}"; do
-            if [[ "${existing_dir}" == "${dir}" ]]; then
-                already_added=true
-                break
-            fi
-        done
-        if [[ "${already_added}" == "false" ]]; then
-            ARTIFACT_DIRS+=("${dir}")
-        fi
-    done < <(find "${ALL_DIR}" -type f \( -name 'stacks.folded' -o -name 'flamegraph.svg' \) -print0 2>/dev/null)
+    while IFS= read -r dir; do
+        ARTIFACT_DIRS+=("${dir}")
+    done < <(find "${ALL_DIR}" -type f \( -name 'stacks.folded' -o -name 'flamegraph.svg' \) -print0 2>/dev/null \
+        | xargs -0 -I{} dirname {} \
+        | sort -u)
 
     if [[ ${#ARTIFACT_DIRS[@]} -eq 0 ]]; then
         echo -e "${RED}ERROR: No profiling artifacts found in ${ALL_DIR}${NC}" >&2
@@ -82,8 +73,6 @@ declare -a VIOLATIONS=()
 
 add_report() { REPORT+="$1"$'\n'; }
 
-# Checks stacks.folded in the given directory.
-# Appends any violations to the provided array variable name (nameref).
 check_stacks_folded() {
     local directory="$1"
     local -n check_violations=$2
@@ -102,8 +91,6 @@ check_stacks_folded() {
     fi
 }
 
-# Checks flamegraph.svg in the given directory.
-# Appends any violations to the provided array variable name (nameref).
 check_flamegraph_svg() {
     local directory="$1"
     local -n check_violations=$2
@@ -147,6 +134,7 @@ validate_artifact_directory() {
     fi
 }
 
+echo "Validating ${#ARTIFACT_DIRS[@]} artifact directories..." >&2
 add_report "=== Profiling Artifact Integrity Report ==="
 add_report "Date: $(date)"
 add_report "Directories: ${#ARTIFACT_DIRS[@]}"
@@ -164,7 +152,7 @@ add_report "Fail: ${FAIL_COUNT}"
 
 if [[ -n "${REPORT_FILE}" ]]; then
     mkdir -p "$(dirname "${REPORT_FILE}")"
-    printf '%s\n' "${REPORT}" > "${REPORT_FILE}"
+    echo -e "${REPORT}" > "${REPORT_FILE}"
     echo "Report written to ${REPORT_FILE}" >&2
 fi
 
