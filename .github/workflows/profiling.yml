@@ -450,8 +450,12 @@ jobs:
           cd /tmp/wrk2 && make -j$(nproc) && sudo cp wrk /usr/local/bin/wrk2
           # Create wrk symlink for backward compatibility
           sudo ln -sf /usr/local/bin/wrk2 /usr/local/bin/wrk
-          # Verify wrk2 installation
-          command -v wrk2 && wrk2 -v 2>&1 | head -1 || (echo "ERROR: wrk2 installation failed" && exit 1)
+          # Verify wrk2 installation (wrk2 -v exits non-zero even on success, so
+          # only check that the binary exists and is executable).
+          if ! command -v wrk2 &>/dev/null; then
+            echo "ERROR: wrk2 installation failed" && exit 1
+          fi
+          wrk2 -v 2>&1 | head -1 || true
           # Allow perf for non-root users
           echo '1' | sudo tee /proc/sys/kernel/perf_event_paranoid
           echo '0' | sudo tee /proc/sys/kernel/kptr_restrict
