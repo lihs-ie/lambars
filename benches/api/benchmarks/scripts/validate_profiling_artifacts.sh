@@ -60,7 +60,7 @@ if [[ "${ALL_MODE}" == "true" ]]; then
     declare -a dirs_tmp=()
     while IFS= read -r -d '' file; do
         dirs_tmp+=("$(dirname "${file}")")
-    done < <(find "${ALL_DIR}" -type f \( -name 'stacks.folded' -o -name 'flamegraph.svg' \) -print0 2>/dev/null)
+    done < <(find "${ALL_DIR}" -type f \( -name 'stacks.folded' -o -name 'flamegraph.svg' -o -name 'benchmark.log' \) -print0 2>/dev/null)
 
     if [[ ${#dirs_tmp[@]} -gt 0 ]]; then
         mapfile -t ARTIFACT_DIRS < <(printf '%s\n' "${dirs_tmp[@]}" | sort -u)
@@ -137,6 +137,18 @@ check_flamegraph_svg() {
     fi
 }
 
+check_benchmark_log() {
+    local directory="$1"
+    local -n check_violations=$2
+    local log_file="${directory}/benchmark.log"
+
+    [[ -f "${log_file}" ]] || return 0
+
+    if grep -qiF "perf not found" "${log_file}" 2>/dev/null; then
+        check_violations+=("benchmark.log: contains 'perf not found' error")
+    fi
+}
+
 validate_artifact_directory() {
     local directory="$1"
     local dir_name
@@ -146,13 +158,17 @@ validate_artifact_directory() {
     local stacks_file="${directory}/stacks.folded"
     local svg_file="${directory}/flamegraph.svg"
 
-    # Fail immediately if neither artifact is present — the directory is incomplete.
-    if [[ ! -f "${stacks_file}" && ! -f "${svg_file}" ]]; then
-        violations_for_dir+=("missing both stacks.folded and flamegraph.svg")
+    # Each artifact must be present individually; a partial set is still incomplete.
+    if [[ ! -f "${stacks_file}" ]]; then
+        violations_for_dir+=("missing stacks.folded")
+    fi
+    if [[ ! -f "${svg_file}" ]]; then
+        violations_for_dir+=("missing flamegraph.svg")
     fi
 
     check_stacks_folded "${directory}" violations_for_dir
     check_flamegraph_svg "${directory}" violations_for_dir
+    check_benchmark_log "${directory}" violations_for_dir
 
     if [[ ${#violations_for_dir[@]} -eq 0 ]]; then
         echo -e "${GREEN}PASS: ${dir_name}${NC}" >&2

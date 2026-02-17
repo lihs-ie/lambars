@@ -431,6 +431,151 @@ EOF
 }
 
 # -------------------------------------------------------------------
+# Test: stacks.folded only (missing flamegraph.svg) fails
+# -------------------------------------------------------------------
+test_missing_flamegraph_svg_fails() {
+    cat << 'EOF'
+
+==============================================
+  Testing: missing flamegraph.svg fails
+==============================================
+EOF
+    local tmpdir
+    tmpdir=$(mktemp -d)
+
+    create_valid_stacks_folded "${tmpdir}"
+    # Intentionally do NOT create flamegraph.svg
+
+    local output exit_code
+    output=$("${TARGET_SCRIPT}" "${tmpdir}" 2>&1) && exit_code=0 || exit_code=$?
+
+    assert_exit_code 1 "${exit_code}" "missing flamegraph.svg: exit code 1"
+    assert_contains "FAIL" "${output}" "missing flamegraph.svg: output contains FAIL"
+    assert_contains "missing flamegraph.svg" "${output}" "missing flamegraph.svg: mentions missing file"
+
+    rm -rf "${tmpdir}"
+}
+
+# -------------------------------------------------------------------
+# Test: flamegraph.svg only (missing stacks.folded) fails
+# -------------------------------------------------------------------
+test_missing_stacks_folded_fails() {
+    cat << 'EOF'
+
+==============================================
+  Testing: missing stacks.folded fails
+==============================================
+EOF
+    local tmpdir
+    tmpdir=$(mktemp -d)
+
+    create_valid_flamegraph_svg "${tmpdir}"
+    # Intentionally do NOT create stacks.folded
+
+    local output exit_code
+    output=$("${TARGET_SCRIPT}" "${tmpdir}" 2>&1) && exit_code=0 || exit_code=$?
+
+    assert_exit_code 1 "${exit_code}" "missing stacks.folded: exit code 1"
+    assert_contains "FAIL" "${output}" "missing stacks.folded: output contains FAIL"
+    assert_contains "missing stacks.folded" "${output}" "missing stacks.folded: mentions missing file"
+
+    rm -rf "${tmpdir}"
+}
+
+# -------------------------------------------------------------------
+# Test: benchmark.log with 'perf not found' fails
+# -------------------------------------------------------------------
+test_benchmark_log_perf_not_found_fails() {
+    cat << 'EOF'
+
+==============================================
+  Testing: benchmark.log with 'perf not found'
+==============================================
+EOF
+    local tmpdir
+    tmpdir=$(mktemp -d)
+
+    create_valid_stacks_folded "${tmpdir}"
+    create_valid_flamegraph_svg "${tmpdir}"
+    cat > "${tmpdir}/benchmark.log" << 'LOGEOF'
+Running benchmark effect_bench
+WARNING: perf not found for kernel 6.14.0-1017
+LOGEOF
+
+    local output exit_code
+    output=$("${TARGET_SCRIPT}" "${tmpdir}" 2>&1) && exit_code=0 || exit_code=$?
+
+    assert_exit_code 1 "${exit_code}" "benchmark.log perf not found: exit code 1"
+    assert_contains "FAIL" "${output}" "benchmark.log perf not found: output contains FAIL"
+    assert_contains "benchmark.log" "${output}" "benchmark.log perf not found: mentions benchmark.log"
+
+    rm -rf "${tmpdir}"
+}
+
+# -------------------------------------------------------------------
+# Test: benchmark.log without errors passes
+# -------------------------------------------------------------------
+test_benchmark_log_clean_passes() {
+    cat << 'EOF'
+
+==============================================
+  Testing: clean benchmark.log passes
+==============================================
+EOF
+    local tmpdir
+    tmpdir=$(mktemp -d)
+
+    create_valid_stacks_folded "${tmpdir}"
+    create_valid_flamegraph_svg "${tmpdir}"
+    cat > "${tmpdir}/benchmark.log" << 'LOGEOF'
+Running benchmark effect_bench
+Benchmarking async_io: Collecting 100 samples
+LOGEOF
+
+    local output exit_code
+    output=$("${TARGET_SCRIPT}" "${tmpdir}" 2>&1) && exit_code=0 || exit_code=$?
+
+    assert_exit_code 0 "${exit_code}" "clean benchmark.log: exit code 0"
+    assert_contains "PASS" "${output}" "clean benchmark.log: output contains PASS"
+
+    rm -rf "${tmpdir}"
+}
+
+# -------------------------------------------------------------------
+# Test: --all mode detects benchmark.log-only directory
+# -------------------------------------------------------------------
+test_all_mode_log_only_directory_fails() {
+    cat << 'EOF'
+
+==============================================
+  Testing: --all mode benchmark.log-only directory
+==============================================
+EOF
+    local rootdir
+    rootdir=$(mktemp -d)
+
+    local valid_dir="${rootdir}/ok"
+    local log_only_dir="${rootdir}/log_only"
+    mkdir -p "${valid_dir}" "${log_only_dir}"
+
+    create_valid_stacks_folded "${valid_dir}"
+    create_valid_flamegraph_svg "${valid_dir}"
+
+    cat > "${log_only_dir}/benchmark.log" << 'LOGEOF'
+WARNING: perf not found for kernel 6.14.0-1017
+LOGEOF
+
+    local output exit_code
+    output=$("${TARGET_SCRIPT}" --all "${rootdir}" 2>&1) && exit_code=0 || exit_code=$?
+
+    assert_exit_code 1 "${exit_code}" "--all log_only: exit code 1"
+    assert_contains "missing stacks.folded" "${output}" "--all log_only: missing stacks.folded"
+    assert_contains "missing flamegraph.svg" "${output}" "--all log_only: missing flamegraph.svg"
+
+    rm -rf "${rootdir}"
+}
+
+# -------------------------------------------------------------------
 # Main
 # -------------------------------------------------------------------
 main() {
@@ -452,6 +597,11 @@ EOF
     test_all_mode_multiple_directories
     test_all_mode_all_pass
     test_report_option
+    test_missing_flamegraph_svg_fails
+    test_missing_stacks_folded_fails
+    test_benchmark_log_perf_not_found_fails
+    test_benchmark_log_clean_passes
+    test_all_mode_log_only_directory_fails
 
     cat << EOF
 

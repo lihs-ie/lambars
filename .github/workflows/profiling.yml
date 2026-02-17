@@ -127,13 +127,14 @@ jobs:
           fi
           perf --version
 
-          # 2. Dry-run: record a trivial workload to confirm perf is functional.
-          # Use mktemp to avoid collisions when jobs run concurrently on the same runner.
+          # 2. Dry-run: record a CPU-bound workload to confirm perf is functional.
+          # Use a busy loop instead of sleep to guarantee CPU samples are captured.
           probe_data="$(mktemp "${RUNNER_TEMP:-/tmp}/perf-probe.XXXXXX.data")"
           probe_script="$(mktemp "${RUNNER_TEMP:-/tmp}/perf-probe.XXXXXX.script")"
           cleanup_probe() { rm -f "${probe_data}" "${probe_script}"; }
           trap cleanup_probe EXIT
-          sudo perf record -e cpu-clock -o "${probe_data}" -- sleep 0.1
+          sudo perf record -e cpu-clock -F 99 -o "${probe_data}" -- \
+            bash -c 'i=0; while [ "$i" -lt 2000000 ]; do i=$((i+1)); done'
           sudo perf script -i "${probe_data}" > "${probe_script}"
           if [[ ! -s "${probe_script}" ]]; then
             echo "::error::perf record dry-run produced no output"
@@ -422,13 +423,14 @@ jobs:
           fi
           perf --version
 
-          # 2. Dry-run: record a trivial workload to confirm perf is functional.
-          # Use mktemp to avoid collisions when jobs run concurrently on the same runner.
+          # 2. Dry-run: record a CPU-bound workload to confirm perf is functional.
+          # Use a busy loop instead of sleep to guarantee CPU samples are captured.
           probe_data="$(mktemp "${RUNNER_TEMP:-/tmp}/perf-probe.XXXXXX.data")"
           probe_script="$(mktemp "${RUNNER_TEMP:-/tmp}/perf-probe.XXXXXX.script")"
           cleanup_probe() { rm -f "${probe_data}" "${probe_script}"; }
           trap cleanup_probe EXIT
-          sudo perf record -e cpu-clock -o "${probe_data}" -- sleep 0.1
+          sudo perf record -e cpu-clock -F 99 -o "${probe_data}" -- \
+            bash -c 'i=0; while [ "$i" -lt 2000000 ]; do i=$((i+1)); done'
           sudo perf script -i "${probe_data}" > "${probe_script}"
           if [[ ! -s "${probe_script}" ]]; then
             echo "::error::perf record dry-run produced no output"
