@@ -95,31 +95,18 @@ assert_not_contains() {
     fi
 }
 
-# シナリオ YAML を一時ファイルに書き込む
-make_scenario_yaml() {
-    local file_path="$1"
-    local content="$2"
-    echo "${content}" > "${file_path}"
+# YAML コンテンツをファイルに書き込む (シナリオ・閾値ファイル共用)
+write_yaml_file() {
+    echo "${2}" > "${1}"
 }
-
-# thresholds.yaml を一時ファイルに書き込む
-make_thresholds_yaml() {
-    local file_path="$1"
-    local content="$2"
-    echo "${content}" > "${file_path}"
-}
+make_scenario_yaml()   { write_yaml_file "$@"; }
+make_thresholds_yaml() { write_yaml_file "$@"; }
 
 # -------------------------------------------------------------------
 # TC-FEAS-1: steady: target=1000, threshold=900 -> PASS (達成可能)
 # -------------------------------------------------------------------
 test_steady_feasible_threshold_is_pass() {
-    cat << 'EOF'
-
-==============================================
-  TC-FEAS-1: steady target=1000, threshold=900 -> PASS
-==============================================
-EOF
-    log_test "steady プロファイルで閾値が理論上限以下なら PASS になること"
+    log_test "TC-FEAS-1: steady target=1000, threshold=900 -> PASS"
 
     local tmp_dir
     tmp_dir=$(make_test_tmp_dir)
@@ -154,13 +141,7 @@ target_rps: 1000"
 # TC-FEAS-2: steady: target=100, threshold=500 -> FAIL (達成不可能)
 # -------------------------------------------------------------------
 test_steady_infeasible_threshold_is_fail() {
-    cat << 'EOF'
-
-==============================================
-  TC-FEAS-2: steady target=100, threshold=500 -> FAIL
-==============================================
-EOF
-    log_test "steady プロファイルで閾値が理論上限を超える場合 FAIL になること"
+    log_test "TC-FEAS-2: steady target=100, threshold=500 -> FAIL (infeasible)"
 
     local tmp_dir
     tmp_dir=$(make_test_tmp_dir)
@@ -195,13 +176,7 @@ target_rps: 100"
 # TC-FEAS-3: burst: target=1000, burst_multiplier=2, metric=peak_phase_rps, threshold=900 -> PASS
 # -------------------------------------------------------------------
 test_burst_peak_phase_rps_feasible_is_pass() {
-    cat << 'EOF'
-
-==============================================
-  TC-FEAS-3: burst peak_phase_rps=1000, threshold=900 -> PASS
-==============================================
-EOF
-    log_test "burst プロファイルで peak_phase_rps が target_rps で、閾値が以下なら PASS になること"
+    log_test "TC-FEAS-3: burst peak_phase_rps=1000, threshold=900 -> PASS"
 
     local tmp_dir
     tmp_dir=$(make_test_tmp_dir)
@@ -239,13 +214,7 @@ burst_interval_seconds: 20"
 # TC-FEAS-4: burst: target=100, metric=weighted_rps, threshold=500 -> FAIL (理論上限超過)
 # -------------------------------------------------------------------
 test_burst_weighted_rps_infeasible_is_fail() {
-    cat << 'EOF'
-
-==============================================
-  TC-FEAS-4: burst weighted_rps upper_bound < threshold=500 -> FAIL
-==============================================
-EOF
-    log_test "burst プロファイルで weighted_rps 上限が閾値を下回る場合 FAIL になること"
+    log_test "TC-FEAS-4: burst weighted_rps upper_bound < threshold=500 -> FAIL"
 
     local tmp_dir
     tmp_dir=$(make_test_tmp_dir)
@@ -287,13 +256,7 @@ burst_interval_seconds: 20"
 # TC-FEAS-5: step_up: steps=[100,200,300], metric=weighted_rps, threshold=250 -> FAIL
 # -------------------------------------------------------------------
 test_step_up_weighted_rps_infeasible_is_fail() {
-    cat << 'EOF'
-
-==============================================
-  TC-FEAS-5: step_up steps=[100,200,300] weighted_rps=200, threshold=250 -> FAIL
-==============================================
-EOF
-    log_test "step_up プロファイルで weighted_rps 上限が閾値を下回る場合 FAIL になること"
+    log_test "TC-FEAS-5: step_up steps=[100,200,300] weighted_rps=200, threshold=250 -> FAIL"
 
     local tmp_dir
     tmp_dir=$(make_test_tmp_dir)
@@ -335,13 +298,7 @@ duration_seconds: 90"
 # TC-FEAS-6: ramp_up_down: target=1000, metric=sustain_phase_rps, threshold=900 -> PASS
 # -------------------------------------------------------------------
 test_ramp_up_down_sustain_phase_rps_feasible_is_pass() {
-    cat << 'EOF'
-
-==============================================
-  TC-FEAS-6: ramp_up_down sustain_phase_rps=1000, threshold=900 -> PASS
-==============================================
-EOF
-    log_test "ramp_up_down プロファイルで sustain_phase_rps 上限が閾値以上なら PASS になること"
+    log_test "TC-FEAS-6: ramp_up_down sustain_phase_rps=1000, threshold=900 -> PASS"
 
     local tmp_dir
     tmp_dir=$(make_test_tmp_dir)
@@ -376,13 +333,7 @@ target_rps: 1000"
 # TC-FEAS-7: RPS ルール未定義 -> スキップ (PASS)
 # -------------------------------------------------------------------
 test_no_rps_rule_skips_check() {
-    cat << 'EOF'
-
-==============================================
-  TC-FEAS-7: RPS ルール未定義 -> スキップ (PASS)
-==============================================
-EOF
-    log_test "thresholds.yaml に RPS ルールが未定義の場合スキップされること"
+    log_test "TC-FEAS-7: RPS ルール未定義 -> スキップ (PASS)"
 
     local tmp_dir
     tmp_dir=$(make_test_tmp_dir)
@@ -416,13 +367,7 @@ target_rps: 100"
 # TC-FEAS-8: --mode warn: 達成不可能でも exit 0
 # -------------------------------------------------------------------
 test_warn_mode_infeasible_is_exit_0() {
-    cat << 'EOF'
-
-==============================================
-  TC-FEAS-8: --mode warn: infeasible -> exit 0
-==============================================
-EOF
-    log_test "--mode warn では達成不可能でも exit 0 になること"
+    log_test "TC-FEAS-8: --mode warn: infeasible -> exit 0"
 
     local tmp_dir
     tmp_dir=$(make_test_tmp_dir)
@@ -457,13 +402,7 @@ target_rps: 100"
 # TC-FEAS-9: --mode strict: 達成不可能で exit 1
 # -------------------------------------------------------------------
 test_strict_mode_infeasible_is_exit_1() {
-    cat << 'EOF'
-
-==============================================
-  TC-FEAS-9: --mode strict: infeasible -> exit 1
-==============================================
-EOF
-    log_test "--mode strict では達成不可能で exit 1 になること"
+    log_test "TC-FEAS-9: --mode strict: infeasible -> exit 1"
 
     local tmp_dir
     tmp_dir=$(make_test_tmp_dir)

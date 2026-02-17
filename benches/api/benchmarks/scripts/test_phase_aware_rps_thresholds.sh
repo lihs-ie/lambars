@@ -174,13 +174,7 @@ make_meta_json_without_phase_metrics() {
 # TC-RPS-1: RPS が warning 閾値以上 -> PASS
 # -------------------------------------------------------------------
 test_rps_above_warning_threshold_is_pass() {
-    cat << 'EOF'
-
-==============================================
-  TC-RPS-1: RPS >= warning threshold -> PASS
-==============================================
-EOF
-    log_test "RPS が warning 閾値以上の場合 PASS になること"
+    log_test "TC-RPS-1: RPS >= warning threshold -> PASS"
 
     local tmp_dir
     tmp_dir=$(make_test_tmp_dir)
@@ -203,13 +197,7 @@ EOF
 # TC-RPS-2: RPS が warning と error の間 -> WARNING (exit 0)
 # -------------------------------------------------------------------
 test_rps_between_warning_and_error_is_warning() {
-    cat << 'EOF'
-
-==============================================
-  TC-RPS-2: warning < RPS < error -> WARNING (exit 0)
-==============================================
-EOF
-    log_test "RPS が warning-error 間の場合 WARNING 表示 (exit 0) になること"
+    log_test "TC-RPS-2: warning < RPS < error -> WARNING (exit 0)"
 
     local tmp_dir
     tmp_dir=$(make_test_tmp_dir)
@@ -232,13 +220,7 @@ EOF
 # TC-RPS-3: RPS が error 閾値未満 -> FAIL (exit 3)
 # -------------------------------------------------------------------
 test_rps_below_error_threshold_is_fail() {
-    cat << 'EOF'
-
-==============================================
-  TC-RPS-3: RPS < error threshold -> FAIL (exit 3)
-==============================================
-EOF
-    log_test "RPS が error 閾値未満の場合 FAIL (exit 3) になること"
+    log_test "TC-RPS-3: RPS < error threshold -> FAIL (exit 3)"
 
     local tmp_dir
     tmp_dir=$(make_test_tmp_dir)
@@ -261,13 +243,7 @@ EOF
 # TC-RPS-4: phase_metrics がない旧形式 meta.json -> merged RPS で fallback
 # -------------------------------------------------------------------
 test_legacy_meta_json_falls_back_to_merged_rps() {
-    cat << 'EOF'
-
-==============================================
-  TC-RPS-4: phase_metrics absent -> fallback to merged RPS
-==============================================
-EOF
-    log_test "phase_metrics がない場合 results.rps (merged) で判定されること"
+    log_test "TC-RPS-4: phase_metrics absent -> fallback to merged RPS"
 
     local tmp_dir
     tmp_dir=$(make_test_tmp_dir)
@@ -289,17 +265,7 @@ EOF
 # TC-RPS-5: RPS ルールが thresholds.yaml に未定義 -> スキップ (PASS)
 # -------------------------------------------------------------------
 test_no_rps_rule_skips_check() {
-    cat << 'EOF'
-
-==============================================
-  TC-RPS-5: rps rule not in thresholds.yaml -> skip (PASS)
-==============================================
-EOF
-    log_test "RPS ルールが未定義のシナリオは RPS チェックをスキップすること"
-
-    # tasks_search_hot has rps rule; but we test a scenario that has no rps rule
-    # by checking that a scenario with rps defined always passes when rps is high
-    # This test verifies check_thresholds.sh handles missing rps section gracefully
+    log_test "TC-RPS-5: rps rule not in thresholds.yaml -> skip (PASS)"
 
     local tmp_dir
     tmp_dir=$(make_test_tmp_dir)
@@ -336,18 +302,7 @@ EOF
 # TC-RPS-6: 各 profile で正しい metric が使われること
 # -------------------------------------------------------------------
 test_each_profile_uses_correct_metric() {
-    cat << 'EOF'
-
-==============================================
-  TC-RPS-6: each profile uses correct metric
-==============================================
-EOF
-    log_test "constant プロファイルは weighted_rps を使うこと"
-
-    # tasks_bulk is constant profile -> uses weighted_rps
-    # peak_phase_rps = 600 (high, above warning), weighted_rps = 200 (below error)
-    # If constant uses weighted_rps, should FAIL
-    # If it mistakenly uses peak_phase_rps, would PASS
+    log_test "TC-RPS-6: constant profile uses weighted_rps (not peak_phase_rps)"
 
     local tmp_dir
     tmp_dir=$(make_test_tmp_dir)

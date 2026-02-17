@@ -17,31 +17,27 @@ get_threshold() {
 
     if [[ ! -f "${yaml_file}" ]]; then
         echo ""
-        return
+        return 0
     fi
 
     local yaml_key
     case "${metric}" in
-        p50|p90|p99)
-            yaml_key="${metric}_latency_ms"
-            ;;
-        error_rate|conflict_rate)
-            yaml_key="${metric}"
-            ;;
+        p50|p90|p99)              yaml_key="${metric}_latency_ms" ;;
+        error_rate|conflict_rate) yaml_key="${metric}" ;;
         *)
             echo ""
-            return
+            return 0
             ;;
     esac
 
     local value
     value=$(SCENARIO_NAME="${scenario}" METRIC_KEY="${yaml_key}" \
         yq '.scenarios[env(SCENARIO_NAME)][env(METRIC_KEY)].error // ""' \
-        "${yaml_file}" 2>/dev/null)
-
-    if [[ -n "${value}" ]] && [[ "${value}" != "null" ]]; then
+        "${yaml_file}" 2>/dev/null || true)
+    if [[ -n "${value}" && "${value}" != "null" ]]; then
         echo "${value}"
     fi
+    return 0
 }
 
 get_rps_rule() {
@@ -51,26 +47,24 @@ get_rps_rule() {
 
     if [[ ! -f "${yaml_file}" ]]; then
         echo ""
-        return
+        return 0
     fi
 
     local value
     value=$(SCENARIO_NAME="${scenario}" RPS_FIELD="${field}" \
         yq '.scenarios[env(SCENARIO_NAME)].rps[env(RPS_FIELD)] // ""' \
-        "${yaml_file}" 2>/dev/null)
-
-    if [[ -n "${value}" ]] && [[ "${value}" != "null" ]]; then
+        "${yaml_file}" 2>/dev/null || true)
+    if [[ -n "${value}" && "${value}" != "null" ]]; then
         echo "${value}"
     fi
+    return 0
 }
 
 check_rps_threshold() {
     local meta_file="${1}"
     local scenario="${2}"
 
-    local rps_metric
-    local rps_warning
-    local rps_error
+    local rps_metric rps_warning rps_error
     rps_metric=$(get_rps_rule "${scenario}" "metric")
     rps_warning=$(get_rps_rule "${scenario}" "warning")
     rps_error=$(get_rps_rule "${scenario}" "error")

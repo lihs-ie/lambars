@@ -186,12 +186,8 @@ create_phase_result() {
 # -------------------------------------------------------------------
 
 test_function_exists() {
-    cat << 'EOF'
-
-==============================================
-  Testing: build_phase_metrics_json exists
-==============================================
-EOF
+    echo ""
+    echo "Testing: build_phase_metrics_json exists"
     ((TESTS_RUN++))
     if load_build_phase_metrics_json; then
         log_pass "build_phase_metrics_json() is defined in run_benchmark.sh"
@@ -204,12 +200,8 @@ EOF
 
 # TC-1: steady (single phase) - MERGED_RPS からの fallback
 test_steady_single_phase_fallback() {
-    cat << 'EOF'
-
-==============================================
-  TC-1: steady single-phase fallback (MERGED_RPS)
-==============================================
-EOF
+    echo ""
+    echo "TC-1: steady single-phase fallback (MERGED_RPS)"
     local tmp_dir
     tmp_dir=$(make_test_tmp_dir)
 
@@ -228,12 +220,8 @@ EOF
 
 # TC-2: burst - 複数フェーズの peak/min/weighted/sustain
 test_burst_multiple_phases() {
-    cat << 'EOF'
-
-==============================================
-  TC-2: burst - multiple phases peak/min/weighted/sustain
-==============================================
-EOF
+    echo ""
+    echo "TC-2: burst - multiple phases peak/min/weighted/sustain"
     local tmp_dir
     tmp_dir=$(make_test_tmp_dir)
 
@@ -273,12 +261,8 @@ EOF
 
 # TC-3: ramp_up_down - sustain phase の正しい選択
 test_ramp_up_down_sustain_phase() {
-    cat << 'EOF'
-
-==============================================
-  TC-3: ramp_up_down - sustain phase selection
-==============================================
-EOF
+    echo ""
+    echo "TC-3: ramp_up_down - sustain phase selection"
     local tmp_dir
     tmp_dir=$(make_test_tmp_dir)
 
@@ -300,12 +284,8 @@ EOF
 
 # TC-4: step_up - 最終ステップの正しい選択
 test_step_up_last_step() {
-    cat << 'EOF'
-
-==============================================
-  TC-4: step_up - last step selection
-==============================================
-EOF
+    echo ""
+    echo "TC-4: step_up - last step selection"
     local tmp_dir
     tmp_dir=$(make_test_tmp_dir)
 
@@ -327,12 +307,8 @@ EOF
 
 # TC-5: 空ディレクトリ - MERGED_RPS なし → null を返すこと
 test_empty_directory_returns_null() {
-    cat << 'EOF'
-
-==============================================
-  TC-5: empty directory (no MERGED_RPS) returns null
-==============================================
-EOF
+    echo ""
+    echo "TC-5: empty directory (no MERGED_RPS) returns null"
     local tmp_dir
     tmp_dir=$(make_test_tmp_dir)
 
@@ -346,12 +322,8 @@ EOF
 
 # TC-6: weighted_rps の計算精度
 test_weighted_rps_calculation_accuracy() {
-    cat << 'EOF'
-
-==============================================
-  TC-6: weighted_rps calculation accuracy
-==============================================
-EOF
+    echo ""
+    echo "TC-6: weighted_rps calculation accuracy"
     local tmp_dir
     tmp_dir=$(make_test_tmp_dir)
 
@@ -384,12 +356,8 @@ EOF
 
 # TC-7: steady profile - "main" phase の sustain 選択
 test_steady_main_phase_sustain_selection() {
-    cat << 'EOF'
-
-==============================================
-  TC-7: steady - "main" phase sustain selection
-==============================================
-EOF
+    echo ""
+    echo "TC-7: steady - \"main\" phase sustain selection"
     local tmp_dir
     tmp_dir=$(make_test_tmp_dir)
 

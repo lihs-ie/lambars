@@ -1112,18 +1112,15 @@ echo ""
 # Threshold feasibility lint (after scenario validation)
 if [[ "${SKIP_THRESHOLD_LINT:-false}" != "true" ]]; then
     LINT_MODE="${THRESHOLD_LINT_MODE:-warn}"
-    THRESHOLD_LINT_FILE="${SCRIPT_DIR}/thresholds.yaml"
-    LINT_SCRIPT="${SCRIPT_DIR}/scripts/validate_threshold_feasibility.sh"
-    if [[ -f "${LINT_SCRIPT}" && -f "${THRESHOLD_LINT_FILE}" ]]; then
+    if [[ -f "${SCRIPT_DIR}/scripts/validate_threshold_feasibility.sh" && \
+          -f "${SCRIPT_DIR}/thresholds.yaml" ]]; then
         echo "Running threshold feasibility lint (mode: ${LINT_MODE})..."
-        if ! bash "${LINT_SCRIPT}" \
+        if ! bash "${SCRIPT_DIR}/scripts/validate_threshold_feasibility.sh" \
             --scenario-file "${SCENARIO_FILE}" \
-            --threshold-file "${THRESHOLD_LINT_FILE}" \
+            --threshold-file "${SCRIPT_DIR}/thresholds.yaml" \
             --mode "${LINT_MODE}"; then
             echo "ERROR: Threshold feasibility check failed"
-            if [[ "${LINT_MODE}" == "strict" ]]; then
-                exit 1
-            fi
+            [[ "${LINT_MODE}" == "strict" ]] && exit 1
         fi
     fi
 fi
