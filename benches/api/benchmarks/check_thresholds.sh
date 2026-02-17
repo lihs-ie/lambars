@@ -79,15 +79,12 @@ check_rps_threshold() {
         return 0
     fi
 
+    # Prefer phase_metrics[$metric] if present; fall back to results.rps (merged).
     local actual_rps
     actual_rps=$(jq -r \
         --arg metric "${rps_metric}" \
-        '.results.phase_metrics[$metric] // .results.rps // empty' \
+        '(.results.phase_metrics[$metric] // .results.rps) // empty' \
         "${meta_file}" 2>/dev/null || true)
-
-    if [[ -z "${actual_rps}" ]] || [[ "${actual_rps}" == "null" ]]; then
-        actual_rps=$(jq -r '.results.rps // empty' "${meta_file}" 2>/dev/null || true)
-    fi
 
     if [[ -z "${actual_rps}" ]] || [[ "${actual_rps}" == "null" ]]; then
         echo "WARNING: RPS metric '${rps_metric}' not found in meta.json; skipping RPS threshold check"
