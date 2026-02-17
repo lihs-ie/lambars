@@ -2,9 +2,9 @@
 
 ## In Progress
 
-- [🟢 GREEN] pin profiling runners to ubuntu-22.04 - 最小実装中
+- [🔄 REFACTOR] pin profiling runners to ubuntu-22.04 - リファクタリング中
   - Started: 2026-02-17
-  - Goal: profiling.yml の全ジョブの runs-on を ubuntu-22.04 に変更する
+  - Goal: テストスクリプトのリファクタリング（期待値定数化）
 
 ## Next
 

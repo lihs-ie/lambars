@@ -5,26 +5,27 @@
 set -euo pipefail
 
 WORKFLOW_FILE="${GITHUB_WORKSPACE:-$(git rev-parse --show-toplevel)}/.github/workflows/profiling.yml"
+EXPECTED_RUNNER="ubuntu-22.04"
 
 pass_count=0
 fail_count=0
 
 assert_job_pinned() {
     local job="$1"
+    local runs_on_value
 
     # ジョブ名の行から次のジョブ定義開始（2スペースインデントのキー行）までを抽出し runs-on を確認
-    local runs_on_value
     runs_on_value=$(awk "
         /^  ${job}:/ { found=1; next }
         found && /^  [a-z]/ { exit }
         found && /runs-on:/ { print; exit }
     " "${WORKFLOW_FILE}" | sed 's/.*runs-on: *//')
 
-    if [[ "${runs_on_value}" == "ubuntu-22.04" ]]; then
-        echo "PASS: ジョブ '${job}' が ubuntu-22.04 に固定されている"
+    if [[ "${runs_on_value}" == "${EXPECTED_RUNNER}" ]]; then
+        echo "PASS: ジョブ '${job}' が ${EXPECTED_RUNNER} に固定されている"
         pass_count=$((pass_count + 1))
     elif [[ "${runs_on_value}" == "ubuntu-latest" ]]; then
-        echo "FAIL: ジョブ '${job}' が ubuntu-latest を使用している（ubuntu-22.04 が必要）"
+        echo "FAIL: ジョブ '${job}' が ubuntu-latest を使用している（${EXPECTED_RUNNER} が必要）"
         fail_count=$((fail_count + 1))
     else
         echo "FAIL: ジョブ '${job}' の runs-on が見つからないか想定外の値: '${runs_on_value}'"
@@ -44,6 +45,7 @@ assert_no_ubuntu_latest_anywhere() {
 
 echo "=== profiling runner pin テスト ==="
 echo "対象ファイル: ${WORKFLOW_FILE}"
+echo "期待値: ${EXPECTED_RUNNER}"
 echo ""
 
 assert_job_pinned "criterion-profiling-build"
@@ -63,4 +65,4 @@ echo "FAIL: ${fail_count}"
 if [[ "${fail_count}" -gt 0 ]]; then
     exit 1
 fi
-echo "全テスト通過ナリ"
+echo "全テスト通過"
