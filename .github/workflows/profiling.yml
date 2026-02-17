@@ -176,6 +176,9 @@ jobs:
           probe_script="$(mktemp "${RUNNER_TEMP:-/tmp}/perf-probe.XXXXXX.script")"
           cleanup_probe() { rm -f "${probe_data}" "${probe_script}"; }
           trap cleanup_probe EXIT
+          # Remove mktemp placeholder so perf record creates the file as root,
+          # avoiding "not owned by current user or root" error in perf script.
+          rm -f "${probe_data}"
           sudo perf record -e cpu-clock -F 99 -o "${probe_data}" -- \
             bash -c 'i=0; while [ "$i" -lt 2000000 ]; do i=$((i+1)); done'
           sudo perf script -i "${probe_data}" > "${probe_script}"
@@ -515,6 +518,9 @@ jobs:
           probe_script="$(mktemp "${RUNNER_TEMP:-/tmp}/perf-probe.XXXXXX.script")"
           cleanup_probe() { rm -f "${probe_data}" "${probe_script}"; }
           trap cleanup_probe EXIT
+          # Remove mktemp placeholder so perf record creates the file as root,
+          # avoiding "not owned by current user or root" error in perf script.
+          rm -f "${probe_data}"
           sudo perf record -e cpu-clock -F 99 -o "${probe_data}" -- \
             bash -c 'i=0; while [ "$i" -lt 2000000 ]; do i=$((i+1)); done'
           sudo perf script -i "${probe_data}" > "${probe_script}"
