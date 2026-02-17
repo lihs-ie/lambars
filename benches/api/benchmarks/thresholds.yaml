@@ -52,6 +52,12 @@ scenarios:
     error_rate:
       warning: 0.005
       error: 0.01
+    # rps_profile: constant -> metric: weighted_rps
+    # target_rps: 2000, warning=85%, error=70%
+    rps:
+      metric: weighted_rps
+      warning: 1700
+      error: 1400
 
   tasks_search_cold:
     p50_latency_ms:
@@ -69,6 +75,12 @@ scenarios:
     error_rate:
       warning: 0.005
       error: 0.01
+    # rps_profile: constant -> metric: weighted_rps
+    # target_rps: 1000, warning=85%, error=70%
+    rps:
+      metric: weighted_rps
+      warning: 850
+      error: 700
 
   # Status update scenario for PATCH /tasks/{id}/status operations.
   #
@@ -92,6 +104,12 @@ scenarios:
     conflict_rate:
       warning: 0.0005
       error: 0.001
+    # rps_profile: constant -> metric: weighted_rps
+    # target_rps: 800, warning=85%, error=70%
+    rps:
+      metric: weighted_rps
+      warning: 680
+      error: 560
 
   # Update scenarios for tasks_update operations.
   #
@@ -115,6 +133,12 @@ scenarios:
     conflict_rate:
       warning: 0.01
       error: 0.03
+    # rps_profile: constant -> metric: weighted_rps
+    # target_rps: 800, warning=85%, error=70%
+    rps:
+      metric: weighted_rps
+      warning: 680
+      error: 560
 
   # Steady: Normal update operations without conflicts.
   #   - High success rate required (>= 99.9%)
@@ -138,6 +162,12 @@ scenarios:
     conflict_rate:
       warning: 0.0005
       error: 0.001
+    # rps_profile: constant -> metric: weighted_rps
+    # target_rps: 100, warning=85%, error=70%
+    rps:
+      metric: weighted_rps
+      warning: 85
+      error: 70
 
   # Conflict: Update operations with concurrent modification simulation.
   #   - Allows higher error rate after retries (<= 10%)
@@ -161,6 +191,12 @@ scenarios:
     conflict_rate:
       warning: 0.005
       error: 0.01
+    # rps_profile: constant -> metric: weighted_rps
+    # target_rps: 500, warning=85%, error=70%
+    rps:
+      metric: weighted_rps
+      warning: 425
+      error: 350
 
   # Bulk operations scenario for POST /tasks/bulk operations.
   #
@@ -181,3 +217,9 @@ scenarios:
     error_rate:
       warning: 0.001
       error: 0.005
+    # rps_profile: constant -> metric: weighted_rps
+    # target_rps: 500, warning=85%, error=70%
+    rps:
+      metric: weighted_rps
+      warning: 425
+      error: 350

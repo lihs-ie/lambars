@@ -95,21 +95,26 @@ assert_not_contains() {
 }
 
 # Create a minimal valid meta.json for tasks_bulk scenario with phase_metrics
+# merged_rps: used by regression guard (results.rps) - must be >= 341.36 to pass guard
+# weighted_rps: used by RPS threshold check via phase_metrics.weighted_rps
 make_meta_json_with_phase_metrics() {
     local directory="$1"
     local weighted_rps="$2"
     local peak_phase_rps="${3:-${weighted_rps}}"
     local sustain_phase_rps="${4:-${weighted_rps}}"
+    # merged_rps for results.rps (regression guard): default to 500 to pass guard
+    local merged_rps="${5:-500}"
 
     mkdir -p "${directory}/tasks_bulk/benchmark/meta"
     jq -n \
         --argjson weighted_rps "${weighted_rps}" \
         --argjson peak_phase_rps "${peak_phase_rps}" \
         --argjson sustain_phase_rps "${sustain_phase_rps}" \
+        --argjson merged_rps "${merged_rps}" \
         '{
             "scenario": "tasks_bulk",
             "results": {
-                "rps": $weighted_rps,
+                "rps": $merged_rps,
                 "p50": "5ms",
                 "p90": "10ms",
                 "p99": "20ms",
@@ -239,8 +244,9 @@ EOF
     tmp_dir=$(make_test_tmp_dir)
 
     # tasks_bulk: warning=425, error=350
-    # RPS = 200 (below error=350) -> should FAIL
-    make_meta_json_with_phase_metrics "${tmp_dir}" 200
+    # weighted_rps = 200 (below error=350) -> should FAIL with RPS message
+    # merged_rps (results.rps) = 500 to pass regression guard (>= 341.36)
+    make_meta_json_with_phase_metrics "${tmp_dir}" 200 200 200 500
 
     local output
     local exit_code=0
@@ -248,7 +254,7 @@ EOF
 
     assert_exit_code "3" "${exit_code}" "TC-RPS-3: exit code 3"
     assert_contains "${output}" "FAIL" "TC-RPS-3: output contains FAIL"
-    assert_contains "${output}" "RPS" "TC-RPS-3: FAIL message mentions RPS"
+    assert_contains "${output}" "weighted_rps" "TC-RPS-3: FAIL message mentions weighted_rps metric"
 }
 
 # -------------------------------------------------------------------
@@ -347,7 +353,8 @@ EOF
     tmp_dir=$(make_test_tmp_dir)
 
     # weighted_rps=200 (below error=350), peak=600 (above warning=425)
-    make_meta_json_with_phase_metrics "${tmp_dir}" 200 600 200
+    # merged_rps (results.rps) = 500 to pass regression guard (>= 341.36)
+    make_meta_json_with_phase_metrics "${tmp_dir}" 200 600 200 500
 
     local output
     local exit_code=0
@@ -355,7 +362,7 @@ EOF
 
     assert_exit_code "3" "${exit_code}" "TC-RPS-6: exit code 3 (uses weighted_rps not peak)"
     assert_contains "${output}" "FAIL" "TC-RPS-6: FAIL when weighted_rps is below error threshold"
-    assert_contains "${output}" "weighted_rps\|RPS" "TC-RPS-6: FAIL message references RPS metric"
+    assert_contains "${output}" "weighted_rps" "TC-RPS-6: FAIL message references weighted_rps metric"
 }
 
 # -------------------------------------------------------------------

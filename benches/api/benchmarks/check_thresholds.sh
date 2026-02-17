@@ -35,11 +35,87 @@ get_threshold() {
     esac
 
     local value
-    value=$(yq ".scenarios.${scenario}.${yaml_key}.error // \"\"" "${yaml_file}" 2>/dev/null)
+    value=$(SCENARIO_NAME="${scenario}" METRIC_KEY="${yaml_key}" \
+        yq '.scenarios[env(SCENARIO_NAME)][env(METRIC_KEY)].error // ""' \
+        "${yaml_file}" 2>/dev/null)
 
     if [[ -n "${value}" ]] && [[ "${value}" != "null" ]]; then
         echo "${value}"
     fi
+}
+
+get_rps_rule() {
+    local scenario="${1}"
+    local field="${2}"
+    local yaml_file="${SCRIPT_DIR}/thresholds.yaml"
+
+    if [[ ! -f "${yaml_file}" ]]; then
+        echo ""
+        return
+    fi
+
+    local value
+    value=$(SCENARIO_NAME="${scenario}" RPS_FIELD="${field}" \
+        yq '.scenarios[env(SCENARIO_NAME)].rps[env(RPS_FIELD)] // ""' \
+        "${yaml_file}" 2>/dev/null)
+
+    if [[ -n "${value}" ]] && [[ "${value}" != "null" ]]; then
+        echo "${value}"
+    fi
+}
+
+check_rps_threshold() {
+    local meta_file="${1}"
+    local scenario="${2}"
+
+    local rps_metric
+    local rps_warning
+    local rps_error
+    rps_metric=$(get_rps_rule "${scenario}" "metric")
+    rps_warning=$(get_rps_rule "${scenario}" "warning")
+    rps_error=$(get_rps_rule "${scenario}" "error")
+
+    if [[ -z "${rps_metric}" ]] || [[ -z "${rps_warning}" ]] || [[ -z "${rps_error}" ]]; then
+        return 0
+    fi
+
+    local actual_rps
+    actual_rps=$(jq -r \
+        --arg metric "${rps_metric}" \
+        '.results.phase_metrics[$metric] // .results.rps // empty' \
+        "${meta_file}" 2>/dev/null || true)
+
+    if [[ -z "${actual_rps}" ]] || [[ "${actual_rps}" == "null" ]]; then
+        actual_rps=$(jq -r '.results.rps // empty' "${meta_file}" 2>/dev/null || true)
+    fi
+
+    if [[ -z "${actual_rps}" ]] || [[ "${actual_rps}" == "null" ]]; then
+        echo "WARNING: RPS metric '${rps_metric}' not found in meta.json; skipping RPS threshold check"
+        return 0
+    fi
+
+    echo "RPS threshold check:"
+    echo "  metric     = ${rps_metric}"
+    echo "  actual_rps = ${actual_rps}"
+    echo "  warning    = ${rps_warning}"
+    echo "  error      = ${rps_error}"
+    echo ""
+
+    if awk -v actual="${actual_rps}" -v threshold="${rps_error}" \
+        'BEGIN { exit (actual < threshold) ? 0 : 1 }'; then
+        echo "FAIL: RPS below error threshold"
+        echo "  ${rps_metric} = ${actual_rps} (required >= ${rps_error})"
+        exit 3
+    fi
+
+    if awk -v actual="${actual_rps}" -v threshold="${rps_warning}" \
+        'BEGIN { exit (actual < threshold) ? 0 : 1 }'; then
+        echo "WARNING: RPS below warning threshold"
+        echo "  ${rps_metric} = ${actual_rps} (warning >= ${rps_warning})"
+    else
+        echo "PASS: RPS threshold met (${rps_metric} = ${actual_rps} >= ${rps_warning})"
+    fi
+    echo ""
 }
 
 show_usage() {
@@ -401,6 +477,8 @@ if [[ ${FAILED} -eq 1 ]]; then
     echo "  Thresholds: ${THRESHOLDS_SUMMARY}"
     exit 3
 fi
+
+check_rps_threshold "${META_FILE}" "${SCENARIO}"
 
 echo "PASS: All thresholds met"
 echo ""
