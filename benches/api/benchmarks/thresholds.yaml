@@ -12,6 +12,12 @@
 #   p99_latency_ms:       99th percentile latency in milliseconds.
 #   error_rate:           Percentage of failed requests (0.01 = 1%).
 #   rps_degradation_percent: Percentage decrease in RPS compared to baseline.
+#
+# Scenario-specific RPS thresholds use phase-aware metrics:
+#   rps.metric:   phase_metrics field to evaluate (weighted_rps, peak_phase_rps, sustain_phase_rps).
+#                 Falls back to results.rps (merged) when phase_metrics is absent.
+#   rps.warning:  RPS below this level triggers a WARNING (non-blocking).
+#   rps.error:    RPS below this level causes CI to fail (exit 3).
 
 thresholds:
   p95_latency_ms:
@@ -52,6 +58,12 @@ scenarios:
     error_rate:
       warning: 0.005
       error: 0.01
+    # rps_profile: constant -> metric: weighted_rps
+    # target_rps: 2000, warning=85%, error=70%
+    rps:
+      metric: weighted_rps
+      warning: 1700
+      error: 1400
 
   tasks_search_cold:
     p50_latency_ms:
@@ -69,6 +81,12 @@ scenarios:
     error_rate:
       warning: 0.005
       error: 0.01
+    # rps_profile: constant -> metric: weighted_rps
+    # target_rps: 1000, warning=85%, error=70%
+    rps:
+      metric: weighted_rps
+      warning: 850
+      error: 700
 
   # Status update scenario for PATCH /tasks/{id}/status operations.
   #
@@ -92,6 +110,12 @@ scenarios:
     conflict_rate:
       warning: 0.0005
       error: 0.001
+    # rps_profile: constant -> metric: weighted_rps
+    # target_rps: 800, warning=85%, error=70%
+    rps:
+      metric: weighted_rps
+      warning: 680
+      error: 560
 
   # Update scenarios for tasks_update operations.
   #
@@ -115,6 +139,12 @@ scenarios:
     conflict_rate:
       warning: 0.01
       error: 0.03
+    # rps_profile: constant -> metric: weighted_rps
+    # target_rps: 800, warning=85%, error=70%
+    rps:
+      metric: weighted_rps
+      warning: 680
+      error: 560
 
   # Steady: Normal update operations without conflicts.
   #   - High success rate required (>= 99.9%)
@@ -138,6 +168,12 @@ scenarios:
     conflict_rate:
       warning: 0.0005
       error: 0.001
+    # rps_profile: constant -> metric: weighted_rps
+    # target_rps: 100, warning=85%, error=70%
+    rps:
+      metric: weighted_rps
+      warning: 85
+      error: 70
 
   # Conflict: Update operations with concurrent modification simulation.
   #   - Allows higher error rate after retries (<= 10%)
@@ -161,6 +197,114 @@ scenarios:
     conflict_rate:
       warning: 0.005
       error: 0.01
+    # rps_profile: constant -> metric: weighted_rps
+    # target_rps: 500, warning=85%, error=70%
+    rps:
+      metric: weighted_rps
+      warning: 425
+      error: 350
+
+  # Burst/spike load test: evaluates peak RPS during burst phases.
+  # profile: burst, target_rps: 1000, burst_multiplier: 3.0 (normal: 333 RPS)
+  # peak_phase_rps should reach ~1000 during burst; warning=80%, error=70%
+  burst_spike_test:
+    p99_latency_ms:
+      warning: 400
+      error: 500
+    error_rate:
+      warning: 0.03
+      error: 0.05
+    rps:
+      metric: peak_phase_rps
+      warning: 800
+      error: 700
+
+  # Production load: evaluates peak RPS during burst phases.
+  # profile: burst, target_rps: 8000
+  # peak_phase_rps should reach ~8000 during burst; warning=80%, error=70%
+  production_load:
+    p99_latency_ms:
+      warning: 400
+      error: 500
+    error_rate:
+      warning: 0.03
+      error: 0.05
+    rps:
+      metric: peak_phase_rps
+      warning: 6400
+      error: 5600
+
+  # Ramp up/down: evaluates sustain phase RPS.
+  # profile: ramp_up_down, target_rps: 500
+  # sustain_phase_rps should hold ~500 during sustain; warning=80%, error=70%
+  ramp_up_down_test:
+    p99_latency_ms:
+      warning: 150
+      error: 200
+    error_rate:
+      warning: 0.005
+      error: 0.01
+    rps:
+      metric: sustain_phase_rps
+      warning: 400
+      error: 350
+
+  # Large scale seeded: step_up profile without explicit target_rps.
+  # Actual throughput is constrained by data scale and cache cold start.
+  # Realistic upper bound ~100 RPS; warning=80, error=60
+  large_scale_seeded:
+    p99_latency_ms:
+      warning: 400
+      error: 500
+    error_rate:
+      warning: 0.005
+      error: 0.01
+    rps:
+      metric: weighted_rps
+      warning: 80
+      error: 60
+
+  # Pool stress large: constant profile, throughput limited by pool size.
+  # Realistic upper bound ~100 RPS with pool=32; warning=80, error=60
+  pool_stress_large:
+    p99_latency_ms:
+      warning: 80
+      error: 100
+    error_rate:
+      warning: 0.005
+      error: 0.01
+    rps:
+      metric: weighted_rps
+      warning: 80
+      error: 60
+
+  # Pool stress medium: constant profile, throughput limited by pool size.
+  # target_rps unspecified; runtime defaults to 100 RPS. warning=80, error=60
+  pool_stress_medium:
+    p99_latency_ms:
+      warning: 150
+      error: 200
+    error_rate:
+      warning: 0.01
+      error: 0.02
+    rps:
+      metric: weighted_rps
+      warning: 80
+      error: 60
+
+  # Mixed contention: burst profile, target_rps: 500.
+  # peak_phase_rps should reach ~500 during burst; warning=80%, error=70%
+  mixed_contention:
+    p99_latency_ms:
+      warning: 150
+      error: 200
+    error_rate:
+      warning: 0.01
+      error: 0.02
+    rps:
+      metric: peak_phase_rps
+      warning: 400
+      error: 350
 
   # Bulk operations scenario for POST /tasks/bulk operations.
   #
@@ -181,3 +325,9 @@ scenarios:
     error_rate:
       warning: 0.001
       error: 0.005
+    # rps_profile: constant -> metric: weighted_rps
+    # target_rps: 500, warning=85%, error=70%
+    rps:
+      metric: weighted_rps
+      warning: 425
+      error: 350

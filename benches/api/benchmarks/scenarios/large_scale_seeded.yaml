@@ -52,7 +52,6 @@ thresholds:
   p50_latency_ms: 50
   p95_latency_ms: 200
   p99_latency_ms: 500
-  min_rps_achieved: 500
   max_error_rate: 0.01
 
 # Concurrency settings

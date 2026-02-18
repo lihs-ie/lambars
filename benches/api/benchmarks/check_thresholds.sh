@@ -17,29 +17,94 @@ get_threshold() {
 
     if [[ ! -f "${yaml_file}" ]]; then
         echo ""
-        return
+        return 0
     fi
 
     local yaml_key
     case "${metric}" in
-        p50|p90|p99)
-            yaml_key="${metric}_latency_ms"
-            ;;
-        error_rate|conflict_rate)
-            yaml_key="${metric}"
-            ;;
+        p50|p90|p99)              yaml_key="${metric}_latency_ms" ;;
+        error_rate|conflict_rate) yaml_key="${metric}" ;;
         *)
             echo ""
-            return
+            return 0
             ;;
     esac
 
     local value
-    value=$(yq ".scenarios.${scenario}.${yaml_key}.error // \"\"" "${yaml_file}" 2>/dev/null)
-
-    if [[ -n "${value}" ]] && [[ "${value}" != "null" ]]; then
+    value=$(yq ".scenarios.${scenario}[\"${yaml_key}\"].error // \"\"" \
+        "${yaml_file}" 2>/dev/null || true)
+    if [[ -n "${value}" && "${value}" != "null" ]]; then
         echo "${value}"
     fi
+    return 0
+}
+
+get_rps_rule() {
+    local scenario="${1}"
+    local field="${2}"
+    local yaml_file="${SCRIPT_DIR}/thresholds.yaml"
+
+    if [[ ! -f "${yaml_file}" ]]; then
+        echo ""
+        return 0
+    fi
+
+    local value
+    value=$(yq ".scenarios.${scenario}.rps.${field} // \"\"" \
+        "${yaml_file}" 2>/dev/null || true)
+    if [[ -n "${value}" && "${value}" != "null" ]]; then
+        echo "${value}"
+    fi
+    return 0
+}
+
+check_rps_threshold() {
+    local meta_file="${1}"
+    local scenario="${2}"
+
+    local rps_metric rps_warning rps_error
+    rps_metric=$(get_rps_rule "${scenario}" "metric")
+    rps_warning=$(get_rps_rule "${scenario}" "warning")
+    rps_error=$(get_rps_rule "${scenario}" "error")
+
+    if [[ -z "${rps_metric}" ]] || [[ -z "${rps_warning}" ]] || [[ -z "${rps_error}" ]]; then
+        return 0
+    fi
+
+    # Prefer phase_metrics[$metric] if present; fall back to results.rps (merged).
+    local actual_rps
+    actual_rps=$(jq -r \
+        --arg metric "${rps_metric}" \
+        '(.results.phase_metrics[$metric] // .results.rps) // empty' \
+        "${meta_file}" 2>/dev/null || true)
+
+    if [[ -z "${actual_rps}" ]] || [[ "${actual_rps}" == "null" ]]; then
+        echo "WARNING: RPS metric '${rps_metric}' not found in meta.json; skipping RPS threshold check"
+        return 0
+    fi
+
+    echo "RPS threshold check:"
+    echo "  metric     = ${rps_metric}"
+    echo "  actual_rps = ${actual_rps}"
+    echo "  warning    = ${rps_warning}"
+    echo "  error      = ${rps_error}"
+    echo ""
+
+    if awk -v actual="${actual_rps}" -v threshold="${rps_error}" \
+        'BEGIN { exit (actual < threshold) ? 0 : 1 }'; then
+        echo "FAIL: RPS below error threshold"
+        echo "  ${rps_metric} = ${actual_rps} (required >= ${rps_error})"
+        exit 3
+    fi
+
+    if awk -v actual="${actual_rps}" -v threshold="${rps_warning}" \
+        'BEGIN { exit (actual < threshold) ? 0 : 1 }'; then
+        echo "WARNING: RPS below warning threshold"
+        echo "  ${rps_metric} = ${actual_rps} (warning >= ${rps_warning})"
+    else
+        echo "PASS: RPS threshold met (${rps_metric} = ${actual_rps} >= ${rps_warning})"
+    fi
+    echo ""
 }
 
 show_usage() {
@@ -94,7 +159,8 @@ P99_MAX=$(get_threshold "${SCENARIO}" "p99")
 ERROR_RATE_MAX=$(get_threshold "${SCENARIO}" "error_rate")
 CONFLICT_RATE_MAX=$(get_threshold "${SCENARIO}" "conflict_rate")
 
-if [[ -z "${P50_MAX}" ]]; then
+# Require at least p99 threshold to be defined; p50/p90 are optional.
+if [[ -z "${P99_MAX}" ]]; then
     echo "ERROR: Unknown scenario: ${SCENARIO}"
     echo "Scenarios are defined in thresholds.yaml"
     echo "Use: yq '.scenarios | keys' ${SCRIPT_DIR}/thresholds.yaml"
@@ -141,9 +207,11 @@ ERROR_RATE="${RAW_ERROR_RATE}"
 CONFLICT_RATE="${RAW_CONFLICT_RATE}"
 
 MISSING_METRICS=""
-[[ -z "${P50}" ]] && MISSING_METRICS="${MISSING_METRICS} p50"
-[[ -z "${P90}" ]] && MISSING_METRICS="${MISSING_METRICS} p90"
-[[ -z "${P99}" ]] && MISSING_METRICS="${MISSING_METRICS} p99"
+# Only check for p50/p90 if thresholds are defined (optional latency metrics)
+[[ -n "${P50_MAX}" ]] && [[ -z "${P50}" ]] && MISSING_METRICS="${MISSING_METRICS} p50"
+[[ -n "${P90_MAX}" ]] && [[ -z "${P90}" ]] && MISSING_METRICS="${MISSING_METRICS} p90"
+# p99 is required when threshold is defined
+[[ -n "${P99_MAX}" ]] && [[ -z "${P99}" ]] && MISSING_METRICS="${MISSING_METRICS} p99"
 [[ -n "${ERROR_RATE_MAX}" ]] && [[ -z "${ERROR_RATE}" ]] && MISSING_METRICS="${MISSING_METRICS} error_rate"
 [[ -n "${CONFLICT_RATE_MAX}" ]] && [[ -z "${CONFLICT_RATE}" ]] && MISSING_METRICS="${MISSING_METRICS} conflict_rate"
 
@@ -161,8 +229,8 @@ fi
 
 echo ""
 echo "Thresholds:"
-echo "  p50 <= ${P50_MAX}ms"
-echo "  p90 <= ${P90_MAX}ms"
+[[ -n "${P50_MAX}" ]] && echo "  p50 <= ${P50_MAX}ms"
+[[ -n "${P90_MAX}" ]] && echo "  p90 <= ${P90_MAX}ms"
 echo "  p99 <= ${P99_MAX}ms"
 if [[ -n "${ERROR_RATE_MAX}" ]]; then
     echo "  error_rate <= ${ERROR_RATE_MAX}"
@@ -172,8 +240,8 @@ if [[ -n "${CONFLICT_RATE_MAX}" ]]; then
 fi
 echo ""
 echo "Results:"
-echo "  p50 = ${P50}ms"
-echo "  p90 = ${P90}ms"
+[[ -n "${P50}" ]] && echo "  p50 = ${P50}ms"
+[[ -n "${P90}" ]] && echo "  p90 = ${P90}ms"
 echo "  p99 = ${P99}ms"
 if [[ -n "${ERROR_RATE}" ]]; then
     echo "  error_rate = ${ERROR_RATE}"
@@ -346,22 +414,28 @@ fi
 FAILED=0
 FAILURES=""
 
-if (( $(echo "${P50} > ${P50_MAX}" | bc -l) )); then
-    FAILURES="${FAILURES}
+if [[ -n "${P50_MAX}" ]] && [[ -n "${P50}" ]]; then
+    if (( $(echo "${P50} > ${P50_MAX}" | bc -l) )); then
+        FAILURES="${FAILURES}
   - p50=${P50}ms exceeds threshold of ${P50_MAX}ms"
-    FAILED=1
+        FAILED=1
+    fi
 fi
 
-if (( $(echo "${P90} > ${P90_MAX}" | bc -l) )); then
-    FAILURES="${FAILURES}
+if [[ -n "${P90_MAX}" ]] && [[ -n "${P90}" ]]; then
+    if (( $(echo "${P90} > ${P90_MAX}" | bc -l) )); then
+        FAILURES="${FAILURES}
   - p90=${P90}ms exceeds threshold of ${P90_MAX}ms"
-    FAILED=1
+        FAILED=1
+    fi
 fi
 
-if (( $(echo "${P99} > ${P99_MAX}" | bc -l) )); then
-    FAILURES="${FAILURES}
+if [[ -n "${P99}" ]]; then
+    if (( $(echo "${P99} > ${P99_MAX}" | bc -l) )); then
+        FAILURES="${FAILURES}
   - p99=${P99}ms exceeds threshold of ${P99_MAX}ms"
-    FAILED=1
+        FAILED=1
+    fi
 fi
 
 if [[ -n "${ERROR_RATE_MAX}" ]] && [[ -n "${ERROR_RATE}" ]]; then
@@ -383,8 +457,12 @@ if [[ -n "${CONFLICT_RATE_MAX}" ]]; then
         fi
     fi
 fi
-RESULTS_SUMMARY="p50=${P50}ms, p90=${P90}ms, p99=${P99}ms"
-THRESHOLDS_SUMMARY="p50<=${P50_MAX}ms, p90<=${P90_MAX}ms, p99<=${P99_MAX}ms"
+RESULTS_SUMMARY="p99=${P99}ms"
+[[ -n "${P50}" ]] && RESULTS_SUMMARY="p50=${P50}ms, ${RESULTS_SUMMARY}"
+[[ -n "${P90}" ]] && RESULTS_SUMMARY="p90=${P90}ms, ${RESULTS_SUMMARY}"
+THRESHOLDS_SUMMARY="p99<=${P99_MAX}ms"
+[[ -n "${P50_MAX}" ]] && THRESHOLDS_SUMMARY="p50<=${P50_MAX}ms, ${THRESHOLDS_SUMMARY}"
+[[ -n "${P90_MAX}" ]] && THRESHOLDS_SUMMARY="p90<=${P90_MAX}ms, ${THRESHOLDS_SUMMARY}"
 [[ -n "${ERROR_RATE}" ]] && RESULTS_SUMMARY="${RESULTS_SUMMARY}, error_rate=${ERROR_RATE}"
 [[ -n "${ERROR_RATE_MAX}" ]] && THRESHOLDS_SUMMARY="${THRESHOLDS_SUMMARY}, error_rate<=${ERROR_RATE_MAX}"
 # Use calculated conflict_error_rate if available
@@ -401,6 +479,8 @@ if [[ ${FAILED} -eq 1 ]]; then
     echo "  Thresholds: ${THRESHOLDS_SUMMARY}"
     exit 3
 fi
+
+check_rps_threshold "${META_FILE}" "${SCENARIO}"
 
 echo "PASS: All thresholds met"
 echo ""

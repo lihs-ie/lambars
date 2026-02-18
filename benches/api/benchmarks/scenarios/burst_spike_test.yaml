@@ -59,7 +59,6 @@ worker_config:
 thresholds:
   max_error_rate: 0.05          # 5% max error rate (higher tolerance for bursts)
   p99_latency_ms: 500           # p99 latency threshold (higher during bursts)
-  min_rps_achieved: 900         # Minimum RPS during burst phase
   recovery_time_seconds: 10     # Expected time to return to normal after burst
 
 # Metadata for result analysis
