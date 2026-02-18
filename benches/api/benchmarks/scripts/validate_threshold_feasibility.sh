@@ -88,16 +88,14 @@ fi
 # Read RPS threshold rule from thresholds.yaml
 # =============================================================================
 
-RPS_METRIC=$(SCENARIO_NAME="${SCENARIO_NAME}" \
-    yq '.scenarios[env(SCENARIO_NAME)].rps.metric // ""' "${THRESHOLD_FILE}" 2>/dev/null | tr -d '"')
+RPS_METRIC=$(yq ".scenarios.${SCENARIO_NAME}.rps.metric // \"\"" "${THRESHOLD_FILE}" 2>/dev/null | tr -d '"')
 
 if [[ -z "${RPS_METRIC}" || "${RPS_METRIC}" == "null" ]]; then
     echo "PASS: ${SCENARIO_NAME} (no rps rule defined - SKIP)"
     exit 0
 fi
 
-RPS_ERROR_THRESHOLD=$(SCENARIO_NAME="${SCENARIO_NAME}" \
-    yq '.scenarios[env(SCENARIO_NAME)].rps.error // 0' "${THRESHOLD_FILE}" 2>/dev/null | tr -d '"')
+RPS_ERROR_THRESHOLD=$(yq ".scenarios.${SCENARIO_NAME}.rps.error // 0" "${THRESHOLD_FILE}" 2>/dev/null | tr -d '"')
 
 if [[ -z "${RPS_ERROR_THRESHOLD}" || "${RPS_ERROR_THRESHOLD}" == "0" ]]; then
     echo "PASS: ${SCENARIO_NAME} (no rps.error threshold defined - SKIP)"

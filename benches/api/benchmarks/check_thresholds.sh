@@ -31,8 +31,7 @@ get_threshold() {
     esac
 
     local value
-    value=$(SCENARIO_NAME="${scenario}" METRIC_KEY="${yaml_key}" \
-        yq '.scenarios[env(SCENARIO_NAME)][env(METRIC_KEY)].error // ""' \
+    value=$(yq ".scenarios.${scenario}[\"${yaml_key}\"].error // \"\"" \
         "${yaml_file}" 2>/dev/null || true)
     if [[ -n "${value}" && "${value}" != "null" ]]; then
         echo "${value}"
@@ -51,8 +50,7 @@ get_rps_rule() {
     fi
 
     local value
-    value=$(SCENARIO_NAME="${scenario}" RPS_FIELD="${field}" \
-        yq '.scenarios[env(SCENARIO_NAME)].rps[env(RPS_FIELD)] // ""' \
+    value=$(yq ".scenarios.${scenario}.rps.${field} // \"\"" \
         "${yaml_file}" 2>/dev/null || true)
     if [[ -n "${value}" && "${value}" != "null" ]]; then
         echo "${value}"
