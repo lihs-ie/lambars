@@ -1,0 +1,208 @@
+Bank Sample API Benchmark Results
+==================================
+Date: 2026年 1月17日 土曜日 17時15分11秒 JST
+Base URL: http://localhost:8081
+Threads: 4
+Connections: 100
+Duration: 10s
+
+
+Test Accounts:
+  Account 1: 019bcb05-c435-7e00-bd2e-b1bbdc494727
+  Account 2: 019bcb05-c445-7ff3-a6cf-b457d2be3bb3
+
+========================================
+Benchmark: Health Check (Baseline)
+Time: 2026年 1月17日 土曜日 17時15分11秒 JST
+Config: 4 threads, 100 connections, 10s
+========================================
+Running 10s test @ http://localhost:8081
+  4 threads and 100 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     1.92ms  765.14us  11.64ms   84.64%
+    Req/Sec    13.08k     1.49k   22.02k    64.84%
+  522267 requests in 10.10s, 72.72MB read
+Requests/sec:  51708.09
+Transfer/sec:      7.20MB
+------------------------------
+Health Check Benchmark Results
+------------------------------
+Requests/sec: 51708.09
+Transfer/sec: 7372.44 KB
+Avg Latency:  1.92 ms
+Max Latency:  11.64 ms
+Latency Stdev: 0.77 ms
+Total Requests: 522267
+Socket Errors: connect=0, read=0, write=0, timeout=0
+
+Latency Distribution:
+  50%: 1.76 ms
+  75%: 2.16 ms
+  90%: 2.71 ms
+  99%: 5.14 ms
+
+========================================
+Benchmark: Deposit (Traditional)
+Time: 2026年 1月17日 土曜日 17時15分21秒 JST
+Config: 4 threads, 100 connections, 10s
+========================================
+Running 10s test @ http://localhost:8081
+  4 threads and 100 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     2.09ms    1.63ms  40.05ms   95.57%
+    Req/Sec    12.65k     2.28k   23.62k    80.80%
+  504844 requests in 10.10s, 131.92MB read
+  Non-2xx or 3xx responses: 504844
+Requests/sec:  49967.75
+Transfer/sec:     13.06MB
+------------------------------
+Deposit Benchmark Results (deposit)
+------------------------------
+Account ID: nil
+Requests/sec: 49967.75
+Transfer/sec: 13370.28 KB
+Avg Latency:  2.09 ms
+Max Latency:  40.05 ms
+Latency Stdev: 1.63 ms
+Total Requests: 504844
+Socket Errors: connect=0, read=0, write=0, timeout=0
+
+Latency Distribution:
+  50%: 1.79 ms
+  75%: 2.23 ms
+  90%: 2.91 ms
+  99%: 7.11 ms
+
+========================================
+Benchmark: Deposit (eff_async!)
+Time: 2026年 1月17日 土曜日 17時15分31秒 JST
+Config: 4 threads, 100 connections, 10s
+========================================
+Running 10s test @ http://localhost:8081
+  4 threads and 100 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     2.51ms    1.76ms  32.02ms   93.43%
+    Req/Sec    10.53k     2.17k   15.05k    67.00%
+  419265 requests in 10.01s, 109.56MB read
+  Non-2xx or 3xx responses: 419265
+Requests/sec:  41890.16
+Transfer/sec:     10.95MB
+------------------------------
+Deposit Benchmark Results (deposit)
+------------------------------
+Account ID: nil
+Requests/sec: 41890.16
+Transfer/sec: 11208.89 KB
+Avg Latency:  2.51 ms
+Max Latency:  32.02 ms
+Latency Stdev: 1.76 ms
+Total Requests: 419265
+Socket Errors: connect=0, read=0, write=0, timeout=0
+
+Latency Distribution:
+  50%: 2.12 ms
+  75%: 2.76 ms
+  90%: 3.69 ms
+  99%: 9.03 ms
+
+========================================
+Benchmark: Withdraw (Traditional)
+Time: 2026年 1月17日 土曜日 17時15分41秒 JST
+Config: 4 threads, 100 connections, 10s
+========================================
+Running 10s test @ http://localhost:8081
+  4 threads and 100 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     3.43ms    5.47ms  75.04ms   94.13%
+    Req/Sec    10.30k     3.60k   16.14k    76.25%
+  409872 requests in 10.01s, 106.32MB read
+  Non-2xx or 3xx responses: 409872
+Requests/sec:  40952.98
+Transfer/sec:     10.62MB
+------------------------------
+Withdraw Benchmark Results (withdraw)
+------------------------------
+Account ID: nil
+Requests/sec: 40952.98
+Transfer/sec: 10878.14 KB
+Avg Latency:  3.43 ms
+Max Latency:  75.04 ms
+Latency Stdev: 5.47 ms
+Total Requests: 409872
+Socket Errors: connect=0, read=0, write=0, timeout=0
+
+Latency Distribution:
+  50%: 2.03 ms
+  75%: 2.82 ms
+  90%: 5.13 ms
+  99%: 32.16 ms
+
+========================================
+Benchmark: Withdraw (eff_async!)
+Time: 2026年 1月17日 土曜日 17時15分51秒 JST
+Config: 4 threads, 100 connections, 10s
+========================================
+Running 10s test @ http://localhost:8081
+  4 threads and 100 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     8.16ms   23.11ms 244.86ms   94.94%
+    Req/Sec     8.04k     3.79k   15.46k    65.99%
+  318270 requests in 10.04s, 82.56MB read
+  Non-2xx or 3xx responses: 318270
+Requests/sec:  31691.35
+Transfer/sec:      8.22MB
+------------------------------
+Withdraw Benchmark Results (withdraw)
+------------------------------
+Account ID: nil
+Requests/sec: 31691.35
+Transfer/sec: 8418.01 KB
+Avg Latency:  8.16 ms
+Max Latency:  244.86 ms
+Latency Stdev: 23.11 ms
+Total Requests: 318270
+Socket Errors: connect=0, read=0, write=0, timeout=0
+
+Latency Distribution:
+  50%: 2.46 ms
+  75%: 3.96 ms
+  90%: 10.30 ms
+  99%: 141.97 ms
+
+========================================
+Benchmark: Transfer
+Time: 2026年 1月17日 土曜日 17時16分01秒 JST
+Config: 4 threads, 100 connections, 10s
+========================================
+Running 10s test @ http://localhost:8081
+  4 threads and 100 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     5.59ms   12.19ms 174.91ms   94.54%
+    Req/Sec     8.09k     3.38k   13.13k    69.25%
+  322243 requests in 10.03s, 83.59MB read
+  Non-2xx or 3xx responses: 322243
+Requests/sec:  32140.35
+Transfer/sec:      8.34MB
+------------------------------
+Transfer Benchmark Results
+------------------------------
+From Account: nil
+To Account: nil
+Requests/sec: 32140.35
+Transfer/sec: 8537.28 KB
+Avg Latency:  5.59 ms
+Max Latency:  174.91 ms
+Latency Stdev: 12.19 ms
+Total Requests: 322243
+Socket Errors: connect=0, read=0, write=0, timeout=0
+
+Latency Distribution:
+  50%: 2.51 ms
+  75%: 3.78 ms
+  90%: 8.22 ms
+  99%: 68.54 ms
+
+Resource Usage Summary:
+----------------------
+  Max CPU: 99.39%
+  Max Memory: 983.00%

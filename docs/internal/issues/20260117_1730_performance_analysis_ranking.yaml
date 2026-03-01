@@ -1,0 +1,382 @@
+# lambars パフォーマンス問題 総合分析レポート
+#
+# 概要:
+#   lambars API全体のパフォーマンス問題を調査・ランキング化し、
+#   対応重要度を評価した結果をまとめたレポート
+#
+# 作成日: 2026-01-17
+# 更新日: 2026-01-17
+
+version: "1.0.0"
+name: "performance_analysis_ranking"
+status: "active"
+created_at: "2026-01-17T17:30:00+09:00"
+
+# 分析サマリー
+summary:
+  total_issues: 5
+  critical: 2
+  high: 1
+  medium: 1
+  low: 1
+
+  key_findings:
+    - "PersistentTreeMap は標準BTreeMapの2,100倍遅く、実用不可レベル"
+    - "Writer Effect の tell chain は O(n²) の計算量問題を抱える"
+    - "Trampoline は深い再帰で1,935倍の遅延が発生"
+    - "Algebraic Effect は3-5.5倍の遅延だが抽象化コストとして許容範囲"
+    - "eff_async! スタイルは従来スタイルで代替可能"
+
+# パフォーマンス問題ランキング（遅延倍率順）
+ranking:
+  - rank: 1
+    api: "PersistentTreeMap"
+    module: "persistent::treemap"
+    file: "src/persistent/treemap.rs"
+
+    performance:
+      delay_ratio: "2,100x"
+      baseline: "BTreeMap 465μs (10,000 insert)"
+      current: "1.02秒 (10,000 insert)"
+      trend: "サイズ増加に対して指数的に劣化"
+
+    severity: "critical"
+    severity_label: "🔴 Critical"
+
+    bottleneck:
+      primary: "過度なclone操作（40-50%のオーバーヘッド）"
+      details:
+        - "Red-Black Tree実装で各rotate操作時に最大6回のcloneが発生"
+        - "src/persistent/treemap.rs に45箇所のclone呼び出し"
+        - "ツリー構造の高さが高くキャッシュ効率が低い"
+
+    impact:
+      scope: "大規模データセット（10,000件以上）での使用"
+      severity: "実質使用不可能"
+      affected_users: "永続データ構造を使用する全ユーザー"
+
+    solution:
+      recommended: "B-Tree実装への移行"
+      expected_improvement: "50-100倍のパフォーマンス改善"
+      complexity: "高（大規模リファクタリング必要）"
+      effort_estimate: "2-4週間"
+
+    tracking:
+      github_issue: "#163"
+      internal_issue: "docs/internal/issues/20260115_1400_persistent_treemap_performance.yaml"
+      status: "issue化済み、要件定義未作成"
+
+  - rank: 2
+    api: "Trampoline"
+    module: "control::trampoline"
+    file: "src/control/trampoline.rs"
+
+    performance:
+      delay_ratio: "1,935x"
+      baseline: "直接実装 数μs (100,000回再帰)"
+      current: "数秒 (100,000回再帰)"
+      breakdown:
+        - depth: 100
+          direct: "1μs"
+          trampoline: "13.7μs"
+          ratio: "13.7x"
+        - depth: 1000
+          trampoline: "6.2秒"
+        - depth: 100000
+          ratio: "1,935x"
+
+    severity: "high"
+    severity_label: "🟡 High"
+
+    bottleneck:
+      primary: "毎ステップのヒープアロケーション + 動的ディスパッチ"
+      details:
+        - "ヒープアロケーション: 40-50% (Box<dyn FnOnce()>)"
+        - "動的ディスパッチ: 20-30% (vtable lookup)"
+        - "パターンマッチング: 15-20% (3パターンチェック)"
+        - "キャッシュミス: 10-15% (メモリ非局所性)"
+
+    impact:
+      scope: "深い再帰が必要なアルゴリズム"
+      severity: "使用制限あり"
+      affected_users: "スタック安全な再帰処理を必要とするユーザー"
+
+    solution:
+      recommended: "7段階の最適化計画"
+      phases:
+        - phase: 1
+          name: "インライン化の強化"
+          expected_improvement: "5-15%"
+        - phase: 2
+          name: "flat_map の Done 即時評価"
+          expected_improvement: "10-20%"
+        - phase: 3
+          name: "FlatMap チェーンの最適化"
+          expected_improvement: "15-25%"
+        - phase: 4
+          name: "run() ループの微最適化"
+          expected_improvement: "3-5%"
+        - phase: 5
+          name: "map の Done 即時評価"
+          expected_improvement: "5-10%"
+        - phase: 6
+          name: "バッチ処理の導入"
+          expected_improvement: "10-15%"
+        - phase: 7
+          name: "継続スタックの明示管理"
+          expected_improvement: "15-20%"
+      total_expected_improvement: "50%以上（1,935倍 → 100倍以下目標）"
+      complexity: "中（段階的に実施可能）"
+      effort_estimate: "1-2週間"
+
+    tracking:
+      github_issue: "#164"
+      internal_issue: "docs/internal/issues/20260115_1405_trampoline_performance.yaml"
+      requirements: "docs/internal/requirements/20260115_1700_trampoline_performance.yaml"
+      status: "要件定義完成、実装未開始"
+
+  - rank: 3
+    api: "Writer Effect (tell chain)"
+    module: "effect::writer"
+    file: "src/effect/writer.rs"
+
+    performance:
+      delay_ratio: "740x (depth 10→100)"
+      baseline: "線形なら 89μs (depth 100)"
+      current: "6.6ms (depth 100)"
+      breakdown:
+        - depth: 10
+          time: "8.9μs"
+        - depth: 100
+          time: "6.6ms"
+          note: "線形なら10倍のはずが740倍増加"
+      complexity: "O(n²)"
+
+    severity: "critical"
+    severity_label: "🔴 Critical"
+
+    bottleneck:
+      primary: "毎回全体をcloneする設計"
+      details:
+        - "n回のtellで合計 0 + 1 + 2 + ... + (n-1) = O(n²) のclone"
+        - "log.borrow().clone() が毎回実行される"
+        - "String結合の非効率なcombine()呼び出し"
+      code_example: |
+        // 現在の実装のO(n²)問題:
+        // 1回目: clone 0 items, combine 1 item
+        // 2回目: clone 1 item, combine 1 item
+        // ...
+        // n回目: clone (n-1) items, combine 1 item
+
+    impact:
+      scope: "ログ出力が多い処理"
+      severity: "深刻なパフォーマンス劣化"
+      affected_users: "Writer モナドでログ蓄積を行うユーザー"
+      example: "100回の tell で 6.6ms は実用上問題"
+
+    solution:
+      recommended: "Vec<W> 蓄積パターン"
+      expected_improvement: "10-20倍（6.6ms → 数百μs）"
+      complexity_change: "O(n²) → O(n)"
+      implementation_complexity: "低（比較的シンプルな修正）"
+      effort_estimate: "2-3日"
+      alternatives:
+        - name: "Rope データ構造"
+          description: "String結合に特化"
+        - name: "遅延評価の導入"
+          description: "実装が複雑"
+
+    tracking:
+      github_issue: "#166"
+      internal_issue: "docs/internal/issues/20260115_1415_writer_effect_on2.yaml"
+      status: "issue化済み、要件定義未作成"
+
+  - rank: 4
+    api: "Algebraic Effect (Eff)"
+    module: "effect::algebraic"
+    files:
+      - "src/effect/algebraic/eff.rs"
+      - "src/effect/algebraic/writer.rs"
+
+    performance:
+      delay_ratio: "3-5.5x"
+      breakdown:
+        - effect: "Reader"
+          traditional: "63ns"
+          eff: "350ns"
+          ratio: "5.5x"
+        - effect: "State"
+          traditional: "102ns"
+          eff: "458ns"
+          ratio: "4.5x"
+        - effect: "Writer"
+          traditional: "168ns"
+          eff: "488ns"
+          ratio: "2.9x"
+      deep_chain:
+        operation: "state_effect_modify[100]"
+        time: "13ms"
+        note: "指数的増加"
+
+    severity: "medium"
+    severity_label: "🟢 Medium"
+
+    bottleneck:
+      primary: "型消去継続によるオーバーヘッド"
+      details:
+        - "各 flat_map で 3つの Box が生成される"
+        - "動的ディスパッチの累積効果"
+        - "深いエフェクトチェーンで指数的に性能劣化"
+
+    impact:
+      scope: "Algebraic Effect を使用する処理"
+      severity: "抽象化コストとして一定程度許容可能"
+      affected_users: "高度な関数型パターンを使用するユーザー"
+
+    solution:
+      recommended: "継続構造の簡素化"
+      expected_improvement: "30-50%"
+      complexity: "高"
+      effort_estimate: "1-2週間"
+      alternatives:
+        - name: "ホットパス最適化"
+          expected_improvement: "10-20%"
+          risk: "低"
+        - name: "特化型ハンドラーの提供"
+          description: "ユーザーが選択可能"
+
+    tracking:
+      github_issue: "#165"
+      internal_issue: "docs/internal/issues/20260115_1410_effect_system_performance.yaml"
+      status: "issue化済み、要件定義未作成"
+
+  - rank: 5
+    api: "eff_async! スタイル"
+    module: "Bank Sample Application"
+    files:
+      - "samples/bank/src/api/handlers/transaction.rs"
+      - "samples/bank/src/api/handlers/workflow_eff.rs"
+
+    performance:
+      delay_ratio: "3.4x"
+      breakdown:
+        - endpoint: "Deposit (traditional)"
+          throughput: "~5,000 req/s"
+          latency: "20.11ms"
+        - endpoint: "Deposit (eff_async!)"
+          throughput: "~1,500 req/s"
+          latency: "87.28ms"
+        - endpoint: "Withdraw (traditional)"
+          throughput: "~1,100 req/s"
+          latency: "89.05ms"
+        - endpoint: "Withdraw (eff_async!)"
+          throughput: "~850 req/s"
+          latency: "144.71ms"
+
+    severity: "low"
+    severity_label: "🟢 Low"
+
+    bottleneck:
+      primary: "ExceptT モナドトランスフォーマーのオーバーヘッド"
+      details:
+        - "モナドスタックの各層での関数呼び出しオーバーヘッド"
+        - "Boxing による追加のヒープアロケーション"
+
+    impact:
+      scope: "Bank Sample の eff_async! エンドポイント"
+      severity: "低（従来スタイルで代替可能）"
+      affected_users: "eff_async! スタイルを選択したユーザー"
+
+    solution:
+      recommended: "ドキュメントで使い分けを推奨"
+      status: "既に両スタイル提供済み"
+      guidance: |
+        - パフォーマンス重視: 従来の ? 演算子スタイル
+        - 可読性・合成性重視: eff_async! スタイル
+      effort_estimate: "なし（対応完了）"
+
+    tracking:
+      internal_issue: "docs/internal/done/issues/20260117_1700_eff_async_limited_value.yaml"
+      status: "解決済み（両スタイル提供）"
+
+# 対応優先度マトリックス
+priority_matrix:
+  description: |
+    影響度と工数を軸にした優先度マトリックス
+
+                        影響度
+                   低         高
+             ┌─────────┬─────────┐
+          低 │ Low     │ Medium  │
+    工数     │eff_async│ Eff     │
+             ├─────────┼─────────┤
+          高 │ Medium  │ Critical│
+             │Trampoline│TreeMap  │
+             │         │ Writer  │
+             └─────────┴─────────┘
+
+  quadrants:
+    - position: "高影響・低工数"
+      priority: "最優先"
+      items:
+        - "Writer Effect O(n²)"
+    - position: "高影響・高工数"
+      priority: "計画的対応"
+      items:
+        - "PersistentTreeMap"
+    - position: "低影響・高工数"
+      priority: "段階的対応"
+      items:
+        - "Trampoline"
+    - position: "低影響・低工数"
+      priority: "現状維持可"
+      items:
+        - "eff_async!"
+        - "Algebraic Effect"
+
+# 推奨対応順序
+recommended_action_order:
+  - order: 1
+    api: "Writer Effect O(n²)"
+    reason: "工数低・影響高 → 即時対応可能で効果大"
+    action: "Vec<W> 蓄積パターンへの修正"
+
+  - order: 2
+    api: "PersistentTreeMap"
+    reason: "工数高・影響高 → 計画的に着手"
+    action: "B-Tree実装への移行プロジェクト開始"
+
+  - order: 3
+    api: "Trampoline"
+    reason: "段階的最適化で着手可能"
+    action: "Phase 1-3 を優先実施"
+
+  - order: 4
+    api: "Algebraic Effect"
+    reason: "長期改善課題として検討"
+    action: "継続構造の簡素化を設計"
+
+# ベンチマーク環境
+benchmark_environment:
+  hardware:
+    cpu: "Apple M3 Pro"
+    memory: "制限なし（lambars本体）/ 1GB（Bank Sample Docker）"
+  software:
+    rust_version: "1.92.0"
+    docker: "Docker Desktop 4.37"
+  tools:
+    - "criterion 0.8"
+    - "wrk 4.2.0"
+
+# 関連ドキュメント
+related_documents:
+  issues:
+    - "docs/internal/issues/20260115_1400_persistent_treemap_performance.yaml"
+    - "docs/internal/issues/20260115_1405_trampoline_performance.yaml"
+    - "docs/internal/issues/20260115_1410_effect_system_performance.yaml"
+    - "docs/internal/issues/20260115_1415_writer_effect_on2.yaml"
+  requirements:
+    - "docs/internal/requirements/20260115_1700_trampoline_performance.yaml"
+  benchmarks:
+    - "benches/"
+    - "samples/bank/benchmarks/"

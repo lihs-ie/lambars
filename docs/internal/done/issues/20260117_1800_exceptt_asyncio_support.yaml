@@ -1,21 +1,22 @@
-# ExceptT の AsyncIO サポート不足
+# ExceptT の AsyncIO サポート
 #
 # 概要:
-#   ExceptT モナドトランスフォーマーが AsyncIO をサポートしていないため、
-#   eff_async! マクロを使った do-notation スタイルのエラーハンドリングが困難
+#   ExceptT モナドトランスフォーマーに AsyncIO サポートを追加し、
+#   eff_async! マクロを使った do-notation スタイルのエラーハンドリングを可能にする
 #
-# 影響:
-#   - bank sample で eff_async! を活用できない
-#   - AsyncIO<Result<T, E>> パターンで do-notation が使えない
+# 解決: 2026-01-17 に実装完了
+#   - pure_async_io, throw_async_io, lift_async_io
+#   - flat_map, flat_map_async_io, fmap_async_io
+#   - catch_async_io, run_async_io
+#   - from_result
 
 version: "1.0.0"
 name: "exceptt_asyncio_support"
-status: "completed"
+status: "resolved"
 created_at: "2026-01-17T18:00:00+09:00"
-completed_at: "2026-01-17T12:00:00+09:00"
+resolved_at: "2026-01-17T20:00:00+09:00"
 priority: "medium"
 category: "feature_request"
-pull_request: "https://github.com/lihs-ie/lambars/pull/187"
 
 # 問題の説明
 problem:
@@ -140,3 +141,21 @@ notes:
     Send + Sync 制約が必要（AsyncIO のマルチスレッド対応のため）。
   - |
     この実装により、bank sample の Phase 3 (eff! マクロ) が再検討可能になる。
+
+# 解決策
+resolution:
+  implemented_methods:
+    - "pure_async_io: 値を AsyncIO<Ok(A)> にリフト"
+    - "throw_async_io: エラーを AsyncIO<Err(E)> にリフト"
+    - "lift_async_io: AsyncIO<A> を ExceptT にリフト"
+    - "from_result: Result を ExceptT にリフト"
+    - "flat_map: eff_async! マクロが呼び出すメソッド"
+    - "flat_map_async_io: 明示的な AsyncIO 用 flat_map"
+    - "fmap_async_io: 値のマッピング"
+    - "catch_async_io: エラーハンドリング"
+    - "run_async_io: AsyncIO を取り出す"
+
+  commit: "feature/exceptt-asyncio-support ブランチでマージ済み"
+
+  next_steps:
+    - "bank sample で eff_async! マクロの適用を検討"

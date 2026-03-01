@@ -1,0 +1,201 @@
+# eff_async! マクロの適用範囲の限界
+#
+# 概要:
+#   現在のbank sampleのコードベースにおいて、eff_async!マクロの
+#   適用が期待したほどの価値を提供しない理由を記録
+#
+# 結論:
+#   Phase 3をスキップし、Phase 4（Readerモナド）に進む
+#
+# 更新 2026-01-17 (1):
+#   ExceptT に AsyncIO サポートが追加されたため、ブロッカーは解消。
+#   ただし、Rust イディオムとの競合（? 演算子）は依然として存在するため、
+#   実装するかは再評価が必要。
+#
+# 更新 2026-01-17 (2):
+#   eff_async! + ExceptT パターンを deposit_handler_eff, withdraw_handler_eff で実装。
+#   両方のスタイル（? 演算子 vs eff_async!）が利用可能になった。
+
+version: "1.0.0"
+name: "eff_async_limited_value"
+status: "resolved"
+created_at: "2026-01-17T17:00:00+09:00"
+updated_at: "2026-01-17T21:00:00+09:00"
+resolved_at: "2026-01-17T21:00:00+09:00"
+
+# 背景
+background:
+  original_plan: |
+    ロードマップのPhase 3では、eff!マクロ（eff_async!）によるワークフロー記述を
+    計画していた。これにより、do-notationスタイルでAsyncIO操作を記述し、
+    複雑な非同期ワークフローの可読性を向上させることを目指していた。
+
+  discovery: |
+    実装を検討した結果、現在のコードベースでは期待したほどの
+    価値が得られないことが判明した。
+
+# 問題点
+issues:
+  - id: result_wrapping
+    title: "Result型のラッピング問題"
+    description: |
+      現在のAsyncIO操作はすべて `AsyncIO<Result<T, E>>` を返す。
+
+      eff_async! でバインドすると:
+      ```rust
+      eff_async! {
+          result <= some_async_operation();  // result は Result<T, E>
+          // ここで T を直接扱えない
+      }
+      ```
+
+      内部の T を取り出すには追加のマッチングやエラーハンドリングが必要で、
+      現在の `?` 演算子パターンより複雑になる。
+
+  - id: idiomatic_rust
+    title: "Rustイディオムとの競合"
+    description: |
+      Rustでは `?` 演算子による早期リターンが標準的なエラー処理パターン:
+      ```rust
+      let events = event_store
+          .load_events(&account_id)
+          .run_async()
+          .await
+          .map_err(|e| event_store_error_response(&e))?;
+      ```
+
+      これは既に十分に簡潔で読みやすく、Rust開発者に馴染みがある。
+
+  - id: monad_transformer_needed
+    title: "モナドトランスフォーマーの必要性"
+    resolved: true
+    resolved_at: "2026-01-17T20:00:00+09:00"
+    description: |
+      eff_async! で Result を透過的に扱うには ExceptT のような
+      モナドトランスフォーマーが必要。
+
+      【解決済み】ExceptT に AsyncIO サポートが追加された:
+      - pure_async_io, throw_async_io, lift_async_io
+      - flat_map（eff_async! マクロが呼び出す）
+      - catch_async_io, run_async_io
+
+      残る懸念:
+      - Rust の型システムでは型推論が困難になる場合がある
+      - 追加の学習コストに見合うメリットが少ない可能性
+
+# 代替案の検討
+alternatives_considered:
+  - id: pure_asyncio
+    description: |
+      AsyncIO<T> を返す関数に変更し、エラーを別の方法で処理する。
+    rejected_reason: |
+      エラー処理のベストプラクティスに反する。
+      Result型でエラーを表現することはRustの重要なイディオム。
+
+  - id: except_transformer
+    description: |
+      ExceptT<E, AsyncIO<Result<A, E>>> を使用する。
+    status: "available"
+    note: |
+      【更新】ExceptT に AsyncIO サポートが追加され、この選択肢が利用可能になった。
+      ただし、型が複雑になり、読みやすさが低下する可能性は残る。
+      Rust開発者にとって直感的でない可能性もある。
+      再評価が必要。
+
+  - id: status_quo
+    description: |
+      現在の `.run_async().await?` パターンを維持する。
+    accepted_reason: |
+      - イディオマティックなRust
+      - 十分に簡潔
+      - エラー追跡が明確
+      - 追加の学習コストなし
+
+# 今後の対応
+future_considerations:
+  - id: revisit_when_needed
+    description: |
+      以下の場合に再検討:
+      1. ✅ lambarsにAsyncIO用のExceptTが追加された場合 → 解決済み
+      2. より複雑なワークフローが必要になった場合
+      3. Rustにdo-notationが導入された場合
+
+  - id: document_pattern
+    description: |
+      現在のパイプラインパターン（Phase 2で実装済み）を
+      ドキュメントで推奨パターンとして記載する。
+
+  - id: evaluate_exceptt_usage
+    description: |
+      ExceptT AsyncIO サポートが追加されたため、以下を評価する:
+      1. eff_async! + ExceptT パターンの可読性
+      2. 型推論の実用性
+      3. ? 演算子パターンとの比較
+
+# 関連
+related:
+  - "docs/internal/plans/20260117_1500_lambars_full_utilization_roadmap.yaml"
+  - "src/api/handlers/transaction.rs"
+  - "src/infrastructure/event_store.rs"
+
+# 解決策の提案
+resolution_proposal:
+  issue: "docs/internal/done/issues/20260117_1800_exceptt_asyncio_support.yaml"
+  status: "resolved"
+  resolved_at: "2026-01-17T20:00:00+09:00"
+  description: |
+    【解決済み】ExceptT に AsyncIO サポートが追加された。
+    ExceptT<E, AsyncIO<Result<A, E>>> の flat_map が実装され、
+    eff_async! マクロで透過的なエラーハンドリングが技術的に可能になった。
+
+# 実装完了
+implementation:
+  status: "completed"
+  completed_at: "2026-01-17T21:00:00+09:00"
+
+  new_files:
+    - path: "src/api/handlers/workflow_eff.rs"
+      description: |
+        ExceptT + eff_async! ワークフローユーティリティモジュール
+        - WorkflowResult<A> 型エイリアス
+        - pure_async, throw_async, from_result, lift_async_io, lift_async_result ヘルパー
+
+  modified_files:
+    - path: "src/api/handlers/transaction.rs"
+      changes:
+        - "deposit_handler_eff: eff_async! パターンによる入金ハンドラー"
+        - "withdraw_handler_eff: eff_async! パターンによる出金ハンドラー"
+        - "execute_deposit_workflow_eff: eff_async! ワークフロー実行"
+        - "execute_withdraw_workflow_eff: eff_async! ワークフロー実行"
+        - "deposit_response, withdraw_response: レスポンス生成ヘルパー"
+        - "idempotency_conflict_response: エラーレスポンスヘルパー"
+
+    - path: "src/api/routes.rs"
+      changes:
+        - "POST /accounts/{id}/deposit-eff: eff_async! 版 deposit エンドポイント"
+        - "POST /accounts/{id}/withdraw-eff: eff_async! 版 withdraw エンドポイント"
+
+  test_results:
+    total: 749
+    passed: 749
+    failed: 0
+
+  comparison:
+    traditional_pattern: |
+      let events = event_store.load_events(&id).run_async().await.map_err(...)?;
+      let account = Account::from_events(&events).ok_or(...)?;
+      let event = either_to_result(deposit(&command, &account, timestamp)).map_err(...)?;
+      event_store.append_events(...).run_async().await.map_err(...)?;
+
+    eff_async_pattern: |
+      eff_async! {
+          event <= from_result(either_to_result(deposit(&command, &account, timestamp)).map_err(...));
+          _ <= lift_async_result(event_store.append_events(...), |e| ...);
+          _ <= lift_async_result(read_model.invalidate(...).fmap(Ok::<_, ()>), |_| ...);
+          pure_async(event)
+      }
+
+  notes:
+    - "PersistentList が Send でないため、events をブロック内でドロップする必要がある"
+    - "idempotency の早期成功リターンは eff_async! 外で処理"
+    - "両方のスタイル（? 演算子 vs eff_async!）が選択可能"

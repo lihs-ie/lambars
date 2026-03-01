@@ -1,0 +1,140 @@
+# Reader/ReaderTモナドの適用範囲の限界
+#
+# 概要:
+#   現在のbank sampleのアーキテクチャにおいて、Reader/ReaderTモナドの
+#   適用が期待したほどの価値を提供しない理由を記録
+#
+# 結論:
+#   Phase 4をスキップし、Phase 5（Writerモナド）に進む
+
+version: "1.0.0"
+name: "reader_monad_limited_value"
+status: "deferred"
+created_at: "2026-01-17T17:30:00+09:00"
+
+# 背景
+background:
+  original_plan: |
+    ロードマップのPhase 4では、Readerモナドによる依存性注入を計画していた。
+    AppReader<A> = Reader<AppDependencies, A> を定義し、
+    ハンドラーをReader値として表現することを目指していた。
+
+  discovery: |
+    実装を検討した結果、現在のアーキテクチャでは期待したほどの
+    価値が得られないことが判明した。
+
+# 現状分析
+current_architecture:
+  handlers: |
+    AxumのState extractorで依存性を受け取る:
+    ```rust
+    pub async fn create_account(
+        State(dependencies): State<AppDependencies>,
+        Json(request): Json<OpenAccountRequest>,
+    ) -> Result<...> {
+        let event_store = dependencies.event_store();
+        // ...
+    }
+    ```
+    これはAxumのイディオマティックなパターン。
+
+  workflows: |
+    ワークフローは純粋関数で、依存性を必要としない:
+    - open_account: Command → Either<DomainError, AccountOpened>
+    - deposit: Command + Account → Either<DomainError, MoneyDeposited>
+
+    全ての必要なデータはパラメータとして渡される。
+    これは関数型プログラミングの良いパターン。
+
+  infrastructure: |
+    EventStore, ReadModel等のインフラは AppDependencies に含まれ、
+    ハンドラー層で State extractor 経由でアクセスされる。
+
+# 問題点
+issues:
+  - id: axum_idiom_conflict
+    title: "Axumイディオムとの競合"
+    description: |
+      AxumはState extractorで依存性注入を行うのが標準パターン。
+      Readerを使用すると:
+      1. ハンドラーシグネチャが非標準になる
+      2. Axum開発者にとって読みにくくなる
+      3. フレームワークの利点を活かせない
+
+  - id: async_complexity
+    title: "非同期処理の複雑化"
+    description: |
+      ハンドラーは非同期関数。Readerを使うにはReaderTが必要:
+      ```rust
+      ReaderT<AppDependencies, AsyncIO<Result<T, E>>>
+      ```
+
+      これは:
+      1. 型が複雑になる
+      2. エラーハンドリングが煩雑になる
+      3. デバッグが困難になる
+
+  - id: pure_workflows
+    title: "ワークフローが既に純粋"
+    description: |
+      現在のワークフローは依存性を持たない純粋関数。
+      Reader経由で依存性を注入する必要がない。
+
+      純粋関数として設計されているため、
+      Readerが提供する「環境の暗黙的な受け渡し」は不要。
+
+  - id: testing_already_easy
+    title: "テストは既に容易"
+    description: |
+      現在の設計で:
+      1. ワークフローは純粋関数なので直接テスト可能
+      2. ハンドラーはモックdependenciesで統合テスト可能
+      3. ReaderによるDIの利点が限定的
+
+# 代替案の検討
+alternatives_considered:
+  - id: full_reader_transformation
+    description: |
+      全てのハンドラーをReaderT<AppDependencies, AsyncIO<Result<T, E>>>に変換。
+    rejected_reason: |
+      - 型が複雑すぎる
+      - Axumイディオムから大きく外れる
+      - 保守性が低下する
+
+  - id: partial_reader_adoption
+    description: |
+      一部の計算のみReaderを使用。
+    rejected_reason: |
+      - 一貫性がなくなる
+      - 混乱を招く
+      - メリットが限定的
+
+  - id: status_quo
+    description: |
+      現在のState extractorパターンを維持。
+    accepted_reason: |
+      - Axumイディオマティック
+      - シンプルで理解しやすい
+      - 十分にテスト可能
+      - 変更コストに見合うメリットがない
+
+# 今後の対応
+future_considerations:
+  - id: new_project_consideration
+    description: |
+      新規プロジェクトでReader/ReaderTを検討する場合:
+      1. 同期処理が主体の場合に有効
+      2. 複雑な依存関係グラフがある場合に有効
+      3. フレームワークがReaderパターンをサポートしている場合に有効
+
+  - id: haskell_comparison
+    description: |
+      HaskellのServantフレームワークではReaderTがイディオマティック。
+      Rustでは異なるパターン（State extractor）が主流。
+      言語/フレームワークに適したパターンを選択すべき。
+
+# 関連
+related:
+  - "docs/internal/plans/20260117_1500_lambars_full_utilization_roadmap.yaml"
+  - "src/api/handlers/account.rs"
+  - "src/infrastructure/dependencies.rs"

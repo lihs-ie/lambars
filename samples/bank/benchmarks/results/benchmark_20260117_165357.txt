@@ -1,0 +1,135 @@
+Bank Sample API Benchmark Results
+==================================
+Date: 2026年 1月17日 土曜日 16時53分57秒 JST
+Base URL: http://localhost:8081
+Threads: 4
+Connections: 100
+Duration: 10s
+
+
+Test Accounts:
+  Account 1:
+  Account 2:
+
+========================================
+Benchmark: Health Check (Baseline)
+Time: 2026年 1月17日 土曜日 16時53分57秒 JST
+Config: 4 threads, 100 connections, 10s
+========================================
+Running 10s test @ http://localhost:8081
+  4 threads and 100 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     1.91ms    0.85ms  21.42ms   89.63%
+    Req/Sec    13.24k     1.43k   16.27k    71.50%
+  527162 requests in 10.00s, 73.40MB read
+Requests/sec:  52708.94
+Transfer/sec:      7.34MB
+------------------------------
+Health Check Benchmark Results
+------------------------------
+Requests/sec: 52708.94
+Transfer/sec: 7515.14 KB
+Avg Latency:  1.91 ms
+Max Latency:  21.42 ms
+Latency Stdev: 0.85 ms
+Total Requests: 527162
+Socket Errors: connect=0, read=0, write=0, timeout=0
+
+Latency Distribution:
+  50%: 1.74 ms
+  75%: 2.13 ms
+  90%: 2.65 ms
+  99%: 5.12 ms
+
+========================================
+Benchmark: Deposit (Traditional)
+Time: 2026年 1月17日 土曜日 16時54分07秒 JST
+Config: 4 threads, 100 connections, 10s
+========================================
+Error: account_id is required
+Usage: wrk ... -s deposit.lua http://localhost:8081 -- <account_id> [eff]
+
+========================================
+Benchmark: Deposit (eff_async!)
+Time: 2026年 1月17日 土曜日 16時54分07秒 JST
+Config: 4 threads, 100 connections, 10s
+========================================
+Running 10s test @ http://localhost:8081
+  4 threads and 100 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     1.98ms  770.72us  16.15ms   83.52%
+    Req/Sec    12.72k     1.61k   15.70k    65.75%
+  506256 requests in 10.00s, 132.77MB read
+  Non-2xx or 3xx responses: 506256
+Requests/sec:  50609.61
+Transfer/sec:     13.27MB
+------------------------------
+Deposit Benchmark Results (deposit)
+------------------------------
+Account ID: nil
+Requests/sec: 50609.61
+Transfer/sec: 13591.45 KB
+Avg Latency:  1.98 ms
+Max Latency:  16.15 ms
+Latency Stdev: 0.77 ms
+Total Requests: 506256
+Socket Errors: connect=0, read=0, write=0, timeout=0
+
+Latency Distribution:
+  50%: 1.81 ms
+  75%: 2.23 ms
+  90%: 2.80 ms
+  99%: 4.88 ms
+
+========================================
+Benchmark: Withdraw (Traditional)
+Time: 2026年 1月17日 土曜日 16時54分17秒 JST
+Config: 4 threads, 100 connections, 10s
+========================================
+Error: account_id is required
+Usage: wrk ... -s withdraw.lua http://localhost:8081 -- <account_id> [eff]
+
+========================================
+Benchmark: Withdraw (eff_async!)
+Time: 2026年 1月17日 土曜日 16時54分17秒 JST
+Config: 4 threads, 100 connections, 10s
+========================================
+Running 10s test @ http://localhost:8081
+  4 threads and 100 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     1.95ms  730.18us  13.10ms   83.43%
+    Req/Sec    12.92k     1.17k   15.91k    69.00%
+  514338 requests in 10.00s, 133.91MB read
+  Non-2xx or 3xx responses: 514338
+Requests/sec:  51429.44
+Transfer/sec:     13.39MB
+------------------------------
+Withdraw Benchmark Results (withdraw)
+------------------------------
+Account ID: nil
+Requests/sec: 51429.44
+Transfer/sec: 13711.17 KB
+Avg Latency:  1.95 ms
+Max Latency:  13.10 ms
+Latency Stdev: 0.73 ms
+Total Requests: 514338
+Socket Errors: connect=0, read=0, write=0, timeout=0
+
+Latency Distribution:
+  50%: 1.80 ms
+  75%: 2.19 ms
+  90%: 2.71 ms
+  99%: 4.73 ms
+
+========================================
+Benchmark: Transfer
+Time: 2026年 1月17日 土曜日 16時54分27秒 JST
+Config: 4 threads, 100 connections, 10s
+========================================
+Error: both from_account_id and to_account_id are required
+Usage: wrk ... -s transfer.lua http://localhost:8081 -- <from_id> <to_id>
+
+Resource Usage Summary:
+----------------------
+  Max CPU: 99.62%
+  Max Memory: 63.10%
