@@ -1,0 +1,140 @@
+# tasks_bulk SearchIndex merge 再設計 要件定義
+#
+# 概要:
+#   GitHub Actions Run 21903605063 の最新プロファイルで、`tasks_bulk` が本番閾値を大幅に未達。
+#   SearchIndex merge と永続データ構造更新の計算量・アロケーション圧を同時に下げる再設計を行う。
+#
+# 設計方針:
+#   1. add-only merge を常時同一アルゴリズムで処理せず、入力分布に応じた適応プランに切り替える。
+#   2. 永続構造の更新を item 単位から batch 単位へ集約し、Copy-on-Write の回数を削減する。
+#   3. scratch バッファの再確保を抑える容量ヒステリシスを導入し、malloc/cfree を抑制する。
+#
+# 参照:
+#   - profiling-results/github-21903605063/api-profiling-all/tasks_bulk/benchmark/meta/tasks_bulk.json
+#   - profiling-results/github-21903605063/api-profiling-all/tasks_bulk/stacks.folded
+#   - benches/api/benchmarks/scenarios/tasks_bulk.yaml
+#   - benches/api/src/api/query.rs
+
+version: "1.0.0"
+name: "tasks_bulk_search_index_merge_redesign_run21903605063"
+description: |
+  最新計測値では `tasks_bulk` が `p50=3190ms / p99=7900ms / rps=368.78`。
+  シナリオ閾値 `p99<=500ms` を大幅に超過し、本番運用判定は不合格。
+
+  `stacks.folded` では以下がホットパス化している。
+  - `SearchIndex::merge_posting_add_only_galloping`
+  - `NgramSegmentOverlay::merge_segment_into`
+  - `PersistentHashMap::get/insert`, `BTreeNode::insert/get`
+  - `malloc/cfree/realloc` を含む再確保系
+
+  ボトルネックは「マージ計算 + 永続構造更新 + メモリアロケーション」の複合であり、
+  断片的な微調整ではなく merge 戦略と更新モデルの設計変更が必要。
+
+background:
+  problem: |
+    `tasks_bulk` は target_rps=500 に対して 368.78 req/s しか達成できず、
+    tail latency は秒オーダー（p99=7.9s）で停滞している。
+    現行実装は bulk 更新中に検索インデックス差分を細粒度で反映し、
+    永続データ構造の clone/insert と容量再確保が連鎖している。
+  motivation: |
+    POST /tasks/bulk は業務バッチ投入の中核であり、ここが秒オーダーのままだと
+    リトライ雪崩・キュー滞留・ロック競合の連鎖を招く。
+    本番運用に必要な「短い tail latency」と「安定スループット」を両立させる。
+  prior_art:
+    - name: "Adaptive Merge Planner"
+      description: "入力サイズ比・重複率で binary insert / galloping / two-pointer を切り替える。"
+    - name: "Single Writer Staging + Snapshot Commit"
+      description: "mutable staging で集約後、永続構造へ一括反映する。"
+    - name: "Arena Capacity Hysteresis"
+      description: "scratch バッファを指数成長で再利用し、頻繁な再確保を防ぐ。"
+
+requirements:
+  - id: REQ-TB219-001
+    name: "add-only merge を適応プラン選択へ置換する"
+    description: |
+      現在の merge は特定経路に偏り、データ分布に不適合なケースで CPU を浪費する。
+      実行時コストモデルで merge アルゴリズムを選択する `MergePlan` を導入する。
+      これにより、tiny-add は binary insert、疎追加は galloping、密追加は two-pointer を適用する。
+    methods:
+      - name: "choose_merge_plan"
+        signature: "const fn choose_merge_plan(existing_length: usize, add_length: usize) -> MergePlan"
+        description: |
+          `MergePlan::{BinaryInsert, Galloping, TwoPointer}` を純粋関数 (const fn) で決定する。
+          estimated_overlap は実測困難かつ const fn 化を妨げるため省略し、
+          入力サイズ比のみで判定する設計とした。
+      - name: "merge_postings_adaptive"
+        signature: "fn merge_postings_adaptive(existing: &[TaskId], add: &[TaskId], out: &mut Vec<TaskId>, plan: MergePlan) -> ()"
+        description: |
+          選択済みプランに従って 1 回の merge を実行し、同値結果を保証する。
+    implementations:
+      - type: "benches/api/src/api/query.rs"
+        description: "merge_posting_add_only_* 系の呼び出し点を `choose_merge_plan` 経由に統一する。"
+
+  - id: REQ-TB219-002
+    name: "BTree 更新の COW 連鎖をキーソートで削減する"
+    description: |
+      当初は staging commit 方式 (mutable staging -> snapshot commit) を計画したが、
+      PersistentTreeMap の transient API が既に mutable staging として機能しており、
+      新たな StagingIndex 型の導入は抽象化の重複となるため方針を変更した。
+      代わりに、merge_index_delta_add_only* 系の insert 順をキーソートに統一し、
+      BTree のパス局所性を向上させることで clone 回数を削減する。
+      これにより `BTreeNode::insert/get` の COW 連鎖を根本削減する。
+    methods:
+      - name: "merge_index_delta_add_only (sorted insert)"
+        signature: "fn merge_index_delta_add_only(index: &PrefixIndex, add: &MutableIndex) -> PrefixIndex"
+        description: |
+          add のキーをソートしてから transient BTree に insert することで、
+          パス局所性を向上させ COW clone 回数を削減する。
+      - name: "merge_index_delta_add_only_owned (sorted insert)"
+        signature: "fn merge_index_delta_add_only_owned(index: &PrefixIndex, add: MutableIndex) -> PrefixIndex"
+        description: |
+          owned variant。sorted_entries を事前構築してキー順に insert する。
+      - name: "merge_index_delta_add_only_owned_with_arena (sorted insert)"
+        signature: "fn merge_index_delta_add_only_owned_with_arena(index: &PrefixIndex, add: MutableIndex, arena: &mut MergeArena) -> PrefixIndex"
+        description: |
+          arena reuse variant。sorted_entries を事前構築してキー順に insert する。
+    implementations:
+      - type: "benches/api/src/api/query.rs"
+        description: "merge_index_delta_add_only* 3関数にキーソート insert を導入する。"
+
+  - id: REQ-TB219-003
+    name: "scratch 容量管理をヒステリシス化する"
+    description: |
+      reserve/realloc の往復で発生する allocator 負荷を抑えるため、
+      scratch 容量を指数成長で維持し、縮小は明示 compaction 時だけ実施する。
+    methods:
+      - name: "reserve_with_hysteresis"
+        signature: "fn reserve_with_hysteresis(buffer: &mut Vec<TaskId>, required: usize) -> ()"
+        description: |
+          `required` を満たす最小容量ではなく、将来要求を見越した容量 (3/2 成長) を確保する。
+          整数演算 (saturating_mul(3) / 2) を使用し、f32 キャスト精度の問題を回避する。
+      - name: "compact_when_idle"
+        signature: "fn compact_when_idle(&mut self, idle_threshold: usize) -> ()"
+        description: |
+          高頻度パスでは shrink せず、アイドル周期でのみ compaction を行う。
+          writer_loop の recv_timeout Timeout 分岐から呼び出される。
+    implementations:
+      - type: "benches/api/src/api/query.rs"
+        description: "MergeArena/scratch 再利用ロジックへ容量ヒステリシスを導入する。"
+
+non_functional_requirements:
+  performance:
+    - "tasks_bulk: p99_latency_ms <= 500"
+    - "tasks_bulk: p50_latency_ms <= 200"
+    - "tasks_bulk: rps >= 500"
+    - "tasks_bulk stacks.folded で alloc/free を含むサンプル比率を 24.71% -> 12% 以下"
+  compatibility:
+    - "POST /tasks/bulk の 207 応答契約を維持する"
+    - "検索結果の同値性（投入前後の検索ヒット集合）を維持する"
+  testing:
+    - "merge plan 切替の同値性 property test"
+    - "sorted insert 前後の結果一致テスト（BTree locality 改善の同値性検証）"
+    - "scratch ヒステリシスの回帰テスト（容量再確保回数を検証）"
+
+future_extensions:
+  - id: "EXT-TB219-001"
+    name: "Incremental Segment Compaction"
+    description: |
+      大規模データ時にフルマージではなく、セグメント単位の段階 compaction を導入する。
+    rationale: |
+      今回はまず p99 の即時改善が目的であり、段階 compaction は次フェーズで実施する。

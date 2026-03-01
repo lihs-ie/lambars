@@ -1253,10 +1253,31 @@ impl Default for SegmentOverlayConfig {
     }
 }
 
+/// Merge strategy selected by [`SearchIndex::choose_merge_plan`].
+///
+/// Each variant corresponds to a different merge algorithm optimised for
+/// a particular input-size distribution:
+/// - `BinaryInsert`: O(m log n) via binary-search insertion, best when m <= 4.
+/// - `Galloping`: O(m log n) via exponential search, best when m << n (ratio >= 8:1).
+/// - `TwoPointer`: O(n + m) linear merge, best for balanced or large additions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MergePlan {
+    BinaryInsert,
+    Galloping,
+    TwoPointer,
+}
+
 /// Reusable scratch buffer for merge operations, avoiding repeated heap allocation.
+///
+/// Capacity management uses a hysteresis strategy:
+/// - `reserve_with_hysteresis` grows the buffer by 3/2 (integer arithmetic) to
+///   amortise future allocations.
+/// - `compact_when_idle` shrinks the buffer only after `idle_threshold`
+///   consecutive idle cycles, avoiding hot-path shrink/realloc churn.
 pub struct MergeArena {
     scratch: Vec<TaskId>,
     shrink_threshold: usize,
+    idle_counter: usize,
 }
 
 impl MergeArena {
@@ -1264,24 +1285,58 @@ impl MergeArena {
         Self {
             scratch: Vec::new(),
             shrink_threshold: 16_384,
+            idle_counter: 0,
         }
     }
 
-    /// Returns the scratch buffer (cleared but capacity preserved).
+    /// Returns the scratch buffer cleared (capacity preserved), resetting the
+    /// idle counter.
     pub fn scratch(&mut self) -> &mut Vec<TaskId> {
         self.scratch.clear();
+        self.idle_counter = 0;
         &mut self.scratch
     }
 
-    /// Shrinks the scratch buffer when capacity exceeds twice the threshold.
+    /// Returns the scratch buffer cleared and pre-reserved to at least
+    /// `required` capacity via [`reserve_with_hysteresis`](Self::reserve_with_hysteresis).
+    pub fn scratch_with_capacity(&mut self, required: usize) -> &mut Vec<TaskId> {
+        self.scratch.clear();
+        self.idle_counter = 0;
+        Self::reserve_with_hysteresis(&mut self.scratch, required);
+        &mut self.scratch
+    }
+
+    /// Grows `buffer` to at least `required` capacity, overshooting by 3/2 to
+    /// amortise future allocations. No-op when capacity already suffices.
     ///
-    /// Uses a hysteresis band to avoid allocation thrashing: the buffer is
-    /// only shrunk when capacity exceeds `2 * shrink_threshold`, and it is
-    /// shrunk back to `shrink_threshold` using `Vec::shrink_to`.
+    /// Uses integer arithmetic (`saturating_mul(3) / 2`) to avoid `f32` cast
+    /// precision loss on large capacities.
+    #[inline]
+    fn reserve_with_hysteresis(buffer: &mut Vec<TaskId>, required: usize) {
+        if buffer.capacity() >= required {
+            return;
+        }
+        let grown = buffer.capacity().saturating_mul(3) / 2;
+        let target = required.max(grown);
+        buffer.reserve(target.saturating_sub(buffer.len()));
+    }
+
+    /// Shrinks the scratch buffer when capacity exceeds `2 * shrink_threshold`.
     pub fn maybe_shrink(&mut self) {
         let hysteresis_limit = self.shrink_threshold.saturating_mul(2);
         if self.scratch.capacity() > hysteresis_limit {
             self.scratch.shrink_to(self.shrink_threshold);
+        }
+    }
+
+    /// Compacts the scratch buffer only after `idle_threshold` consecutive idle
+    /// cycles. The counter resets whenever [`scratch`](Self::scratch) or
+    /// [`scratch_with_capacity`](Self::scratch_with_capacity) is called.
+    pub fn compact_when_idle(&mut self, idle_threshold: usize) {
+        self.idle_counter += 1;
+        if self.idle_counter >= idle_threshold && self.scratch.capacity() > self.shrink_threshold {
+            self.scratch.shrink_to(self.shrink_threshold);
+            self.idle_counter = 0;
         }
     }
 }
@@ -2437,14 +2492,18 @@ fn merge_sorted_posting_lists(
         SearchIndex::extend_sorted_into(existing, &mut result_vec);
         SearchIndex::extend_sorted_into(new_entries, &mut result_vec);
         TaskIdCollection::from_sorted_vec(result_vec)
-    } else if new_entries.len().saturating_mul(8) < existing.len() {
+    } else {
+        let plan = SearchIndex::choose_merge_plan(existing.len(), new_entries.len());
+        if matches!(plan, MergePlan::TwoPointer) {
+            // For balanced sizes, fall back to the built-in merge which avoids
+            // the intermediate Vec allocation entirely.
+            return existing.merge(new_entries);
+        }
         let existing_vec = SearchIndex::to_sorted_vec(existing);
         let add_vec = SearchIndex::to_sorted_vec(new_entries);
-        let mut output = Vec::with_capacity(existing.len() + new_entries.len());
-        SearchIndex::merge_posting_add_only_galloping(&existing_vec, &add_vec, &mut output);
+        let mut output = Vec::with_capacity(existing_vec.len() + add_vec.len());
+        SearchIndex::merge_postings_adaptive(&existing_vec, &add_vec, &mut output, plan);
         TaskIdCollection::from_sorted_vec(output)
-    } else {
-        existing.merge(new_entries)
     }
 }
 
@@ -2622,6 +2681,50 @@ impl SearchIndexDelta {
              LegacyAllSuffix suffix indexes would be skipped"
         );
         Self::build_delta_with_mode(changes, config, tasks_by_id, DeltaMode::WithoutNgram).0
+    }
+
+    /// Constructs a delta from pre-normalized Add-only task data without collecting n-grams.
+    ///
+    /// This is an optimized variant of [`from_changes_without_ngrams`] that accepts
+    /// already-normalized task data, avoiding redundant `NormalizedTaskData::from_task` calls.
+    ///
+    /// # Preconditions
+    ///
+    /// - All entries in `normalized_adds` must represent **Add** operations only.
+    /// - Tasks must already be deduplicated and filtered (tasks that already exist
+    ///   in the index should not be included).
+    /// - `config.infix_mode` must be `InfixMode::Ngram`.
+    ///
+    /// # Panics (debug only)
+    ///
+    /// Debug-asserts that `config.infix_mode == InfixMode::Ngram`.
+    #[must_use]
+    #[inline]
+    pub(crate) fn from_pre_normalized_adds_without_ngrams(
+        normalized_adds: &[(&Task, &NormalizedTaskData)],
+        config: &SearchIndexConfig,
+    ) -> Self {
+        debug_assert!(
+            config.infix_mode == InfixMode::Ngram,
+            "from_pre_normalized_adds_without_ngrams is designed for InfixMode::Ngram only; \
+             LegacyAllSuffix suffix indexes would be skipped"
+        );
+
+        let estimated_capacity = normalized_adds.len().saturating_mul(10);
+        let mut delta = Self::with_capacity(estimated_capacity);
+        let mut pool = KeyPool::new();
+
+        for &(task, normalized) in normalized_adds {
+            delta.collect_add(
+                normalized,
+                &task.task_id,
+                config,
+                &mut pool,
+                DeltaMode::WithoutNgram,
+            );
+        }
+
+        delta
     }
 
     /// Constructs a delta from task changes and returns metrics (REQ-SEARCH-NGRAM-MEM-005).
@@ -5941,19 +6044,24 @@ impl SearchIndex {
             return Ok(self.clone());
         }
 
-        let estimated_entries_per_index = tasks.len() * self.config.max_tokens_per_task;
+        // Normalize each task exactly once and reuse for both n-gram building and delta construction.
+        let normalized_tasks: Vec<(&Task, NormalizedTaskData)> = tasks
+            .iter()
+            .map(|task| (*task, NormalizedTaskData::from_task(task)))
+            .collect();
+
+        let estimated_entries_per_index = normalized_tasks.len() * self.config.max_tokens_per_task;
 
         let mut title_word_builder =
             SearchIndexBulkBuilder::with_capacity(self.config.clone(), estimated_entries_per_index);
         let mut title_full_builder =
-            SearchIndexBulkBuilder::with_capacity(self.config.clone(), tasks.len());
+            SearchIndexBulkBuilder::with_capacity(self.config.clone(), normalized_tasks.len());
         let mut tag_builder =
             SearchIndexBulkBuilder::with_capacity(self.config.clone(), estimated_entries_per_index);
 
-        for task in &tasks {
-            let normalized = NormalizedTaskData::from_task(task);
+        for (task, normalized) in &normalized_tasks {
             let (word_limit, tag_limit) =
-                SearchIndexDelta::compute_token_limits(&normalized, &self.config);
+                SearchIndexDelta::compute_token_limits(normalized, &self.config);
 
             title_full_builder =
                 title_full_builder.add_entry(normalized.title_key.clone(), task.task_id.clone());
@@ -5988,8 +6096,15 @@ impl SearchIndex {
             .tag_ngram_index
             .append_and_compact_with_arena(tag_bulk, arena);
 
-        let mut delta =
-            SearchIndexDelta::from_changes_without_ngrams(changes, &self.config, &self.tasks_by_id);
+        // Reuse pre-normalized data to avoid redundant NormalizedTaskData::from_task calls.
+        let normalized_refs: Vec<(&Task, &NormalizedTaskData)> = normalized_tasks
+            .iter()
+            .map(|(task, normalized)| (*task, normalized))
+            .collect();
+        let mut delta = SearchIndexDelta::from_pre_normalized_adds_without_ngrams(
+            &normalized_refs,
+            &self.config,
+        );
         delta.prepare_posting_lists();
         let base_result = self.apply_delta_owned_with_arena(delta, changes, arena);
 
@@ -6329,18 +6444,14 @@ impl SearchIndex {
                 tag_add,
                 arena,
             ),
-            title_full_ngram_index: self
-                .title_full_ngram_index
-                .append_and_compact_with_arena(
-                    build_ngram_from_mutable(title_full_ngram_add),
-                    arena,
-                ),
-            title_word_ngram_index: self
-                .title_word_ngram_index
-                .append_and_compact_with_arena(
-                    build_ngram_from_mutable(title_word_ngram_add),
-                    arena,
-                ),
+            title_full_ngram_index: self.title_full_ngram_index.append_and_compact_with_arena(
+                build_ngram_from_mutable(title_full_ngram_add),
+                arena,
+            ),
+            title_word_ngram_index: self.title_word_ngram_index.append_and_compact_with_arena(
+                build_ngram_from_mutable(title_word_ngram_add),
+                arena,
+            ),
             tag_ngram_index: self
                 .tag_ngram_index
                 .append_and_compact_with_arena(build_ngram_from_mutable(tag_ngram_add), arena),
@@ -6872,6 +6983,46 @@ impl SearchIndex {
                 .unwrap_or_else(|position| position)
     }
 
+    const BINARY_INSERT_THRESHOLD: usize = 4;
+    const GALLOPING_RATIO: usize = 8;
+
+    /// Selects the optimal merge strategy based on input sizes.
+    #[inline]
+    const fn choose_merge_plan(existing_length: usize, add_length: usize) -> MergePlan {
+        if add_length == 0 || existing_length == 0 {
+            MergePlan::TwoPointer
+        } else if add_length <= Self::BINARY_INSERT_THRESHOLD {
+            MergePlan::BinaryInsert
+        } else if add_length.saturating_mul(Self::GALLOPING_RATIO) < existing_length {
+            MergePlan::Galloping
+        } else {
+            MergePlan::TwoPointer
+        }
+    }
+
+    /// Dispatches a posting-list merge to the algorithm selected by [`MergePlan`].
+    ///
+    /// All inputs must be sorted and deduplicated.
+    #[inline]
+    fn merge_postings_adaptive(
+        existing: &[TaskId],
+        add: &[TaskId],
+        output: &mut Vec<TaskId>,
+        plan: MergePlan,
+    ) {
+        match plan {
+            MergePlan::BinaryInsert => {
+                Self::merge_posting_add_only_binary_search_insert(existing, add, output);
+            }
+            MergePlan::Galloping => {
+                Self::merge_posting_add_only_galloping(existing, add, output);
+            }
+            MergePlan::TwoPointer => {
+                Self::merge_posting_add_only_two_pointer(existing.iter(), add, output);
+            }
+        }
+    }
+
     /// Galloping merge for cases where `add` is much smaller than `existing`.
     ///
     /// Uses exponential search to skip large portions of `existing`, achieving
@@ -6958,21 +7109,21 @@ impl SearchIndex {
         // size_hint().0 is accurate.
         let (existing_size_hint, _) = existing.size_hint();
 
-        if add.len() <= 4 && existing_size_hint > 0 {
-            let existing_vec: Vec<TaskId> = existing.cloned().collect();
-            Self::merge_posting_add_only_binary_search_insert(&existing_vec, add, output);
-        } else if existing_size_hint > 0 && add.len().saturating_mul(8) < existing_size_hint {
-            let existing_vec: Vec<TaskId> = existing.cloned().collect();
-            Self::merge_posting_add_only_galloping(&existing_vec, add, output);
-        } else {
-            Self::merge_posting_add_only_two_pointer(existing, add, output);
+        let plan = Self::choose_merge_plan(existing_size_hint, add.len());
+        match plan {
+            MergePlan::BinaryInsert | MergePlan::Galloping => {
+                let existing_vec: Vec<TaskId> = existing.cloned().collect();
+                Self::merge_postings_adaptive(&existing_vec, add, output, plan);
+            }
+            MergePlan::TwoPointer => {
+                Self::merge_posting_add_only_two_pointer(existing, add, output);
+            }
         }
     }
 
     /// Slice-based variant of [`merge_posting_add_only_into`].
     ///
-    /// When the caller already has a `&[TaskId]` (e.g. from
-    /// [`OrderedUniqueSet::as_sorted_slice`]), this avoids the `collect()`
+    /// When the caller already has a `&[TaskId]`, this avoids the `collect()`
     /// allocation that the iterator-based variant requires for galloping and
     /// binary-search paths.
     fn merge_posting_add_only_into_slice(
@@ -6997,13 +7148,38 @@ impl SearchIndex {
             return;
         }
 
-        if add.len() <= 4 {
-            Self::merge_posting_add_only_binary_search_insert(existing, add, output);
-        } else if add.len().saturating_mul(8) < existing.len() {
-            Self::merge_posting_add_only_galloping(existing, add, output);
+        let plan = Self::choose_merge_plan(existing.len(), add.len());
+        Self::merge_postings_adaptive(existing, add, output, plan);
+    }
+
+    /// Merges `collection` with `add_list` into `scratch`, then drains scratch
+    /// into a new [`TaskIdCollection`].
+    ///
+    /// Dispatches to the slice-based or iterator-based merge depending on
+    /// whether the collection exposes a contiguous sorted slice.
+    fn merge_collection_into_scratch(
+        collection: &TaskIdCollection,
+        add_list: &[TaskId],
+        scratch: &mut Vec<TaskId>,
+    ) -> Option<TaskIdCollection> {
+        if let Some(existing_slice) = collection.as_sorted_slice() {
+            Self::merge_posting_add_only_into_slice(existing_slice, add_list, scratch);
         } else {
-            Self::merge_posting_add_only_two_pointer(existing.iter(), add, output);
+            Self::merge_posting_add_only_into(collection.iter_sorted(), add_list, scratch);
         }
+        Self::take_scratch_as_collection(scratch)
+    }
+
+    /// Drains `scratch` into a new [`TaskIdCollection`], returning `None` if
+    /// the scratch buffer is empty.
+    #[inline]
+    fn take_scratch_as_collection(scratch: &mut Vec<TaskId>) -> Option<TaskIdCollection> {
+        if scratch.is_empty() {
+            return None;
+        }
+        let mut collected = Vec::with_capacity(scratch.len());
+        collected.append(scratch);
+        Some(TaskIdCollection::from_sorted_vec(collected))
     }
 
     /// Standard two-pointer merge for `existing ∪ add`.
@@ -7054,18 +7230,27 @@ impl SearchIndex {
     }
 
     /// Computes `existing ∪ add` for a `PrefixIndex` (add-only fast path).
+    ///
+    /// Entries are sorted by key before insertion for `BTree` path locality.
     fn merge_index_delta_add_only(index: &PrefixIndex, add: &MutableIndex) -> PrefixIndex {
         if add.is_empty() {
             return index.clone();
         }
 
+        let mut sorted_keys: Vec<&NgramKey> = add.keys().collect();
+        sorted_keys.sort_unstable();
+
         let mut transient = index.clone().transient();
         let mut scratch: Vec<TaskId> = Vec::new();
 
-        for (key, add_list) in add {
+        for key in sorted_keys {
+            let add_list = &add[key];
+            if add_list.is_empty() {
+                continue;
+            }
             let key_str = key.as_str();
             match transient.get(key_str) {
-                Some(collection) if !add_list.is_empty() => {
+                Some(collection) => {
                     let can_concat = collection
                         .last_sorted()
                         .zip(add_list.first())
@@ -7077,57 +7262,47 @@ impl SearchIndex {
                         result_vec.extend(add_list.iter().cloned());
                         transient
                             .insert(key.clone(), TaskIdCollection::from_sorted_vec(result_vec));
-                    } else if let Some(existing_slice) = collection.as_sorted_slice() {
-                        Self::merge_posting_add_only_into_slice(
-                            existing_slice,
-                            add_list.as_slice(),
-                            &mut scratch,
-                        );
-                        if !scratch.is_empty() {
-                            let mut collected = Vec::with_capacity(scratch.len());
-                            collected.append(&mut scratch);
-                            transient.insert(key.clone(), TaskIdCollection::from_sorted_vec(collected));
-                        }
-                    } else {
-                        Self::merge_posting_add_only_into(
-                            collection.iter_sorted(),
-                            add_list.as_slice(),
-                            &mut scratch,
-                        );
-                        if !scratch.is_empty() {
-                            let mut collected = Vec::with_capacity(scratch.len());
-                            collected.append(&mut scratch);
-                            transient.insert(key.clone(), TaskIdCollection::from_sorted_vec(collected));
-                        }
+                    } else if let Some(merged) = Self::merge_collection_into_scratch(
+                        collection,
+                        add_list.as_slice(),
+                        &mut scratch,
+                    ) {
+                        transient.insert(key.clone(), merged);
                     }
                 }
-                None if !add_list.is_empty() => {
+                None => {
                     transient.insert(
                         key.clone(),
                         TaskIdCollection::from_sorted_vec(add_list.clone()),
                     );
                 }
-                Some(_) | None => {}
             }
         }
 
         transient.persistent()
     }
 
-    /// Owned variant of [`merge_index_delta_add_only`] that consumes the `MutableIndex`
-    /// via `into_iter()`, eliminating `add_list.clone()` on the miss path.
+    /// Owned variant of [`merge_index_delta_add_only`] that consumes the `MutableIndex`,
+    /// eliminating `add_list.clone()` on the miss path.
+    ///
+    /// Entries are sorted by key before insertion for `BTree` path locality.
     fn merge_index_delta_add_only_owned(index: &PrefixIndex, add: MutableIndex) -> PrefixIndex {
         if add.is_empty() {
             return index.clone();
         }
 
+        let mut sorted_entries: Vec<(NgramKey, Vec<TaskId>)> = add.into_iter().collect();
+        sorted_entries.sort_unstable_by(|(key_a, _), (key_b, _)| key_a.cmp(key_b));
+
         let mut transient = index.clone().transient();
         let mut scratch: Vec<TaskId> = Vec::new();
 
-        for (key, add_list) in add {
-            let key_str = key.as_str();
-            match transient.get(key_str) {
-                Some(collection) if !add_list.is_empty() => {
+        for (key, add_list) in sorted_entries {
+            if add_list.is_empty() {
+                continue;
+            }
+            match transient.get(key.as_str()) {
+                Some(collection) => {
                     let can_concat = collection
                         .last_sorted()
                         .zip(add_list.first())
@@ -7138,35 +7313,17 @@ impl SearchIndex {
                         Self::extend_sorted_into(collection, &mut result_vec);
                         result_vec.extend(add_list);
                         transient.insert(key, TaskIdCollection::from_sorted_vec(result_vec));
-                    } else if let Some(existing_slice) = collection.as_sorted_slice() {
-                        Self::merge_posting_add_only_into_slice(
-                            existing_slice,
-                            add_list.as_slice(),
-                            &mut scratch,
-                        );
-                        if !scratch.is_empty() {
-                            let mut collected = Vec::with_capacity(scratch.len());
-                            collected.append(&mut scratch);
-                            transient.insert(key, TaskIdCollection::from_sorted_vec(collected));
-                        }
-                    } else {
-                        Self::merge_posting_add_only_into(
-                            collection.iter_sorted(),
-                            add_list.as_slice(),
-                            &mut scratch,
-                        );
-                        if !scratch.is_empty() {
-                            let mut collected = Vec::with_capacity(scratch.len());
-                            collected.append(&mut scratch);
-                            transient.insert(key, TaskIdCollection::from_sorted_vec(collected));
-                        }
+                    } else if let Some(merged) = Self::merge_collection_into_scratch(
+                        collection,
+                        add_list.as_slice(),
+                        &mut scratch,
+                    ) {
+                        transient.insert(key, merged);
                     }
                 }
-                None if !add_list.is_empty() => {
-                    let collection = TaskIdCollection::from_sorted_vec(add_list);
-                    transient.insert(key, collection);
+                None => {
+                    transient.insert(key, TaskIdCollection::from_sorted_vec(add_list));
                 }
-                Some(_) | None => {}
             }
         }
 
@@ -7174,6 +7331,8 @@ impl SearchIndex {
     }
 
     /// Like [`merge_index_delta_add_only_owned`] but reuses scratch from the [`MergeArena`].
+    ///
+    /// Entries are sorted by key for `BTree` path locality and reduced COW overhead.
     fn merge_index_delta_add_only_owned_with_arena(
         index: &PrefixIndex,
         add: MutableIndex,
@@ -7183,13 +7342,24 @@ impl SearchIndex {
             return index.clone();
         }
 
-        let mut transient = index.clone().transient();
-        let scratch = arena.scratch();
+        let mut sorted_entries: Vec<(NgramKey, Vec<TaskId>)> = add.into_iter().collect();
+        sorted_entries.sort_unstable_by(|(key_a, _), (key_b, _)| key_a.cmp(key_b));
 
-        for (key, add_list) in add {
-            let key_str = key.as_str();
-            match transient.get(key_str) {
-                Some(collection) if !add_list.is_empty() => {
+        let estimated_capacity = sorted_entries
+            .iter()
+            .map(|(_, add_list)| add_list.len())
+            .max()
+            .unwrap_or(0);
+
+        let mut transient = index.clone().transient();
+        let scratch = arena.scratch_with_capacity(estimated_capacity);
+
+        for (key, add_list) in sorted_entries {
+            if add_list.is_empty() {
+                continue;
+            }
+            match transient.get(key.as_str()) {
+                Some(collection) => {
                     let can_concat = collection
                         .last_sorted()
                         .zip(add_list.first())
@@ -7200,35 +7370,17 @@ impl SearchIndex {
                         Self::extend_sorted_into(collection, &mut result_vec);
                         result_vec.extend(add_list);
                         transient.insert(key, TaskIdCollection::from_sorted_vec(result_vec));
-                    } else if let Some(existing_slice) = collection.as_sorted_slice() {
-                        Self::merge_posting_add_only_into_slice(
-                            existing_slice,
-                            add_list.as_slice(),
-                            scratch,
-                        );
-                        if !scratch.is_empty() {
-                            let mut collected = Vec::with_capacity(scratch.len());
-                            collected.append(scratch);
-                            transient.insert(key, TaskIdCollection::from_sorted_vec(collected));
-                        }
-                    } else {
-                        Self::merge_posting_add_only_into(
-                            collection.iter_sorted(),
-                            add_list.as_slice(),
-                            scratch,
-                        );
-                        if !scratch.is_empty() {
-                            let mut collected = Vec::with_capacity(scratch.len());
-                            collected.append(scratch);
-                            transient.insert(key, TaskIdCollection::from_sorted_vec(collected));
-                        }
+                    } else if let Some(merged) = Self::merge_collection_into_scratch(
+                        collection,
+                        add_list.as_slice(),
+                        scratch,
+                    ) {
+                        transient.insert(key, merged);
                     }
                 }
-                None if !add_list.is_empty() => {
-                    let collection = TaskIdCollection::from_sorted_vec(add_list);
-                    transient.insert(key, collection);
+                None => {
+                    transient.insert(key, TaskIdCollection::from_sorted_vec(add_list));
                 }
-                Some(_) | None => {}
             }
         }
 
@@ -7262,9 +7414,11 @@ impl SearchIndex {
         let mut scratch: Vec<TaskId> = Vec::new();
 
         for (key, add_list) in add {
-            let key_str = key.as_str();
-            match result.get(key_str) {
-                Some(collection) if !add_list.is_empty() => {
+            if add_list.is_empty() {
+                continue;
+            }
+            match result.get(key.as_str()) {
+                Some(collection) => {
                     let can_concat = collection
                         .last_sorted()
                         .zip(add_list.first())
@@ -7275,27 +7429,20 @@ impl SearchIndex {
                         Self::extend_sorted_into(collection, &mut result_vec);
                         result_vec.extend(add_list.iter().cloned());
                         result.insert(key.clone(), TaskIdCollection::from_sorted_vec(result_vec));
-                    } else {
-                        Self::merge_posting_add_only_into(
-                            collection.iter_sorted(),
-                            add_list.as_slice(),
-                            &mut scratch,
-                        );
-                        if !scratch.is_empty() {
-                            let mut collected = Vec::with_capacity(scratch.len());
-                            collected.append(&mut scratch);
-                            result
-                                .insert(key.clone(), TaskIdCollection::from_sorted_vec(collected));
-                        }
+                    } else if let Some(merged) = Self::merge_collection_into_scratch(
+                        collection,
+                        add_list.as_slice(),
+                        &mut scratch,
+                    ) {
+                        result.insert(key.clone(), merged);
                     }
                 }
-                None if !add_list.is_empty() => {
+                None => {
                     result.insert(
                         key.clone(),
                         TaskIdCollection::from_sorted_vec(add_list.clone()),
                     );
                 }
-                Some(_) | None => {}
             }
         }
 
@@ -7314,9 +7461,11 @@ impl SearchIndex {
         let mut scratch: Vec<TaskId> = Vec::new();
 
         for (key, add_list) in add {
-            let key_str = key.as_str();
-            match result.get(key_str) {
-                Some(collection) if !add_list.is_empty() => {
+            if add_list.is_empty() {
+                continue;
+            }
+            match result.get(key.as_str()) {
+                Some(collection) => {
                     let can_concat = collection
                         .last_sorted()
                         .zip(add_list.first())
@@ -7328,39 +7477,20 @@ impl SearchIndex {
                         result_vec.extend(add_list.iter().cloned());
                         entries_to_insert
                             .push((key.clone(), TaskIdCollection::from_sorted_vec(result_vec)));
-                    } else if let Some(existing_slice) = collection.as_sorted_slice() {
-                        Self::merge_posting_add_only_into_slice(
-                            existing_slice,
-                            add_list.as_slice(),
-                            &mut scratch,
-                        );
-                        if !scratch.is_empty() {
-                            let mut collected = Vec::with_capacity(scratch.len());
-                            collected.append(&mut scratch);
-                            entries_to_insert
-                                .push((key.clone(), TaskIdCollection::from_sorted_vec(collected)));
-                        }
-                    } else {
-                        Self::merge_posting_add_only_into(
-                            collection.iter_sorted(),
-                            add_list.as_slice(),
-                            &mut scratch,
-                        );
-                        if !scratch.is_empty() {
-                            let mut collected = Vec::with_capacity(scratch.len());
-                            collected.append(&mut scratch);
-                            entries_to_insert
-                                .push((key.clone(), TaskIdCollection::from_sorted_vec(collected)));
-                        }
+                    } else if let Some(merged) = Self::merge_collection_into_scratch(
+                        collection,
+                        add_list.as_slice(),
+                        &mut scratch,
+                    ) {
+                        entries_to_insert.push((key.clone(), merged));
                     }
                 }
-                None if !add_list.is_empty() => {
+                None => {
                     entries_to_insert.push((
                         key.clone(),
                         TaskIdCollection::from_sorted_vec(add_list.clone()),
                     ));
                 }
-                Some(_) | None => {}
             }
         }
 
@@ -7416,9 +7546,11 @@ impl SearchIndex {
         let mut scratch: Vec<TaskId> = Vec::new();
 
         for (key, add_list) in add {
-            let key_str = key.as_str();
-            match result.get(key_str) {
-                Some(collection) if !add_list.is_empty() => {
+            if add_list.is_empty() {
+                continue;
+            }
+            match result.get(key.as_str()) {
+                Some(collection) => {
                     let can_concat = collection
                         .last_sorted()
                         .zip(add_list.first())
@@ -7429,24 +7561,17 @@ impl SearchIndex {
                         Self::extend_sorted_into(collection, &mut result_vec);
                         result_vec.extend(add_list);
                         result.insert(key, TaskIdCollection::from_sorted_vec(result_vec));
-                    } else {
-                        Self::merge_posting_add_only_into(
-                            collection.iter_sorted(),
-                            add_list.as_slice(),
-                            &mut scratch,
-                        );
-                        if !scratch.is_empty() {
-                            let mut collected = Vec::with_capacity(scratch.len());
-                            collected.append(&mut scratch);
-                            result.insert(key, TaskIdCollection::from_sorted_vec(collected));
-                        }
+                    } else if let Some(merged) = Self::merge_collection_into_scratch(
+                        collection,
+                        add_list.as_slice(),
+                        &mut scratch,
+                    ) {
+                        result.insert(key, merged);
                     }
                 }
-                None if !add_list.is_empty() => {
-                    let collection = TaskIdCollection::from_sorted_vec(add_list);
-                    result.insert(key, collection);
+                None => {
+                    result.insert(key, TaskIdCollection::from_sorted_vec(add_list));
                 }
-                Some(_) | None => {}
             }
         }
 
@@ -7465,9 +7590,11 @@ impl SearchIndex {
         let mut scratch: Vec<TaskId> = Vec::new();
 
         for (key, add_list) in add {
-            let key_str = key.as_str();
-            match result.get(key_str) {
-                Some(collection) if !add_list.is_empty() => {
+            if add_list.is_empty() {
+                continue;
+            }
+            match result.get(key.as_str()) {
+                Some(collection) => {
                     let can_concat = collection
                         .last_sorted()
                         .zip(add_list.first())
@@ -7479,37 +7606,17 @@ impl SearchIndex {
                         result_vec.extend(add_list);
                         entries_to_insert
                             .push((key, TaskIdCollection::from_sorted_vec(result_vec)));
-                    } else if let Some(existing_slice) = collection.as_sorted_slice() {
-                        Self::merge_posting_add_only_into_slice(
-                            existing_slice,
-                            add_list.as_slice(),
-                            &mut scratch,
-                        );
-                        if !scratch.is_empty() {
-                            let mut collected = Vec::with_capacity(scratch.len());
-                            collected.append(&mut scratch);
-                            entries_to_insert
-                                .push((key, TaskIdCollection::from_sorted_vec(collected)));
-                        }
-                    } else {
-                        Self::merge_posting_add_only_into(
-                            collection.iter_sorted(),
-                            add_list.as_slice(),
-                            &mut scratch,
-                        );
-                        if !scratch.is_empty() {
-                            let mut collected = Vec::with_capacity(scratch.len());
-                            collected.append(&mut scratch);
-                            entries_to_insert
-                                .push((key, TaskIdCollection::from_sorted_vec(collected)));
-                        }
+                    } else if let Some(merged) = Self::merge_collection_into_scratch(
+                        collection,
+                        add_list.as_slice(),
+                        &mut scratch,
+                    ) {
+                        entries_to_insert.push((key, merged));
                     }
                 }
-                None if !add_list.is_empty() => {
-                    let collection = TaskIdCollection::from_sorted_vec(add_list);
-                    entries_to_insert.push((key, collection));
+                None => {
+                    entries_to_insert.push((key, TaskIdCollection::from_sorted_vec(add_list)));
                 }
-                Some(_) | None => {}
             }
         }
 
@@ -7746,6 +7853,24 @@ impl SearchIndex {
         Self::merge_ngram_delta_add_only_bulk_owned(index, add)
     }
 
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) const fn choose_merge_plan_for_test(
+        existing_length: usize,
+        add_length: usize,
+    ) -> MergePlan {
+        Self::choose_merge_plan(existing_length, add_length)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn merge_postings_adaptive_for_test(
+        existing: &[TaskId],
+        add: &[TaskId],
+        output: &mut Vec<TaskId>,
+        plan: MergePlan,
+    ) {
+        Self::merge_postings_adaptive(existing, add, output, plan);
+    }
 }
 
 /// Represents a change to a task for differential index updates.
@@ -8003,12 +8128,23 @@ impl SearchIndexWriter {
         search_index: Arc<arc_swap::ArcSwap<SearchIndex>>,
         config: &SearchIndexWriterConfig,
     ) {
-        let batch_timeout = std::time::Duration::from_millis(config.batch_timeout_milliseconds);
+        // Ensure at least 1ms to prevent spin-loop when batch_timeout_milliseconds=0.
+        let batch_timeout =
+            std::time::Duration::from_millis(config.batch_timeout_milliseconds.max(1));
+        let idle_poll_interval = batch_timeout
+            .saturating_mul(2)
+            .max(std::time::Duration::from_millis(10));
         let mut arena = MergeArena::new();
 
         loop {
-            let Ok(first_changes) = receiver.recv() else {
-                break;
+            // Use recv_timeout so that idle cycles trigger scratch compaction.
+            let first_changes = match receiver.recv_timeout(idle_poll_interval) {
+                Ok(changes) => changes,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    arena.compact_when_idle(8);
+                    continue;
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
             };
 
             // Fixed deadline prevents a continuous stream from extending the batch window.
@@ -8042,8 +8178,6 @@ impl SearchIndexWriter {
             if !coalesced_changes.is_empty() {
                 Self::apply_coalesced_changes(&search_index, &coalesced_changes, &mut arena);
             }
-
-            arena.maybe_shrink();
         }
     }
 
@@ -16539,6 +16673,91 @@ mod search_index_delta_tests {
 
         assert!(!delta.is_add_only());
     }
+
+    #[rstest]
+    fn from_pre_normalized_adds_produces_same_delta_as_from_changes_without_ngrams() {
+        let tasks: Vec<Task> = (0..5)
+            .map(|i| {
+                let base = Task::new(
+                    task_id_from_u128(i + 1),
+                    format!("Task Title {i}"),
+                    Timestamp::now(),
+                );
+                base.add_tag(Tag::new(format!("tag-{i}")))
+            })
+            .collect();
+        let config = SearchIndexConfig::default();
+        let empty_tasks_by_id: PersistentTreeMap<TaskId, Task> = PersistentTreeMap::new();
+
+        let changes: Vec<TaskChange> = tasks.iter().map(|t| TaskChange::Add(t.clone())).collect();
+
+        let mut expected =
+            SearchIndexDelta::from_changes_without_ngrams(&changes, &config, &empty_tasks_by_id);
+        expected.prepare_posting_lists();
+
+        let normalized: Vec<(&Task, NormalizedTaskData)> = tasks
+            .iter()
+            .map(|task| (task, NormalizedTaskData::from_task(task)))
+            .collect();
+        let normalized_refs: Vec<(&Task, &NormalizedTaskData)> = normalized
+            .iter()
+            .map(|(task, data)| (*task, data))
+            .collect();
+        let mut actual =
+            SearchIndexDelta::from_pre_normalized_adds_without_ngrams(&normalized_refs, &config);
+        actual.prepare_posting_lists();
+
+        // Compare prefix indexes (title_full, title_word, tag)
+        assert_eq!(expected.title_full_add, actual.title_full_add);
+        assert_eq!(expected.title_word_add, actual.title_word_add);
+        assert_eq!(expected.tag_add, actual.tag_add);
+
+        // Ngram indexes should both be empty (WithoutNgram mode)
+        assert!(actual.title_full_ngram_add.is_empty());
+        assert!(actual.title_word_ngram_add.is_empty());
+        assert!(actual.tag_ngram_add.is_empty());
+
+        // Remove indexes should be empty for add-only operations
+        assert!(actual.title_full_remove.is_empty());
+        assert!(actual.title_word_remove.is_empty());
+        assert!(actual.tag_remove.is_empty());
+    }
+
+    #[rstest]
+    fn from_pre_normalized_adds_with_empty_input_produces_empty_delta() {
+        let config = SearchIndexConfig::default();
+        let normalized_adds: Vec<(&Task, &NormalizedTaskData)> = vec![];
+
+        let delta =
+            SearchIndexDelta::from_pre_normalized_adds_without_ngrams(&normalized_adds, &config);
+
+        assert!(delta.title_full_add.is_empty());
+        assert!(delta.title_word_add.is_empty());
+        assert!(delta.tag_add.is_empty());
+        assert!(delta.title_full_ngram_add.is_empty());
+        assert!(delta.title_word_ngram_add.is_empty());
+        assert!(delta.tag_ngram_add.is_empty());
+    }
+
+    #[rstest]
+    fn from_pre_normalized_adds_single_task() {
+        let task = Task::new(task_id_from_u128(42), "Buy Groceries", Timestamp::now())
+            .add_tag(Tag::new("shopping"));
+        let config = SearchIndexConfig::default();
+        let normalized = NormalizedTaskData::from_task(&task);
+        let normalized_adds: Vec<(&Task, &NormalizedTaskData)> = vec![(&task, &normalized)];
+
+        let mut delta =
+            SearchIndexDelta::from_pre_normalized_adds_without_ngrams(&normalized_adds, &config);
+        delta.prepare_posting_lists();
+
+        // title_full_add should contain the normalized title key
+        assert_eq!(delta.title_full_add.len(), 1);
+        // title_word_add should contain each word
+        assert!(!delta.title_word_add.is_empty());
+        // tag_add should contain the tag
+        assert_eq!(delta.tag_add.len(), 1);
+    }
 }
 
 #[cfg(test)]
@@ -24025,6 +24244,181 @@ mod ngram_segment_overlay_tests {
         arena.maybe_shrink();
         assert_eq!(arena.scratch.capacity(), capacity_before);
     }
+
+    // =========================================================================
+    // IMPL-TB219-003a: reserve_with_hysteresis tests
+    // =========================================================================
+
+    #[rstest]
+    fn reserve_with_hysteresis_no_realloc_when_sufficient() {
+        let mut arena = MergeArena::new();
+        // Pre-grow buffer to capacity 100
+        let scratch = arena.scratch();
+        scratch.reserve(100);
+        let capacity_before = scratch.capacity();
+        assert!(capacity_before >= 100);
+
+        // reserve_with_hysteresis should not reallocate when capacity is sufficient
+        let scratch = arena.scratch_with_capacity(50);
+        assert!(
+            scratch.capacity() >= capacity_before,
+            "Should not shrink: was {capacity_before}, now {}",
+            scratch.capacity()
+        );
+    }
+
+    #[rstest]
+    fn reserve_with_hysteresis_grows_with_factor() {
+        let mut arena = MergeArena::new();
+        // Start with small capacity
+        let scratch = arena.scratch();
+        scratch.reserve(10);
+        let initial_capacity = scratch.capacity();
+
+        // Request more than current capacity; integer 3/2 growth applies.
+        // If capacity=10, grown = 10*3/2 = 15, required = 15, target = max(15, 15) = 15
+        let scratch = arena.scratch_with_capacity(initial_capacity + 5);
+        assert!(
+            scratch.capacity() >= initial_capacity + 5,
+            "Should grow to at least required: was {initial_capacity}, now {}",
+            scratch.capacity()
+        );
+    }
+
+    #[rstest]
+    fn reserve_with_hysteresis_meets_required_minimum() {
+        let mut arena = MergeArena::new();
+        // Request a large amount from empty
+        let scratch = arena.scratch_with_capacity(1000);
+        assert!(
+            scratch.capacity() >= 1000,
+            "Must meet required minimum: {}",
+            scratch.capacity()
+        );
+    }
+
+    #[rstest]
+    fn scratch_with_capacity_clears_buffer() {
+        let mut arena = MergeArena::new();
+        let scratch = arena.scratch();
+        scratch.push(TaskId::from_uuid(Uuid::from_u128(1)));
+        assert_eq!(scratch.len(), 1);
+
+        let scratch = arena.scratch_with_capacity(10);
+        assert!(
+            scratch.is_empty(),
+            "scratch_with_capacity should clear buffer"
+        );
+        assert!(scratch.capacity() >= 10);
+    }
+
+    // =========================================================================
+    // IMPL-TB219-003b: compact_when_idle tests
+    // =========================================================================
+
+    /// Grows arena scratch beyond `shrink_threshold`, clears it, and returns
+    /// the capacity before any compaction.
+    fn arena_with_oversized_scratch() -> (MergeArena, usize) {
+        let mut arena = MergeArena::new();
+        let scratch = arena.scratch();
+        scratch.extend((0..40_000).map(|i| TaskId::from_uuid(Uuid::from_u128(i))));
+        arena.scratch.clear();
+        let capacity_before = arena.scratch.capacity();
+        (arena, capacity_before)
+    }
+
+    #[rstest]
+    fn compact_when_idle_does_not_shrink_below_threshold() {
+        let (mut arena, capacity_before) = arena_with_oversized_scratch();
+
+        for _ in 0..7 {
+            arena.compact_when_idle(8);
+        }
+
+        assert!(
+            arena.scratch.capacity() >= capacity_before,
+            "Should not shrink before idle_threshold: was {capacity_before}, now {}",
+            arena.scratch.capacity()
+        );
+    }
+
+    #[rstest]
+    fn compact_when_idle_shrinks_at_threshold() {
+        let (mut arena, capacity_before) = arena_with_oversized_scratch();
+
+        for _ in 0..8 {
+            arena.compact_when_idle(8);
+        }
+
+        assert!(
+            arena.scratch.capacity() < capacity_before,
+            "Should shrink at idle_threshold: was {capacity_before}, now {}",
+            arena.scratch.capacity()
+        );
+    }
+
+    /// Verifies that the idle counter resets when the given `reset_action`
+    /// accesses the scratch buffer, preventing compaction.
+    fn assert_counter_resets_after(reset_action: impl FnOnce(&mut MergeArena)) {
+        let (mut arena, capacity_before) = arena_with_oversized_scratch();
+
+        for _ in 0..6 {
+            arena.compact_when_idle(8);
+        }
+
+        reset_action(&mut arena);
+
+        for _ in 0..7 {
+            arena.compact_when_idle(8);
+        }
+
+        assert!(
+            arena.scratch.capacity() >= capacity_before,
+            "Should not shrink because counter was reset: was {capacity_before}, now {}",
+            arena.scratch.capacity()
+        );
+    }
+
+    #[rstest]
+    fn compact_when_idle_counter_resets_on_scratch() {
+        assert_counter_resets_after(|arena| {
+            let _scratch = arena.scratch();
+        });
+    }
+
+    #[rstest]
+    fn compact_when_idle_counter_resets_on_scratch_with_capacity() {
+        assert_counter_resets_after(|arena| {
+            let _scratch = arena.scratch_with_capacity(10);
+        });
+    }
+
+    // =========================================================================
+    // IMPL-TB219-003c: hysteresis realloc count regression test
+    // =========================================================================
+
+    #[rstest]
+    fn reserve_with_hysteresis_limits_realloc_frequency() {
+        let mut arena = MergeArena::new();
+        let mut growth_count = 0usize;
+        let mut last_capacity = 0usize;
+
+        for required in [128, 192, 256, 300, 340, 380, 420, 460] {
+            let scratch = arena.scratch_with_capacity(required);
+            let capacity = scratch.capacity();
+            if capacity > last_capacity {
+                growth_count += 1;
+                last_capacity = capacity;
+            }
+        }
+
+        // With 3/2 growth factor, 8 ascending requests should trigger at most 4
+        // reallocations (initial + ~3 growth steps that overshoot).
+        assert!(
+            growth_count <= 4,
+            "Expected at most 4 reallocations but got {growth_count}"
+        );
+    }
 }
 
 // =============================================================================
@@ -24050,96 +24444,55 @@ mod adaptive_merge_tests {
     }
 
     // =========================================================================
+    // IMPL-TB219-001a: choose_merge_plan tests
+    // =========================================================================
+
+    #[rstest]
+    #[case::empty_add(100, 0, MergePlan::TwoPointer)]
+    #[case::empty_existing(0, 10, MergePlan::TwoPointer)]
+    #[case::both_empty(0, 0, MergePlan::TwoPointer)]
+    #[case::at_binary_insert_threshold(100, 4, MergePlan::BinaryInsert)]
+    #[case::below_binary_insert_threshold(100, 1, MergePlan::BinaryInsert)]
+    #[case::above_threshold_galloping(100, 5, MergePlan::Galloping)]
+    #[case::exact_galloping_boundary(40, 5, MergePlan::TwoPointer)]
+    #[case::just_below_galloping_boundary(41, 5, MergePlan::Galloping)]
+    #[case::large_add(100, 50, MergePlan::TwoPointer)]
+    #[case::equal_sizes(10, 10, MergePlan::TwoPointer)]
+    fn choose_merge_plan_selects_correct_strategy(
+        #[case] existing_length: usize,
+        #[case] add_length: usize,
+        #[case] expected: MergePlan,
+    ) {
+        assert_eq!(
+            SearchIndex::choose_merge_plan_for_test(existing_length, add_length),
+            expected
+        );
+    }
+
+    // =========================================================================
     // galloping_search tests
     // =========================================================================
 
     #[rstest]
-    fn galloping_search_empty_slice() {
-        let empty: Vec<TaskId> = vec![];
+    #[case::empty_slice(&[], 5, 0)]
+    #[case::target_before_all(&[10, 20, 30], 5, 0)]
+    #[case::target_at_beginning(&[10, 20, 30], 10, 0)]
+    #[case::target_in_middle(&[10, 20, 30, 40, 50], 30, 2)]
+    #[case::target_at_end(&[10, 20, 30], 30, 2)]
+    #[case::target_after_all(&[10, 20, 30], 35, 3)]
+    #[case::target_between_elements(&[10, 20, 30, 40, 50], 25, 2)]
+    #[case::single_element_match(&[42], 42, 0)]
+    #[case::single_element_before(&[42], 10, 0)]
+    #[case::single_element_after(&[42], 100, 1)]
+    fn galloping_search_returns_correct_position(
+        #[case] slice_values: &[u128],
+        #[case] target_value: u128,
+        #[case] expected_position: usize,
+    ) {
+        let slice = task_ids(slice_values);
         assert_eq!(
-            SearchIndex::galloping_search_for_test(&empty, &task_id(5)),
-            0
-        );
-    }
-
-    #[rstest]
-    fn galloping_search_target_before_all() {
-        let slice = task_ids(&[10, 20, 30]);
-        assert_eq!(
-            SearchIndex::galloping_search_for_test(&slice, &task_id(5)),
-            0
-        );
-    }
-
-    #[rstest]
-    fn galloping_search_target_at_beginning() {
-        let slice = task_ids(&[10, 20, 30]);
-        assert_eq!(
-            SearchIndex::galloping_search_for_test(&slice, &task_id(10)),
-            0
-        );
-    }
-
-    #[rstest]
-    fn galloping_search_target_in_middle() {
-        let slice = task_ids(&[10, 20, 30, 40, 50]);
-        assert_eq!(
-            SearchIndex::galloping_search_for_test(&slice, &task_id(30)),
-            2
-        );
-    }
-
-    #[rstest]
-    fn galloping_search_target_at_end() {
-        let slice = task_ids(&[10, 20, 30]);
-        assert_eq!(
-            SearchIndex::galloping_search_for_test(&slice, &task_id(30)),
-            2
-        );
-    }
-
-    #[rstest]
-    fn galloping_search_target_after_all() {
-        let slice = task_ids(&[10, 20, 30]);
-        assert_eq!(
-            SearchIndex::galloping_search_for_test(&slice, &task_id(35)),
-            3
-        );
-    }
-
-    #[rstest]
-    fn galloping_search_target_between_elements() {
-        let slice = task_ids(&[10, 20, 30, 40, 50]);
-        assert_eq!(
-            SearchIndex::galloping_search_for_test(&slice, &task_id(25)),
-            2
-        );
-    }
-
-    #[rstest]
-    fn galloping_search_single_element_match() {
-        let slice = task_ids(&[42]);
-        assert_eq!(
-            SearchIndex::galloping_search_for_test(&slice, &task_id(42)),
-            0
-        );
-    }
-
-    #[rstest]
-    fn galloping_search_single_element_before() {
-        let slice = task_ids(&[42]);
-        assert_eq!(
-            SearchIndex::galloping_search_for_test(&slice, &task_id(10)),
-            0
-        );
-    }
-
-    #[rstest]
-    fn galloping_search_single_element_after() {
-        let slice = task_ids(&[42]);
-        assert_eq!(
-            SearchIndex::galloping_search_for_test(&slice, &task_id(100)),
-            1
+            SearchIndex::galloping_search_for_test(&slice, &task_id(target_value)),
+            expected_position
         );
     }
 
@@ -24148,65 +24501,27 @@ mod adaptive_merge_tests {
     // =========================================================================
 
     #[rstest]
-    fn galloping_merge_empty_both() {
-        let mut output = Vec::new();
-        SearchIndex::merge_posting_add_only_galloping_for_test(&[], &[], &mut output);
-        assert!(output.is_empty());
-    }
-
-    #[rstest]
-    fn galloping_merge_empty_existing() {
-        let add = task_ids(&[2, 4, 6]);
-        let mut output = Vec::new();
-        SearchIndex::merge_posting_add_only_galloping_for_test(&[], &add, &mut output);
-        assert_eq!(output, task_ids(&[2, 4, 6]));
-    }
-
-    #[rstest]
-    fn galloping_merge_empty_add() {
-        let existing = task_ids(&[1, 3, 5]);
-        let mut output = Vec::new();
-        SearchIndex::merge_posting_add_only_galloping_for_test(&existing, &[], &mut output);
-        assert_eq!(output, task_ids(&[1, 3, 5]));
-    }
-
-    #[rstest]
-    fn galloping_merge_small_add_into_large_existing() {
-        let existing = task_ids(&[1, 3, 5, 7, 9, 11, 13, 15, 17, 19]);
-        let add = task_ids(&[4, 12]);
+    #[case::empty_both(&[], &[], &[])]
+    #[case::empty_existing(&[], &[2, 4, 6], &[2, 4, 6])]
+    #[case::empty_add(&[1, 3, 5], &[], &[1, 3, 5])]
+    #[case::small_add_into_large(
+        &[1, 3, 5, 7, 9, 11, 13, 15, 17, 19],
+        &[4, 12],
+        &[1, 3, 4, 5, 7, 9, 11, 12, 13, 15, 17, 19]
+    )]
+    #[case::with_duplicates(&[1, 3, 5, 7, 9], &[3, 7], &[1, 3, 5, 7, 9])]
+    #[case::add_all_at_end(&[1, 2, 3], &[10, 20, 30], &[1, 2, 3, 10, 20, 30])]
+    #[case::add_all_at_beginning(&[10, 20, 30], &[1, 2, 3], &[1, 2, 3, 10, 20, 30])]
+    fn galloping_merge_produces_sorted_union(
+        #[case] existing_values: &[u128],
+        #[case] add_values: &[u128],
+        #[case] expected_values: &[u128],
+    ) {
+        let existing = task_ids(existing_values);
+        let add = task_ids(add_values);
         let mut output = Vec::new();
         SearchIndex::merge_posting_add_only_galloping_for_test(&existing, &add, &mut output);
-        assert_eq!(
-            output,
-            task_ids(&[1, 3, 4, 5, 7, 9, 11, 12, 13, 15, 17, 19])
-        );
-    }
-
-    #[rstest]
-    fn galloping_merge_with_duplicates() {
-        let existing = task_ids(&[1, 3, 5, 7, 9]);
-        let add = task_ids(&[3, 7]);
-        let mut output = Vec::new();
-        SearchIndex::merge_posting_add_only_galloping_for_test(&existing, &add, &mut output);
-        assert_eq!(output, task_ids(&[1, 3, 5, 7, 9]));
-    }
-
-    #[rstest]
-    fn galloping_merge_add_all_at_end() {
-        let existing = task_ids(&[1, 2, 3]);
-        let add = task_ids(&[10, 20, 30]);
-        let mut output = Vec::new();
-        SearchIndex::merge_posting_add_only_galloping_for_test(&existing, &add, &mut output);
-        assert_eq!(output, task_ids(&[1, 2, 3, 10, 20, 30]));
-    }
-
-    #[rstest]
-    fn galloping_merge_add_all_at_beginning() {
-        let existing = task_ids(&[10, 20, 30]);
-        let add = task_ids(&[1, 2, 3]);
-        let mut output = Vec::new();
-        SearchIndex::merge_posting_add_only_galloping_for_test(&existing, &add, &mut output);
-        assert_eq!(output, task_ids(&[1, 2, 3, 10, 20, 30]));
+        assert_eq!(output, task_ids(expected_values));
     }
 
     // =========================================================================
@@ -24214,69 +24529,30 @@ mod adaptive_merge_tests {
     // =========================================================================
 
     #[rstest]
-    fn binary_search_insert_empty_both() {
-        let mut output = Vec::new();
-        SearchIndex::merge_posting_add_only_binary_search_insert_for_test(&[], &[], &mut output);
-        assert!(output.is_empty());
-    }
-
-    #[rstest]
-    fn binary_search_insert_empty_existing() {
-        let add = task_ids(&[2, 4]);
-        let mut output = Vec::new();
-        SearchIndex::merge_posting_add_only_binary_search_insert_for_test(&[], &add, &mut output);
-        assert_eq!(output, task_ids(&[2, 4]));
-    }
-
-    #[rstest]
-    fn binary_search_insert_empty_add() {
-        let existing = task_ids(&[1, 3, 5]);
-        let mut output = Vec::new();
-        SearchIndex::merge_posting_add_only_binary_search_insert_for_test(
-            &existing,
-            &[],
-            &mut output,
-        );
-        assert_eq!(output, task_ids(&[1, 3, 5]));
-    }
-
-    #[rstest]
-    fn binary_search_insert_single_addition() {
-        let existing = task_ids(&[1, 3, 5, 7, 9]);
-        let add = task_ids(&[4]);
+    #[case::empty_both(&[], &[], &[])]
+    #[case::empty_existing(&[], &[2, 4], &[2, 4])]
+    #[case::empty_add(&[1, 3, 5], &[], &[1, 3, 5])]
+    #[case::single_addition(&[1, 3, 5, 7, 9], &[4], &[1, 3, 4, 5, 7, 9])]
+    #[case::four_additions(
+        &[10, 20, 30, 40, 50],
+        &[15, 25, 35, 45],
+        &[10, 15, 20, 25, 30, 35, 40, 45, 50]
+    )]
+    #[case::with_duplicates(&[1, 3, 5, 7], &[3, 5], &[1, 3, 5, 7])]
+    fn binary_search_insert_produces_sorted_union(
+        #[case] existing_values: &[u128],
+        #[case] add_values: &[u128],
+        #[case] expected_values: &[u128],
+    ) {
+        let existing = task_ids(existing_values);
+        let add = task_ids(add_values);
         let mut output = Vec::new();
         SearchIndex::merge_posting_add_only_binary_search_insert_for_test(
             &existing,
             &add,
             &mut output,
         );
-        assert_eq!(output, task_ids(&[1, 3, 4, 5, 7, 9]));
-    }
-
-    #[rstest]
-    fn binary_search_insert_four_additions() {
-        let existing = task_ids(&[10, 20, 30, 40, 50]);
-        let add = task_ids(&[15, 25, 35, 45]);
-        let mut output = Vec::new();
-        SearchIndex::merge_posting_add_only_binary_search_insert_for_test(
-            &existing,
-            &add,
-            &mut output,
-        );
-        assert_eq!(output, task_ids(&[10, 15, 20, 25, 30, 35, 40, 45, 50]));
-    }
-
-    #[rstest]
-    fn binary_search_insert_with_duplicates() {
-        let existing = task_ids(&[1, 3, 5, 7]);
-        let add = task_ids(&[3, 5]);
-        let mut output = Vec::new();
-        SearchIndex::merge_posting_add_only_binary_search_insert_for_test(
-            &existing,
-            &add,
-            &mut output,
-        );
-        assert_eq!(output, task_ids(&[1, 3, 5, 7]));
+        assert_eq!(output, task_ids(expected_values));
     }
 
     // =========================================================================
@@ -24351,6 +24627,44 @@ mod adaptive_merge_tests {
             let target = task_id(value);
             assert!(result_vec.contains(&target), "Expected {value} in result");
         }
+    }
+
+    // =========================================================================
+    // IMPL-TB219-001b: merge_postings_adaptive tests
+    // =========================================================================
+
+    #[rstest]
+    #[case::binary_insert(MergePlan::BinaryInsert)]
+    #[case::galloping(MergePlan::Galloping)]
+    #[case::two_pointer(MergePlan::TwoPointer)]
+    fn merge_postings_adaptive_matches_reference(#[case] plan: MergePlan) {
+        let existing = task_ids(&[1, 5, 10, 20, 30, 40, 50]);
+        let add = task_ids(&[3, 25]);
+        let mut reference_output = Vec::new();
+        SearchIndex::merge_posting_add_only_two_pointer_for_test(
+            &existing,
+            &add,
+            &mut reference_output,
+        );
+        let mut output = Vec::new();
+        SearchIndex::merge_postings_adaptive_for_test(&existing, &add, &mut output, plan);
+        assert_eq!(
+            output, reference_output,
+            "Plan {plan:?} should match two-pointer reference"
+        );
+    }
+
+    #[rstest]
+    #[case::binary_insert(MergePlan::BinaryInsert)]
+    #[case::galloping(MergePlan::Galloping)]
+    #[case::two_pointer(MergePlan::TwoPointer)]
+    fn merge_postings_adaptive_empty_inputs(#[case] plan: MergePlan) {
+        let mut output = Vec::new();
+        SearchIndex::merge_postings_adaptive_for_test(&[], &[], &mut output, plan);
+        assert!(
+            output.is_empty(),
+            "Plan {plan:?} should produce empty for empty inputs"
+        );
     }
 
     // =========================================================================
@@ -24879,6 +25193,47 @@ mod search_index_writer_tests {
 
         writer.shutdown();
     }
+
+    // -------------------------------------------------------------------------
+    // Regression: batch_timeout_milliseconds=0 must not cause busy-loop
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn test_writer_with_zero_batch_timeout_is_safe() {
+        let search_index = create_empty_search_index();
+        let writer = SearchIndexWriter::new(
+            Arc::clone(&search_index),
+            SearchIndexWriterConfig {
+                batch_size: 8,
+                batch_timeout_milliseconds: 0,
+                channel_capacity: 32,
+            },
+        );
+
+        let task = create_task("zero-timeout-safe");
+        writer
+            .send_change(TaskChange::Add(task))
+            .expect("send should succeed");
+
+        // Poll until the writer thread processes the change (avoids flaky sleep).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        loop {
+            if search_index
+                .load()
+                .search_by_title("zero-timeout-safe")
+                .is_some()
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "task was not indexed within deadline"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        writer.shutdown();
+    }
 }
 
 // =============================================================================
@@ -25131,9 +25486,13 @@ mod merge_arena_integration_tests {
 
         let tasks: Vec<Task> = (0..20)
             .map(|i| {
-                Task::new(TaskId::generate(), format!("Task number {i}"), Timestamp::now())
-                    .add_tag(Tag::new("common"))
-                    .add_tag(Tag::new(format!("tag{i}")))
+                Task::new(
+                    TaskId::generate(),
+                    format!("Task number {i}"),
+                    Timestamp::now(),
+                )
+                .add_tag(Tag::new("common"))
+                .add_tag(Tag::new(format!("tag{i}")))
             })
             .collect();
         let changes: Vec<TaskChange> = tasks.iter().cloned().map(TaskChange::Add).collect();
@@ -25179,7 +25538,8 @@ mod merge_arena_integration_tests {
             let bulk_ids: Vec<_> = bulk_collection.iter_sorted().cloned().collect();
             let arena_ids: Vec<_> = arena_collection.iter_sorted().cloned().collect();
             assert_eq!(
-                bulk_ids, arena_ids,
+                bulk_ids,
+                arena_ids,
                 "title_word_index posting list mismatch for key '{}'",
                 key.as_str()
             );
@@ -25187,16 +25547,14 @@ mod merge_arena_integration_tests {
 
         // Verify tag_index equivalence
         for (key, bulk_collection) in &result_bulk.tag_index {
-            let arena_collection = result_arena
-                .tag_index
-                .get(key.as_str())
-                .unwrap_or_else(|| {
-                    panic!("tag_index key '{}' missing in arena result", key.as_str())
-                });
+            let arena_collection = result_arena.tag_index.get(key.as_str()).unwrap_or_else(|| {
+                panic!("tag_index key '{}' missing in arena result", key.as_str())
+            });
             let bulk_ids: Vec<_> = bulk_collection.iter_sorted().cloned().collect();
             let arena_ids: Vec<_> = arena_collection.iter_sorted().cloned().collect();
             assert_eq!(
-                bulk_ids, arena_ids,
+                bulk_ids,
+                arena_ids,
                 "tag_index posting list mismatch for key '{}'",
                 key.as_str()
             );
@@ -25237,8 +25595,12 @@ mod merge_arena_integration_tests {
 
         let tasks: Vec<Task> = (0..10)
             .map(|i| {
-                Task::new(TaskId::generate(), format!("Arena task {i}"), Timestamp::now())
-                    .add_tag(Tag::new("arenatest"))
+                Task::new(
+                    TaskId::generate(),
+                    format!("Arena task {i}"),
+                    Timestamp::now(),
+                )
+                .add_tag(Tag::new("arenatest"))
             })
             .collect();
         let changes: Vec<TaskChange> = tasks.iter().cloned().map(TaskChange::Add).collect();
@@ -25274,12 +25636,13 @@ mod merge_arena_integration_tests {
             lambars::persistent::PersistentVector::new();
         let index = SearchIndex::build_with_config(&tasks_pv, config);
 
-        let task = Task::new(TaskId::generate(), "Duplicate task".to_string(), Timestamp::now())
-            .add_tag(Tag::new("dup"));
-        let changes = vec![
-            TaskChange::Add(task.clone()),
-            TaskChange::Add(task.clone()),
-        ];
+        let task = Task::new(
+            TaskId::generate(),
+            "Duplicate task".to_string(),
+            Timestamp::now(),
+        )
+        .add_tag(Tag::new("dup"));
+        let changes = vec![TaskChange::Add(task.clone()), TaskChange::Add(task.clone())];
 
         let mut arena = MergeArena::new();
         let result = index
@@ -25287,7 +25650,139 @@ mod merge_arena_integration_tests {
             .expect("should succeed");
 
         // Only one copy of the task should exist
-        assert_eq!(result.tasks_by_id.len(), 1, "Duplicate should be deduplicated");
+        assert_eq!(
+            result.tasks_by_id.len(),
+            1,
+            "Duplicate should be deduplicated"
+        );
         assert!(result.tasks_by_id.contains_key(&task.task_id));
+    }
+
+    // -------------------------------------------------------------------------
+    // IMPL-TB219-002: sorted insert order invariant (key insertion order must
+    // not affect the result)
+    // -------------------------------------------------------------------------
+
+    #[rstest]
+    fn merge_index_delta_sorted_insert_order_invariant() {
+        let index = PrefixIndex::new();
+
+        // Build two MutableIndex maps with identical entries but different
+        // HashMap iteration orders (achieved by inserting in opposite order).
+        let mut add_forward: MutableIndex = std::collections::HashMap::new();
+        add_forward.insert(
+            NgramKey::new("aaa"),
+            vec![
+                TaskId::from_uuid(Uuid::from_u128(1)),
+                TaskId::from_uuid(Uuid::from_u128(9)),
+            ],
+        );
+        add_forward.insert(
+            NgramKey::new("bbb"),
+            vec![
+                TaskId::from_uuid(Uuid::from_u128(2)),
+                TaskId::from_uuid(Uuid::from_u128(8)),
+            ],
+        );
+        add_forward.insert(
+            NgramKey::new("ccc"),
+            vec![
+                TaskId::from_uuid(Uuid::from_u128(3)),
+                TaskId::from_uuid(Uuid::from_u128(7)),
+            ],
+        );
+
+        let mut add_reverse: MutableIndex = std::collections::HashMap::new();
+        add_reverse.insert(
+            NgramKey::new("ccc"),
+            vec![
+                TaskId::from_uuid(Uuid::from_u128(3)),
+                TaskId::from_uuid(Uuid::from_u128(7)),
+            ],
+        );
+        add_reverse.insert(
+            NgramKey::new("bbb"),
+            vec![
+                TaskId::from_uuid(Uuid::from_u128(2)),
+                TaskId::from_uuid(Uuid::from_u128(8)),
+            ],
+        );
+        add_reverse.insert(
+            NgramKey::new("aaa"),
+            vec![
+                TaskId::from_uuid(Uuid::from_u128(1)),
+                TaskId::from_uuid(Uuid::from_u128(9)),
+            ],
+        );
+
+        // All three variants must produce identical results regardless of
+        // HashMap iteration order.
+        let result_borrowed_forward =
+            SearchIndex::merge_index_delta_add_only_for_test(&index, &add_forward);
+        let result_borrowed_reverse =
+            SearchIndex::merge_index_delta_add_only_for_test(&index, &add_reverse);
+
+        let result_owned_forward =
+            SearchIndex::merge_index_delta_add_only_owned_for_test(&index, add_forward.clone());
+        let result_owned_reverse =
+            SearchIndex::merge_index_delta_add_only_owned_for_test(&index, add_reverse.clone());
+
+        let mut arena = MergeArena::new();
+        let result_arena_forward =
+            SearchIndex::merge_index_delta_add_only_owned_with_arena_for_test(
+                &index,
+                add_forward,
+                &mut arena,
+            );
+        let result_arena_reverse =
+            SearchIndex::merge_index_delta_add_only_owned_with_arena_for_test(
+                &index,
+                add_reverse,
+                &mut arena,
+            );
+
+        // Compare all pairs
+        for (label, result_a, result_b) in [
+            (
+                "borrowed forward vs reverse",
+                &result_borrowed_forward,
+                &result_borrowed_reverse,
+            ),
+            (
+                "owned forward vs reverse",
+                &result_owned_forward,
+                &result_owned_reverse,
+            ),
+            (
+                "arena forward vs reverse",
+                &result_arena_forward,
+                &result_arena_reverse,
+            ),
+            (
+                "borrowed vs owned",
+                &result_borrowed_forward,
+                &result_owned_forward,
+            ),
+            (
+                "borrowed vs arena",
+                &result_borrowed_forward,
+                &result_arena_forward,
+            ),
+        ] {
+            assert_eq!(result_a.len(), result_b.len(), "{label}: length mismatch");
+            for (key, collection_a) in result_a {
+                let collection_b = result_b
+                    .get(key.as_str())
+                    .unwrap_or_else(|| panic!("{label}: key '{}' missing", key.as_str()));
+                let ids_a: Vec<_> = collection_a.iter_sorted().cloned().collect();
+                let ids_b: Vec<_> = collection_b.iter_sorted().cloned().collect();
+                assert_eq!(
+                    ids_a,
+                    ids_b,
+                    "{label}: posting list mismatch for key '{}'",
+                    key.as_str()
+                );
+            }
+        }
     }
 }

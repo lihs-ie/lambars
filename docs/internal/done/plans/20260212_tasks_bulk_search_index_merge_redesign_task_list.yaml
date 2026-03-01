@@ -1,0 +1,565 @@
+# tasks_bulk SearchIndex merge 再設計 - 実装タスクリスト
+#
+# 根拠: docs/internal/requirements/20260212_0930_tasks_bulk_search_index_merge_redesign_run21903605063.yaml
+# 作成日: 2026-02-12
+# Codex レビュー: 完了 (プロファイルデータに基づく修正済み)
+#
+# プロファイルデータサマリー (tasks_bulk, search-index-wr thread):
+#   libc.so.6 (malloc/cfree/realloc): 7,245M samples (支配的)
+#   Cloned::next (SmallVec): 3,895M samples
+#   SmallVec::extend: 1,755M samples
+#   PersistentHashMap::get: 682M samples
+#   RawVecInner::finish_grow (malloc): 617M samples
+#   NgramSegmentOverlay::merge_segment_into: 505M samples
+#   normalize_query: 436M samples
+#   BTreeNode::get: 390M samples
+#   Arc::make_mut (malloc): 382M samples
+#   SearchIndex::merge_posting_add_only_galloping: 356M samples
+#   SearchIndexBulkBuilder::build: 343M samples
+#   SmallVec::clone: 297M samples
+#   hashbrown::fallible_with_capacity (malloc): 291M samples
+#   SmallVec::drop: 350M samples
+#   merge_index_delta_add_only_owned_with_arena: 117M samples
+#   merge_posting_add_only_binary_search_insert: 42M samples
+
+version: "1.0.0"
+name: "tasks_bulk_search_index_merge_redesign_task_list"
+created_at: "2026-02-12T10:00:00+09:00"
+
+# =============================================================================
+# タスク分類
+# =============================================================================
+
+categories:
+  rust_bench_phase1:
+    description: "Phase 1: Adaptive Merge Plan - merge 戦略の統一 (コード保守性向上、限定的パフォーマンスインパクト)"
+    file: "benches/api/src/api/query.rs"
+    tasks: ["IMPL-TB219-001a", "IMPL-TB219-001b", "IMPL-TB219-001c"]
+    estimated_impact: "merge_posting_add_only_galloping 0.76% + binary_search_insert 0.09% = ~0.85% の改善余地"
+
+  rust_bench_phase2:
+    description: "Phase 2: Arena Capacity Hysteresis - メモリアロケーション削減 (中程度のインパクト)"
+    file: "benches/api/src/api/query.rs"
+    tasks: ["IMPL-TB219-003a", "IMPL-TB219-003b"]
+    estimated_impact: "RawVecInner::finish_grow 617M + hashbrown::fallible_with_capacity 291M = ~1.9% の改善余地"
+
+  rust_bench_phase3:
+    description: "Phase 3: ソート順 Insert - BTree パスの局所性向上 (並列探索の結果に基づく修正)"
+    file: "benches/api/src/api/query.rs"
+    tasks: ["IMPL-TB219-002a", "IMPL-TB219-002b"]
+    estimated_impact: "BTreeNode::get 390M + take_or_clone_child clone 削減。ソート順 insert で BTree パス局所性向上"
+    note: |
+      並列探索の結果:
+      - アプローチ A (StagingMap/HashMap): 推奨度 2/5 - MutableIndex が既に HashMap のため無意味
+      - アプローチ B (BTreeMap 直接マージ): 推奨度 3/5 - 変換オーバーヘッド追加
+      - アプローチ C (Vec ソート順バッチ): 推奨度 4/5 - 最もシンプルで効果的 ← 採用
+
+  integration:
+    description: "Phase 4: 統合テストと同値性検証"
+    file: "benches/api/src/api/query.rs"
+    tasks: ["IMPL-TB219-INT"]
+
+# =============================================================================
+# Phase 1: Adaptive Merge Plan (REQ-TB219-001)
+# =============================================================================
+# 優先度: 中 (コード統一による保守性向上が主目的)
+# merge 関連は全体の ~0.85% であり、パフォーマンスインパクトは限定的
+# ただし Phase 3 の staging commit と組み合わせることで相乗効果あり
+
+tasks:
+  - id: "IMPL-TB219-001a"
+    phase: "1"
+    requirement: "REQ-TB219-001"
+    priority: "P1"
+    type: "rust_bench"
+    title: "MergePlan enum と choose_merge_plan 純粋関数を導入"
+    status: "pending"
+    file: "benches/api/src/api/query.rs"
+    description: |
+      MergePlan enum と choose_merge_plan 純粋関数を定義する。
+
+      変更内容:
+      1. MergePlan enum を定義:
+         ```rust
+         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+         pub(crate) enum MergePlan {
+             BinaryInsert,
+             Galloping,
+             TwoPointer,
+         }
+         ```
+      2. 閾値を定数化:
+         ```rust
+         const BINARY_INSERT_THRESHOLD: usize = 4;
+         const GALLOPING_RATIO: usize = 8;
+         ```
+      3. choose_merge_plan を実装:
+         ```rust
+         #[inline]
+         fn choose_merge_plan(existing_len: usize, add_len: usize) -> MergePlan {
+             if add_len == 0 || existing_len == 0 {
+                 MergePlan::TwoPointer  // 空の場合はどれでも同等
+             } else if add_len <= BINARY_INSERT_THRESHOLD {
+                 MergePlan::BinaryInsert
+             } else if add_len.saturating_mul(GALLOPING_RATIO) < existing_len {
+                 MergePlan::Galloping
+             } else {
+                 MergePlan::TwoPointer
+             }
+         }
+         ```
+
+      Codex レビュー修正:
+      - estimated_overlap: f32 パラメータは YAGNI 原則に基づき除外
+      - #[inline] 属性を付与し hot path でのオーバーヘッド最小化
+      - const 定数で閾値を可視化・テスト可能に
+
+      配置場所: SearchIndex impl ブロック内、merge_posting_add_only_galloping の直前
+    depends_on: []
+    success_criteria:
+      - "choose_merge_plan の各分岐をカバーする単体テスト (rstest)"
+      - "境界値テスト: add_len=4 -> BinaryInsert, add_len=5 -> context dependent"
+      - "比率境界テスト: add*8 == existing -> TwoPointer, add*8 < existing -> Galloping"
+      - "空リストテスト: existing=0 or add=0"
+      - "cargo test 全パス"
+    estimated_effort: "1 hour"
+
+  - id: "IMPL-TB219-001b"
+    phase: "1"
+    requirement: "REQ-TB219-001"
+    priority: "P1"
+    type: "rust_bench"
+    title: "merge_postings_adaptive 関数を導入"
+    status: "pending"
+    file: "benches/api/src/api/query.rs"
+    description: |
+      MergePlan を引数に取る merge_postings_adaptive を実装する。
+
+      変更内容:
+      ```rust
+      #[inline]
+      fn merge_postings_adaptive(
+          existing: &[TaskId],
+          add: &[TaskId],
+          output: &mut Vec<TaskId>,
+          plan: MergePlan,
+      ) {
+          match plan {
+              MergePlan::BinaryInsert => {
+                  Self::merge_posting_add_only_binary_search_insert(existing, add, output);
+              }
+              MergePlan::Galloping => {
+                  Self::merge_posting_add_only_galloping(existing, add, output);
+              }
+              MergePlan::TwoPointer => {
+                  Self::merge_posting_add_only_two_pointer(existing.iter(), add, output);
+              }
+          }
+      }
+      ```
+
+      テスト用ヘルパー追加:
+      ```rust
+      #[cfg(test)]
+      pub fn merge_postings_adaptive_for_test(
+          existing: &[TaskId],
+          add: &[TaskId],
+          output: &mut Vec<TaskId>,
+          plan: MergePlan,
+      ) {
+          Self::merge_postings_adaptive(existing, add, output, plan);
+      }
+      ```
+
+    depends_on: ["IMPL-TB219-001a"]
+    success_criteria:
+      - "各 MergePlan で結果が同値であることの proptest"
+      - "既存 merge_posting_add_only_tests と同等のテスト (各 plan で)"
+      - "cargo test 全パス"
+    estimated_effort: "1-2 hours"
+
+  - id: "IMPL-TB219-001c"
+    phase: "1"
+    requirement: "REQ-TB219-001"
+    priority: "P1"
+    type: "rust_bench"
+    title: "呼び出し側を choose_merge_plan + merge_postings_adaptive に統一"
+    status: "pending"
+    file: "benches/api/src/api/query.rs"
+    description: |
+      既存の merge 呼び出し箇所を統一する。
+
+      変更対象箇所:
+      1. merge_posting_add_only_into (L6940-6970):
+         - size_hint で existing_len を取得 → choose_merge_plan → merge_postings_adaptive
+         - iterator からの collect() は Galloping/BinaryInsert の場合のみ実施
+
+      2. merge_posting_add_only_into_slice (L6978-7007):
+         - existing.len() で直接取得 → choose_merge_plan → merge_postings_adaptive
+
+      3. NgramSegmentOverlay::merge_segment_posting (L1604):
+         - merge_posting_add_only_into_slice の呼び出しはそのまま (内部で adaptive を使用)
+
+      4. merge_sorted_posting_lists (L2440-2444):
+         - 直接 merge_posting_add_only_galloping を呼んでいる箇所を
+           choose_merge_plan + merge_postings_adaptive に置換
+
+      5. merge_index_delta_add_only_owned_with_arena (L7177-7236):
+         - merge_posting_add_only_into_slice / merge_posting_add_only_into の呼び出しを
+           可能な限り merge_postings_adaptive に統一
+
+      6. merge_index_delta_add_only_owned (L7119-7174):
+         - 同上
+
+      7. merge_index_delta_add_only (L7057-7115):
+         - 同上
+
+      注意事項:
+      - iterator ベースの呼び出し (L6940) では、slice を持たない場合に collect() が必要
+      - as_sorted_slice() が Some を返す場合は slice ベースの adaptive を使用
+      - iter_sorted() のみの場合は collect() 後に adaptive を使用
+
+    depends_on: ["IMPL-TB219-001b"]
+    success_criteria:
+      - "既存テスト全てパス"
+      - "apply_changes_bulk_with_arena_and_bulk_are_equivalent テストパス"
+      - "merge_posting_add_only_tests 全パス"
+      - "adaptive_merge_tests 全パス"
+      - "cargo clippy パス"
+    estimated_effort: "2-3 hours"
+
+# =============================================================================
+# Phase 2: Arena Capacity Hysteresis (REQ-TB219-003)
+# =============================================================================
+# 優先度: 中-高 (malloc 系サンプルが支配的であり、scratch 再確保削減は直接的効果あり)
+# Phase 3 の staging commit が arena を使うため、先に実施
+
+  - id: "IMPL-TB219-003a"
+    phase: "2"
+    requirement: "REQ-TB219-003"
+    priority: "P1"
+    type: "rust_bench"
+    title: "reserve_with_hysteresis 関数を導入"
+    status: "pending"
+    file: "benches/api/src/api/query.rs"
+    description: |
+      scratch バッファの容量確保にヒステリシスを導入する。
+
+      変更内容:
+      1. MergeArena に growth_factor フィールドを追加 (デフォルト 1.5):
+         ```rust
+         pub struct MergeArena {
+             scratch: Vec<TaskId>,
+             shrink_threshold: usize,
+             growth_factor: f32,
+         }
+         ```
+
+      2. reserve_with_hysteresis を実装:
+         ```rust
+         #[inline]
+         fn reserve_with_hysteresis(buf: &mut Vec<TaskId>, required: usize, growth_factor: f32) {
+             if buf.capacity() >= required {
+                 return;
+             }
+             let grown = (buf.capacity() as f32 * growth_factor) as usize;
+             let target = required.max(grown);
+             // reserve は buf.len() 基準の追加容量を期待するため、差分を渡す
+             buf.reserve(target.saturating_sub(buf.len()));
+         }
+         ```
+
+      3. MergeArena::scratch() を更新:
+         - clear() 後に reserve_with_hysteresis は呼ばない (呼び出し側が必要に応じて reserve)
+         - scratch_with_capacity(required: usize) メソッドを追加:
+           ```rust
+           pub fn scratch_with_capacity(&mut self, required: usize) -> &mut Vec<TaskId> {
+               self.scratch.clear();
+               Self::reserve_with_hysteresis(
+                   &mut self.scratch, required, self.growth_factor
+               );
+               &mut self.scratch
+           }
+           ```
+
+      配置場所: MergeArena impl ブロック内
+
+    depends_on: []
+    success_criteria:
+      - "容量が十分な場合は realloc しないことを検証 (capacity チェック)"
+      - "growth_factor による指数成長を検証"
+      - "必要容量を必ず満たすことを検証"
+      - "既存テスト全パス"
+      - "cargo test 全パス"
+    estimated_effort: "1-2 hours"
+
+  - id: "IMPL-TB219-003b"
+    phase: "2"
+    requirement: "REQ-TB219-003"
+    priority: "P1"
+    type: "rust_bench"
+    title: "compact_when_idle を導入し MergeArena を改修"
+    status: "pending"
+    file: "benches/api/src/api/query.rs"
+    description: |
+      高頻度パスでの shrink を抑制し、アイドル時のみ compaction を行う。
+
+      変更内容:
+      1. MergeArena に idle_counter を追加:
+         ```rust
+         pub struct MergeArena {
+             scratch: Vec<TaskId>,
+             shrink_threshold: usize,
+             growth_factor: f32,
+             idle_counter: usize,
+         }
+         ```
+
+      2. scratch() / scratch_with_capacity() で idle_counter = 0 にリセット
+
+      3. compact_when_idle を実装:
+         ```rust
+         /// アイドル周期でのみ scratch バッファを compaction する。
+         ///
+         /// writer_loop で各バッチ処理後に呼び出す。
+         /// idle_threshold 回連続で呼ばれた場合のみ shrink_to を実行。
+         pub fn compact_when_idle(&mut self, idle_threshold: usize) {
+             self.idle_counter += 1;
+             if self.idle_counter >= idle_threshold
+                 && self.scratch.capacity() > self.shrink_threshold
+             {
+                 self.scratch.shrink_to(self.shrink_threshold);
+                 self.idle_counter = 0;
+             }
+         }
+         ```
+
+      4. writer_loop (L8046) の maybe_shrink() 呼び出しを compact_when_idle(8) に置換
+         - idle_threshold = 8: 8回連続でアイドルの場合のみ compaction
+
+      5. 既存の maybe_shrink は deprecated にするか削除
+
+    depends_on: ["IMPL-TB219-003a"]
+    success_criteria:
+      - "idle_threshold 未満では shrink しないことを検証"
+      - "idle_threshold 到達時に shrink することを検証"
+      - "scratch()/scratch_with_capacity() 呼び出しでカウンタがリセットされることを検証"
+      - "budget_shrink_threshold_on_arena テストの更新"
+      - "arena_below_threshold_does_not_shrink テストの更新"
+      - "cargo test 全パス"
+    estimated_effort: "1-2 hours"
+
+# =============================================================================
+# Phase 3: ソート順 Insert (REQ-TB219-002, 並列探索結果に基づく修正)
+# =============================================================================
+# 優先度: 高 (BTreeNode::get 390M + take_or_clone_child clone 削減)
+# 並列探索の結果、StagingMap (HashMap) は MutableIndex が既に HashMap のため無意味と判明。
+# 代わりに Vec ソート順バッチ (アプローチ C) を採用。
+# PrefixIndex (PersistentTreeMap) が BTree ベースであるため、
+# ソート順の insert はパス上のノードの局所性を向上させ、clone 回数を削減する。
+
+  - id: "IMPL-TB219-002a"
+    phase: "3"
+    requirement: "REQ-TB219-002"
+    priority: "P0"
+    type: "rust_bench"
+    title: "merge_index_delta にソート順 insert を導入"
+    status: "pending"
+    file: "benches/api/src/api/query.rs"
+    description: |
+      並列探索の結果に基づき、StagingMap の導入ではなく、
+      merge_index_delta_add_only_owned_with_arena 内で MutableIndex の
+      エントリをキーでソートしてから transient に insert する。
+
+      変更内容:
+      merge_index_delta_add_only_owned_with_arena (L7177-7236) を修正:
+      ```rust
+      fn merge_index_delta_add_only_owned_with_arena(
+          index: &PrefixIndex,
+          add: MutableIndex,
+          arena: &mut MergeArena,
+      ) -> PrefixIndex {
+          if add.is_empty() {
+              return index.clone();
+          }
+
+          // ソート順で insert することで BTree パスの局所性を向上
+          let mut sorted_entries: Vec<(NgramKey, Vec<TaskId>)> = add.into_iter().collect();
+          sorted_entries.sort_unstable_by(|(key_a, _), (key_b, _)| key_a.cmp(key_b));
+
+          let mut transient = index.clone().transient();
+          let scratch = arena.scratch();
+
+          for (key, add_list) in sorted_entries {
+              // ... 既存の merge ロジックをそのまま適用 ...
+          }
+
+          transient.persistent()
+      }
+      ```
+
+      NgramKey は Arc<str> なので cmp は文字列比較、clone は O(1)。
+      ソートコスト O(N log N) は HashMap の走査コスト O(N) より大きいが、
+      BTree insert のパス局所性向上による clone 削減がソートコストを上回る見込み。
+
+      同様に以下の関数にも適用:
+      - merge_index_delta_add_only_owned (L7119-7174)
+      - merge_index_delta_add_only (L7057-7115)
+
+    depends_on: []
+    success_criteria:
+      - "merge_index_delta_add_only_owned_with_arena_equivalence テストパス"
+      - "既存テスト全パス"
+      - "cargo test 全パス"
+    estimated_effort: "1-2 hours"
+
+  - id: "IMPL-TB219-002b"
+    phase: "3"
+    requirement: "REQ-TB219-002"
+    priority: "P0"
+    type: "rust_bench"
+    title: "apply_delta_owned_with_arena 全体にソート順最適化を適用"
+    status: "pending"
+    file: "benches/api/src/api/query.rs"
+    description: |
+      IMPL-TB219-002a で実装したソート順 insert を、
+      apply_delta_owned_with_arena の全ての PrefixIndex 更新呼び出しに適用する。
+
+      apply_delta_owned_with_arena (L6281-6364) では以下の 6 つの PrefixIndex を更新:
+      1. title_full_index (L6317-6320)
+      2. title_word_index (L6322-6325)
+      3. tag_index (L6327-6330)
+      4. title_full_all_suffix_index (L6347-6350)
+      5. title_word_all_suffix_index (L6352-6355)
+      6. tag_all_suffix_index (L6357-6360)
+
+      これらは全て merge_index_delta_add_only_owned_with_arena を呼んでおり、
+      IMPL-TB219-002a の修正により自動的にソート順 insert が適用される。
+
+      追加の最適化検討:
+      - scratch_with_capacity を使って事前に容量確保 (IMPL-TB219-003a と連携)
+
+    depends_on: ["IMPL-TB219-002a"]
+    success_criteria:
+      - "apply_changes_bulk_with_arena_and_bulk_are_equivalent テストパス"
+      - "apply_delta_owned_with_arena_equivalence テストパス"
+      - "全既存テストパス"
+      - "cargo test 全パス"
+      - "cargo clippy パス"
+    estimated_effort: "1-2 hours"
+
+# =============================================================================
+# Phase 4: 統合検証
+# =============================================================================
+
+  - id: "IMPL-TB219-INT"
+    phase: "4"
+    requirement: "REQ-TB219-001, REQ-TB219-002, REQ-TB219-003"
+    priority: "P0"
+    type: "integration"
+    title: "統合テストと同値性検証"
+    status: "pending"
+    file: "benches/api/src/api/query.rs"
+    description: |
+      全変更を統合した状態で品質ゲートを通過する。
+
+      実施内容:
+      1. cargo fmt
+      2. cargo clippy --all-features --all-targets -- -D warnings
+      3. cargo test (全テストパス)
+      4. cargo doc --no-deps (ドキュメントビルド)
+      5. perf-gate 実行 (RPS リグレッションなし)
+
+      追加テスト:
+      - merge_plan 切替の同値性 property test (3 plan で同一結果)
+      - staging commit 前後の結果一致テスト
+      - scratch ヒステリシスの回帰テスト (容量再確保回数検証)
+
+    depends_on: ["IMPL-TB219-001c", "IMPL-TB219-003b", "IMPL-TB219-002b"]
+    success_criteria:
+      - "cargo fmt パス"
+      - "cargo clippy パス"
+      - "cargo test 全パス"
+      - "cargo doc --no-deps パス"
+      - "perf-gate パス (RPS リグレッションなし)"
+    estimated_effort: "2-3 hours"
+
+# =============================================================================
+# 実行順序と依存関係
+# =============================================================================
+#
+# 独立パス A (Phase 1): IMPL-TB219-001a → 001b → 001c
+# 独立パス B (Phase 2): IMPL-TB219-003a → 003b
+# 独立パス C (Phase 3): IMPL-TB219-002a → 002b
+# 統合: IMPL-TB219-INT (A, B, C 全完了後)
+#
+# パス A, B, C は互いに独立して並列実行可能。
+# ただし Phase 3 (002b) は Phase 1 (001a) の choose_merge_plan と
+# Phase 2 (003a) の reserve_with_hysteresis を使用するため、
+# 推奨実行順序: Phase 1 → Phase 2 → Phase 3 → Phase 4
+#
+# 実行順序の根拠:
+# - Phase 1 はリスクが最も低い (既存ロジックの抽出)
+# - Phase 2 は Phase 3 の arena 改修の基盤
+# - Phase 3 は最大インパクトだが Phase 1/2 の関数を利用
+# - Phase 4 は全統合後の検証
+
+# =============================================================================
+# リスクと緩和策
+# =============================================================================
+
+risks:
+  - risk: "ソート順 insert の効果が限定的"
+    severity: "medium"
+    mitigation: |
+      PrefixIndex (PersistentTreeMap) の BTree 構造上、ソート順 insert は
+      パス上のノードの局所性を向上させるが、効果はツリーの深さとキー分布に依存。
+      perf-gate で効果を確認し、不十分な場合は PersistentTreeMap の bulk insert API
+      (ソート済み入力に対して O(N) 構築) を検討する。
+
+  - risk: "ソートコスト O(N log N) がパフォーマンスを悪化させる"
+    severity: "low"
+    mitigation: |
+      NgramKey は Arc<str> なので比較は文字列比較だが、move は O(1)。
+      sort_unstable_by は in-place ソートで追加アロケーションなし。
+      N はキー数 (通常数百〜数千) であり、ソートコストは BTree 操作の
+      パス局所性改善で相殺される見込み。
+
+  - risk: "merge_postings_adaptive の間接呼び出しオーバーヘッド"
+    severity: "low"
+    mitigation: |
+      #[inline] 属性付与により、コンパイラが呼び出し先を展開。
+      Phase8 の教訓: ヘルパー関数の間接呼び出しは -4.2% RPS 悪化の原因になった。
+      #[inline] で確実にインライン展開させる。
+
+  - risk: "TaskId が Copy ではないため clone コストが残る"
+    severity: "low"
+    mitigation: |
+      この制約は受け入れ済み。extend_from_slice の memcpy 最適化は不可。
+      本計画での主な改善は BTree パス局所性の向上とアロケーション削減であり、
+      clone コスト自体は対象外。
+
+  - risk: "目標 (rps>=500, p99<=500ms) の未達成"
+    severity: "high"
+    mitigation: |
+      プロファイルデータから、支配的なボトルネックは malloc/cfree (7.2G samples) と
+      SmallVec 操作 (6.0G+ samples) であり、merge 最適化だけでは目標達成は困難。
+      本計画は merge 周りの改善に集中するが、以下の追加施策を将来の拡張として検討:
+      1. jemalloc / mimalloc 等の高速アロケータ採用
+      2. PersistentTreeMap の bulk insert API
+      3. SmallVec の使用箇所最適化 (BTreeNode の children/entries)
+
+parallel_exploration_results:
+  conducted_at: "2026-02-12T10:30:00+09:00"
+  approaches:
+    - name: "アプローチ A: StagingMap (HashMap) + 一括 commit"
+      recommendation_score: 2
+      summary: "MutableIndex が既に HashMap であるため、HashMap→HashMap の移し替えは無意味"
+    - name: "アプローチ B: BTreeMap 直接マージ"
+      recommendation_score: 3
+      summary: "HashMap→BTreeMap 変換コストが追加。ソート順走査は可能だが変換が重い"
+    - name: "アプローチ C: Vec ソート順バッチ"
+      recommendation_score: 4
+      summary: "最もシンプルで軽量。into_iter().collect() + sort_unstable_by で BTree 局所性最大化"
+  selected: "アプローチ C"
+  rationale: "実装コスト最小、HashMap 確保不要、BTree ソート順に合致した insert 順序で局所性向上"
