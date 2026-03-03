@@ -82,7 +82,7 @@ jobs:
           ls -la criterion-profiling-tools/benches/
 
       - name: Upload profiling tools
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: criterion-profiling-tools-${{ github.sha }}
           path: criterion-profiling-tools
@@ -265,7 +265,7 @@ jobs:
             "profiling-results/criterion/${{ matrix.bench }}"
 
       - name: Upload profiling artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: criterion-profiling-${{ github.sha }}-${{ matrix.bench }}
           path: profiling-results/criterion/${{ matrix.bench }}/
@@ -352,7 +352,7 @@ jobs:
           done
 
       - name: Upload iai-callgrind artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: iai-profiling-${{ github.sha }}
           path: profiling-results/iai/
@@ -415,7 +415,7 @@ jobs:
           chmod +x api-profiling-tools/bin/*
 
       - name: Upload profiling tools
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: api-profiling-tools-${{ github.sha }}
           path: api-profiling-tools/bin
@@ -692,7 +692,7 @@ jobs:
             "profiling-results/api/${{ steps.scenario.outputs.name }}"
 
       - name: Upload API profiling artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: api-profiling-${{ github.sha }}-${{ steps.scenario.outputs.name }}
           path: profiling-results/api/${{ steps.scenario.outputs.name }}/
@@ -814,7 +814,7 @@ jobs:
 
       - name: Upload invariant report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: metrics-invariant-report
           path: profiling-artifacts/invariant-report.txt
@@ -1000,7 +1000,7 @@ jobs:
             }
 
       - name: Upload Criterion profiling aggregate
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: criterion-profiling-all-${{ github.sha }}
@@ -1009,7 +1009,7 @@ jobs:
           if-no-files-found: error
 
       - name: Upload API profiling aggregate
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: api-profiling-all-${{ github.sha }}
