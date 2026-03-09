@@ -65,7 +65,7 @@ jobs:
           command -v wrk2 && wrk2 -v 2>&1 | head -1 || (echo "ERROR: wrk2 installation failed" && exit 1)
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Checkout main branch for baseline
         uses: actions/checkout@v4
@@ -157,7 +157,7 @@ jobs:
           pip install jsonschema
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Checkout PR branch
         uses: actions/checkout@v4
@@ -558,7 +558,7 @@ jobs:
           sudo ln -sf /tmp/FlameGraph/flamegraph.pl /usr/local/bin/
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Checkout
         uses: actions/checkout@v4
@@ -625,7 +625,7 @@ jobs:
           sudo ln -sf /tmp/FlameGraph/flamegraph.pl /usr/local/bin/
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Checkout
         uses: actions/checkout@v4
@@ -697,7 +697,7 @@ jobs:
           pip install jsonschema
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Checkout
         uses: actions/checkout@v4
