@@ -1,0 +1,78 @@
+# Issue: Contravariant 型クラス
+# 反変ファンクター
+
+deferred_features:
+  - id: contravariant
+    name: "Contravariant 型クラス"
+    discovered_date: "2026-01-16"
+    priority: low
+    category: enhancement
+    labels:
+      - "typeclass"
+      - "enhancement"
+      - "priority: low"
+
+    problem:
+      summary: "入力の型に対する反変マッピング（contramap）がない"
+      details: |
+        Contravariant は Functor の双対で、入力の型に対して
+        contramap を持つ。Predicate、Comparator、Serializer などで有用。
+
+        - 何が問題なのか: 反変ファンクターの抽象がない
+        - なぜ発生するのか: Contravariant 型クラスが未実装
+        - どのような影響があるか: 述語やシリアライザの合成が不便
+
+      rust_limitation: |
+        ```rust
+        // Contravariant の定義
+        trait Contravariant<A> {
+            type Target<B>;
+            fn contramap<B>(self, f: impl Fn(B) -> A) -> Self::Target<B>;
+        }
+
+        // 使用例: Predicate
+        struct Predicate<A>(Box<dyn Fn(&A) -> bool>);
+
+        impl<A> Contravariant<A> for Predicate<A> {
+            type Target<B> = Predicate<B>;
+            fn contramap<B>(self, f: impl Fn(B) -> A) -> Predicate<B> {
+                Predicate(Box::new(move |b| (self.0)(&f(b.clone()))))
+            }
+        }
+
+        // 使用例
+        let is_positive: Predicate<i32> = Predicate(Box::new(|x| *x > 0));
+        let string_len_positive: Predicate<String> =
+            is_positive.contramap(|s: String| s.len() as i32);
+        ```
+
+    solution:
+      approach: "Contravariant トレイトを定義し、Predicate 等に実装"
+      options:
+        - name: "標準的な Contravariant"
+          description: |
+            contramap メソッドを持つトレイトを定義。
+            Predicate, Comparator, Serializer に実装。
+          pros:
+            - "型理論的に正しい"
+            - "Haskell/Scala との互換性"
+          cons:
+            - "使用頻度が低い"
+            - "HKT の制約"
+
+      recommended: "標準的な Contravariant"
+      estimated_complexity: medium
+
+    references:
+      - "Haskell Data.Functor.Contravariant"
+      - "Scala cats Contravariant"
+      - "docs/internal/requirements/20250101_0000_typeclass.yaml"
+
+    related:
+      requirement_id: "typeclass"
+      plan_id: null
+
+    github_issue:
+      number: 176
+      url: "https://github.com/lihs-ie/lambars/issues/176"
+      created: true
